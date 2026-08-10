@@ -67,6 +67,25 @@ def test_execution_does_not_depend_on_domain_packages() -> None:
     assert not violations, f"execution must remain domain- and state-agnostic: {violations}"
 
 
+def test_graph_definition_layer_does_not_depend_on_runtime_execution_modules() -> None:
+    forbidden_modules = frozenset({"engine", "executor", "request", "result", "snapshot", "transition"})
+    violations: list[str] = []
+    graph_root = PACKAGE_ROOT / "execution" / "graph"
+    for path in sorted(graph_root.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT)
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module is None:
+                continue
+            prefix = "mote_kernel.execution."
+            if not node.module.startswith(prefix):
+                continue
+            imported_module = node.module.removeprefix(prefix).partition(".")[0]
+            if imported_module in forbidden_modules:
+                violations.append(f"{relative}:{node.lineno} imports execution.{imported_module}")
+    assert not violations, f"graph definitions must remain below runtime execution: {violations}"
+
+
 def test_workflow_does_not_depend_on_tools_or_act() -> None:
     violations: list[str] = []
     for path, tree in _production_modules():

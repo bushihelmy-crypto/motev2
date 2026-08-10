@@ -30,7 +30,7 @@ class CompiledGraph(Generic[InputT, OutputT]):
 def immutable_mapping(values: dict[NodeId, tuple[NodeId, ...]]) -> Mapping[NodeId, tuple[NodeId, ...]]:
     """Return a read-only copy of a node index."""
 
-    return MappingProxyType(values.copy())
+    return MappingProxyType(dict(sorted(values.items())))
 
 
 def immutable_route_mapping(
@@ -38,7 +38,9 @@ def immutable_route_mapping(
 ) -> Mapping[NodeId, Mapping[RouteId, NodeId]]:
     """Return a deeply read-only copy of a conditional-route index."""
 
-    return MappingProxyType({node_id: MappingProxyType(routes.copy()) for node_id, routes in values.items()})
+    return MappingProxyType(
+        {node_id: MappingProxyType(dict(sorted(routes.items()))) for node_id, routes in sorted(values.items())}
+    )
 
 
 def immutable_node_mapping(
@@ -46,7 +48,7 @@ def immutable_node_mapping(
 ) -> Mapping[NodeId, GraphNode[InputT, OutputT]]:
     """Return a read-only copy of the node index."""
 
-    return MappingProxyType(values.copy())
+    return MappingProxyType(dict(sorted(values.items())))
 
 
 def immutable_join_mapping(values: dict[NodeId, list[JoinEdge]]) -> Mapping[NodeId, tuple[JoinEdge, ...]]:
@@ -55,7 +57,7 @@ def immutable_join_mapping(values: dict[NodeId, list[JoinEdge]]) -> Mapping[Node
     return MappingProxyType(
         {
             node_id: tuple(sorted(edges, key=lambda edge: (edge.target, edge.sources)))
-            for node_id, edges in values.items()
+            for node_id, edges in sorted(values.items())
         }
     )
 

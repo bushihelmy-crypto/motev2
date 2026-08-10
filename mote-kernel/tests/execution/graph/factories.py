@@ -1,0 +1,35 @@
+from mote_kernel.execution.graph import (
+    ConditionalEdge,
+    DirectEdge,
+    GraphDefinition,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    JoinEdge,
+    NodeDefinition,
+    NodeId,
+)
+
+
+def identity(node_input: str) -> str:
+    return node_input
+
+
+def node(node_id: str) -> NodeDefinition[str, str]:
+    return NodeDefinition(NodeId(node_id), identity)
+
+
+def graph(
+    *,
+    nodes: tuple[NodeDefinition[str, str], ...],
+    edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
+    entries: tuple[NodeId, ...] = (NodeId("a"),),
+    exits: tuple[NodeId, ...] = (),
+) -> GraphDefinition[str, str]:
+    return GraphDefinition(
+        definition_id=GraphDefinitionId("test.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=nodes,
+        edges=edges,
+        entries=entries,
+        exits=exits,
+    )

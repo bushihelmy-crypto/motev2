@@ -2,7 +2,6 @@
 
 from typing import TypeVar
 
-from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge, RouteId
 from mote_kernel.execution.graph.node import NodeId
@@ -33,12 +32,11 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
             direct_targets[edge.source].append(edge.target)
         elif isinstance(edge, ConditionalEdge):
             routes = conditional_targets[edge.source]
-            if edge.route in routes:
-                raise GraphValidationError(f"duplicate conditional route {edge.route!r} from node {edge.source!r}")
             routes[edge.route] = edge.target
         else:
+            normalized_edge = JoinEdge(tuple(sorted(edge.sources)), edge.target)
             for source in edge.sources:
-                joins_by_source[source].append(edge)
+                joins_by_source[source].append(normalized_edge)
 
     return CompiledGraph(
         definition_id=definition.definition_id,

@@ -1,22 +1,8 @@
-from dataclasses import FrozenInstanceError
+from tests.execution.graph.factories import graph, node
 
-import pytest
-
-from mote_kernel.execution.errors import (
-    DuplicateNodeError,
-    GraphValidationError,
-    InvalidGraphIdentityError,
-    InvalidJoinError,
-    MissingEntryError,
-    UnknownNodeError,
-    UnreachableNodeError,
-)
 from mote_kernel.execution.graph import (
     ConditionalEdge,
     DirectEdge,
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
     JoinEdge,
     NodeDefinition,
     NodeId,
@@ -25,48 +11,19 @@ from mote_kernel.execution.graph import (
 )
 
 
-def identity(node_input: str) -> str:
-    return node_input
+def test_compilation_never_invokes_nodes() -> None:
+    calls = 0
 
+    def must_not_run(node_input: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise AssertionError(node_input)
 
-def node(node_id: str) -> NodeDefinition[str, str]:
-    return NodeDefinition(NodeId(node_id), identity)
-
-
-def graph(
-    *,
-    nodes: tuple[NodeDefinition[str, str], ...],
-    edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
-    entries: tuple[NodeId, ...] = (NodeId("a"),),
-    exits: tuple[NodeId, ...] = (),
-) -> GraphDefinition[str, str]:
-    return GraphDefinition(
-        definition_id=GraphDefinitionId("test.graph"),
-        version=GraphDefinitionVersion(1),
-        nodes=nodes,
-        edges=edges,
-        entries=entries,
-        exits=exits,
-    )
-
-
-def test_compile_sequence_builds_deterministic_immutable_indexes() -> None:
-    definition = graph(
-        nodes=(node("c"), node("a"), node("b")),
-        edges=(DirectEdge(NodeId("b"), NodeId("c")), DirectEdge(NodeId("a"), NodeId("b"))),
-        exits=(NodeId("c"),),
-    )
-
+    definition = graph(nodes=(NodeDefinition(NodeId("a"), must_not_run),))
     compiled = compile_graph(definition)
 
-    assert compiled.entries == (NodeId("a"),)
-    assert tuple(compiled.nodes) == (NodeId("c"), NodeId("a"), NodeId("b"))
-    assert compiled.direct_targets[NodeId("a")] == (NodeId("b"),)
-    assert compiled.direct_targets[NodeId("b")] == (NodeId("c"),)
-    with pytest.raises(TypeError):
-        compiled.nodes[NodeId("d")] = node("d")  # type: ignore[index]
-    with pytest.raises(FrozenInstanceError):
-        compiled.entries = ()  # type: ignore[misc]
+    assert calls == 0
+    assert compiled.nodes[NodeId("a")].node is must_not_run  # type: ignore[union-attr]
 
 
 def test_compile_indexes_conditional_routes_and_joins() -> None:
@@ -79,7 +36,6 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
         ),
         exits=(NodeId("d"),),
     )
-
     compiled = compile_graph(definition)
 
     assert compiled.conditional_targets[NodeId("a")][RouteId("left")] == NodeId("b")
@@ -89,91 +45,103 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
     assert compiled.joins_by_source[NodeId("c")] == (expected_join,)
 
 
-def test_cycles_are_valid_when_reachable() -> None:
-    definition = graph(
+def test_cycles_and_self_loops_compile() -> None:
+    cycle = graph(
         nodes=(node("a"), node("b")),
         edges=(DirectEdge(NodeId("a"), NodeId("b")), DirectEdge(NodeId("b"), NodeId("a"))),
     )
+    self_loop = graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("a"), NodeId("a")),))
 
+    assert compile_graph(cycle).direct_targets[NodeId("b")] == (NodeId("a"),)
+    assert compile_graph(self_loop).direct_targets[NodeId("a")] == (NodeId("a"),)
+
+
+def test_multiple_entries_and_direct_fan_out_are_sorted() -> None:
+    definition = graph(
+        nodes=(node("d"), node("c"), node("b"), node("a")),
+        edges=(DirectEdge(NodeId("a"), NodeId("d")), DirectEdge(NodeId("a"), NodeId("c"))),
+        entries=(NodeId("b"), NodeId("a")),
+    )
     compiled = compile_graph(definition)
 
-    assert compiled.direct_targets[NodeId("b")] == (NodeId("a"),)
+    assert compiled.entries == (NodeId("a"), NodeId("b"))
+    assert compiled.direct_targets[NodeId("a")] == (NodeId("c"), NodeId("d"))
 
 
-@pytest.mark.parametrize(
-    ("definition", "error"),
-    [
-        (graph(nodes=(node("a"),), entries=()), MissingEntryError),
-        (
-            GraphDefinition(
-                definition_id=GraphDefinitionId(""),
-                version=GraphDefinitionVersion(1),
-                nodes=(node("a"),),
-                edges=(),
-                entries=(NodeId("a"),),
-                exits=(),
-            ),
-            InvalidGraphIdentityError,
-        ),
-        (
-            GraphDefinition(
-                definition_id=GraphDefinitionId("test.graph"),
-                version=GraphDefinitionVersion(0),
-                nodes=(node("a"),),
-                edges=(),
-                entries=(NodeId("a"),),
-                exits=(),
-            ),
-            InvalidGraphIdentityError,
-        ),
-        (graph(nodes=(node(" a"),), entries=(NodeId(" a"),)), InvalidGraphIdentityError),
-        (graph(nodes=(node("a"), node("a"))), DuplicateNodeError),
-        (graph(nodes=(node("a"),), entries=(NodeId("missing"),)), UnknownNodeError),
-        (graph(nodes=(node("a"),), exits=(NodeId("missing"),)), UnknownNodeError),
-        (
-            graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("a"), NodeId("missing")),)),
-            UnknownNodeError,
-        ),
-        (graph(nodes=(node("a"), node("b"))), UnreachableNodeError),
-        (
-            graph(
-                nodes=(node("a"), node("b")),
-                edges=(JoinEdge((NodeId("a"), NodeId("a")), NodeId("b")),),
-            ),
-            InvalidJoinError,
-        ),
-        (
-            graph(
-                nodes=(node("a"), node("b"), node("c")),
-                edges=(
-                    JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),
-                    JoinEdge((NodeId("b"), NodeId("a")), NodeId("c")),
-                ),
-            ),
-            InvalidJoinError,
-        ),
-        (
-            graph(
-                nodes=(node("a"), node("b")),
-                edges=(ConditionalEdge(NodeId("a"), RouteId(""), NodeId("b")),),
-            ),
-            InvalidGraphIdentityError,
-        ),
-    ],
-)
-def test_invalid_graphs_fail_closed(definition: GraphDefinition[str, str], error: type[GraphValidationError]) -> None:
-    with pytest.raises(error):
-        compile_graph(definition)
-
-
-def test_duplicate_conditional_route_fails_closed() -> None:
-    definition = graph(
-        nodes=(node("a"), node("b"), node("c")),
+def test_declaration_order_does_not_change_compiled_indexes() -> None:
+    first = graph(
+        nodes=(node("a"), node("b"), node("c"), node("d")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("b")),
-            ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("c")),
+            ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
+            JoinEdge((NodeId("c"), NodeId("b")), NodeId("d")),
+            ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("b")),
+        ),
+    )
+    second = graph(
+        nodes=(node("d"), node("c"), node("b"), node("a")),
+        edges=(
+            ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("b")),
+            JoinEdge((NodeId("b"), NodeId("c")), NodeId("d")),
+            ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
         ),
     )
 
-    with pytest.raises(GraphValidationError):
-        compile_graph(definition)
+    first_compiled = compile_graph(first)
+    second_compiled = compile_graph(second)
+
+    assert tuple(first_compiled.nodes) == tuple(second_compiled.nodes)
+    assert tuple(first_compiled.direct_targets) == tuple(second_compiled.direct_targets)
+    assert tuple(first_compiled.conditional_targets) == tuple(second_compiled.conditional_targets)
+    assert tuple(first_compiled.joins_by_source) == tuple(second_compiled.joins_by_source)
+    assert dict(first_compiled.direct_targets) == dict(second_compiled.direct_targets)
+    assert {source: dict(routes) for source, routes in first_compiled.conditional_targets.items()} == {
+        source: dict(routes) for source, routes in second_compiled.conditional_targets.items()
+    }
+    assert dict(first_compiled.joins_by_source) == dict(second_compiled.joins_by_source)
+
+
+def test_direct_and_conditional_edges_may_share_a_source() -> None:
+    definition = graph(
+        nodes=(node("a"), node("b"), node("c")),
+        edges=(
+            DirectEdge(NodeId("a"), NodeId("b")),
+            ConditionalEdge(NodeId("a"), RouteId("optional"), NodeId("c")),
+        ),
+    )
+    compiled = compile_graph(definition)
+
+    assert compiled.direct_targets[NodeId("a")] == (NodeId("b"),)
+    assert compiled.conditional_targets[NodeId("a")][RouteId("optional")] == NodeId("c")
+
+
+def test_multiple_routes_may_share_a_target_and_identity_across_sources() -> None:
+    definition = graph(
+        nodes=(node("a"), node("b"), node("c")),
+        edges=(
+            ConditionalEdge(NodeId("a"), RouteId("first"), NodeId("c")),
+            ConditionalEdge(NodeId("a"), RouteId("second"), NodeId("c")),
+            ConditionalEdge(NodeId("b"), RouteId("first"), NodeId("c")),
+        ),
+        entries=(NodeId("a"), NodeId("b")),
+    )
+    compiled = compile_graph(definition)
+
+    assert tuple(compiled.conditional_targets[NodeId("a")]) == (RouteId("first"), RouteId("second"))
+    assert compiled.conditional_targets[NodeId("b")][RouteId("first")] == NodeId("c")
+
+
+def test_compiling_the_same_definition_is_idempotent() -> None:
+    definition = graph(
+        nodes=(node("a"), node("b"), node("c")),
+        edges=(
+            DirectEdge(NodeId("a"), NodeId("b")),
+            ConditionalEdge(NodeId("b"), RouteId("finish"), NodeId("c")),
+        ),
+        exits=(NodeId("c"),),
+    )
+
+    first = compile_graph(definition)
+    second = compile_graph(definition)
+
+    assert first == second
+    assert first is not second

@@ -13,6 +13,22 @@ class DuplicateNodeError(GraphValidationError):
     """A graph definition contains the same node identity more than once."""
 
 
+class DuplicateBoundaryError(GraphValidationError):
+    """A graph definition repeats an entry or exit identity."""
+
+
+class DuplicateEdgeError(GraphValidationError):
+    """A graph definition repeats the same static edge."""
+
+
+class DuplicateGraphDefinitionError(GraphValidationError):
+    """One graph tree binds a definition identity and version more than once."""
+
+
+class RecursiveGraphDefinitionError(GraphValidationError):
+    """Nested graph definitions recursively contain a graph still being validated."""
+
+
 class UnknownNodeError(GraphValidationError):
     """An edge or graph boundary references an unknown node."""
 
@@ -30,16 +46,20 @@ class InvalidJoinError(GraphValidationError):
 
 
 class InvalidGraphIdentityError(GraphValidationError):
-    """A graph, node, or route identity is empty or reserved."""
+    """A graph, node, or route identity is empty or not trimmed."""
 
 
 __all__ = [
+    "DuplicateBoundaryError",
+    "DuplicateEdgeError",
+    "DuplicateGraphDefinitionError",
     "DuplicateNodeError",
     "ExecutionError",
     "GraphValidationError",
     "InvalidGraphIdentityError",
     "InvalidJoinError",
     "MissingEntryError",
+    "RecursiveGraphDefinitionError",
     "UnknownNodeError",
     "UnreachableNodeError",
 ]
