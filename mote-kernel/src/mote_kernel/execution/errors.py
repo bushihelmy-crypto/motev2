@@ -5,6 +5,22 @@ class ExecutionError(Exception):
     """Base class for errors owned by the graph execution substrate."""
 
 
+class PlanningError(ExecutionError):
+    """A committed execution projection cannot be planned safely."""
+
+
+class SnapshotMismatchError(PlanningError):
+    """A snapshot does not belong to the compiled graph being planned."""
+
+
+class InvalidExecutionSnapshotError(PlanningError):
+    """A snapshot contains an invalid or unknown execution position."""
+
+
+class ExecutionLimitError(PlanningError):
+    """Planning would exceed an explicit graph execution limit."""
+
+
 class GraphValidationError(ExecutionError):
     """A graph definition violates a static topology invariant."""
 
@@ -55,11 +71,15 @@ __all__ = [
     "DuplicateGraphDefinitionError",
     "DuplicateNodeError",
     "ExecutionError",
+    "ExecutionLimitError",
     "GraphValidationError",
+    "InvalidExecutionSnapshotError",
     "InvalidGraphIdentityError",
     "InvalidJoinError",
     "MissingEntryError",
+    "PlanningError",
     "RecursiveGraphDefinitionError",
+    "SnapshotMismatchError",
     "UnknownNodeError",
     "UnreachableNodeError",
 ]
