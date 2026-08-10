@@ -39,6 +39,17 @@ def run(definition: Definition[OutputT]) -> OutputT:
     assert generic_violations(source) == ()
 
 
+def test_generic_gate_accepts_parameterized_containers() -> None:
+    source = """
+from collections.abc import Mapping
+
+def index(values: tuple[str, ...]) -> Mapping[str, list[int]]:
+    return {value: [position] for position, value in enumerate(values)}
+"""
+
+    assert generic_violations(source) == ()
+
+
 def test_generic_gate_rejects_erased_relationships() -> None:
     source = """
 from typing import cast

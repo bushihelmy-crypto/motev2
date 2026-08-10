@@ -63,18 +63,42 @@ def _annotations(tree: ast.Module) -> list[ast.expr]:
     return annotations
 
 
+def _annotation_violations(annotation: ast.expr) -> list[GenericViolation]:
+    violations: list[GenericViolation] = []
+
+    def visit(node: ast.expr, *, parameterized_owner: bool = False) -> None:
+        if isinstance(node, ast.Subscript):
+            visit(node.value, parameterized_owner=True)
+            visit(node.slice)
+            return
+        if isinstance(node, ast.Tuple):
+            for element in node.elts:
+                visit(element)
+            return
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            visit(node.left)
+            visit(node.right)
+            return
+        if isinstance(node, ast.Starred):
+            visit(node.value)
+            return
+        if isinstance(node, ast.Name | ast.Attribute):
+            name = _qualified_name(node)
+            if name == "object":
+                violations.append(GenericViolation(node.lineno, "object erases the boundary type"))
+            elif name in BARE_GENERIC_NAMES and not parameterized_owner:
+                violations.append(GenericViolation(node.lineno, f"bare generic annotation {name}"))
+
+    visit(annotation)
+    return violations
+
+
 def generic_violations(source: str, *, filename: str = "<unknown>") -> tuple[GenericViolation, ...]:
     tree = ast.parse(source, filename=filename)
     violations: list[GenericViolation] = []
 
     for annotation in _annotations(tree):
-        for node in ast.walk(annotation):
-            if isinstance(node, ast.Name | ast.Attribute):
-                name = _qualified_name(node)
-                if name in BARE_GENERIC_NAMES:
-                    violations.append(GenericViolation(node.lineno, f"bare generic annotation {name}"))
-                elif name == "object":
-                    violations.append(GenericViolation(node.lineno, "object erases the boundary type"))
+        violations.extend(_annotation_violations(annotation))
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
