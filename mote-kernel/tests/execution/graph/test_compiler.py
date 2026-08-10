@@ -1,11 +1,13 @@
 from tests.execution.graph.factories import graph, node
 
 from mote_kernel.execution.graph import (
+    END,
     ConditionalEdge,
     DirectEdge,
     JoinEdge,
     NodeDefinition,
     NodeId,
+    NodeSuccess,
     RouteId,
     compile_graph,
 )
@@ -14,7 +16,7 @@ from mote_kernel.execution.graph import (
 def test_compilation_never_invokes_nodes() -> None:
     calls = 0
 
-    def must_not_run(node_input: str) -> str:
+    def must_not_run(node_input: str) -> NodeSuccess[str]:
         nonlocal calls
         calls += 1
         raise AssertionError(node_input)
@@ -34,7 +36,6 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
             ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
             JoinEdge((NodeId("b"), NodeId("c")), NodeId("d")),
         ),
-        exits=(NodeId("d"),),
     )
     compiled = compile_graph(definition)
 
@@ -43,6 +44,20 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
     expected_join = JoinEdge((NodeId("b"), NodeId("c")), NodeId("d"))
     assert compiled.joins_by_source[NodeId("b")] == (expected_join,)
     assert compiled.joins_by_source[NodeId("c")] == (expected_join,)
+
+
+def test_join_to_end_preserves_its_runtime_barrier() -> None:
+    definition = graph(
+        nodes=(node("a"), node("b")),
+        edges=(JoinEdge((NodeId("a"), NodeId("b")), END),),
+        entries=(NodeId("a"), NodeId("b")),
+    )
+
+    compiled = compile_graph(definition)
+
+    expected_join = JoinEdge((NodeId("a"), NodeId("b")), END)
+    assert compiled.joins_by_source[NodeId("a")] == (expected_join,)
+    assert compiled.joins_by_source[NodeId("b")] == (expected_join,)
 
 
 def test_cycles_and_self_loops_compile() -> None:
@@ -132,12 +147,11 @@ def test_multiple_routes_may_share_a_target_and_identity_across_sources() -> Non
 
 def test_compiling_the_same_definition_is_idempotent() -> None:
     definition = graph(
-        nodes=(node("a"), node("b"), node("c")),
+        nodes=(node("a"), node("b")),
         edges=(
             DirectEdge(NodeId("a"), NodeId("b")),
-            ConditionalEdge(NodeId("b"), RouteId("finish"), NodeId("c")),
+            ConditionalEdge(NodeId("b"), RouteId("finish"), END),
         ),
-        exits=(NodeId("c"),),
     )
 
     first = compile_graph(definition)

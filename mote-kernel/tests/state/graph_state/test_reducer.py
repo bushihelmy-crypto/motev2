@@ -10,6 +10,7 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphFailure,
+    GraphJoinProgress,
     GraphNodeId,
     GraphRunCommand,
     GraphRunId,
@@ -107,6 +108,77 @@ def test_advance_is_pure_and_guards_expected_superstep() -> None:
         reduce_graph_run(new_state, AdvanceGraphRun(2, (GraphNodeId("e"),)))
 
 
+def test_advance_persists_valid_join_progress() -> None:
+    progress = GraphJoinProgress(
+        (GraphNodeId("a"), GraphNodeId("c")),
+        GraphNodeId("d"),
+        frozenset({GraphNodeId("a")}),
+    )
+
+    state = reduce_graph_run(running_state(), AdvanceGraphRun(0, (GraphNodeId("c"),), (progress,)))
+
+    assert state.join_progress == (progress,)
+
+
+def test_advance_normalizes_join_progress_order() -> None:
+    later = GraphJoinProgress(
+        (GraphNodeId("c"), GraphNodeId("d")),
+        GraphNodeId("e"),
+        frozenset({GraphNodeId("c")}),
+    )
+    earlier = GraphJoinProgress(
+        (GraphNodeId("a"), GraphNodeId("b")),
+        GraphNodeId("e"),
+        frozenset({GraphNodeId("a")}),
+    )
+
+    state = reduce_graph_run(running_state(), AdvanceGraphRun(0, (GraphNodeId("e"),), (later, earlier)))
+
+    assert state.join_progress == (earlier, later)
+
+
+@pytest.mark.parametrize(
+    "progress",
+    [
+        GraphJoinProgress((), GraphNodeId("c"), frozenset()),
+        GraphJoinProgress(
+            (GraphNodeId("a"), GraphNodeId("a")),
+            GraphNodeId("c"),
+            frozenset({GraphNodeId("a")}),
+        ),
+        GraphJoinProgress(
+            (GraphNodeId("a"), GraphNodeId("b")),
+            GraphNodeId("a"),
+            frozenset({GraphNodeId("b")}),
+        ),
+        GraphJoinProgress(
+            (GraphNodeId("a"), GraphNodeId("b")),
+            GraphNodeId("c"),
+            frozenset(),
+        ),
+        GraphJoinProgress(
+            (GraphNodeId("a"), GraphNodeId("b")),
+            GraphNodeId("c"),
+            frozenset({GraphNodeId("a"), GraphNodeId("b")}),
+        ),
+    ],
+)
+def test_advance_rejects_invalid_join_progress(progress: GraphJoinProgress) -> None:
+    with pytest.raises(GraphStateTransitionError):
+        reduce_graph_run(running_state(), AdvanceGraphRun(0, (GraphNodeId("c"),), (progress,)))
+
+
+def test_advance_rejects_duplicate_join_progress() -> None:
+    progress = GraphJoinProgress(
+        (GraphNodeId("a"), GraphNodeId("b")),
+        GraphNodeId("c"),
+        frozenset({GraphNodeId("a")}),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="repeats"):
+        reduce_graph_run(running_state(), AdvanceGraphRun(0, (GraphNodeId("c"),), (progress, progress)))
+
+
 @pytest.mark.parametrize("frontier", [(), (GraphNodeId("a"), GraphNodeId("a")), (GraphNodeId(" a"),)])
 def test_advance_rejects_invalid_frontier(frontier: tuple[GraphNodeId, ...]) -> None:
     with pytest.raises(GraphStateTransitionError):
@@ -123,6 +195,20 @@ def test_suspend_and_resume_preserve_committed_position() -> None:
     assert resumed == running
 
 
+def test_suspend_and_resume_preserve_join_progress() -> None:
+    progress = GraphJoinProgress(
+        (GraphNodeId("a"), GraphNodeId("c")),
+        GraphNodeId("d"),
+        frozenset({GraphNodeId("a")}),
+    )
+    running = reduce_graph_run(running_state(), AdvanceGraphRun(0, (GraphNodeId("c"),), (progress,)))
+
+    resumed = reduce_graph_run(reduce_graph_run(running, SuspendGraphRun()), ResumeGraphRun())
+
+    assert resumed == running
+    assert resumed.join_progress == (progress,)
+
+
 def test_complete_clears_frontier_and_guards_expected_superstep() -> None:
     state = running_state()
 
@@ -133,6 +219,7 @@ def test_complete_clears_frontier_and_guards_expected_superstep() -> None:
     completed = reduce_graph_run(state, CompleteGraphRun(0))
     assert completed.status is GraphRunStatus.COMPLETED
     assert completed.frontier == ()
+    assert completed.join_progress == ()
 
 
 @pytest.mark.parametrize("suspend_first", [False, True])
@@ -146,6 +233,7 @@ def test_fail_clears_frontier_from_nonterminal_state(suspend_first: bool) -> Non
     assert failed.status is GraphRunStatus.FAILED
     assert failed.failure == GraphFailure("node failed")
     assert failed.frontier == ()
+    assert failed.join_progress == ()
 
 
 def test_empty_failure_fails_closed() -> None:
@@ -199,7 +287,30 @@ def corrupted_state(**changes: object) -> GraphRunState:
         corrupted_state(parent=ParentGraphTask(GraphRunId("run"), GraphTaskId("task"))),
         corrupted_state(failure=GraphFailure("unexpected")),
         corrupted_state(status=GraphRunStatus.COMPLETED, frontier=(GraphNodeId("a"),)),
+        corrupted_state(
+            status=GraphRunStatus.COMPLETED,
+            frontier=(),
+            join_progress=(
+                GraphJoinProgress(
+                    (GraphNodeId("a"), GraphNodeId("b")),
+                    GraphNodeId("c"),
+                    frozenset({GraphNodeId("a")}),
+                ),
+            ),
+        ),
         corrupted_state(status=GraphRunStatus.FAILED, frontier=(), failure=None),
+        corrupted_state(
+            status=GraphRunStatus.FAILED,
+            frontier=(),
+            failure=GraphFailure("failed"),
+            join_progress=(
+                GraphJoinProgress(
+                    (GraphNodeId("a"), GraphNodeId("b")),
+                    GraphNodeId("c"),
+                    frozenset({GraphNodeId("a")}),
+                ),
+            ),
+        ),
         corrupted_state(status=GraphRunStatus.FAILED, frontier=(), failure=GraphFailure("  ")),
     ],
 )

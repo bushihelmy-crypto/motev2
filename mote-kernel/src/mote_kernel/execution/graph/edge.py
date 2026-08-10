@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import NewType, TypeAlias
 
-from mote_kernel.execution.graph.node import NodeId
+from mote_kernel.execution.graph.identity import NodeId
 
 RouteId = NewType("RouteId", str)
 

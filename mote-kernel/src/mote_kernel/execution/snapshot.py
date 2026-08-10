@@ -28,6 +28,15 @@ class ParentTaskRef:
 
 
 @dataclass(frozen=True, slots=True)
+class JoinProgress:
+    """Recoverable arrivals for one static join that has not fired yet."""
+
+    sources: tuple[NodeId, ...]
+    target: NodeId
+    arrived: frozenset[NodeId]
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionSnapshot:
     """Immutable committed facts consumed by pure execution algorithms."""
 
@@ -38,6 +47,7 @@ class ExecutionSnapshot:
     superstep: int
     frontier: tuple[NodeId, ...]
     parent: ParentTaskRef | None = None
+    join_progress: tuple[JoinProgress, ...] = ()
 
 
-__all__ = ["ExecutionSnapshot", "ExecutionStatus", "GraphRunId", "ParentTaskId", "ParentTaskRef"]
+__all__ = ["ExecutionSnapshot", "ExecutionStatus", "GraphRunId", "JoinProgress", "ParentTaskId", "ParentTaskRef"]

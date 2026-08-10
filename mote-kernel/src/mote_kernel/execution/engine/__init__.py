@@ -1,6 +1,12 @@
 """Pure graph planning, scheduling, and transition algorithms."""
 
 from mote_kernel.execution.engine.planner import plan_tasks
-from mote_kernel.execution.engine.task import GraphTask, TaskId, task_identity
+from mote_kernel.execution.engine.settlement import settle_tasks
+from mote_kernel.execution.engine.task import GraphTask, TaskId
 
-__all__ = ["GraphTask", "TaskId", "plan_tasks", "task_identity"]
+__all__ = [
+    "GraphTask",
+    "TaskId",
+    "plan_tasks",
+    "settle_tasks",
+]

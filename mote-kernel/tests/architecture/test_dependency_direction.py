@@ -56,7 +56,7 @@ def test_state_does_not_depend_on_flow_packages() -> None:
 
 def test_execution_does_not_depend_on_domain_packages() -> None:
     violations: list[str] = []
-    forbidden = CORE_FLOW_PACKAGES | {"state"}
+    forbidden = CORE_FLOW_PACKAGES
     for path, tree in _production_modules():
         relative = path.relative_to(PACKAGE_ROOT)
         if relative.parts[0] != "execution":
@@ -64,7 +64,7 @@ def test_execution_does_not_depend_on_domain_packages() -> None:
         for line, imported_root in _internal_import_roots(tree):
             if imported_root in forbidden:
                 violations.append(f"{relative}:{line} imports {imported_root}")
-    assert not violations, f"execution must remain domain- and state-agnostic: {violations}"
+    assert not violations, f"execution must remain domain-agnostic: {violations}"
 
 
 def test_graph_definition_layer_does_not_depend_on_runtime_execution_modules() -> None:

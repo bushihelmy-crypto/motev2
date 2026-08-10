@@ -30,7 +30,6 @@ def single_node_graph(definition_id: str, version: int, node_id: str = "step") -
         nodes=(node(node_id),),
         edges=(),
         entries=(NodeId(node_id),),
-        exits=(NodeId(node_id),),
     )
 
 
@@ -43,7 +42,6 @@ def test_nested_graph_definition_is_preserved_and_validated() -> None:
         nodes=(child_node,),
         edges=(),
         entries=(NodeId("nested"),),
-        exits=(NodeId("nested"),),
     )
 
     compiled = compile_graph(parent)
@@ -60,7 +58,6 @@ def test_invalid_nested_graph_fails_parent_compilation() -> None:
         nodes=(node("child"),),
         edges=(),
         entries=(),
-        exits=(),
     )
     parent = GraphDefinition(
         definition_id=GraphDefinitionId("parent.graph"),
@@ -68,7 +65,6 @@ def test_invalid_nested_graph_fails_parent_compilation() -> None:
         nodes=(nested("nested", child),),
         edges=(),
         entries=(NodeId("nested"),),
-        exits=(),
     )
 
     with pytest.raises(MissingEntryError):
@@ -82,7 +78,6 @@ def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
         nodes=(node("child"),),
         edges=(),
         entries=(),
-        exits=(),
     )
     middle = GraphDefinition(
         definition_id=GraphDefinitionId("middle.graph"),
@@ -90,7 +85,6 @@ def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
         nodes=(nested("child", child),),
         edges=(),
         entries=(NodeId("child"),),
-        exits=(),
     )
     root = GraphDefinition(
         definition_id=GraphDefinitionId("root.graph"),
@@ -98,7 +92,6 @@ def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
         nodes=(nested("middle", middle),),
         edges=(),
         entries=(NodeId("middle"),),
-        exits=(),
     )
 
     with pytest.raises(MissingEntryError):
@@ -115,7 +108,6 @@ def test_nested_graph_with_duplicate_route_fails_parent_compilation() -> None:
             ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("c")),
         ),
         entries=(NodeId("a"),),
-        exits=(),
     )
     parent = GraphDefinition(
         definition_id=GraphDefinitionId("parent.graph"),
@@ -123,7 +115,6 @@ def test_nested_graph_with_duplicate_route_fails_parent_compilation() -> None:
         nodes=(nested("nested", child),),
         edges=(),
         entries=(NodeId("nested"),),
-        exits=(),
     )
 
     with pytest.raises(DuplicateEdgeError):
@@ -138,7 +129,6 @@ def test_valid_graphs_nest_with_local_node_id_reuse() -> None:
         nodes=(nested("step", child),),
         edges=(),
         entries=(NodeId("step"),),
-        exits=(NodeId("step"),),
     )
     root = GraphDefinition(
         definition_id=GraphDefinitionId("root.graph"),
@@ -146,7 +136,6 @@ def test_valid_graphs_nest_with_local_node_id_reuse() -> None:
         nodes=(nested("step", middle),),
         edges=(),
         entries=(NodeId("step"),),
-        exits=(NodeId("step"),),
     )
 
     root_node = compile_graph(root).nodes[NodeId("step")]
@@ -165,7 +154,6 @@ def test_same_nested_graph_definition_may_be_reused_by_sibling_nodes() -> None:
         nodes=(nested("second", child), nested("first", child)),
         edges=(),
         entries=(NodeId("second"), NodeId("first")),
-        exits=(NodeId("first"), NodeId("second")),
     )
 
     compiled = compile_graph(parent)
@@ -184,7 +172,6 @@ def test_distinct_nested_graphs_cannot_share_identity_and_version() -> None:
         nodes=(nested("first", first_child), nested("second", second_child)),
         edges=(),
         entries=(NodeId("first"), NodeId("second")),
-        exits=(),
     )
 
     with pytest.raises(DuplicateGraphDefinitionError):
@@ -200,7 +187,6 @@ def test_nested_graphs_may_share_definition_id_across_versions() -> None:
         nodes=(nested("first", first_child), nested("second", second_child)),
         edges=(),
         entries=(NodeId("first"), NodeId("second")),
-        exits=(),
     )
 
     assert tuple(compile_graph(parent).nodes) == (NodeId("first"), NodeId("second"))
@@ -210,7 +196,6 @@ def test_direct_recursive_nested_graph_fails_with_typed_error() -> None:
     root = single_node_graph("root.graph", 1, "leaf")
     object.__setattr__(root, "nodes", (nested("self", root),))
     object.__setattr__(root, "entries", (NodeId("self"),))
-    object.__setattr__(root, "exits", (NodeId("self"),))
 
     with pytest.raises(RecursiveGraphDefinitionError):
         compile_graph(root)
@@ -224,11 +209,9 @@ def test_indirect_recursive_nested_graph_fails_with_typed_error() -> None:
         nodes=(nested("root", root),),
         edges=(),
         entries=(NodeId("root"),),
-        exits=(NodeId("root"),),
     )
     object.__setattr__(root, "nodes", (nested("child", child),))
     object.__setattr__(root, "entries", (NodeId("child"),))
-    object.__setattr__(root, "exits", (NodeId("child"),))
 
     with pytest.raises(RecursiveGraphDefinitionError):
         compile_graph(root)

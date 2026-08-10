@@ -7,11 +7,12 @@ from mote_kernel.execution.graph import (
     JoinEdge,
     NodeDefinition,
     NodeId,
+    NodeSuccess,
 )
 
 
-def identity(node_input: str) -> str:
-    return node_input
+def identity(node_input: str) -> NodeSuccess[str]:
+    return NodeSuccess(node_input)
 
 
 def node(node_id: str) -> NodeDefinition[str, str]:
@@ -23,7 +24,6 @@ def graph(
     nodes: tuple[NodeDefinition[str, str], ...],
     edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
     entries: tuple[NodeId, ...] = (NodeId("a"),),
-    exits: tuple[NodeId, ...] = (),
 ) -> GraphDefinition[str, str]:
     return GraphDefinition(
         definition_id=GraphDefinitionId("test.graph"),
@@ -31,5 +31,4 @@ def graph(
         nodes=nodes,
         edges=edges,
         entries=entries,
-        exits=exits,
     )

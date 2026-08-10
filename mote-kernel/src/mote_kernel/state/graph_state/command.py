@@ -7,6 +7,7 @@ from mote_kernel.state.graph_state.model import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphFailure,
+    GraphJoinProgress,
     GraphNodeId,
     GraphRunId,
     ParentGraphTask,
@@ -30,6 +31,7 @@ class AdvanceGraphRun:
 
     expected_superstep: int
     frontier: tuple[GraphNodeId, ...]
+    join_progress: tuple[GraphJoinProgress, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

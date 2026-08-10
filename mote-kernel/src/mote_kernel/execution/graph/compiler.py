@@ -2,9 +2,10 @@
 
 from typing import TypeVar
 
+from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge, RouteId
-from mote_kernel.execution.graph.node import NodeId
+from mote_kernel.execution.graph.identity import NodeId
 from mote_kernel.execution.graph.topology import (
     CompiledGraph,
     immutable_join_mapping,
@@ -29,7 +30,8 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
 
     for edge in definition.edges:
         if isinstance(edge, DirectEdge):
-            direct_targets[edge.source].append(edge.target)
+            if edge.target != END:
+                direct_targets[edge.source].append(edge.target)
         elif isinstance(edge, ConditionalEdge):
             routes = conditional_targets[edge.source]
             routes[edge.route] = edge.target
@@ -43,7 +45,6 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
         version=definition.version,
         nodes=immutable_node_mapping(nodes),
         entries=tuple(sorted(definition.entries)),
-        exits=frozenset(definition.exits),
         direct_targets=immutable_mapping(
             {node_id: tuple(sorted(targets)) for node_id, targets in direct_targets.items()}
         ),

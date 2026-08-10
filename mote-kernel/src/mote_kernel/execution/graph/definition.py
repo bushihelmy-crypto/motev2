@@ -33,7 +33,6 @@ class GraphDefinition(Generic[InputT, OutputT]):
     nodes: tuple[GraphNode[InputT, OutputT], ...]
     edges: tuple[Edge, ...]
     entries: tuple[NodeId, ...]
-    exits: tuple[NodeId, ...]
 
 
 __all__ = [

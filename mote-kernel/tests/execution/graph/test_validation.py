@@ -12,6 +12,7 @@ from mote_kernel.execution.errors import (
     UnreachableNodeError,
 )
 from mote_kernel.execution.graph import (
+    END,
     ConditionalEdge,
     DirectEdge,
     GraphDefinition,
@@ -29,7 +30,7 @@ from mote_kernel.execution.graph import (
     [
         (graph(nodes=(node("a"),), entries=()), MissingEntryError),
         (
-            GraphDefinition(GraphDefinitionId(""), GraphDefinitionVersion(1), (node("a"),), (), (NodeId("a"),), ()),
+            GraphDefinition(GraphDefinitionId(""), GraphDefinitionVersion(1), (node("a"),), (), (NodeId("a"),)),
             InvalidGraphIdentityError,
         ),
         (
@@ -39,7 +40,6 @@ from mote_kernel.execution.graph import (
                 (node("a"),),
                 (),
                 (NodeId("a"),),
-                (),
             ),
             InvalidGraphIdentityError,
         ),
@@ -50,15 +50,14 @@ from mote_kernel.execution.graph import (
                 (node("a"),),
                 (),
                 (NodeId("a"),),
-                (),
             ),
             InvalidGraphIdentityError,
         ),
         (graph(nodes=(node(""),), entries=(NodeId(""),)), InvalidGraphIdentityError),
         (graph(nodes=(node(" a"),), entries=(NodeId(" a"),)), InvalidGraphIdentityError),
+        (graph(nodes=(node(END),), entries=(END,)), InvalidGraphIdentityError),
         (graph(nodes=(node("a"), node("a"))), DuplicateNodeError),
         (graph(nodes=(node("a"),), entries=(NodeId("a"), NodeId("a"))), DuplicateBoundaryError),
-        (graph(nodes=(node("a"),), exits=(NodeId("a"), NodeId("a"))), DuplicateBoundaryError),
         (
             graph(
                 nodes=(node("a"), node("b")),
@@ -67,7 +66,6 @@ from mote_kernel.execution.graph import (
             DuplicateEdgeError,
         ),
         (graph(nodes=(node("a"),), entries=(NodeId("missing"),)), UnknownNodeError),
-        (graph(nodes=(node("a"),), exits=(NodeId("missing"),)), UnknownNodeError),
         (graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("a"), NodeId("missing")),)), UnknownNodeError),
         (graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("missing"), NodeId("a")),)), UnknownNodeError),
         (

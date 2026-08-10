@@ -3,19 +3,24 @@ from dataclasses import FrozenInstanceError, fields
 import pytest
 from tests.execution.engine.factories import compiled_graph, snapshot
 
-from mote_kernel.execution.engine import GraphTask, plan_tasks, task_identity
+from mote_kernel.execution.engine import GraphTask, plan_tasks
+from mote_kernel.execution.engine.task import task_identity
 from mote_kernel.execution.errors import ExecutionLimitError, InvalidExecutionSnapshotError, SnapshotMismatchError
 from mote_kernel.execution.graph import (
+    END,
+    DirectEdge,
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    JoinEdge,
     NestedGraphNodeDefinition,
     NodeDefinition,
     NodeId,
+    NodeSuccess,
     compile_graph,
 )
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.snapshot import ExecutionStatus, GraphRunId
+from mote_kernel.execution.snapshot import ExecutionStatus, GraphRunId, JoinProgress
 
 LIMITS = ExecutionLimits()
 
@@ -200,25 +205,23 @@ def test_parallel_limit_allows_exactly_the_configured_batch_size() -> None:
 
 
 def test_nested_graph_node_is_planned_as_one_parent_task() -> None:
-    def child_node(node_input: str) -> str:
-        return node_input
+    def child_node(node_input: str) -> NodeSuccess[str]:
+        return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
         definition_id=GraphDefinitionId("child.graph"),
         version=GraphDefinitionVersion(1),
         nodes=(NodeDefinition(NodeId("child-step"), child_node),),
-        edges=(),
+        edges=(DirectEdge(NodeId("child-step"), END),),
         entries=(NodeId("child-step"),),
-        exits=(NodeId("child-step"),),
     )
     parent = compile_graph(
         GraphDefinition[str, str](
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
             nodes=(NestedGraphNodeDefinition(NodeId("nested"), child),),
-            edges=(),
+            edges=(DirectEdge(NodeId("nested"), END),),
             entries=(NodeId("nested"),),
-            exits=(NodeId("nested"),),
         )
     )
 
@@ -253,6 +256,92 @@ def test_invalid_snapshot_identity_or_parent_fails_closed(execution_snapshot: ob
 def test_terminal_snapshot_cannot_retain_frontier(status: ExecutionStatus) -> None:
     with pytest.raises(InvalidExecutionSnapshotError, match="terminal"):
         plan_tasks(compiled_graph("a"), snapshot(status=status, frontier=("a",)), LIMITS)
+
+
+@pytest.mark.parametrize("status", [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED])
+def test_terminal_snapshot_cannot_retain_join_progress(status: ExecutionStatus) -> None:
+    progress = JoinProgress((NodeId("a"), NodeId("b")), NodeId("c"), frozenset({NodeId("a")}))
+    graph = compile_graph(
+        GraphDefinition[str, str](
+            definition_id=GraphDefinitionId("test.graph"),
+            version=GraphDefinitionVersion(1),
+            nodes=tuple(
+                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
+                for node_id in ("a", "b", "c")
+            ),
+            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
+            entries=(NodeId("a"), NodeId("b")),
+        )
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="terminal"):
+        plan_tasks(graph, snapshot(status=status, frontier=(), join_progress=(progress,)), LIMITS)
+
+
+@pytest.mark.parametrize(
+    "progress",
+    [
+        JoinProgress((NodeId("a"), NodeId("a")), NodeId("c"), frozenset({NodeId("a")})),
+        JoinProgress((NodeId("a"), NodeId("b")), NodeId("a"), frozenset({NodeId("b")})),
+        JoinProgress((NodeId(" a"), NodeId("b")), NodeId("c"), frozenset({NodeId(" a")})),
+        JoinProgress((NodeId("a"), NodeId("b")), NodeId(" c"), frozenset({NodeId("a")})),
+        JoinProgress((NodeId("a"), NodeId("b")), NodeId("c"), frozenset({NodeId("unknown")})),
+    ],
+)
+def test_corrupt_recovered_join_progress_fails_closed(progress: JoinProgress) -> None:
+    graph = compile_graph(
+        GraphDefinition[str, str](
+            definition_id=GraphDefinitionId("test.graph"),
+            version=GraphDefinitionVersion(1),
+            nodes=tuple(
+                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
+                for node_id in ("a", "b", "c")
+            ),
+            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
+            entries=(NodeId("a"), NodeId("b")),
+        )
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError):
+        plan_tasks(graph, snapshot(frontier=("b",), join_progress=(progress,)), LIMITS)
+
+
+def test_recovered_join_progress_must_belong_to_compiled_graph() -> None:
+    progress = JoinProgress(
+        (NodeId("a"), NodeId("b")),
+        NodeId("c"),
+        frozenset({NodeId("a")}),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="unknown join"):
+        plan_tasks(
+            compiled_graph("a", "b", "c", entries=("a", "b", "c")),
+            snapshot(frontier=("b",), join_progress=(progress,)),
+            LIMITS,
+        )
+
+
+def test_recovered_snapshot_rejects_duplicate_join_progress() -> None:
+    progress = JoinProgress(
+        (NodeId("a"), NodeId("b")),
+        NodeId("c"),
+        frozenset({NodeId("a")}),
+    )
+    graph = compile_graph(
+        GraphDefinition[str, str](
+            definition_id=GraphDefinitionId("test.graph"),
+            version=GraphDefinitionVersion(1),
+            nodes=tuple(
+                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
+                for node_id in ("a", "b", "c")
+            ),
+            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
+            entries=(NodeId("a"), NodeId("b")),
+        )
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="repeats"):
+        plan_tasks(graph, snapshot(frontier=("b",), join_progress=(progress, progress)), LIMITS)
 
 
 def test_suspended_snapshot_may_retain_recoverable_frontier() -> None:
@@ -293,10 +382,10 @@ def test_planner_accepts_large_deterministic_frontier_at_exact_limit() -> None:
 def test_planner_does_not_invoke_node() -> None:
     calls = 0
 
-    def forbidden_node(node_input: str) -> str:
+    def forbidden_node(node_input: str) -> NodeSuccess[str]:
         nonlocal calls
         calls += 1
-        return node_input
+        return NodeSuccess(node_input)
 
     graph = compile_graph(
         GraphDefinition(
@@ -305,7 +394,6 @@ def test_planner_does_not_invoke_node() -> None:
             nodes=(NodeDefinition(NodeId("a"), forbidden_node),),
             edges=(),
             entries=(NodeId("a"),),
-            exits=(),
         )
     )
 

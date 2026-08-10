@@ -21,6 +21,34 @@ class ExecutionLimitError(PlanningError):
     """Planning would exceed an explicit graph execution limit."""
 
 
+class ResultCollectionError(ExecutionError):
+    """Task results do not exactly match one planned superstep."""
+
+
+class NodeExecutionContractError(ExecutionError):
+    """A node returned a value outside its typed execution contract."""
+
+
+class RoutingError(ExecutionError):
+    """Completed tasks cannot produce a valid deterministic next frontier."""
+
+
+class UnknownRouteError(RoutingError):
+    """A node selected a route not declared by its compiled graph."""
+
+
+class InvalidRoutingCommandError(RoutingError):
+    """A node emitted a routing command incompatible with its topology."""
+
+
+class JoinProgressError(RoutingError):
+    """Persisted join progress is invalid for the compiled graph."""
+
+
+class RoutingDeadlockError(RoutingError):
+    """A graph has partial join progress but no task able to advance it."""
+
+
 class GraphValidationError(ExecutionError):
     """A graph definition violates a static topology invariant."""
 
@@ -76,10 +104,17 @@ __all__ = [
     "InvalidExecutionSnapshotError",
     "InvalidGraphIdentityError",
     "InvalidJoinError",
+    "InvalidRoutingCommandError",
+    "JoinProgressError",
     "MissingEntryError",
+    "NodeExecutionContractError",
     "PlanningError",
     "RecursiveGraphDefinitionError",
+    "ResultCollectionError",
+    "RoutingDeadlockError",
+    "RoutingError",
     "SnapshotMismatchError",
     "UnknownNodeError",
+    "UnknownRouteError",
     "UnreachableNodeError",
 ]

@@ -30,6 +30,15 @@ class ParentGraphTask:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphJoinProgress:
+    """Durable arrivals for one static join that has not fired yet."""
+
+    sources: tuple[GraphNodeId, ...]
+    target: GraphNodeId
+    arrived: frozenset[GraphNodeId]
+
+
+@dataclass(frozen=True, slots=True)
 class GraphRunState:
     """The committed execution position for one graph run."""
 
@@ -41,12 +50,14 @@ class GraphRunState:
     frontier: tuple[GraphNodeId, ...]
     parent: ParentGraphTask | None = None
     failure: GraphFailure | None = None
+    join_progress: tuple[GraphJoinProgress, ...] = ()
 
 
 __all__ = [
     "GraphDefinitionId",
     "GraphDefinitionVersion",
     "GraphFailure",
+    "GraphJoinProgress",
     "GraphNodeId",
     "GraphRunId",
     "GraphRunState",

@@ -7,7 +7,7 @@ from typing import Generic, TypeVar
 
 from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefinitionVersion, GraphNode
 from mote_kernel.execution.graph.edge import JoinEdge, RouteId
-from mote_kernel.execution.graph.node import NodeId
+from mote_kernel.execution.graph.identity import NodeId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -21,7 +21,6 @@ class CompiledGraph(Generic[InputT, OutputT]):
     version: GraphDefinitionVersion
     nodes: Mapping[NodeId, GraphNode[InputT, OutputT]]
     entries: tuple[NodeId, ...]
-    exits: frozenset[NodeId]
     direct_targets: Mapping[NodeId, tuple[NodeId, ...]]
     conditional_targets: Mapping[NodeId, Mapping[RouteId, NodeId]]
     joins_by_source: Mapping[NodeId, tuple[JoinEdge, ...]]

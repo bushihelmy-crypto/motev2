@@ -16,6 +16,7 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
     UnreachableNodeError,
 )
+from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import (
     GraphDefinition,
     GraphDefinitionId,
@@ -23,7 +24,7 @@ from mote_kernel.execution.graph.definition import (
     NestedGraphNodeDefinition,
 )
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
-from mote_kernel.execution.graph.node import NodeId
+from mote_kernel.execution.graph.identity import NodeId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -51,15 +52,11 @@ def _validate_node_references(definition: GraphDefinition[InputT, OutputT], node
     for entry in definition.entries:
         if entry not in node_ids:
             raise UnknownNodeError(f"entry references unknown node: {entry}")
-    for exit_node in definition.exits:
-        if exit_node not in node_ids:
-            raise UnknownNodeError(f"exit references unknown node: {exit_node}")
-
     for edge in definition.edges:
         if isinstance(edge, DirectEdge | ConditionalEdge):
-            referenced = (edge.source, edge.target)
+            referenced = (edge.source,) if edge.target == END else (edge.source, edge.target)
         else:
-            referenced = (*edge.sources, edge.target)
+            referenced = edge.sources if edge.target == END else (*edge.sources, edge.target)
         for node_id in referenced:
             if node_id not in node_ids:
                 raise UnknownNodeError(f"edge references unknown node: {node_id}")
@@ -82,9 +79,6 @@ def _validate_joins(definition: GraphDefinition[InputT, OutputT]) -> None:
 def _validate_duplicates(definition: GraphDefinition[InputT, OutputT]) -> None:
     if len(frozenset(definition.entries)) != len(definition.entries):
         raise DuplicateBoundaryError("graph definition contains duplicate entries")
-    if len(frozenset(definition.exits)) != len(definition.exits):
-        raise DuplicateBoundaryError("graph definition contains duplicate exits")
-
     direct_edges: set[DirectEdge] = set()
     conditional_routes: set[tuple[NodeId, str]] = set()
     for edge in definition.edges:
@@ -113,13 +107,16 @@ def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[
     joins: list[JoinEdge] = []
     for edge in definition.edges:
         if isinstance(edge, DirectEdge | ConditionalEdge):
-            outgoing[edge.source].add(edge.target)
+            if edge.target != END:
+                outgoing[edge.source].add(edge.target)
         else:
             joins.append(edge)
 
     pending = deque(definition.entries)
     reachable: set[NodeId] = set()
-    while pending or any(set(edge.sources) <= reachable and edge.target not in reachable for edge in joins):
+    while pending or any(
+        edge.target != END and set(edge.sources) <= reachable and edge.target not in reachable for edge in joins
+    ):
         while pending:
             node_id = pending.popleft()
             if node_id in reachable:
@@ -127,7 +124,11 @@ def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[
             reachable.add(node_id)
             pending.extend(sorted(outgoing[node_id]))
         pending.extend(
-            sorted(edge.target for edge in joins if set(edge.sources) <= reachable and edge.target not in reachable)
+            sorted(
+                edge.target
+                for edge in joins
+                if edge.target != END and set(edge.sources) <= reachable and edge.target not in reachable
+            )
         )
     return frozenset(reachable)
 
@@ -158,6 +159,8 @@ def _validate_graph(
     node_ids = tuple(node.node_id for node in definition.nodes)
     for node_id in node_ids:
         _require_identity(node_id, kind="node")
+        if node_id == END:
+            raise InvalidGraphIdentityError("END is a virtual boundary and cannot be declared as a node")
     if len(frozenset(node_ids)) != len(node_ids):
         raise DuplicateNodeError("graph definition contains duplicate node identities")
     for edge in definition.edges:

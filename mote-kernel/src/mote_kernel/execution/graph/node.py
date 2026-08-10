@@ -1,28 +1,29 @@
 """Graph node contracts."""
 
 from dataclasses import dataclass
-from typing import Generic, NewType, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar
 
-NodeId = NewType("NodeId", str)
+from mote_kernel.execution.graph.identity import NodeId
+from mote_kernel.execution.graph.outcome import NodeOutcome
 
 InputT = TypeVar("InputT", contravariant=True)
-OutputT = TypeVar("OutputT", covariant=True)
+OutputT_co = TypeVar("OutputT_co", covariant=True)
 
 
-class Node(Protocol[InputT, OutputT]):
+class Node(Protocol[InputT, OutputT_co]):
     """Execute one node invocation without graph-level retry."""
 
-    def __call__(self, node_input: InputT) -> OutputT:
-        """Return the result of exactly one node invocation."""
+    def __call__(self, node_input: InputT) -> "NodeOutcome[OutputT_co]":
+        """Return the typed outcome of exactly one node invocation."""
         ...
 
 
 @dataclass(frozen=True, slots=True)
-class NodeDefinition(Generic[InputT, OutputT]):
+class NodeDefinition(Generic[InputT, OutputT_co]):
     """Bind a stable node identity to one executable node."""
 
     node_id: NodeId
-    node: Node[InputT, OutputT]
+    node: Node[InputT, OutputT_co]
 
 
 __all__ = ["Node", "NodeDefinition", "NodeId"]
