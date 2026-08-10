@@ -28,6 +28,8 @@ jobs:
           cache-dependency-path: mote-kernel/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
+      - run: pre-commit run --all-files
+        working-directory: .
       - run: python -m ruff check src tests
       - run: python -m ruff format --check src tests
       - run: pyright
