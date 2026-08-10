@@ -5,7 +5,7 @@ from typing import Generic, TypeVar
 
 from mote_kernel.execution.graph import CompiledGraph
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.result import NestedTaskResult
+from mote_kernel.execution.result import NestedTaskResult, TaskResult
 from mote_kernel.state.graph_state import GraphRunState
 
 InputT = TypeVar("InputT")
@@ -21,6 +21,7 @@ class StepRequest(Generic[InputT, OutputT]):
     node_input: InputT
     limits: ExecutionLimits = field(default_factory=ExecutionLimits)
     nested_results: tuple[NestedTaskResult[OutputT], ...] = ()
+    settled_results: tuple[TaskResult[OutputT], ...] = ()
 
 
 __all__ = ["StepRequest"]

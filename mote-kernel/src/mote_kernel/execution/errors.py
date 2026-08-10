@@ -93,6 +93,10 @@ class InvalidGraphIdentityError(GraphValidationError):
     """A graph, node, or route identity is empty or not trimmed."""
 
 
+class InvalidResourceDefinitionError(GraphValidationError):
+    """A graph resource declaration or node requirement is invalid."""
+
+
 __all__ = [
     "DuplicateBoundaryError",
     "DuplicateEdgeError",
@@ -104,6 +108,7 @@ __all__ = [
     "InvalidExecutionSnapshotError",
     "InvalidGraphIdentityError",
     "InvalidJoinError",
+    "InvalidResourceDefinitionError",
     "InvalidRoutingCommandError",
     "JoinProgressError",
     "MissingEntryError",

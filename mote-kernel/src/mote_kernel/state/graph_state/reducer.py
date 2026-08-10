@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+from mote_kernel.parallel import ParallelTransitionError, ParticipantId, validate_parallel_snapshot
 from mote_kernel.state.graph_state.command import (
     AdvanceGraphRun,
     CompleteGraphRun,
@@ -9,6 +10,7 @@ from mote_kernel.state.graph_state.command import (
     ResumeGraphRun,
     StartGraphRun,
     SuspendGraphRun,
+    UpdateGraphParallel,
 )
 from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
 
@@ -67,10 +69,26 @@ def _validate_state(state: GraphRunState) -> None:
             raise GraphStateTransitionError("a graph run cannot be its own parent")
     _validate_frontier(state.frontier, required=state.status in {GraphRunStatus.RUNNING, GraphRunStatus.SUSPENDED})
     _validate_join_progress(state.join_progress)
+    if len(state.settled_tasks) != len(frozenset(state.settled_tasks)):
+        raise GraphStateTransitionError("graph state repeats a settled task")
+    for task_id in state.settled_tasks:
+        _require_identity(task_id, "settled task identity")
+    if state.parallel is not None:
+        try:
+            validate_parallel_snapshot(state.parallel)
+        except ParallelTransitionError as error:
+            raise GraphStateTransitionError("graph parallel state is invalid") from error
+        acquisition_participants = frozenset(acquisition.participant_id for acquisition in state.parallel.acquisitions)
+        if acquisition_participants & frozenset(ParticipantId(task_id) for task_id in state.settled_tasks):
+            raise GraphStateTransitionError("settled tasks cannot retain parallel acquisitions")
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.frontier:
         raise GraphStateTransitionError("a terminal graph cannot retain a frontier")
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.join_progress:
         raise GraphStateTransitionError("a terminal graph cannot retain join progress")
+    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.parallel is not None:
+        raise GraphStateTransitionError("a terminal graph cannot retain parallel state")
+    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.settled_tasks:
+        raise GraphStateTransitionError("a terminal graph cannot retain settled tasks")
     if state.status is GraphRunStatus.FAILED:
         if state.failure is None:
             raise GraphStateTransitionError("a failed graph requires a failure")
@@ -111,6 +129,30 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
     if state is None:
         raise GraphStateTransitionError("a graph run must be started before it can transition")
     _validate_state(state)
+    if isinstance(command, UpdateGraphParallel):
+        if state.status is not GraphRunStatus.RUNNING:
+            raise GraphStateTransitionError("only a running graph can update parallel state")
+        if command.expected_superstep != state.superstep:
+            raise GraphStateTransitionError("parallel command was based on a stale superstep")
+        if command.expected_parallel != state.parallel:
+            raise GraphStateTransitionError("parallel command was based on a stale snapshot")
+        try:
+            validate_parallel_snapshot(command.parallel)
+        except ParallelTransitionError as error:
+            raise GraphStateTransitionError("parallel command contains an invalid snapshot") from error
+        if len(command.settle_tasks) != len(frozenset(command.settle_tasks)):
+            raise GraphStateTransitionError("parallel command repeats a settled task")
+        for task_id in command.settle_tasks:
+            _require_identity(task_id, "settled task identity")
+        settled_tasks = tuple(sorted((*state.settled_tasks, *command.settle_tasks)))
+        if len(settled_tasks) != len(frozenset(settled_tasks)):
+            raise GraphStateTransitionError("parallel command settles an already settled task")
+        acquisition_participants = frozenset(
+            acquisition.participant_id for acquisition in command.parallel.acquisitions
+        )
+        if acquisition_participants & frozenset(ParticipantId(task_id) for task_id in settled_tasks):
+            raise GraphStateTransitionError("parallel command cannot settle a task with an active acquisition")
+        return replace(state, parallel=command.parallel, settled_tasks=settled_tasks)
     if isinstance(command, AdvanceGraphRun):
         if state.status is not GraphRunStatus.RUNNING:
             raise GraphStateTransitionError("only a running graph can advance")
@@ -123,6 +165,8 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
             superstep=state.superstep + 1,
             frontier=tuple(sorted(command.frontier)),
             join_progress=tuple(sorted(command.join_progress, key=_join_sort_key)),
+            parallel=None,
+            settled_tasks=(),
         )
     if isinstance(command, SuspendGraphRun):
         if state.status is not GraphRunStatus.RUNNING:
@@ -137,10 +181,20 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
             raise GraphStateTransitionError("only a running graph can complete")
         if command.expected_superstep != state.superstep:
             raise GraphStateTransitionError("complete command was based on a stale superstep")
-        return replace(state, status=GraphRunStatus.COMPLETED, frontier=(), join_progress=())
+        return replace(
+            state, status=GraphRunStatus.COMPLETED, frontier=(), join_progress=(), parallel=None, settled_tasks=()
+        )
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED}:
         raise GraphStateTransitionError("a terminal graph cannot fail again")
     if command.expected_superstep != state.superstep:
         raise GraphStateTransitionError("fail command was based on a stale superstep")
     _require_identity(command.failure, "graph failure")
-    return replace(state, status=GraphRunStatus.FAILED, frontier=(), failure=command.failure, join_progress=())
+    return replace(
+        state,
+        status=GraphRunStatus.FAILED,
+        frontier=(),
+        failure=command.failure,
+        join_progress=(),
+        parallel=None,
+        settled_tasks=(),
+    )

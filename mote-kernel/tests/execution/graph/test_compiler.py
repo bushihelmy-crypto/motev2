@@ -11,6 +11,7 @@ from mote_kernel.execution.graph import (
     RouteId,
     compile_graph,
 )
+from mote_kernel.parallel import ResourceDefinition, ResourceId
 
 
 def test_compilation_never_invokes_nodes() -> None:
@@ -159,3 +160,27 @@ def test_compiling_the_same_definition_is_idempotent() -> None:
 
     assert first == second
     assert first is not second
+
+
+def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> None:
+    definition = graph(
+        nodes=(
+            NodeDefinition(
+                NodeId("a"),
+                node("a").node,
+                (ResourceId("database"), ResourceId("file")),
+            ),
+        ),
+        resources=(
+            ResourceDefinition(ResourceId("database"), 20),
+            ResourceDefinition(ResourceId("file"), 10),
+        ),
+    )
+
+    compiled = compile_graph(definition)
+    compiled_node = compiled.nodes[NodeId("a")]
+
+    assert isinstance(compiled_node, NodeDefinition)
+    assert compiled.resource_order == (ResourceId("file"), ResourceId("database"))
+    assert compiled_node.resources == (ResourceId("file"), ResourceId("database"))
+    assert tuple(compiled.resources) == (ResourceId("database"), ResourceId("file"))

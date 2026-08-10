@@ -6,7 +6,7 @@ from typing import Generic, TypeAlias, TypeVar
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.graph import CompiledGraph
 from mote_kernel.execution.graph.command import Continue, RoutingCommand
-from mote_kernel.state.graph_state import GraphRunCommand, GraphRunState, StartGraphRun
+from mote_kernel.state.graph_state import GraphRunCommand, GraphRunState, StartGraphRun, UpdateGraphParallel
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -41,6 +41,23 @@ class ExecutedSuperstep(Generic[OutputT]):
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedResourceAdmission:
+    """The resource reservation part of a prepared frontier."""
+
+    admitted: tuple[GraphTask, ...]
+    waiting: tuple[GraphTask, ...]
+    command: UpdateGraphParallel
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutedFrontierBatch(Generic[OutputT]):
+    """A partial frontier result batch and its state command awaiting commit."""
+
+    results: tuple[TaskResult[OutputT], ...]
+    command: UpdateGraphParallel
+
+
+@dataclass(frozen=True, slots=True)
 class NestedTaskSuccess(Generic[OutputT]):
     """A child success loaded atomically with its committed terminal state."""
 
@@ -72,21 +89,24 @@ class PreparedNestedRun(Generic[InputT, OutputT]):
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedNestedRuns(Generic[InputT, OutputT]):
-    """Child graph starts required before the parent superstep can settle."""
+class PreparedFrontier(Generic[InputT, OutputT]):
+    """All state and child-run preparation required before a frontier can execute."""
 
-    runs: tuple[PreparedNestedRun[InputT, OutputT], ...]
+    admission: PreparedResourceAdmission | None
+    nested_runs: tuple[PreparedNestedRun[InputT, OutputT], ...]
 
 
-StepResult: TypeAlias = PreparedNestedRuns[InputT, OutputT] | ExecutedSuperstep[OutputT]
+StepResult: TypeAlias = PreparedFrontier[InputT, OutputT] | ExecutedFrontierBatch[OutputT] | ExecutedSuperstep[OutputT]
 
 __all__ = [
+    "ExecutedFrontierBatch",
     "ExecutedSuperstep",
     "NestedTaskFailure",
     "NestedTaskResult",
     "NestedTaskSuccess",
+    "PreparedFrontier",
     "PreparedNestedRun",
-    "PreparedNestedRuns",
+    "PreparedResourceAdmission",
     "StepResult",
     "TaskFailure",
     "TaskResult",

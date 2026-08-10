@@ -5,6 +5,7 @@ from typing import Generic, Protocol, TypeVar
 
 from mote_kernel.execution.graph.identity import NodeId
 from mote_kernel.execution.graph.outcome import NodeOutcome
+from mote_kernel.parallel import ResourceId
 
 InputT = TypeVar("InputT", contravariant=True)
 OutputT_co = TypeVar("OutputT_co", covariant=True)
@@ -24,6 +25,7 @@ class NodeDefinition(Generic[InputT, OutputT_co]):
 
     node_id: NodeId
     node: Node[InputT, OutputT_co]
+    resources: tuple[ResourceId, ...] = ()
 
 
 __all__ = ["Node", "NodeDefinition", "NodeId"]

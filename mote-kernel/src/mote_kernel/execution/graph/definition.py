@@ -5,6 +5,7 @@ from typing import Generic, NewType, TypeAlias, TypeVar
 
 from mote_kernel.execution.graph.edge import Edge
 from mote_kernel.execution.graph.node import NodeDefinition, NodeId
+from mote_kernel.parallel import ResourceDefinition
 
 GraphDefinitionId = NewType("GraphDefinitionId", str)
 GraphDefinitionVersion = NewType("GraphDefinitionVersion", int)
@@ -33,6 +34,7 @@ class GraphDefinition(Generic[InputT, OutputT]):
     nodes: tuple[GraphNode[InputT, OutputT], ...]
     edges: tuple[Edge, ...]
     entries: tuple[NodeId, ...]
+    resources: tuple[ResourceDefinition, ...] = ()
 
 
 __all__ = [

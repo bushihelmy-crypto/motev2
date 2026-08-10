@@ -8,6 +8,7 @@ from typing import Generic, TypeVar
 from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefinitionVersion, GraphNode
 from mote_kernel.execution.graph.edge import JoinEdge, RouteId
 from mote_kernel.execution.graph.identity import NodeId
+from mote_kernel.parallel import ResourceDefinition, ResourceId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -24,6 +25,8 @@ class CompiledGraph(Generic[InputT, OutputT]):
     direct_targets: Mapping[NodeId, tuple[NodeId, ...]]
     conditional_targets: Mapping[NodeId, Mapping[RouteId, NodeId]]
     joins_by_source: Mapping[NodeId, tuple[JoinEdge, ...]]
+    resources: Mapping[ResourceId, ResourceDefinition]
+    resource_order: tuple[ResourceId, ...]
 
 
 def immutable_mapping(values: dict[NodeId, tuple[NodeId, ...]]) -> Mapping[NodeId, tuple[NodeId, ...]]:
@@ -46,6 +49,14 @@ def immutable_node_mapping(
     values: dict[NodeId, GraphNode[InputT, OutputT]],
 ) -> Mapping[NodeId, GraphNode[InputT, OutputT]]:
     """Return a read-only copy of the node index."""
+
+    return MappingProxyType(dict(sorted(values.items())))
+
+
+def immutable_resource_mapping(
+    values: dict[ResourceId, ResourceDefinition],
+) -> Mapping[ResourceId, ResourceDefinition]:
+    """Return a read-only copy of a resource definition index."""
 
     return MappingProxyType(dict(sorted(values.items())))
 

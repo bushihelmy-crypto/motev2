@@ -8,6 +8,7 @@ from mote_kernel.state.graph_state.command import (
     ResumeGraphRun,
     StartGraphRun,
     SuspendGraphRun,
+    UpdateGraphParallel,
 )
 from mote_kernel.state.graph_state.model import (
     GraphDefinitionId,
@@ -42,5 +43,6 @@ __all__ = [
     "ResumeGraphRun",
     "StartGraphRun",
     "SuspendGraphRun",
+    "UpdateGraphParallel",
     "reduce_graph_run",
 ]

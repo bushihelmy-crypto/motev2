@@ -11,6 +11,7 @@ from mote_kernel.execution.errors import (
     DuplicateNodeError,
     InvalidGraphIdentityError,
     InvalidJoinError,
+    InvalidResourceDefinitionError,
     MissingEntryError,
     RecursiveGraphDefinitionError,
     UnknownNodeError,
@@ -25,6 +26,7 @@ from mote_kernel.execution.graph.definition import (
 )
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.identity import NodeId
+from mote_kernel.execution.graph.node import NodeDefinition
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -102,6 +104,34 @@ def _validate_nested_graphs(
             _validate_graph(node.graph, definitions)
 
 
+def _validate_resources(definition: GraphDefinition[InputT, OutputT]) -> None:
+    resource_ids = tuple(resource.resource_id for resource in definition.resources)
+    resource_orders = tuple(resource.order for resource in definition.resources)
+    for resource_id in resource_ids:
+        try:
+            _require_identity(resource_id, kind="resource")
+        except InvalidGraphIdentityError as error:
+            raise InvalidResourceDefinitionError(str(error)) from error
+    if len(frozenset(resource_ids)) != len(resource_ids):
+        raise InvalidResourceDefinitionError("graph definition contains duplicate resource identities")
+    if any(order < 0 for order in resource_orders):
+        raise InvalidResourceDefinitionError("resource order must be non-negative")
+    if len(frozenset(resource_orders)) != len(resource_orders):
+        raise InvalidResourceDefinitionError("graph resources must have distinct order values")
+
+    known_resources = frozenset(resource_ids)
+    for node in definition.nodes:
+        if not isinstance(node, NodeDefinition):
+            continue
+        if len(frozenset(node.resources)) != len(node.resources):
+            raise InvalidResourceDefinitionError(f"node {node.node_id!r} repeats a resource requirement")
+        unknown = frozenset(node.resources) - known_resources
+        if unknown:
+            raise InvalidResourceDefinitionError(
+                f"node {node.node_id!r} references unknown resources: {tuple(sorted(unknown))!r}"
+            )
+
+
 def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[NodeId]:
     outgoing: dict[NodeId, set[NodeId]] = {node.node_id: set() for node in definition.nodes}
     joins: list[JoinEdge] = []
@@ -168,6 +198,7 @@ def _validate_graph(
             _require_identity(edge.route, kind="route")
 
     known_nodes = frozenset(node_ids)
+    _validate_resources(definition)
     _validate_duplicates(definition)
     _validate_node_references(definition, known_nodes)
     _validate_joins(definition)

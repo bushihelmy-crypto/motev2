@@ -3,6 +3,15 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from mote_kernel.parallel import (
+    AcquireResources,
+    ParallelSnapshot,
+    ParticipantId,
+    ReleaseResources,
+    ResourceId,
+    ResourceLock,
+    reduce_parallel,
+)
 from mote_kernel.state.graph_state import (
     AdvanceGraphRun,
     CompleteGraphRun,
@@ -22,6 +31,7 @@ from mote_kernel.state.graph_state import (
     ResumeGraphRun,
     StartGraphRun,
     SuspendGraphRun,
+    UpdateGraphParallel,
     reduce_graph_run,
 )
 
@@ -192,6 +202,205 @@ def test_suspend_and_resume_preserve_committed_position() -> None:
 
     assert suspended.status is GraphRunStatus.SUSPENDED
     assert suspended.frontier == running.frontier
+    assert resumed == running
+
+
+def test_parallel_snapshot_commits_with_stale_guards_and_clears_on_advance() -> None:
+    running = running_state()
+    resource = ResourceId("file")
+    empty = ParallelSnapshot((ResourceLock(resource),))
+    acquired = reduce_parallel(empty, AcquireResources(ParticipantId("task"), (resource,)))
+
+    committed = reduce_graph_run(running, UpdateGraphParallel(0, None, acquired))
+
+    assert committed.parallel == acquired
+    with pytest.raises(GraphStateTransitionError, match="stale snapshot"):
+        reduce_graph_run(committed, UpdateGraphParallel(0, None, empty))
+    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
+        reduce_graph_run(committed, UpdateGraphParallel(1, acquired, empty))
+    advanced = reduce_graph_run(committed, AdvanceGraphRun(0, (GraphNodeId("next"),)))
+    assert advanced.parallel is None
+    assert advanced.settled_tasks == ()
+
+
+def test_parallel_update_records_normalized_settled_task_identities() -> None:
+    running = running_state()
+    parallel = ParallelSnapshot((ResourceLock(ResourceId("file")),))
+
+    settled = reduce_graph_run(
+        running,
+        UpdateGraphParallel(0, None, parallel, (GraphTaskId("task-b"), GraphTaskId("task-a"))),
+    )
+
+    assert settled.settled_tasks == (GraphTaskId("task-a"), GraphTaskId("task-b"))
+    with pytest.raises(GraphStateTransitionError, match="already settled"):
+        reduce_graph_run(
+            settled,
+            UpdateGraphParallel(0, parallel, parallel, (GraphTaskId("task-a"),)),
+        )
+    with pytest.raises(GraphStateTransitionError, match="repeats a settled"):
+        reduce_graph_run(
+            running,
+            UpdateGraphParallel(0, None, parallel, (GraphTaskId("task-a"), GraphTaskId("task-a"))),
+        )
+
+
+def test_parallel_update_cannot_settle_a_task_with_an_active_acquisition() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("task-a"), (resource,)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="active acquisition"):
+        reduce_graph_run(
+            running_state(),
+            UpdateGraphParallel(0, None, acquired, (GraphTaskId("task-a"),)),
+        )
+
+
+def test_parallel_update_cannot_settle_a_task_with_a_waiting_acquisition() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("owner"), (resource,)),
+    )
+    waiting = reduce_parallel(acquired, AcquireResources(ParticipantId("task-a"), (resource,)))
+
+    with pytest.raises(GraphStateTransitionError, match="active acquisition"):
+        reduce_graph_run(
+            running_state(),
+            UpdateGraphParallel(0, None, waiting, (GraphTaskId("task-a"),)),
+        )
+
+
+def test_parallel_update_cannot_add_an_acquisition_for_an_already_settled_task() -> None:
+    resource = ResourceId("file")
+    empty = ParallelSnapshot((ResourceLock(resource),))
+    settled = reduce_graph_run(
+        running_state(),
+        UpdateGraphParallel(0, None, empty, (GraphTaskId("task-a"),)),
+    )
+    acquired = reduce_parallel(empty, AcquireResources(ParticipantId("task-a"), (resource,)))
+
+    with pytest.raises(GraphStateTransitionError, match="active acquisition"):
+        reduce_graph_run(settled, UpdateGraphParallel(0, empty, acquired))
+
+
+def test_parallel_update_can_settle_a_task_after_releasing_its_acquisition() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("task-a"), (resource,)),
+    )
+    committed = reduce_graph_run(running_state(), UpdateGraphParallel(0, None, acquired))
+    released = reduce_parallel(acquired, ReleaseResources(ParticipantId("task-a")))
+
+    settled = reduce_graph_run(
+        committed,
+        UpdateGraphParallel(0, acquired, released, (GraphTaskId("task-a"),)),
+    )
+
+    assert settled.parallel == released
+    assert settled.settled_tasks == (GraphTaskId("task-a"),)
+
+
+def test_parallel_update_can_settle_released_owner_while_next_waiter_acquires() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("task-a"), (resource,)),
+    )
+    waiting = reduce_parallel(acquired, AcquireResources(ParticipantId("task-b"), (resource,)))
+    committed = reduce_graph_run(running_state(), UpdateGraphParallel(0, None, waiting))
+    handed_off = reduce_parallel(waiting, ReleaseResources(ParticipantId("task-a")))
+
+    settled = reduce_graph_run(
+        committed,
+        UpdateGraphParallel(0, waiting, handed_off, (GraphTaskId("task-a"),)),
+    )
+
+    assert settled.settled_tasks == (GraphTaskId("task-a"),)
+    assert settled.parallel is not None
+    assert settled.parallel.resources[0].owner == ParticipantId("task-b")
+    assert tuple(acquisition.participant_id for acquisition in settled.parallel.acquisitions) == (
+        ParticipantId("task-b"),
+    )
+
+
+def test_recovered_settled_task_cannot_retain_an_active_acquisition() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("task-a"), (resource,)),
+    )
+    recovered = corrupted_state(
+        parallel=acquired,
+        settled_tasks=(GraphTaskId("task-a"),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="cannot retain"):
+        reduce_graph_run(recovered, SuspendGraphRun())
+
+
+def test_corrupt_recovered_settled_tasks_fail_closed() -> None:
+    duplicate = corrupted_state(settled_tasks=(GraphTaskId("task"), GraphTaskId("task")))
+    terminal = corrupted_state(
+        status=GraphRunStatus.COMPLETED,
+        frontier=(),
+        settled_tasks=(GraphTaskId("task"),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="repeats a settled"):
+        reduce_graph_run(duplicate, SuspendGraphRun())
+    with pytest.raises(GraphStateTransitionError, match="terminal graph cannot retain settled"):
+        reduce_graph_run(terminal, FailGraphRun(0, GraphFailure("late")))
+
+
+def test_invalid_parallel_snapshot_fails_closed() -> None:
+    running = running_state()
+    invalid = ParallelSnapshot((ResourceLock(ResourceId("file"), ParticipantId("orphan")),))
+
+    with pytest.raises(GraphStateTransitionError, match="invalid snapshot"):
+        reduce_graph_run(running, UpdateGraphParallel(0, None, invalid))
+
+
+def test_corrupt_recovered_parallel_state_fails_closed() -> None:
+    invalid = ParallelSnapshot((ResourceLock(ResourceId("file"), ParticipantId("orphan")),))
+    recovered = corrupted_state(parallel=invalid)
+
+    with pytest.raises(GraphStateTransitionError, match="parallel state"):
+        reduce_graph_run(recovered, SuspendGraphRun())
+
+
+def test_terminal_graph_cannot_retain_parallel_state() -> None:
+    parallel = ParallelSnapshot((ResourceLock(ResourceId("file")),))
+    recovered = corrupted_state(status=GraphRunStatus.COMPLETED, frontier=(), parallel=parallel)
+
+    with pytest.raises(GraphStateTransitionError, match="terminal graph cannot retain parallel"):
+        reduce_graph_run(recovered, FailGraphRun(0, GraphFailure("late")))
+
+
+def test_suspended_graph_cannot_update_parallel_state() -> None:
+    suspended = reduce_graph_run(running_state(), SuspendGraphRun())
+    parallel = ParallelSnapshot((ResourceLock(ResourceId("file")),))
+
+    with pytest.raises(GraphStateTransitionError, match="only a running"):
+        reduce_graph_run(suspended, UpdateGraphParallel(0, None, parallel))
+
+
+def test_suspend_and_resume_preserve_parallel_snapshot() -> None:
+    resource = ResourceId("file")
+    acquired = reduce_parallel(
+        ParallelSnapshot((ResourceLock(resource),)),
+        AcquireResources(ParticipantId("task"), (resource,)),
+    )
+    running = reduce_graph_run(running_state(), UpdateGraphParallel(0, None, acquired))
+
+    suspended = reduce_graph_run(running, SuspendGraphRun())
+    resumed = reduce_graph_run(suspended, ResumeGraphRun())
+
+    assert suspended.parallel == acquired
     assert resumed == running
 
 

@@ -7,6 +7,7 @@ from mote_kernel.execution.errors import (
     DuplicateNodeError,
     GraphValidationError,
     InvalidGraphIdentityError,
+    InvalidResourceDefinitionError,
     MissingEntryError,
     UnknownNodeError,
     UnreachableNodeError,
@@ -19,10 +20,12 @@ from mote_kernel.execution.graph import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     JoinEdge,
+    NodeDefinition,
     NodeId,
     RouteId,
     compile_graph,
 )
+from mote_kernel.parallel import ResourceDefinition, ResourceId
 
 
 @pytest.mark.parametrize(
@@ -129,3 +132,37 @@ def test_duplicate_conditional_route_fails_closed() -> None:
 
     with pytest.raises(DuplicateEdgeError):
         compile_graph(definition)
+
+
+@pytest.mark.parametrize(
+    "resources",
+    [
+        (ResourceDefinition(ResourceId(""), 1),),
+        (ResourceDefinition(ResourceId(" file"), 1),),
+        (ResourceDefinition(ResourceId("file"), -1),),
+        (ResourceDefinition(ResourceId("file"), 1), ResourceDefinition(ResourceId("file"), 2)),
+        (ResourceDefinition(ResourceId("file"), 1), ResourceDefinition(ResourceId("database"), 1)),
+    ],
+)
+def test_invalid_resource_definitions_fail_closed(resources: tuple[ResourceDefinition, ...]) -> None:
+    with pytest.raises(InvalidResourceDefinitionError):
+        compile_graph(graph(nodes=(node("a"),), resources=resources))
+
+
+def test_node_resource_requirements_must_be_unique_and_declared() -> None:
+    declared = (ResourceDefinition(ResourceId("file"), 10),)
+
+    with pytest.raises(InvalidResourceDefinitionError, match="unknown"):
+        compile_graph(
+            graph(
+                nodes=(NodeDefinition(NodeId("a"), node("a").node, (ResourceId("database"),)),),
+                resources=declared,
+            )
+        )
+    with pytest.raises(InvalidResourceDefinitionError, match="repeats"):
+        compile_graph(
+            graph(
+                nodes=(NodeDefinition(NodeId("a"), node("a").node, (ResourceId("file"), ResourceId("file"))),),
+                resources=declared,
+            )
+        )

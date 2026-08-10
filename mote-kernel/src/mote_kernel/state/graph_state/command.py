@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import TypeAlias
 
+from mote_kernel.parallel import ParallelSnapshot
 from mote_kernel.state.graph_state.model import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -10,6 +11,7 @@ from mote_kernel.state.graph_state.model import (
     GraphJoinProgress,
     GraphNodeId,
     GraphRunId,
+    GraphTaskId,
     ParentGraphTask,
 )
 
@@ -59,8 +61,24 @@ class FailGraphRun:
     failure: GraphFailure
 
 
+@dataclass(frozen=True, slots=True)
+class UpdateGraphParallel:
+    """Commit a resource snapshot for the current graph superstep."""
+
+    expected_superstep: int
+    expected_parallel: ParallelSnapshot | None
+    parallel: ParallelSnapshot
+    settle_tasks: tuple[GraphTaskId, ...] = ()
+
+
 GraphRunCommand: TypeAlias = (
-    StartGraphRun | AdvanceGraphRun | SuspendGraphRun | ResumeGraphRun | CompleteGraphRun | FailGraphRun
+    StartGraphRun
+    | AdvanceGraphRun
+    | SuspendGraphRun
+    | ResumeGraphRun
+    | CompleteGraphRun
+    | FailGraphRun
+    | UpdateGraphParallel
 )
 
 __all__ = [
@@ -71,4 +89,5 @@ __all__ = [
     "ResumeGraphRun",
     "StartGraphRun",
     "SuspendGraphRun",
+    "UpdateGraphParallel",
 ]

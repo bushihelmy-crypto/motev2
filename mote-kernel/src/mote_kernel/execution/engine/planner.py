@@ -86,7 +86,7 @@ def plan_tasks(
         raise InvalidExecutionSnapshotError("a running snapshot requires a non-empty frontier")
     if len(snapshot.frontier) > limits.max_parallel_tasks:
         raise ExecutionLimitError("planned frontier exceeds the parallel task limit")
-    tasks = tuple(
+    return tuple(
         GraphTask(
             task_id=task_identity(snapshot.run_id, snapshot.superstep, node_id),
             run_id=snapshot.run_id,
@@ -95,7 +95,6 @@ def plan_tasks(
         )
         for node_id in sorted(snapshot.frontier)
     )
-    return tuple(sorted(tasks, key=lambda task: task.sort_key))
 
 
 __all__ = ["plan_tasks"]

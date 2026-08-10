@@ -4,20 +4,24 @@ from mote_kernel.execution.executor import step_graph
 from mote_kernel.execution.graph_run import project_execution_snapshot, project_graph_command
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
+    ExecutedFrontierBatch,
     ExecutedSuperstep,
     NestedTaskFailure,
     NestedTaskSuccess,
+    PreparedFrontier,
     PreparedNestedRun,
-    PreparedNestedRuns,
+    PreparedResourceAdmission,
     StepResult,
 )
 
 __all__ = [
+    "ExecutedFrontierBatch",
     "ExecutedSuperstep",
     "NestedTaskFailure",
     "NestedTaskSuccess",
+    "PreparedFrontier",
     "PreparedNestedRun",
-    "PreparedNestedRuns",
+    "PreparedResourceAdmission",
     "StepRequest",
     "StepResult",
     "project_execution_snapshot",
