@@ -18,11 +18,11 @@ typecheck:
 	pyright
 
 security:
-	detect-secrets scan --baseline .secrets.baseline
-	python -m pip_audit --strict
+	cd .. && pre-commit run detect-secrets --all-files
+	python -m pip_audit --strict .
 
 build:
-	python -m build
+	python -m build --no-isolation
 
 package-check: build
 	python -m twine check dist/*
