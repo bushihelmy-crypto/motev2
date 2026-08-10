@@ -1,0 +1,52 @@
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build and test artifacts across language projects
+**/__pycache__/
+**/*.py[cod]
+**/*.so
+**/*.egg-info/
+**/.eggs/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pyright/
+**/.hypothesis/
+**/.coverage
+**/.coverage.*
+**/coverage.xml
+**/htmlcov/
+**/build/
+**/dist/
+**/target/
+**/bin/
+**/coverage/
+
+# Local environments and dependencies
+**/.venv/
+**/venv/
+**/node_modules/
+**/.pre-commit-cache/
+
+# Runtime state
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.crt
+**/*.log
+
+# Conformance runner outputs
+conformance/reports/
+conformance/tmp/

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mote.dev/conformance/case/manifest.v1.schema.json",
+  "title": "Mote conformance manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "protocol_versions", "suites"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "manifest_version": {"const": 1},
+    "protocol_versions": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "suites": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_vectors",
+        "wire_vectors",
+        "recovery_scenarios",
+        "effect_scenarios",
+        "canonical_traces"
+      ],
+      "properties": {
+        "state_vectors": {"$ref": "#/$defs/paths"},
+        "wire_vectors": {"$ref": "#/$defs/paths"},
+        "recovery_scenarios": {"$ref": "#/$defs/paths"},
+        "effect_scenarios": {"$ref": "#/$defs/paths"},
+        "canonical_traces": {"$ref": "#/$defs/paths"}
+      }
+    }
+  },
+  "$defs": {
+    "paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(vectors|scenarios|traces)/[a-z0-9_./-]+\\.json$"
+      }
+    }
+  }
+}

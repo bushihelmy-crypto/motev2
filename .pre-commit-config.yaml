@@ -1,0 +1,28 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^mote-kernel/(src|tests)/.*\.py$
+      - id: ruff-format
+        files: ^mote-kernel/(src|tests)/.*\.py$
+  - repo: local
+    hooks:
+      - id: detect-secrets
+        name: detect secrets
+        entry: detect-secrets-hook --baseline .secrets.baseline
+        language: system
+        types: [text]
+        exclude: ^(.secrets.baseline|mote-kernel/third_party_licenses/)

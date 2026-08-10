@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mote.dev/conformance/case/vector.v1.schema.json",
+  "title": "Mote conformance vector envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_version", "case_id", "protocol", "input", "expect"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "case_version": {"const": 1},
+    "case_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
+    "description": {"type": "string", "minLength": 1},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "input": {},
+    "expect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "value"],
+          "properties": {"outcome": {"const": "accept"}, "value": {}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "error_code"],
+          "properties": {
+            "outcome": {"const": "reject"},
+            "error_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}
+          }
+        }
+      ]
+    }
+  }
+}

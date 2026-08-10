@@ -1,0 +1,12 @@
+{
+  "$schema": "./schemas/case/manifest.v1.schema.json",
+  "manifest_version": 1,
+  "protocol_versions": {},
+  "suites": {
+    "state_vectors": [],
+    "wire_vectors": [],
+    "recovery_scenarios": [],
+    "effect_scenarios": [],
+    "canonical_traces": []
+  }
+}
