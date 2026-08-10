@@ -109,5 +109,7 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
         return replace(state, status=GraphRunStatus.COMPLETED, frontier=())
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED}:
         raise GraphStateTransitionError("a terminal graph cannot fail again")
+    if command.expected_superstep != state.superstep:
+        raise GraphStateTransitionError("fail command was based on a stale superstep")
     _require_identity(command.failure, "graph failure")
     return replace(state, status=GraphRunStatus.FAILED, frontier=(), failure=command.failure)

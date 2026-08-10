@@ -53,6 +53,7 @@ class CompleteGraphRun:
 class FailGraphRun:
     """Mark a running or suspended graph as failed."""
 
+    expected_superstep: int
     failure: GraphFailure
 
 

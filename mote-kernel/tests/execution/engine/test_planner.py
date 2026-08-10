@@ -111,6 +111,13 @@ def test_snapshot_must_match_compiled_graph(execution_snapshot: object) -> None:
         plan_tasks(compiled_graph("a"), execution_snapshot, LIMITS)  # type: ignore[arg-type]
 
 
+def test_graph_mismatch_takes_precedence_over_foreign_frontier_nodes() -> None:
+    foreign_snapshot = snapshot(definition_id="other.graph", frontier=("foreign-node",))
+
+    with pytest.raises(SnapshotMismatchError):
+        plan_tasks(compiled_graph("a"), foreign_snapshot, LIMITS)
+
+
 @pytest.mark.parametrize(
     "execution_snapshot",
     [

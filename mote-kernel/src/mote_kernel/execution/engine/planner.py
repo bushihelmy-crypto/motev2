@@ -24,7 +24,7 @@ def _require_identity(value: str, field: str) -> None:
         raise InvalidExecutionSnapshotError(f"{field} must be non-empty and trimmed")
 
 
-def _validate_snapshot(graph: CompiledGraph[InputT, OutputT], snapshot: ExecutionSnapshot) -> None:
+def _validate_snapshot(snapshot: ExecutionSnapshot) -> None:
     _require_identity(snapshot.run_id, "graph run identity")
     _require_identity(snapshot.definition_id, "graph definition identity")
     if snapshot.definition_version < 1:
@@ -40,9 +40,6 @@ def _validate_snapshot(graph: CompiledGraph[InputT, OutputT], snapshot: Executio
         raise InvalidExecutionSnapshotError("snapshot frontier contains duplicate nodes")
     for node_id in snapshot.frontier:
         _require_identity(node_id, "frontier node identity")
-    unknown_nodes = tuple(sorted(node_id for node_id in snapshot.frontier if node_id not in graph.nodes))
-    if unknown_nodes:
-        raise InvalidExecutionSnapshotError(f"snapshot frontier contains unknown nodes: {unknown_nodes!r}")
     if snapshot.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED} and snapshot.frontier:
         raise InvalidExecutionSnapshotError("a terminal snapshot cannot retain a frontier")
     if snapshot.status is ExecutionStatus.SUSPENDED and not snapshot.frontier:
@@ -55,9 +52,12 @@ def plan_tasks(
     """Materialize the committed frontier as a stable, side-effect-free task batch."""
 
     _validate_limits(limits)
-    _validate_snapshot(graph, snapshot)
+    _validate_snapshot(snapshot)
     if snapshot.definition_id != graph.definition_id or snapshot.definition_version != graph.version:
         raise SnapshotMismatchError("execution snapshot does not match the compiled graph identity and version")
+    unknown_nodes = tuple(sorted(node_id for node_id in snapshot.frontier if node_id not in graph.nodes))
+    if unknown_nodes:
+        raise InvalidExecutionSnapshotError(f"snapshot frontier contains unknown nodes: {unknown_nodes!r}")
     if snapshot.status is not ExecutionStatus.RUNNING:
         return ()
     if snapshot.superstep >= limits.max_supersteps:

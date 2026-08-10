@@ -141,7 +141,7 @@ def test_fail_clears_frontier_from_nonterminal_state(suspend_first: bool) -> Non
     if suspend_first:
         state = reduce_graph_run(state, SuspendGraphRun())
 
-    failed = reduce_graph_run(state, FailGraphRun(GraphFailure("node failed")))
+    failed = reduce_graph_run(state, FailGraphRun(state.superstep, GraphFailure("node failed")))
 
     assert failed.status is GraphRunStatus.FAILED
     assert failed.failure == GraphFailure("node failed")
@@ -151,7 +151,18 @@ def test_fail_clears_frontier_from_nonterminal_state(suspend_first: bool) -> Non
 def test_empty_failure_fails_closed() -> None:
     for failure in (GraphFailure(""), GraphFailure("  ")):
         with pytest.raises(GraphStateTransitionError):
-            reduce_graph_run(running_state(), FailGraphRun(failure))
+            reduce_graph_run(running_state(), FailGraphRun(0, failure))
+
+
+@pytest.mark.parametrize("expected_superstep", [-1, 1])
+def test_stale_failure_cannot_terminate_current_superstep(expected_superstep: int) -> None:
+    state = running_state()
+
+    with pytest.raises(GraphStateTransitionError, match="stale"):
+        reduce_graph_run(state, FailGraphRun(expected_superstep, GraphFailure("late failure")))
+
+    assert state.status is GraphRunStatus.RUNNING
+    assert state.frontier == (GraphNodeId("a"), GraphNodeId("b"))
 
 
 def test_non_start_command_requires_existing_run() -> None:
@@ -201,7 +212,7 @@ def test_valid_recovered_failed_state_reaches_lifecycle_guard() -> None:
     state = corrupted_state(status=GraphRunStatus.FAILED, frontier=(), failure=GraphFailure("failed"))
 
     with pytest.raises(GraphStateTransitionError, match="terminal"):
-        reduce_graph_run(state, FailGraphRun(GraphFailure("again")))
+        reduce_graph_run(state, FailGraphRun(0, GraphFailure("again")))
 
 
 def test_valid_recovered_parent_linkage_can_transition() -> None:
@@ -231,17 +242,17 @@ def test_valid_recovered_completed_state_reaches_lifecycle_guard() -> None:
         (lambda: reduce_graph_run(running_state(), CompleteGraphRun(0)), SuspendGraphRun()),
         (lambda: reduce_graph_run(running_state(), CompleteGraphRun(0)), ResumeGraphRun()),
         (lambda: reduce_graph_run(running_state(), CompleteGraphRun(0)), CompleteGraphRun(0)),
-        (lambda: reduce_graph_run(running_state(), CompleteGraphRun(0)), FailGraphRun(GraphFailure("late"))),
+        (lambda: reduce_graph_run(running_state(), CompleteGraphRun(0)), FailGraphRun(0, GraphFailure("late"))),
         (
-            lambda: reduce_graph_run(running_state(), FailGraphRun(GraphFailure("failed"))),
+            lambda: reduce_graph_run(running_state(), FailGraphRun(0, GraphFailure("failed"))),
             AdvanceGraphRun(0, (GraphNodeId("c"),)),
         ),
-        (lambda: reduce_graph_run(running_state(), FailGraphRun(GraphFailure("failed"))), SuspendGraphRun()),
-        (lambda: reduce_graph_run(running_state(), FailGraphRun(GraphFailure("failed"))), ResumeGraphRun()),
-        (lambda: reduce_graph_run(running_state(), FailGraphRun(GraphFailure("failed"))), CompleteGraphRun(0)),
+        (lambda: reduce_graph_run(running_state(), FailGraphRun(0, GraphFailure("failed"))), SuspendGraphRun()),
+        (lambda: reduce_graph_run(running_state(), FailGraphRun(0, GraphFailure("failed"))), ResumeGraphRun()),
+        (lambda: reduce_graph_run(running_state(), FailGraphRun(0, GraphFailure("failed"))), CompleteGraphRun(0)),
         (
-            lambda: reduce_graph_run(running_state(), FailGraphRun(GraphFailure("failed"))),
-            FailGraphRun(GraphFailure("again")),
+            lambda: reduce_graph_run(running_state(), FailGraphRun(0, GraphFailure("failed"))),
+            FailGraphRun(0, GraphFailure("again")),
         ),
     ],
 )
