@@ -58,7 +58,12 @@ def collect_results(
     failures = tuple(result for result in ordered if isinstance(result, TaskFailure))
     if failures:
         for failure in failures:
-            if not failure.failure or failure.failure != failure.failure.strip():
+            if (
+                not failure.failure
+                or failure.failure != failure.failure.strip()
+                or "\n" in failure.failure
+                or "\r" in failure.failure
+            ):
                 raise ResultCollectionError("task failure must be non-empty and trimmed")
         return CollectedResults(successes=(), failure=failures[0])
     successes = tuple(result for result in ordered if isinstance(result, TaskSuccess))

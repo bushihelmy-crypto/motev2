@@ -12,6 +12,7 @@ from mote_kernel.parallel import (
     ResourceId,
     ResourceLock,
     reduce_parallel,
+    validate_parallel_snapshot,
 )
 
 FILE = ResourceId("file")
@@ -94,6 +95,7 @@ def test_partially_held_task_keeps_prefix_until_later_resource_releases() -> Non
         AcquireResources(A, (FILE, FILE)),
         AcquireResources(A, (ResourceId("unknown"),)),
         AcquireResources(ParticipantId(""), (FILE,)),
+        AcquireResources(ParticipantId("bad\nparticipant"), (FILE,)),
     ],
 )
 def test_invalid_acquisition_fails_closed(command: AcquireResources) -> None:
@@ -126,6 +128,7 @@ def test_empty_resource_request_is_a_noop_and_missing_release_fails() -> None:
     [
         ParallelSnapshot((ResourceLock(FILE), ResourceLock(FILE))),
         ParallelSnapshot((ResourceLock(ResourceId("")),)),
+        ParallelSnapshot((ResourceLock(ResourceId("bad\nresource")),)),
         ParallelSnapshot((ResourceLock(FILE, waiters=(A, A)),)),
         ParallelSnapshot((ResourceLock(FILE, A, (A,)),), (ResourceAcquisition(A, (FILE,), (FILE,)),)),
         ParallelSnapshot((ResourceLock(FILE, ParticipantId("")),)),
@@ -183,3 +186,18 @@ def test_waiter_must_be_queued_on_the_resource_it_is_waiting_for() -> None:
 
     with pytest.raises(ParallelTransitionError, match="waiting elsewhere"):
         reduce_parallel(snapshot, AcquireResources(ParticipantId("c"), ()))
+
+
+def test_snapshot_validation_rejects_non_fifo_history_that_looks_structurally_valid() -> None:
+    snapshot = ParallelSnapshot(
+        (ResourceLock(FILE, A, (B,)),),
+        (
+            ResourceAcquisition(B, (FILE,), (), FILE),
+            ResourceAcquisition(A, (FILE,), (FILE,)),
+        ),
+    )
+
+    with pytest.raises(ParallelTransitionError, match="replayed acquisition sequence"):
+        validate_parallel_snapshot(snapshot)
+    with pytest.raises(ParallelTransitionError, match="replayed acquisition sequence"):
+        reduce_parallel(snapshot, AcquireResources(C, ()))

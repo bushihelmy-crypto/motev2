@@ -69,6 +69,7 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
         joins_by_source=immutable_join_mapping(joins_by_source),
         resources=immutable_resource_mapping({resource.resource_id: resource for resource in definition.resources}),
         resource_order=resource_order,
+        resolution=definition.resolution,
     )
 
 

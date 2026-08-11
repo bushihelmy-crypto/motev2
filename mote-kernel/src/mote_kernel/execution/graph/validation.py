@@ -46,8 +46,17 @@ class _DefinitionVisit:
 
 
 def _require_identity(value: str, *, kind: str) -> None:
-    if not value or value.strip() != value:
+    if not value or value.strip() != value or "\n" in value or "\r" in value:
         raise InvalidGraphIdentityError(f"{kind} identity must be non-empty and trimmed: {value!r}")
+
+
+def _validate_resolution(definition: GraphDefinition[InputT, OutputT]) -> None:
+    binding = definition.resolution
+    if binding is None:
+        return
+    _require_identity(binding.codec_id, kind="resolution codec")
+    if binding.version < 1:
+        raise InvalidGraphIdentityError("resolution codec version must be positive")
 
 
 def _validate_node_references(definition: GraphDefinition[InputT, OutputT], node_ids: frozenset[NodeId]) -> None:
@@ -199,6 +208,7 @@ def _validate_graph(
 
     known_nodes = frozenset(node_ids)
     _validate_resources(definition)
+    _validate_resolution(definition)
     _validate_duplicates(definition)
     _validate_node_references(definition, known_nodes)
     _validate_joins(definition)

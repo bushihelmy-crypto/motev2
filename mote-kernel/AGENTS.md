@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- `Role` is the sole default public entry point and composition owner.
+- The default public composition entry point has not been designed or implemented yet; do not infer one from internal execution or state APIs.
 - `execution` is the only graph execution engine; domain packages define topology but never create private runners.
 - `GraphState` records recoverable execution position. `DomainState` records established business facts. They evolve separately and commit atomically as one `AgentState`.
 - State transitions are pure. Services and tools return typed results and commands; they never mutate state directly.

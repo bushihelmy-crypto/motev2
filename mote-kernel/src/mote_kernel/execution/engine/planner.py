@@ -20,57 +20,12 @@ def _validate_limits(limits: ExecutionLimits) -> None:
         raise ExecutionLimitError("max_parallel_tasks must be positive")
 
 
-def _require_identity(value: str, field: str) -> None:
-    if not value or value != value.strip():
-        raise InvalidExecutionSnapshotError(f"{field} must be non-empty and trimmed")
-
-
-def _validate_snapshot(snapshot: ExecutionSnapshot) -> None:
-    _require_identity(snapshot.run_id, "graph run identity")
-    _require_identity(snapshot.definition_id, "graph definition identity")
-    if snapshot.definition_version < 1:
-        raise InvalidExecutionSnapshotError("graph definition version must be positive")
-    if snapshot.superstep < 0:
-        raise InvalidExecutionSnapshotError("snapshot superstep cannot be negative")
-    if snapshot.parent is not None:
-        _require_identity(snapshot.parent.run_id, "parent graph run identity")
-        _require_identity(snapshot.parent.task_id, "parent graph task identity")
-        if snapshot.parent.run_id == snapshot.run_id:
-            raise InvalidExecutionSnapshotError("a graph run cannot be its own parent")
-    progress_keys: set[tuple[tuple[str, ...], str]] = set()
-    for progress in snapshot.join_progress:
-        if not progress.sources or len(progress.sources) != len(set(progress.sources)):
-            raise InvalidExecutionSnapshotError("join progress requires distinct sources")
-        for source in progress.sources:
-            _require_identity(source, "join source identity")
-        _require_identity(progress.target, "join target identity")
-        if progress.target in progress.sources:
-            raise InvalidExecutionSnapshotError("join target cannot be a source")
-        if not progress.arrived or not progress.arrived < frozenset(progress.sources):
-            raise InvalidExecutionSnapshotError("join progress must contain partial declared arrivals")
-        key = (progress.sources, progress.target)
-        if key in progress_keys:
-            raise InvalidExecutionSnapshotError("snapshot repeats join progress")
-        progress_keys.add(key)
-    if len(snapshot.frontier) != len(set(snapshot.frontier)):
-        raise InvalidExecutionSnapshotError("snapshot frontier contains duplicate nodes")
-    for node_id in snapshot.frontier:
-        _require_identity(node_id, "frontier node identity")
-    if snapshot.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED} and snapshot.frontier:
-        raise InvalidExecutionSnapshotError("a terminal snapshot cannot retain a frontier")
-    if snapshot.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED} and snapshot.join_progress:
-        raise InvalidExecutionSnapshotError("a terminal snapshot cannot retain join progress")
-    if snapshot.status is ExecutionStatus.SUSPENDED and not snapshot.frontier:
-        raise InvalidExecutionSnapshotError("a suspended snapshot requires a recoverable frontier")
-
-
 def plan_tasks(
     graph: CompiledGraph[InputT, OutputT], snapshot: ExecutionSnapshot, limits: ExecutionLimits
 ) -> tuple[GraphTask, ...]:
     """Materialize the committed frontier as a stable, side-effect-free task batch."""
 
     _validate_limits(limits)
-    _validate_snapshot(snapshot)
     require_snapshot_matches_graph(graph, snapshot)
     declared_joins = {(edge.sources, edge.target) for edges in graph.joins_by_source.values() for edge in edges}
     if any((progress.sources, progress.target) not in declared_joins for progress in snapshot.join_progress):
@@ -82,8 +37,6 @@ def plan_tasks(
         return ()
     if snapshot.superstep >= limits.max_supersteps:
         raise ExecutionLimitError("graph run reached its superstep limit")
-    if not snapshot.frontier:
-        raise InvalidExecutionSnapshotError("a running snapshot requires a non-empty frontier")
     if len(snapshot.frontier) > limits.max_parallel_tasks:
         raise ExecutionLimitError("planned frontier exceeds the parallel task limit")
     return tuple(

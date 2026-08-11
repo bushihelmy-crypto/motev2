@@ -11,6 +11,6 @@ The authoritative snapshot is an `AgentState` composed of independently versione
 
 Every node in one concurrent frontier receives the same immutable input snapshot. Nodes and ports must treat that snapshot as read-only and return typed outcomes instead of mutating it. Kernel does not clone arbitrary domain DTOs; their owner must define them as immutable values.
 
-`Role` is the composition root and intended default public entry point. Required ports are validated during assembly. Missing optional ports remove their corresponding nodes when graph definitions are assembled, keeping runtime paths deterministic.
+The default public composition entry point has not been designed or implemented yet. Required ports are validated when an agent flow is assembled. Missing optional ports remove their corresponding nodes when graph definitions are assembled, keeping runtime paths deterministic.
 
 This document records the stable architectural direction. Authoritative public contracts will be documented alongside their implementation.

@@ -1,21 +1,26 @@
 import asyncio
 from contextvars import ContextVar
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass, replace
 
 import pytest
+from tests.execution.driver import execute_step, step_request
 
 from mote_kernel.execution import (
     ExecutedSuperstep,
+    GraphExecutor,
     NestedTaskFailure,
     NestedTaskSuccess,
     PreparedFrontier,
-    StepRequest,
-    step_graph,
 )
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.scheduler import execute_tasks
 from mote_kernel.execution.engine.task import TaskId
-from mote_kernel.execution.errors import ExecutionLimitError, NodeExecutionContractError, ResultCollectionError
+from mote_kernel.execution.errors import (
+    ExecutionLimitError,
+    NodeExecutionContractError,
+    ResultCollectionError,
+    SnapshotMismatchError,
+)
 from mote_kernel.execution.graph import (
     END,
     CompiledGraph,
@@ -39,14 +44,20 @@ from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import TaskFailure, TaskSuccess
 from mote_kernel.state.graph_state import (
     AdvanceGraphRun,
+    ClaimGraphExecution,
     CompleteGraphRun,
-    FailGraphRun,
+    FailGraphExecution,
+    GraphExecutionAttemptId,
+    GraphExecutionToken,
     GraphFailure,
     GraphJoinProgress,
     GraphNodeId,
+    GraphResolutionCodec,
+    GraphResolutionCodecId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
+    GraphStateTransitionError,
     GraphTaskId,
     ParentGraphTask,
     StartGraphRun,
@@ -79,9 +90,21 @@ def child_state(
     failure: str | None = None,
 ) -> GraphRunState:
     started = reduce_graph_run(None, command)
+    claimed = reduce_graph_run(
+        started,
+        ClaimGraphExecution(
+            0,
+            0,
+            None,
+            None,
+            GraphExecutionAttemptId("child-fixture"),
+            (GraphTaskId("child-fixture-task"),),
+        ),
+    )
+    execution = GraphExecutionToken(1, GraphExecutionAttemptId("child-fixture"))
     if failure is None:
-        return reduce_graph_run(started, CompleteGraphRun(0))
-    return reduce_graph_run(started, FailGraphRun(0, GraphFailure(failure)))
+        return reduce_graph_run(claimed, CompleteGraphRun(0, execution, None))
+    return reduce_graph_run(claimed, FailGraphExecution(0, execution, None, GraphFailure(failure)))
 
 
 async def test_step_executes_direct_node_once_and_proposes_advance_without_mutating_state() -> None:
@@ -102,11 +125,13 @@ async def test_step_executes_direct_node_once_and_proposes_advance_without_mutat
     )
     committed = state()
 
-    executed = await step_graph(StepRequest(graph, committed, "input"))
+    executed = await execute_step(step_request(graph, committed, "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == ["input"]
-    assert executed.command == AdvanceGraphRun(0, (GraphNodeId("b"),))
+    assert isinstance(executed.command, AdvanceGraphRun)
+    assert executed.command.expected_superstep == 0
+    assert executed.command.frontier == (GraphNodeId("b"),)
     assert isinstance(executed.results[0], TaskSuccess)
     assert executed.results[0].output == "INPUT"
     assert committed.superstep == 0
@@ -142,7 +167,7 @@ async def test_step_executes_frontier_concurrently_and_collects_results_in_deter
         )
     )
 
-    executed = await step_graph(StepRequest(graph, state(frontier=("b", "a")), "input"))
+    executed = await execute_step(step_request(graph, state(frontier=("b", "a")), "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
     assert completions == ["b", "a"]
@@ -151,7 +176,8 @@ async def test_step_executes_frontier_concurrently_and_collects_results_in_deter
         "a:input",
         "b:input",
     )
-    assert executed.command == CompleteGraphRun(0)
+    assert isinstance(executed.command, CompleteGraphRun)
+    assert executed.command.expected_superstep == 0
 
 
 async def test_concurrent_runs_share_compiled_graph_without_cross_run_state() -> None:
@@ -179,14 +205,36 @@ async def test_concurrent_runs_share_compiled_graph_without_cross_run_state() ->
         (GraphNodeId("a"),),
     )
 
+    executor = GraphExecutor(graph)
+    first_state = state()
+    first_prepared, second_prepared = await asyncio.gather(
+        executor.prepare(step_request(graph, first_state, "first").execution_request()),
+        executor.prepare(step_request(graph, other_run, "second").execution_request()),
+    )
+    assert first_prepared.execution is not None
+    assert second_prepared.execution is not None
+    first_claimed = reduce_graph_run(first_state, first_prepared.execution.command)
+    second_claimed = reduce_graph_run(other_run, second_prepared.execution.command)
+
     first, second = await asyncio.gather(
-        step_graph(StepRequest(graph, state(), "first")),
-        step_graph(StepRequest(graph, other_run, "second")),
+        executor.execute(
+            first_prepared.execution,
+            step_request(graph, first_claimed, "first").execution_request(),
+        ),
+        executor.execute(
+            second_prepared.execution,
+            step_request(graph, second_claimed, "second").execution_request(),
+        ),
     )
 
     assert isinstance(first, ExecutedSuperstep)
     assert isinstance(second, ExecutedSuperstep)
-    assert first.command == second.command == CompleteGraphRun(0)
+    assert isinstance(first.command, CompleteGraphRun)
+    assert isinstance(second.command, CompleteGraphRun)
+    assert first.command.expected_superstep == 0
+    assert second.command.expected_superstep == 0
+    assert first.command.execution.generation == second.command.execution.generation == 1
+    assert first.command.execution.attempt_id != second.command.execution.attempt_id
     assert isinstance(first.results[0], TaskSuccess)
     assert isinstance(second.results[0], TaskSuccess)
     assert first.results[0].output == "first"
@@ -212,8 +260,8 @@ async def test_step_enforces_custom_parallel_limit_before_scheduling_nodes() -> 
     )
 
     with pytest.raises(ExecutionLimitError, match="parallel"):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 graph,
                 state(frontier=("a", "b")),
                 "input",
@@ -241,7 +289,7 @@ async def test_parallel_frontier_copies_context_into_each_node_invocation() -> N
     )
     token = trace_id.set("trace")
     try:
-        executed = await step_graph(StepRequest(graph, state(frontier=("a", "b")), "input"))
+        executed = await execute_step(step_request(graph, state(frontier=("a", "b")), "input"))
     finally:
         trace_id.reset(token)
 
@@ -276,7 +324,7 @@ async def test_parallel_node_context_changes_are_isolated_from_siblings_and_call
     )
     token = trace_id.set("caller")
     try:
-        executed = await step_graph(StepRequest(graph, state(frontier=("a", "b")), "input"))
+        executed = await execute_step(step_request(graph, state(frontier=("a", "b")), "input"))
         assert trace_id.get() == "caller"
     finally:
         trace_id.reset(token)
@@ -307,7 +355,7 @@ async def test_single_node_context_changes_do_not_leak_to_step_caller() -> None:
     )
     token = trace_id.set("caller")
     try:
-        executed = await step_graph(StepRequest(graph, state(), "input"))
+        executed = await execute_step(step_request(graph, state(), "input"))
         assert trace_id.get() == "caller"
     finally:
         trace_id.reset(token)
@@ -341,7 +389,7 @@ async def test_parallel_nodes_share_one_frozen_read_only_input_snapshot() -> Non
     )
     node_input = InputSnapshot("input")
 
-    executed = await step_graph(StepRequest(graph, state(frontier=("a", "b")), node_input))
+    executed = await execute_step(step_request(graph, state(frontier=("a", "b")), node_input))
 
     assert isinstance(executed, ExecutedSuperstep)
     assert len(observed) == 2
@@ -367,10 +415,12 @@ async def test_step_preserves_typed_conditional_routing() -> None:
         )
     )
 
-    executed = await step_graph(StepRequest(graph, state(), "input"))
+    executed = await execute_step(step_request(graph, state(), "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
-    assert executed.command == AdvanceGraphRun(0, (GraphNodeId("right"),))
+    assert isinstance(executed.command, AdvanceGraphRun)
+    assert executed.command.expected_superstep == 0
+    assert executed.command.frontier == (GraphNodeId("right"),)
 
 
 async def test_node_failure_becomes_fail_command_without_retry() -> None:
@@ -391,11 +441,13 @@ async def test_node_failure_becomes_fail_command_without_retry() -> None:
         )
     )
 
-    executed = await step_graph(StepRequest(graph, state(superstep=3), "input"))
+    executed = await execute_step(step_request(graph, state(superstep=3), "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == 1
-    assert executed.command == FailGraphRun(3, GraphFailure("failed: input"))
+    assert isinstance(executed.command, FailGraphExecution)
+    assert executed.command.expected_superstep == 3
+    assert executed.command.failure == GraphFailure("failed: input")
     assert executed.results == (TaskFailure(executed.results[0].task, "failed: input"),)
 
 
@@ -418,7 +470,7 @@ async def test_unexpected_node_exception_propagates_without_retry_or_conversion(
     )
 
     with pytest.raises(ValueError, match="input"):
-        await step_graph(StepRequest(graph, state(), "input"))
+        await execute_step(step_request(graph, state(), "input"))
 
     assert calls == 1
 
@@ -449,7 +501,7 @@ async def test_parallel_frontier_propagates_first_task_exception_deterministical
     )
 
     with pytest.raises(ValueError, match="input"):
-        await step_graph(StepRequest(graph, state(frontier=("a", "b")), "input"))
+        await execute_step(step_request(graph, state(frontier=("a", "b")), "input"))
 
     assert completions == ["b", "a"]
 
@@ -485,7 +537,7 @@ async def test_cancelling_parallel_frontier_cancels_every_node_task() -> None:
             (NodeId("a"), NodeId("b")),
         )
     )
-    execution = asyncio.create_task(step_graph(StepRequest(graph, state(frontier=("a", "b")), "input")))
+    execution = asyncio.create_task(execute_step(step_request(graph, state(frontier=("a", "b")), "input")))
     async with asyncio.timeout(2):
         await asyncio.gather(started_a.wait(), started_b.wait())
     execution.cancel()
@@ -521,11 +573,12 @@ async def test_mixed_success_and_failure_settles_failure_after_each_task_runs_on
         )
     )
 
-    executed = await step_graph(StepRequest(graph, state(frontier=("b", "a")), "input"))
+    executed = await execute_step(step_request(graph, state(frontier=("b", "a")), "input"))
 
     assert completions == ["b", "a"]
     assert isinstance(executed, ExecutedSuperstep)
-    assert executed.command == FailGraphRun(0, GraphFailure("failed: input"))
+    assert isinstance(executed.command, FailGraphExecution)
+    assert executed.command.failure == GraphFailure("failed: input")
 
 
 async def test_node_return_outside_typed_contract_fails_closed() -> None:
@@ -543,7 +596,7 @@ async def test_node_return_outside_typed_contract_fails_closed() -> None:
     )
 
     with pytest.raises(NodeExecutionContractError):
-        await step_graph(StepRequest(graph, state(), "input"))
+        await execute_step(step_request(graph, state(), "input"))
 
 
 async def test_node_success_subclass_satisfies_runtime_contract() -> None:
@@ -563,10 +616,11 @@ async def test_node_success_subclass_satisfies_runtime_contract() -> None:
         )
     )
 
-    executed = await step_graph(StepRequest(graph, state(), "input"))
+    executed = await execute_step(step_request(graph, state(), "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
-    assert executed.command == CompleteGraphRun(0)
+    assert isinstance(executed.command, CompleteGraphRun)
+    assert executed.command.expected_superstep == 0
     assert isinstance(executed.results[0], TaskSuccess)
     assert executed.results[0].output == "input"
 
@@ -592,21 +646,22 @@ async def test_nested_graph_prepares_child_run_then_settles_parent_from_child_re
         )
     )
 
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
 
     assert isinstance(prepared, PreparedFrontier)
     assert len(prepared.nested_runs) == 1
     nested_run = prepared.nested_runs[0]
     started_child_state = reduce_graph_run(None, nested_run.command)
     assert started_child_state.parent == ParentGraphTask(GraphRunId("run"), GraphTaskId(nested_run.parent_task.task_id))
-    executed_child = await step_graph(StepRequest(nested_run.graph, started_child_state, "input"))
+    executed_child = await execute_step(step_request(nested_run.graph, started_child_state, "input"))
     assert isinstance(executed_child, ExecutedSuperstep)
-    assert executed_child.command == CompleteGraphRun(0)
+    assert isinstance(executed_child.command, CompleteGraphRun)
+    assert executed_child.command.expected_superstep == 0
     child_result = executed_child.results[0]
     assert isinstance(child_result, TaskSuccess)
 
-    executed_parent = await step_graph(
-        StepRequest(
+    executed_parent = await execute_step(
+        step_request(
             parent,
             state(),
             "input",
@@ -621,8 +676,50 @@ async def test_nested_graph_prepares_child_run_then_settles_parent_from_child_re
     )
 
     assert isinstance(executed_parent, ExecutedSuperstep)
-    assert executed_parent.command == CompleteGraphRun(0)
+    assert isinstance(executed_parent.command, CompleteGraphRun)
+    assert executed_parent.command.expected_superstep == 0
     assert executed_parent.results == (TaskSuccess(nested_run.parent_task, "input"),)
+
+
+async def test_nested_wait_rejects_retained_execution_ownership() -> None:
+    async def child_node(node_input: str) -> NodeSuccess[str]:
+        return NodeSuccess(node_input)
+
+    child = GraphDefinition[str, str](
+        GraphDefinitionId("child.graph"),
+        GraphDefinitionVersion(1),
+        (NodeDefinition(NodeId("child"), child_node),),
+        (DirectEdge(NodeId("child"), END),),
+        (NodeId("child"),),
+    )
+    parent = compile_graph(
+        GraphDefinition[str, str](
+            GraphDefinitionId("test.graph"),
+            GraphDefinitionVersion(1),
+            (NestedGraphNodeDefinition(NodeId("a"), child),),
+            (DirectEdge(NodeId("a"), END),),
+            (NodeId("a"),),
+        )
+    )
+    executor = GraphExecutor(parent)
+    driver_request = step_request(parent, state(), "input")
+    prepared = await executor.prepare(driver_request.execution_request())
+    assert isinstance(prepared, PreparedFrontier)
+    parent_task = prepared.nested_runs[0].parent_task
+    claimed = reduce_graph_run(
+        state(),
+        ClaimGraphExecution(
+            0,
+            0,
+            None,
+            None,
+            GraphExecutionAttemptId("test-attempt"),
+            (GraphTaskId(parent_task.task_id),),
+        ),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="active execution lease"):
+        await executor.prepare(step_request(parent, claimed, "input").execution_request())
 
 
 def nested_parent() -> tuple[CompiledGraph[str, str], GraphDefinition[str, str]]:
@@ -650,12 +747,12 @@ def nested_parent() -> tuple[CompiledGraph[str, str], GraphDefinition[str, str]]
 
 async def test_nested_graph_failure_fails_parent_task() -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     parent_task = prepared.nested_runs[0].parent_task
 
-    executed = await step_graph(
-        StepRequest(
+    executed = await execute_step(
+        step_request(
             parent,
             state(),
             "input",
@@ -670,7 +767,8 @@ async def test_nested_graph_failure_fails_parent_task() -> None:
     )
 
     assert isinstance(executed, ExecutedSuperstep)
-    assert executed.command == FailGraphRun(0, GraphFailure("child failed"))
+    assert isinstance(executed.command, FailGraphExecution)
+    assert executed.command.failure == GraphFailure("child failed")
 
 
 async def test_nested_graph_result_preserves_parent_conditional_routing() -> None:
@@ -695,13 +793,13 @@ async def test_nested_graph_result_preserves_parent_conditional_routing() -> Non
             (NodeId("a"),),
         )
     )
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     nested_run = prepared.nested_runs[0]
     parent_task = nested_run.parent_task
 
-    executed = await step_graph(
-        StepRequest(
+    executed = await execute_step(
+        step_request(
             parent,
             state(),
             "input",
@@ -717,12 +815,13 @@ async def test_nested_graph_result_preserves_parent_conditional_routing() -> Non
     )
 
     assert isinstance(executed, ExecutedSuperstep)
-    assert executed.command == AdvanceGraphRun(0, (GraphNodeId("right"),))
+    assert isinstance(executed.command, AdvanceGraphRun)
+    assert executed.command.frontier == (GraphNodeId("right"),)
 
 
 async def test_nested_results_must_have_unique_task_identity() -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     result = NestedTaskSuccess(
         prepared.nested_runs[0].parent_task.task_id,
@@ -731,15 +830,15 @@ async def test_nested_results_must_have_unique_task_identity() -> None:
     )
 
     with pytest.raises(ResultCollectionError, match="unique"):
-        await step_graph(StepRequest(parent, state(), "input", nested_results=(result, result)))
+        await execute_step(step_request(parent, state(), "input", nested_results=(result, result)))
 
 
 async def test_unknown_nested_result_fails_before_preparing_missing_child() -> None:
     parent, _ = nested_parent()
 
     with pytest.raises(ResultCollectionError, match="unknown parent"):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 parent,
                 state(),
                 "input",
@@ -750,13 +849,13 @@ async def test_unknown_nested_result_fails_before_preparing_missing_child() -> N
 
 async def test_nested_result_with_forged_child_run_identity_fails_closed() -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     parent_task = prepared.nested_runs[0].parent_task
 
     with pytest.raises(ResultCollectionError, match="child run identity"):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 parent,
                 state(),
                 "input",
@@ -785,7 +884,7 @@ async def test_nested_result_with_forged_child_run_identity_fails_closed() -> No
 )
 async def test_nested_success_requires_committed_completed_child_state(status: GraphRunStatus) -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     nested_run = prepared.nested_runs[0]
     started = reduce_graph_run(None, nested_run.command)
@@ -801,8 +900,8 @@ async def test_nested_success_requires_committed_completed_child_state(status: G
     )
 
     with pytest.raises(ResultCollectionError, match="committed completed"):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 parent,
                 state(),
                 "input",
@@ -813,13 +912,13 @@ async def test_nested_success_requires_committed_completed_child_state(status: G
 
 async def test_nested_failure_must_match_committed_failed_child_state() -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     nested_run = prepared.nested_runs[0]
 
     with pytest.raises(ResultCollectionError, match="committed failed"):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 parent,
                 state(),
                 "input",
@@ -830,6 +929,48 @@ async def test_nested_failure_must_match_committed_failed_child_state() -> None:
                         "forged failure",
                     ),
                 ),
+            )
+        )
+
+
+async def test_nested_terminal_state_must_satisfy_authoritative_state_invariants() -> None:
+    parent, _ = nested_parent()
+    prepared = await execute_step(step_request(parent, state(), "input"))
+    assert isinstance(prepared, PreparedFrontier)
+    nested_run = prepared.nested_runs[0]
+    corrupted = replace(
+        child_state(nested_run.command),
+        frontier=(GraphNodeId("retained-after-completion"),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="terminal graph cannot retain a frontier"):
+        await execute_step(
+            step_request(
+                parent,
+                state(),
+                "input",
+                nested_results=(NestedTaskSuccess(nested_run.parent_task.task_id, corrupted, "output"),),
+            )
+        )
+
+
+async def test_nested_terminal_state_codec_must_match_child_graph_definition() -> None:
+    parent, _ = nested_parent()
+    prepared = await execute_step(step_request(parent, state(), "input"))
+    assert isinstance(prepared, PreparedFrontier)
+    nested_run = prepared.nested_runs[0]
+    mismatched = replace(
+        child_state(nested_run.command),
+        resolution_codec=GraphResolutionCodec(GraphResolutionCodecId("unexpected.codec"), 1),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="resolution codec"):
+        await execute_step(
+            step_request(
+                parent,
+                state(),
+                "input",
+                nested_results=(NestedTaskSuccess(nested_run.parent_task.task_id, mismatched, "output"),),
             )
         )
 
@@ -854,7 +995,7 @@ async def test_nested_result_must_match_committed_child_ownership(
     message: str,
 ) -> None:
     parent, _ = nested_parent()
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     nested_run = prepared.nested_runs[0]
     completed = child_state(nested_run.command)
@@ -869,8 +1010,8 @@ async def test_nested_result_must_match_committed_child_ownership(
     )
 
     with pytest.raises(ResultCollectionError, match=message):
-        await step_graph(
-            StepRequest(
+        await execute_step(
+            step_request(
                 parent,
                 state(),
                 "input",
@@ -920,7 +1061,7 @@ async def test_sibling_invocations_of_same_child_definition_have_distinct_run_id
         )
     )
 
-    prepared = await step_graph(StepRequest(parent, state(frontier=("b", "a")), "input"))
+    prepared = await execute_step(step_request(parent, state(frontier=("b", "a")), "input"))
 
     assert isinstance(prepared, PreparedFrontier)
     assert tuple(run.parent_task.node_id for run in prepared.nested_runs) == (NodeId("a"), NodeId("b"))
@@ -941,12 +1082,12 @@ async def test_partially_completed_nested_frontier_prepares_only_missing_child()
             (NodeId("a"), NodeId("b")),
         )
     )
-    first = await step_graph(StepRequest(parent, state(frontier=("a", "b")), "input"))
+    first = await execute_step(step_request(parent, state(frontier=("a", "b")), "input"))
     assert isinstance(first, PreparedFrontier)
     completed = first.nested_runs[0]
 
-    remaining = await step_graph(
-        StepRequest(
+    remaining = await execute_step(
+        step_request(
             parent,
             state(frontier=("a", "b")),
             "input",
@@ -961,8 +1102,8 @@ async def test_partially_completed_nested_frontier_prepares_only_missing_child()
     assert remaining.nested_runs[0].parent_task.node_id == NodeId("b")
     assert remaining.nested_runs[0].command.run_id == first.nested_runs[1].command.run_id
 
-    settled = await step_graph(
-        StepRequest(
+    settled = await execute_step(
+        step_request(
             parent,
             state(frontier=("a", "b")),
             "input",
@@ -979,7 +1120,8 @@ async def test_partially_completed_nested_frontier_prepares_only_missing_child()
 
     assert isinstance(settled, ExecutedSuperstep)
     assert tuple(result.task.node_id for result in settled.results) == (NodeId("a"), NodeId("b"))
-    assert settled.command == CompleteGraphRun(0)
+    assert isinstance(settled.command, CompleteGraphRun)
+    assert settled.command.expected_superstep == 0
 
 
 async def test_mixed_nested_success_and_failure_fails_parent_deterministically() -> None:
@@ -1005,7 +1147,7 @@ async def test_mixed_nested_success_and_failure_fails_parent_deterministically()
             (NodeId("a"), NodeId("b")),
         )
     )
-    prepared = await step_graph(StepRequest(parent, state(frontier=("a", "b")), "input"))
+    prepared = await execute_step(step_request(parent, state(frontier=("a", "b")), "input"))
     assert isinstance(prepared, PreparedFrontier)
     first, second = prepared.nested_runs
     success = NestedTaskSuccess(first.parent_task.task_id, child_state(first.command), "a output")
@@ -1015,26 +1157,32 @@ async def test_mixed_nested_success_and_failure_fails_parent_deterministically()
         "b failed",
     )
 
-    forward = await step_graph(
-        StepRequest(parent, state(frontier=("a", "b")), "input", nested_results=(success, failure))
+    forward = await execute_step(
+        step_request(parent, state(frontier=("a", "b")), "input", nested_results=(success, failure))
     )
-    reversed_result = await step_graph(
-        StepRequest(parent, state(frontier=("a", "b")), "input", nested_results=(failure, success))
+    reversed_result = await execute_step(
+        step_request(parent, state(frontier=("a", "b")), "input", nested_results=(failure, success))
     )
 
     assert isinstance(forward, ExecutedSuperstep)
     assert isinstance(reversed_result, ExecutedSuperstep)
-    assert forward == reversed_result
-    assert forward.command == FailGraphRun(0, GraphFailure("b failed"))
+    assert forward.results == reversed_result.results
+    assert isinstance(forward.command, FailGraphExecution)
+    assert isinstance(reversed_result.command, FailGraphExecution)
+    assert forward.command.failure == GraphFailure("b failed")
+    assert reversed_result.command.failure == GraphFailure("b failed")
+    assert forward.command.expected_superstep == reversed_result.command.expected_superstep == 0
+    assert forward.command.execution.generation == reversed_result.command.execution.generation == 1
+    assert forward.command.execution.attempt_id != reversed_result.command.execution.attempt_id
     assert tuple(result.task.node_id for result in forward.results) == (NodeId("a"), NodeId("b"))
 
 
 async def test_replaying_same_parent_task_prepares_identical_child_run() -> None:
     parent, _ = nested_parent()
-    request = StepRequest(parent, state(superstep=4), "input")
+    request = step_request(parent, state(superstep=4), "input")
 
-    first = await step_graph(request)
-    second = await step_graph(request)
+    first = await execute_step(request)
+    second = await execute_step(request)
 
     assert isinstance(first, PreparedFrontier)
     assert isinstance(second, PreparedFrontier)
@@ -1064,15 +1212,15 @@ async def test_regular_sibling_waits_for_nested_child_and_executes_once_when_chi
     )
     committed = state(frontier=("b", "a"))
 
-    prepared = await step_graph(StepRequest(parent, committed, "input"))
+    prepared = await execute_step(step_request(parent, committed, "input"))
 
     assert isinstance(prepared, PreparedFrontier)
     assert calls == []
     nested_run = prepared.nested_runs[0]
     parent_task = nested_run.parent_task
 
-    executed = await step_graph(
-        StepRequest(
+    executed = await execute_step(
+        step_request(
             parent,
             committed,
             "input",
@@ -1083,12 +1231,13 @@ async def test_regular_sibling_waits_for_nested_child_and_executes_once_when_chi
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == ["input"]
     assert tuple(result.task.node_id for result in executed.results) == (NodeId("a"), NodeId("b"))
-    assert executed.command == CompleteGraphRun(0)
+    assert isinstance(executed.command, CompleteGraphRun)
+    assert executed.command.expected_superstep == 0
 
 
 async def test_stale_nested_completion_from_prior_superstep_is_rejected() -> None:
     parent, _ = nested_parent()
-    prior = await step_graph(StepRequest(parent, state(superstep=1), "input"))
+    prior = await execute_step(step_request(parent, state(superstep=1), "input"))
     assert isinstance(prior, PreparedFrontier)
     stale = NestedTaskSuccess(
         prior.nested_runs[0].parent_task.task_id,
@@ -1097,7 +1246,7 @@ async def test_stale_nested_completion_from_prior_superstep_is_rejected() -> Non
     )
 
     with pytest.raises(ResultCollectionError, match="unknown parent"):
-        await step_graph(StepRequest(parent, state(superstep=2), "input", nested_results=(stale,)))
+        await execute_step(step_request(parent, state(superstep=2), "input", nested_results=(stale,)))
 
 
 async def test_nested_graph_can_recursively_prepare_a_grandchild_run() -> None:
@@ -1128,11 +1277,11 @@ async def test_nested_graph_can_recursively_prepare_a_grandchild_run() -> None:
         )
     )
 
-    child_prepared = await step_graph(StepRequest(root, state(), "input"))
+    child_prepared = await execute_step(step_request(root, state(), "input"))
     assert isinstance(child_prepared, PreparedFrontier)
     child_run = child_prepared.nested_runs[0]
     child_state = reduce_graph_run(None, child_run.command)
-    grandchild_prepared = await step_graph(StepRequest(child_run.graph, child_state, "input"))
+    grandchild_prepared = await execute_step(step_request(child_run.graph, child_state, "input"))
 
     assert isinstance(grandchild_prepared, PreparedFrontier)
     grandchild_run = grandchild_prepared.nested_runs[0]
@@ -1165,12 +1314,12 @@ async def test_nested_completion_participates_in_cross_superstep_join() -> None:
             (NodeId("a"),),
         )
     )
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     nested_run = prepared.nested_runs[0]
 
-    first = await step_graph(
-        StepRequest(
+    first = await execute_step(
+        step_request(
             parent,
             state(),
             "input",
@@ -1190,7 +1339,10 @@ async def test_nested_completion_participates_in_cross_superstep_join() -> None:
         GraphNodeId("joined"),
         frozenset({GraphNodeId("a")}),
     )
-    assert first.command == AdvanceGraphRun(0, (GraphNodeId("b"),), (expected_progress,))
+    assert isinstance(first.command, AdvanceGraphRun)
+    assert first.command.expected_superstep == 0
+    assert first.command.frontier == (GraphNodeId("b"),)
+    assert first.command.join_progress == (expected_progress,)
     second_state = GraphRunState(
         GraphRunId("run"),
         StateDefinitionId("test.graph"),
@@ -1201,10 +1353,12 @@ async def test_nested_completion_participates_in_cross_superstep_join() -> None:
         join_progress=(expected_progress,),
     )
 
-    second = await step_graph(StepRequest(parent, second_state, "input"))
+    second = await execute_step(step_request(parent, second_state, "input"))
 
     assert isinstance(second, ExecutedSuperstep)
-    assert second.command == AdvanceGraphRun(1, (GraphNodeId("joined"),))
+    assert isinstance(second.command, AdvanceGraphRun)
+    assert second.command.expected_superstep == 1
+    assert second.command.frontier == (GraphNodeId("joined"),)
 
 
 async def test_nested_graph_start_preserves_all_sorted_child_entries() -> None:
@@ -1236,7 +1390,7 @@ async def test_nested_graph_start_preserves_all_sorted_child_entries() -> None:
         )
     )
 
-    prepared = await step_graph(StepRequest(parent, state(), "input"))
+    prepared = await execute_step(step_request(parent, state(), "input"))
 
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.nested_runs[0].command.frontier == (GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c"))

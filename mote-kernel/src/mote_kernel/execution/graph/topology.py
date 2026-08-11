@@ -8,6 +8,7 @@ from typing import Generic, TypeVar
 from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefinitionVersion, GraphNode
 from mote_kernel.execution.graph.edge import JoinEdge, RouteId
 from mote_kernel.execution.graph.identity import NodeId
+from mote_kernel.execution.graph.resolution import ResolutionBinding
 from mote_kernel.parallel import ResourceDefinition, ResourceId
 
 InputT = TypeVar("InputT")
@@ -27,6 +28,7 @@ class CompiledGraph(Generic[InputT, OutputT]):
     joins_by_source: Mapping[NodeId, tuple[JoinEdge, ...]]
     resources: Mapping[ResourceId, ResourceDefinition]
     resource_order: tuple[ResourceId, ...]
+    resolution: ResolutionBinding[InputT] | None
 
 
 def immutable_mapping(values: dict[NodeId, tuple[NodeId, ...]]) -> Mapping[NodeId, tuple[NodeId, ...]]:

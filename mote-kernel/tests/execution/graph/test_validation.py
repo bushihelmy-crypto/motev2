@@ -22,10 +22,17 @@ from mote_kernel.execution.graph import (
     JoinEdge,
     NodeDefinition,
     NodeId,
+    ResolutionBinding,
+    ResolutionCodecId,
     RouteId,
     compile_graph,
 )
 from mote_kernel.parallel import ResourceDefinition, ResourceId
+
+
+class Decoder:
+    def decode(self, payload: bytes) -> str:
+        return payload.decode()
 
 
 @pytest.mark.parametrize(
@@ -164,5 +171,19 @@ def test_node_resource_requirements_must_be_unique_and_declared() -> None:
             graph(
                 nodes=(NodeDefinition(NodeId("a"), node("a").node, (ResourceId("file"), ResourceId("file"))),),
                 resources=declared,
+            )
+        )
+
+
+def test_resolution_codec_version_must_be_positive() -> None:
+    with pytest.raises(InvalidGraphIdentityError, match="codec version"):
+        compile_graph(
+            GraphDefinition(
+                GraphDefinitionId("graph"),
+                GraphDefinitionVersion(1),
+                (node("a"),),
+                (),
+                (NodeId("a"),),
+                resolution=ResolutionBinding(ResolutionCodecId("input"), 0, Decoder()),
             )
         )

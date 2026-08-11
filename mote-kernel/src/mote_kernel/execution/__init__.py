@@ -1,10 +1,13 @@
 """The sole graph execution substrate for Kernel flows."""
 
-from mote_kernel.execution.executor import step_graph
-from mote_kernel.execution.graph_run import project_execution_snapshot, project_graph_command
+from mote_kernel.execution.claim import PreparedExecutionClaim
+from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.graph_run import (
+    project_execution_snapshot,
+    project_graph_command,
+)
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
-    ExecutedFrontierBatch,
     ExecutedSuperstep,
     NestedTaskFailure,
     NestedTaskSuccess,
@@ -15,10 +18,11 @@ from mote_kernel.execution.result import (
 )
 
 __all__ = [
-    "ExecutedFrontierBatch",
     "ExecutedSuperstep",
+    "GraphExecutor",
     "NestedTaskFailure",
     "NestedTaskSuccess",
+    "PreparedExecutionClaim",
     "PreparedFrontier",
     "PreparedNestedRun",
     "PreparedResourceAdmission",
@@ -26,5 +30,4 @@ __all__ = [
     "StepResult",
     "project_execution_snapshot",
     "project_graph_command",
-    "step_graph",
 ]

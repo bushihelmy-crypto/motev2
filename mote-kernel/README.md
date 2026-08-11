@@ -2,7 +2,7 @@
 
 Mote Kernel is a durable, state-machine-driven agent kernel. Graphs control execution; state machines control truth.
 
-The project is in its initial architecture and implementation phase. Its intended public entry point is a single `Role`; graph execution, domain state, persistence, and replaceable services remain internal mechanisms.
+The project is in its initial architecture and implementation phase. Its default public composition entry point has not been designed or implemented yet; graph execution and state primitives are currently internal development surfaces.
 
 ## Design principles
 
@@ -11,7 +11,7 @@ The project is in its initial architecture and implementation phase. Its intende
 - Durable state is committed before the in-memory snapshot advances.
 - Concurrent nodes share one immutable input snapshot and must treat it as read-only.
 - Concrete model, prompt, tool, storage, and extension capabilities enter through narrow typed ports.
-- Optional capabilities are selected when a Role is assembled, not checked repeatedly during execution.
+- Optional capabilities are selected when an agent flow is assembled, not checked repeatedly during execution.
 
 ## Development
 

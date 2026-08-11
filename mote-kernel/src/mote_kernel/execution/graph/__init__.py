@@ -11,6 +11,7 @@ from mote_kernel.execution.graph.definition import (
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge, RouteId
 from mote_kernel.execution.graph.node import Node, NodeDefinition, NodeId
 from mote_kernel.execution.graph.outcome import NodeFailure, NodeOutcome, NodeSuccess
+from mote_kernel.execution.graph.resolution import ResolutionBinding, ResolutionCodecId, ResolutionDecoder
 from mote_kernel.execution.graph.topology import CompiledGraph
 
 __all__ = [
@@ -29,6 +30,9 @@ __all__ = [
     "NodeId",
     "NodeOutcome",
     "NodeSuccess",
+    "ResolutionBinding",
+    "ResolutionCodecId",
+    "ResolutionDecoder",
     "RouteId",
     "compile_graph",
 ]

@@ -13,9 +13,14 @@ from mote_kernel.execution.graph import (
 from mote_kernel.execution.graph.edge import RouteId
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.snapshot import (
+    ExecutionAttemptId,
+    ExecutionLeaseSnapshot,
     ExecutionSnapshot,
     ExecutionStatus,
+    ExecutionTaskId,
+    ExecutionToken,
     GraphRunId,
+    InterruptRecord,
     JoinProgress,
     ParentTaskId,
     ParentTaskRef,
@@ -24,6 +29,26 @@ from mote_kernel.execution.snapshot import (
 
 async def identity(node_input: str) -> NodeSuccess[str]:
     return NodeSuccess(node_input)
+
+
+def lease_snapshot(execution_snapshot: ExecutionSnapshot, *task_ids: str) -> ExecutionSnapshot:
+    return ExecutionSnapshot(
+        run_id=execution_snapshot.run_id,
+        definition_id=execution_snapshot.definition_id,
+        definition_version=execution_snapshot.definition_version,
+        status=execution_snapshot.status,
+        superstep=execution_snapshot.superstep,
+        frontier=execution_snapshot.frontier,
+        parent=execution_snapshot.parent,
+        join_progress=execution_snapshot.join_progress,
+        parallel=execution_snapshot.parallel,
+        execution_sequence=1,
+        execution=ExecutionLeaseSnapshot(
+            ExecutionToken(1, ExecutionAttemptId("test-attempt")),
+            tuple(ExecutionTaskId(task_id) for task_id in sorted(task_ids)),
+        ),
+        interrupt=execution_snapshot.interrupt,
+    )
 
 
 def compiled_graph(*node_ids: str, entries: tuple[str, ...] = ("a",)) -> CompiledGraph[str, str]:
@@ -77,6 +102,8 @@ def snapshot(
     parent_run_id: str | None = None,
     parent_task_id: str = "parent-task",
     join_progress: tuple[JoinProgress, ...] = (),
+    leased_task_ids: tuple[str, ...] = (),
+    interrupt: InterruptRecord | None = None,
 ) -> ExecutionSnapshot:
     return ExecutionSnapshot(
         run_id=GraphRunId(run_id),
@@ -91,4 +118,14 @@ def snapshot(
             else None
         ),
         join_progress=join_progress,
+        execution_sequence=1 if leased_task_ids else 0,
+        execution=(
+            ExecutionLeaseSnapshot(
+                ExecutionToken(1, ExecutionAttemptId("test-attempt")),
+                tuple(ExecutionTaskId(task_id) for task_id in leased_task_ids),
+            )
+            if leased_task_ids
+            else None
+        ),
+        interrupt=interrupt,
     )

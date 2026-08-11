@@ -1,21 +1,53 @@
 from mote_kernel.execution import project_execution_snapshot, project_graph_command
-from mote_kernel.execution.graph import GraphDefinitionId, GraphDefinitionVersion, NodeId
+from mote_kernel.execution.graph import (
+    END,
+    DirectEdge,
+    GraphDefinition,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    NodeDefinition,
+    NodeId,
+    NodeSuccess,
+    ResolutionBinding,
+    ResolutionCodecId,
+    compile_graph,
+)
+from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.snapshot import (
+    ExecutionAttemptId,
+    ExecutionLeaseSnapshot,
     ExecutionSnapshot,
     ExecutionStatus,
+    ExecutionTaskId,
+    ExecutionToken,
+    InterruptId,
+    InterruptLifecycle,
+    InterruptPayload,
+    InterruptRecord,
     JoinProgress,
     ParentTaskId,
     ParentTaskRef,
 )
 from mote_kernel.execution.snapshot import GraphRunId as ExecutionRunId
+from mote_kernel.execution.snapshot import ResolutionCodecId as SnapshotCodecId
 from mote_kernel.execution.transition import AdvanceTransition, CompleteTransition, FailTransition
 from mote_kernel.state.graph_state import (
     AdvanceGraphRun,
     CompleteGraphRun,
-    FailGraphRun,
+    FailGraphExecution,
+    GraphExecutionAttemptId,
+    GraphExecutionLease,
+    GraphExecutionToken,
     GraphFailure,
+    GraphInterruptId,
+    GraphInterruptIdentity,
+    GraphInterruptLifecycle,
+    GraphInterruptPayload,
+    GraphInterruptRecord,
     GraphJoinProgress,
     GraphNodeId,
+    GraphResolutionCodec,
+    GraphResolutionCodecId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -26,16 +58,36 @@ from mote_kernel.state.graph_state import (
 from mote_kernel.state.graph_state import GraphDefinitionId as StateDefinitionId
 from mote_kernel.state.graph_state import GraphDefinitionVersion as StateDefinitionVersion
 
+EXECUTION_TOKEN = ExecutionToken(3, ExecutionAttemptId("attempt"))
+STATE_TOKEN = GraphExecutionToken(3, GraphExecutionAttemptId("attempt"))
+CODEC = GraphResolutionCodec(GraphResolutionCodecId("input.v1"), 2)
+
+
+class StringDecoder:
+    def decode(self, payload: bytes) -> str:
+        return payload.decode("utf-8")
+
+
+async def identity(node_input: str) -> NodeSuccess[str]:
+    return NodeSuccess(node_input)
+
 
 def test_projection_maps_every_authoritative_graph_run_fact() -> None:
+    interrupt = GraphInterruptRecord(
+        GraphInterruptIdentity(GraphRunId("root"), GraphInterruptId("pause"), 4),
+        GraphInterruptPayload(b"request"),
+        CODEC,
+        GraphInterruptLifecycle.RESOLVED,
+        GraphInterruptPayload(b"resolution"),
+    )
     state = GraphRunState(
         run_id=GraphRunId("child"),
         definition_id=StateDefinitionId("flow.graph"),
         definition_version=StateDefinitionVersion(3),
-        status=GraphRunStatus.SUSPENDED,
+        status=GraphRunStatus.RUNNING,
         superstep=7,
         frontier=(GraphNodeId("b"), GraphNodeId("a")),
-        parent=ParentGraphTask(GraphRunId("parent"), GraphTaskId("parent-task")),
+        parent=ParentGraphTask(GraphRunId("root"), GraphTaskId("parent-task")),
         join_progress=(
             GraphJoinProgress(
                 (GraphNodeId("a"), GraphNodeId("c")),
@@ -43,22 +95,38 @@ def test_projection_maps_every_authoritative_graph_run_fact() -> None:
                 frozenset({GraphNodeId("a")}),
             ),
         ),
+        execution_sequence=3,
+        execution=GraphExecutionLease(STATE_TOKEN, (GraphTaskId("task"),)),
+        interrupt=interrupt,
+        resolution_codec=CODEC,
     )
 
     assert project_execution_snapshot(state) == ExecutionSnapshot(
         run_id=ExecutionRunId("child"),
         definition_id=GraphDefinitionId("flow.graph"),
         definition_version=GraphDefinitionVersion(3),
-        status=ExecutionStatus.SUSPENDED,
+        status=ExecutionStatus.RUNNING,
         superstep=7,
         frontier=(NodeId("b"), NodeId("a")),
-        parent=ParentTaskRef(ExecutionRunId("parent"), ParentTaskId("parent-task")),
+        parent=ParentTaskRef(ExecutionRunId("root"), ParentTaskId("parent-task")),
         join_progress=(
             JoinProgress(
                 (NodeId("a"), NodeId("c")),
                 NodeId("d"),
                 frozenset({NodeId("a")}),
             ),
+        ),
+        execution_sequence=3,
+        execution=ExecutionLeaseSnapshot(EXECUTION_TOKEN, (ExecutionTaskId("task"),)),
+        interrupt=InterruptRecord(
+            ExecutionRunId("root"),
+            InterruptId("pause"),
+            4,
+            InterruptPayload(b"request"),
+            SnapshotCodecId("input.v1"),
+            2,
+            InterruptLifecycle.RESOLVED,
+            InterruptPayload(b"resolution"),
         ),
     )
 
@@ -77,9 +145,60 @@ def test_projection_maps_every_lifecycle_status() -> None:
             state_status,
             0,
             (GraphNodeId("a"),) if state_status in {GraphRunStatus.RUNNING, GraphRunStatus.SUSPENDED} else (),
+            failure=GraphFailure("failed") if state_status is GraphRunStatus.FAILED else None,
+            interrupt=(
+                GraphInterruptRecord(
+                    GraphInterruptIdentity(GraphRunId("run"), GraphInterruptId("pause"), 1),
+                    GraphInterruptPayload(b"request"),
+                    CODEC,
+                    GraphInterruptLifecycle.REQUESTED,
+                )
+                if state_status is GraphRunStatus.SUSPENDED
+                else None
+            ),
+            resolution_codec=CODEC if state_status is GraphRunStatus.SUSPENDED else None,
         )
 
         assert project_execution_snapshot(state).status is execution_status
+
+
+def test_compiled_graph_projects_start_with_fixed_resolution_codec() -> None:
+    graph = compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(5),
+            (NodeDefinition(NodeId("a"), identity),),
+            (DirectEdge(NodeId("a"), END),),
+            (NodeId("a"),),
+            resolution=ResolutionBinding(ResolutionCodecId("input.v1"), 2, StringDecoder()),
+        )
+    )
+
+    command = project_start_graph_command(
+        graph,
+        GraphRunId("child"),
+        ParentGraphTask(GraphRunId("root"), GraphTaskId("task")),
+    )
+
+    assert command.run_id == GraphRunId("child")
+    assert command.definition_id == StateDefinitionId("graph")
+    assert command.definition_version == StateDefinitionVersion(5)
+    assert command.frontier == (GraphNodeId("a"),)
+    assert command.resolution_codec == CODEC
+
+
+def test_compiled_graph_without_resolution_codec_projects_none() -> None:
+    graph = compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (NodeDefinition(NodeId("a"), identity),),
+            (DirectEdge(NodeId("a"), END),),
+            (NodeId("a"),),
+        )
+    )
+
+    assert project_start_graph_command(graph, GraphRunId("root")).resolution_codec is None
 
 
 def test_advance_transition_projects_every_state_command_fact() -> None:
@@ -89,8 +208,12 @@ def test_advance_transition_projects_every_state_command_fact() -> None:
         frozenset({NodeId("a")}),
     )
 
-    assert project_graph_command(AdvanceTransition(4, (NodeId("d"),), (progress,))) == AdvanceGraphRun(
+    assert project_graph_command(
+        AdvanceTransition(4, EXECUTION_TOKEN, 8, (NodeId("d"),), (progress,))
+    ) == AdvanceGraphRun(
         4,
+        STATE_TOKEN,
+        8,
         (GraphNodeId("d"),),
         (
             GraphJoinProgress(
@@ -102,12 +225,14 @@ def test_advance_transition_projects_every_state_command_fact() -> None:
     )
 
 
-def test_terminal_transitions_project_expected_superstep_and_failure() -> None:
-    assert project_graph_command(CompleteTransition(5)) == CompleteGraphRun(5)
-    assert project_graph_command(FailTransition(6, "node failed")) == FailGraphRun(6, GraphFailure("node failed"))
+def test_terminal_transitions_project_token_generation_and_failure() -> None:
+    assert project_graph_command(CompleteTransition(5, EXECUTION_TOKEN, 8)) == CompleteGraphRun(5, STATE_TOKEN, 8)
+    assert project_graph_command(FailTransition(6, EXECUTION_TOKEN, 8, "node failed")) == FailGraphExecution(
+        6, STATE_TOKEN, 8, GraphFailure("node failed")
+    )
 
 
-def running_state(*, superstep: int = 0) -> GraphRunState:
+def leased_state(*, superstep: int = 0) -> GraphRunState:
     return GraphRunState(
         GraphRunId("run"),
         StateDefinitionId("graph"),
@@ -115,44 +240,37 @@ def running_state(*, superstep: int = 0) -> GraphRunState:
         GraphRunStatus.RUNNING,
         superstep,
         (GraphNodeId("a"),),
+        execution_sequence=3,
+        execution=GraphExecutionLease(STATE_TOKEN, (GraphTaskId("task"),)),
     )
 
 
 def test_advance_transition_projects_through_reducer_into_durable_state() -> None:
-    progress = JoinProgress(
-        (NodeId("a"), NodeId("b")),
-        NodeId("c"),
-        frozenset({NodeId("a")}),
+    advanced = reduce_graph_run(
+        leased_state(superstep=3),
+        project_graph_command(AdvanceTransition(3, EXECUTION_TOKEN, None, (NodeId("d"),))),
     )
 
-    state = reduce_graph_run(
-        running_state(superstep=3),
-        project_graph_command(AdvanceTransition(3, (NodeId("d"),), (progress,))),
-    )
-
-    assert state.superstep == 4
-    assert state.frontier == (GraphNodeId("d"),)
-    assert state.join_progress == (
-        GraphJoinProgress(
-            (GraphNodeId("a"), GraphNodeId("b")),
-            GraphNodeId("c"),
-            frozenset({GraphNodeId("a")}),
-        ),
-    )
+    assert advanced.superstep == 4
+    assert advanced.frontier == (GraphNodeId("d"),)
 
 
 def test_complete_transition_projects_through_reducer_into_durable_state() -> None:
-    state = reduce_graph_run(running_state(superstep=3), project_graph_command(CompleteTransition(3)))
+    completed = reduce_graph_run(
+        leased_state(superstep=3),
+        project_graph_command(CompleteTransition(3, EXECUTION_TOKEN, None)),
+    )
 
-    assert state.status is GraphRunStatus.COMPLETED
-    assert state.superstep == 3
-    assert state.frontier == ()
+    assert completed.status is GraphRunStatus.COMPLETED
+    assert completed.frontier == ()
 
 
 def test_fail_transition_projects_through_reducer_into_durable_state() -> None:
-    state = reduce_graph_run(running_state(superstep=3), project_graph_command(FailTransition(3, "node failed")))
+    failed = reduce_graph_run(
+        leased_state(superstep=3),
+        project_graph_command(FailTransition(3, EXECUTION_TOKEN, None, "node failed")),
+    )
 
-    assert state.status is GraphRunStatus.FAILED
-    assert state.superstep == 3
-    assert state.frontier == ()
-    assert state.failure == GraphFailure("node failed")
+    assert failed.status is GraphRunStatus.FAILED
+    assert failed.frontier == ()
+    assert failed.failure == GraphFailure("node failed")

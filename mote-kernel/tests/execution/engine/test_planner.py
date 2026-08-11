@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, fields
 
 import pytest
-from tests.execution.engine.factories import compiled_graph, identity, snapshot
+from tests.execution.engine.factories import compiled_graph, snapshot
 
 from mote_kernel.execution.engine import GraphTask, plan_tasks
 from mote_kernel.execution.engine.task import task_identity
@@ -12,7 +12,6 @@ from mote_kernel.execution.graph import (
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
-    JoinEdge,
     NestedGraphNodeDefinition,
     NodeDefinition,
     NodeId,
@@ -41,10 +40,7 @@ def test_planner_is_idempotent_and_does_not_modify_snapshot() -> None:
     execution_snapshot = snapshot(frontier=("b", "a"))
     graph = compiled_graph("a", "b", entries=("a", "b"))
 
-    first = plan_tasks(graph, execution_snapshot, LIMITS)
-    second = plan_tasks(graph, execution_snapshot, LIMITS)
-
-    assert first == second
+    assert plan_tasks(graph, execution_snapshot, LIMITS) == plan_tasks(graph, execution_snapshot, LIMITS)
     assert execution_snapshot.frontier == (NodeId("b"), NodeId("a"))
     with pytest.raises(FrozenInstanceError):
         execution_snapshot.superstep = 1  # type: ignore[misc]
@@ -79,13 +75,11 @@ def test_declaration_and_frontier_order_do_not_change_planned_batch() -> None:
         snapshot(frontier=("c", "a", "b")),
         LIMITS,
     )
-
     assert first == second
 
 
 def test_graph_task_is_immutable() -> None:
     task = plan_tasks(compiled_graph("a"), snapshot(), LIMITS)[0]
-
     with pytest.raises(FrozenInstanceError):
         task.node_id = NodeId("other")  # type: ignore[misc]
 
@@ -94,72 +88,44 @@ def test_graph_task_has_no_retry_or_attempt_policy() -> None:
     assert {field.name for field in fields(GraphTask)} == {"task_id", "run_id", "superstep", "node_id"}
 
 
-@pytest.mark.parametrize(
-    "status",
-    [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED],
-)
+@pytest.mark.parametrize("status", [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED])
 def test_nonrunning_snapshot_has_no_ready_tasks(status: ExecutionStatus) -> None:
     assert plan_tasks(compiled_graph("a"), snapshot(status=status, frontier=()), LIMITS) == ()
 
 
-def test_suspended_snapshot_requires_a_recoverable_frontier() -> None:
-    with pytest.raises(InvalidExecutionSnapshotError, match="frontier"):
-        plan_tasks(compiled_graph("a"), snapshot(status=ExecutionStatus.SUSPENDED, frontier=()), LIMITS)
+def test_suspended_snapshot_may_retain_recoverable_frontier() -> None:
+    assert plan_tasks(compiled_graph("a"), snapshot(status=ExecutionStatus.SUSPENDED, frontier=("a",)), LIMITS) == ()
 
 
-@pytest.mark.parametrize(
-    "execution_snapshot",
-    [snapshot(definition_id="other"), snapshot(version=2)],
-)
+@pytest.mark.parametrize("execution_snapshot", [snapshot(definition_id="other"), snapshot(version=2)])
 def test_snapshot_must_match_compiled_graph(execution_snapshot: object) -> None:
     with pytest.raises(SnapshotMismatchError):
         plan_tasks(compiled_graph("a"), execution_snapshot, LIMITS)  # type: ignore[arg-type]
 
 
 def test_graph_mismatch_takes_precedence_over_foreign_frontier_nodes() -> None:
-    foreign_snapshot = snapshot(definition_id="other.graph", frontier=("foreign-node",))
-
     with pytest.raises(SnapshotMismatchError):
-        plan_tasks(compiled_graph("a"), foreign_snapshot, LIMITS)
+        plan_tasks(compiled_graph("a"), snapshot(definition_id="other.graph", frontier=("foreign",)), LIMITS)
 
 
-@pytest.mark.parametrize(
-    "execution_snapshot",
-    [
-        snapshot(superstep=-1),
-        snapshot(frontier=()),
-        snapshot(frontier=("a", "a")),
-        snapshot(frontier=("unknown",)),
-    ],
-)
-def test_invalid_running_projection_fails_closed(execution_snapshot: object) -> None:
-    with pytest.raises(InvalidExecutionSnapshotError):
-        plan_tasks(compiled_graph("a"), execution_snapshot, LIMITS)  # type: ignore[arg-type]
+@pytest.mark.parametrize("status", list(ExecutionStatus))
+def test_frontier_must_belong_to_compiled_graph_for_every_lifecycle(status: ExecutionStatus) -> None:
+    with pytest.raises(InvalidExecutionSnapshotError, match="unknown nodes"):
+        plan_tasks(compiled_graph("a"), snapshot(status=status, frontier=("unknown",)), LIMITS)
 
 
-@pytest.mark.parametrize(
-    "status",
-    [ExecutionStatus.SUSPENDED, ExecutionStatus.COMPLETED, ExecutionStatus.FAILED],
-)
-@pytest.mark.parametrize(
-    "execution_snapshot",
-    [snapshot(superstep=-1), snapshot(frontier=("unknown",)), snapshot(frontier=("a", "a"))],
-)
-def test_corrupt_nonrunning_projection_fails_closed(status: ExecutionStatus, execution_snapshot: object) -> None:
-    projected = execution_snapshot
-    object.__setattr__(projected, "status", status)
-
-    with pytest.raises(InvalidExecutionSnapshotError):
-        plan_tasks(compiled_graph("a"), projected, LIMITS)  # type: ignore[arg-type]
+@pytest.mark.parametrize("status", list(ExecutionStatus))
+def test_join_progress_must_belong_to_compiled_graph_for_every_lifecycle(status: ExecutionStatus) -> None:
+    progress = JoinProgress((NodeId("a"), NodeId("b")), NodeId("c"), frozenset({NodeId("a")}))
+    with pytest.raises(InvalidExecutionSnapshotError, match="unknown join"):
+        plan_tasks(
+            compiled_graph("a", "b", "c", entries=("a", "b", "c")),
+            snapshot(status=status, frontier=("b",), join_progress=(progress,)),
+            LIMITS,
+        )
 
 
-@pytest.mark.parametrize(
-    "limits",
-    [
-        ExecutionLimits(max_supersteps=0),
-        ExecutionLimits(max_parallel_tasks=0),
-    ],
-)
+@pytest.mark.parametrize("limits", [ExecutionLimits(max_supersteps=0), ExecutionLimits(max_parallel_tasks=0)])
 def test_invalid_limits_fail_closed(limits: ExecutionLimits) -> None:
     with pytest.raises(ExecutionLimitError):
         plan_tasks(compiled_graph("a"), snapshot(), limits)
@@ -200,149 +166,12 @@ def test_parallel_limit_allows_exactly_the_configured_batch_size() -> None:
         snapshot(frontier=("a", "b")),
         ExecutionLimits(max_parallel_tasks=2),
     )
-
     assert tuple(task.node_id for task in tasks) == (NodeId("a"), NodeId("b"))
-
-
-def test_nested_graph_node_is_planned_as_one_parent_task() -> None:
-    async def child_node(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input)
-
-    child = GraphDefinition[str, str](
-        definition_id=GraphDefinitionId("child.graph"),
-        version=GraphDefinitionVersion(1),
-        nodes=(NodeDefinition(NodeId("child-step"), child_node),),
-        edges=(DirectEdge(NodeId("child-step"), END),),
-        entries=(NodeId("child-step"),),
-    )
-    parent = compile_graph(
-        GraphDefinition[str, str](
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=(NestedGraphNodeDefinition(NodeId("nested"), child),),
-            edges=(DirectEdge(NodeId("nested"), END),),
-            entries=(NodeId("nested"),),
-        )
-    )
-
-    tasks = plan_tasks(parent, snapshot(frontier=("nested",)), LIMITS)
-
-    assert len(tasks) == 1
-    assert tasks[0].node_id == NodeId("nested")
-
-
-@pytest.mark.parametrize(
-    "execution_snapshot",
-    [
-        snapshot(run_id=""),
-        snapshot(run_id=" run"),
-        snapshot(definition_id=""),
-        snapshot(definition_id="test.graph "),
-        snapshot(version=0),
-        snapshot(frontier=(" a",)),
-        snapshot(parent_run_id=""),
-        snapshot(parent_run_id=" parent"),
-        snapshot(parent_run_id="parent", parent_task_id=""),
-        snapshot(parent_run_id="parent", parent_task_id=" task"),
-        snapshot(parent_run_id="run"),
-    ],
-)
-def test_invalid_snapshot_identity_or_parent_fails_closed(execution_snapshot: object) -> None:
-    with pytest.raises(InvalidExecutionSnapshotError):
-        plan_tasks(compiled_graph("a"), execution_snapshot, LIMITS)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("status", [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED])
-def test_terminal_snapshot_cannot_retain_frontier(status: ExecutionStatus) -> None:
-    with pytest.raises(InvalidExecutionSnapshotError, match="terminal"):
-        plan_tasks(compiled_graph("a"), snapshot(status=status, frontier=("a",)), LIMITS)
-
-
-@pytest.mark.parametrize("status", [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED])
-def test_terminal_snapshot_cannot_retain_join_progress(status: ExecutionStatus) -> None:
-    progress = JoinProgress((NodeId("a"), NodeId("b")), NodeId("c"), frozenset({NodeId("a")}))
-    graph = compile_graph(
-        GraphDefinition[str, str](
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
-            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
-            entries=(NodeId("a"), NodeId("b")),
-        )
-    )
-
-    with pytest.raises(InvalidExecutionSnapshotError, match="terminal"):
-        plan_tasks(graph, snapshot(status=status, frontier=(), join_progress=(progress,)), LIMITS)
-
-
-@pytest.mark.parametrize(
-    "progress",
-    [
-        JoinProgress((NodeId("a"), NodeId("a")), NodeId("c"), frozenset({NodeId("a")})),
-        JoinProgress((NodeId("a"), NodeId("b")), NodeId("a"), frozenset({NodeId("b")})),
-        JoinProgress((NodeId(" a"), NodeId("b")), NodeId("c"), frozenset({NodeId(" a")})),
-        JoinProgress((NodeId("a"), NodeId("b")), NodeId(" c"), frozenset({NodeId("a")})),
-        JoinProgress((NodeId("a"), NodeId("b")), NodeId("c"), frozenset({NodeId("unknown")})),
-    ],
-)
-def test_corrupt_recovered_join_progress_fails_closed(progress: JoinProgress) -> None:
-    graph = compile_graph(
-        GraphDefinition[str, str](
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
-            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
-            entries=(NodeId("a"), NodeId("b")),
-        )
-    )
-
-    with pytest.raises(InvalidExecutionSnapshotError):
-        plan_tasks(graph, snapshot(frontier=("b",), join_progress=(progress,)), LIMITS)
-
-
-def test_recovered_join_progress_must_belong_to_compiled_graph() -> None:
-    progress = JoinProgress(
-        (NodeId("a"), NodeId("b")),
-        NodeId("c"),
-        frozenset({NodeId("a")}),
-    )
-
-    with pytest.raises(InvalidExecutionSnapshotError, match="unknown join"):
-        plan_tasks(
-            compiled_graph("a", "b", "c", entries=("a", "b", "c")),
-            snapshot(frontier=("b",), join_progress=(progress,)),
-            LIMITS,
-        )
-
-
-def test_recovered_snapshot_rejects_duplicate_join_progress() -> None:
-    progress = JoinProgress(
-        (NodeId("a"), NodeId("b")),
-        NodeId("c"),
-        frozenset({NodeId("a")}),
-    )
-    graph = compile_graph(
-        GraphDefinition[str, str](
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
-            edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
-            entries=(NodeId("a"), NodeId("b")),
-        )
-    )
-
-    with pytest.raises(InvalidExecutionSnapshotError, match="repeats"):
-        plan_tasks(graph, snapshot(frontier=("b",), join_progress=(progress, progress)), LIMITS)
-
-
-def test_suspended_snapshot_may_retain_recoverable_frontier() -> None:
-    assert plan_tasks(compiled_graph("a"), snapshot(status=ExecutionStatus.SUSPENDED, frontier=("a",)), LIMITS) == ()
 
 
 def test_valid_parent_linkage_does_not_change_parent_task_identity() -> None:
     without_parent = plan_tasks(compiled_graph("a"), snapshot(), LIMITS)
     with_parent = plan_tasks(compiled_graph("a"), snapshot(parent_run_id="parent"), LIMITS)
-
     assert with_parent == without_parent
 
 
@@ -357,16 +186,36 @@ def test_terminal_snapshot_is_not_rejected_only_for_reaching_step_limit() -> Non
     )
 
 
+def test_nested_graph_node_is_planned_as_one_parent_task() -> None:
+    async def child_node(node_input: str) -> NodeSuccess[str]:
+        return NodeSuccess(node_input)
+
+    child = GraphDefinition[str, str](
+        GraphDefinitionId("child.graph"),
+        GraphDefinitionVersion(1),
+        (NodeDefinition(NodeId("child-step"), child_node),),
+        (DirectEdge(NodeId("child-step"), END),),
+        (NodeId("child-step"),),
+    )
+    parent = compile_graph(
+        GraphDefinition[str, str](
+            GraphDefinitionId("test.graph"),
+            GraphDefinitionVersion(1),
+            (NestedGraphNodeDefinition(NodeId("nested"), child),),
+            (DirectEdge(NodeId("nested"), END),),
+            (NodeId("nested"),),
+        )
+    )
+    assert plan_tasks(parent, snapshot(frontier=("nested",)), LIMITS)[0].node_id == NodeId("nested")
+
+
 def test_planner_accepts_large_deterministic_frontier_at_exact_limit() -> None:
     node_ids = tuple(f"node-{index:04d}" for index in range(256))
-    graph = compiled_graph(*reversed(node_ids), entries=tuple(reversed(node_ids)))
-
     tasks = plan_tasks(
-        graph,
+        compiled_graph(*reversed(node_ids), entries=tuple(reversed(node_ids))),
         snapshot(frontier=tuple(reversed(node_ids))),
         ExecutionLimits(max_parallel_tasks=len(node_ids)),
     )
-
     assert tuple(task.node_id for task in tasks) == tuple(NodeId(node_id) for node_id in node_ids)
 
 
@@ -380,14 +229,12 @@ def test_planner_does_not_invoke_node() -> None:
 
     graph = compile_graph(
         GraphDefinition(
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=(NodeDefinition(NodeId("a"), forbidden_node),),
-            edges=(),
-            entries=(NodeId("a"),),
+            GraphDefinitionId("test.graph"),
+            GraphDefinitionVersion(1),
+            (NodeDefinition(NodeId("a"), forbidden_node),),
+            (),
+            (NodeId("a"),),
         )
     )
-
     plan_tasks(graph, snapshot(), LIMITS)
-
     assert calls == 0

@@ -3,10 +3,16 @@
 from dataclasses import dataclass, field
 from typing import Generic, TypeAlias, TypeVar
 
+from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.graph import CompiledGraph
 from mote_kernel.execution.graph.command import Continue, RoutingCommand
-from mote_kernel.state.graph_state import GraphRunCommand, GraphRunState, StartGraphRun, UpdateGraphParallel
+from mote_kernel.state.graph_state import (
+    GraphRunCommand,
+    GraphRunState,
+    StartGraphRun,
+    UpdateGraphParallel,
+)
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -50,14 +56,6 @@ class PreparedResourceAdmission:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutedFrontierBatch(Generic[OutputT]):
-    """A partial frontier result batch and its state command awaiting commit."""
-
-    results: tuple[TaskResult[OutputT], ...]
-    command: UpdateGraphParallel
-
-
-@dataclass(frozen=True, slots=True)
 class NestedTaskSuccess(Generic[OutputT]):
     """A child success loaded atomically with its committed terminal state."""
 
@@ -94,16 +92,17 @@ class PreparedFrontier(Generic[InputT, OutputT]):
 
     admission: PreparedResourceAdmission | None
     nested_runs: tuple[PreparedNestedRun[InputT, OutputT], ...]
+    execution: PreparedExecutionClaim | None = None
 
 
-StepResult: TypeAlias = PreparedFrontier[InputT, OutputT] | ExecutedFrontierBatch[OutputT] | ExecutedSuperstep[OutputT]
+StepResult: TypeAlias = PreparedFrontier[InputT, OutputT] | ExecutedSuperstep[OutputT]
 
 __all__ = [
-    "ExecutedFrontierBatch",
     "ExecutedSuperstep",
     "NestedTaskFailure",
     "NestedTaskResult",
     "NestedTaskSuccess",
+    "PreparedExecutionClaim",
     "PreparedFrontier",
     "PreparedNestedRun",
     "PreparedResourceAdmission",

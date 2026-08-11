@@ -51,7 +51,7 @@ User / API / UI
 
 The control relationship is equally important:
 
-1. Product chooses configuration and assembles a `Role` with concrete capabilities.
+1. Product chooses configuration and supplies the concrete capabilities required by Kernel.
 2. Kernel advances the agent flow.
 3. When a flow step needs an external capability, Kernel invokes a narrow typed Port.
 4. Runtime implements that Port and returns a typed result; it does not mutate Kernel state.
@@ -62,10 +62,10 @@ The control relationship is equally important:
 
 `mote-kernel` is the architectural center of Mote. A reader should be able to understand how one agent interacts by reading the Kernel, without reconstructing its control flow from a model adapter, tool executor, persistence backend, or UI callback.
 
-Its intended default public entry point is a single `Role`. Internally, the Kernel separates the major branches of agent behavior:
+The default public composition entry point has not been designed or implemented yet. Internally, the Kernel separates the major branches of agent behavior:
 
 ```text
-Role
+Agent flow
 ├── Observe       accept and interpret inputs
 ├── Think         construct cognition and produce decisions
 ├── Act           express and settle agent actions
@@ -77,7 +77,7 @@ Role
 └── Ports         request concrete external capabilities
 ```
 
-`Role` is a controlled agent-level facade, not a proxy for every Runtime service. Runtime-specific conveniences such as browser profiles, secret stores, database handles, or process clients must not accumulate on its public surface.
+The future composition surface must remain a controlled agent-level facade, not a proxy for every Runtime service. Runtime-specific conveniences such as browser profiles, secret stores, database handles, or process clients must not accumulate on that public surface.
 
 ### An Agent flow is a composition of state machines
 
@@ -132,7 +132,7 @@ Kernel flow need → Port contract → Runtime implementation
 
 Ports return typed results or commands and never mutate Kernel state directly. Their contracts must express the failure semantics the flow needs, including identity, rejection, completion, unknown outcome, retry, cancellation, receipt, or reconciliation where applicable.
 
-Required Ports must be present when a `Role` is assembled. Missing optional capabilities remove their associated steps when the graph is assembled; they do not create repeated feature checks or hidden fallback paths during execution.
+Required Ports must be present when an agent flow is assembled. Missing optional capabilities remove their associated steps when the graph is assembled; they do not create repeated feature checks or hidden fallback paths during execution.
 
 The ownership test is deliberately simple:
 
@@ -282,7 +282,7 @@ Mote v2 is in its initial architecture and implementation phase. The current Ker
 
 The immediate architectural objective is a narrow end-to-end agent flow that demonstrates:
 
-1. a `Role` accepting an input;
+1. a public orchestration entry point accepting an input;
 2. Kernel advancing Observe, Think, and Act through one execution engine;
 3. Runtime implementations satisfying typed Ports;
 4. atomic advancement of graph position and domain facts;

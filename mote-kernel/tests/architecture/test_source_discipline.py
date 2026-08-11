@@ -142,8 +142,10 @@ def test_concurrent_node_input_contract_remains_explicit() -> None:
 
 def test_graph_execution_contract_remains_async_only() -> None:
     execution_functions = (
-        _top_level_function("execution/executor.py", "step_graph"),
-        _top_level_function("execution/engine/superstep.py", "execute_superstep"),
+        _class_method("execution/executor.py", "GraphExecutor", "prepare"),
+        _class_method("execution/executor.py", "GraphExecutor", "execute"),
+        _top_level_function("execution/engine/superstep.py", "prepare_superstep"),
+        _top_level_function("execution/engine/superstep.py", "execute_claimed_superstep"),
         _top_level_function("execution/engine/scheduler.py", "execute_tasks"),
         _class_method("execution/graph/node.py", "Node", "__call__"),
     )

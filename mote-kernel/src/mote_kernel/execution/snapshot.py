@@ -5,9 +5,15 @@ from enum import Enum, auto
 from typing import NewType
 
 from mote_kernel.execution.graph import GraphDefinitionId, GraphDefinitionVersion, NodeId
+from mote_kernel.parallel import ParallelSnapshot
 
 GraphRunId = NewType("GraphRunId", str)
 ParentTaskId = NewType("ParentTaskId", str)
+ExecutionAttemptId = NewType("ExecutionAttemptId", str)
+ExecutionTaskId = NewType("ExecutionTaskId", str)
+InterruptId = NewType("InterruptId", str)
+InterruptPayload = NewType("InterruptPayload", bytes)
+ResolutionCodecId = NewType("ResolutionCodecId", str)
 
 
 class ExecutionStatus(Enum):
@@ -17,6 +23,53 @@ class ExecutionStatus(Enum):
     SUSPENDED = auto()
     COMPLETED = auto()
     FAILED = auto()
+
+
+class InterruptLifecycle(Enum):
+    """Execution projection of one durable interrupt generation."""
+
+    REQUESTED = auto()
+    RESOLVED = auto()
+    CONSUMED = auto()
+    CANCELLED = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionToken:
+    """Executor-owned fencing token for one committed task batch."""
+
+    generation: int
+    attempt_id: ExecutionAttemptId
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLeaseSnapshot:
+    """Read-only projection of the current durable execution owner."""
+
+    token: ExecutionToken
+    task_ids: tuple[ExecutionTaskId, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptReceipt:
+    """Execution projection of the superstep that finalized a resolution."""
+
+    superstep: int
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptRecord:
+    """Read-only durable interrupt projection consumed by execution."""
+
+    root_run_id: GraphRunId
+    interrupt_id: InterruptId
+    generation: int
+    request_payload: InterruptPayload
+    resolution_codec_id: ResolutionCodecId
+    resolution_codec_version: int
+    lifecycle: InterruptLifecycle
+    resolution_payload: InterruptPayload | None = None
+    receipt: InterruptReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +101,27 @@ class ExecutionSnapshot:
     frontier: tuple[NodeId, ...]
     parent: ParentTaskRef | None = None
     join_progress: tuple[JoinProgress, ...] = ()
+    parallel: ParallelSnapshot | None = None
+    execution_sequence: int = 0
+    execution: ExecutionLeaseSnapshot | None = None
+    interrupt: InterruptRecord | None = None
 
 
-__all__ = ["ExecutionSnapshot", "ExecutionStatus", "GraphRunId", "JoinProgress", "ParentTaskId", "ParentTaskRef"]
+__all__ = [
+    "ExecutionAttemptId",
+    "ExecutionLeaseSnapshot",
+    "ExecutionSnapshot",
+    "ExecutionStatus",
+    "ExecutionTaskId",
+    "ExecutionToken",
+    "GraphRunId",
+    "InterruptId",
+    "InterruptLifecycle",
+    "InterruptPayload",
+    "InterruptReceipt",
+    "InterruptRecord",
+    "JoinProgress",
+    "ParentTaskId",
+    "ParentTaskRef",
+    "ResolutionCodecId",
+]

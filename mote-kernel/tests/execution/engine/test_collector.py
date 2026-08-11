@@ -156,7 +156,7 @@ def test_planned_task_identity_must_be_canonical() -> None:
         collect_results(execution_snapshot, (changed,), (TaskSuccess(changed, "output"),))
 
 
-@pytest.mark.parametrize("failure", ["", "  ", " failure"])
+@pytest.mark.parametrize("failure", ["", "  ", " failure", "line\nbreak", "carriage\rreturn"])
 def test_task_failure_requires_stable_nonempty_reason(failure: str) -> None:
     execution_snapshot = snapshot()
     task = plan_tasks(compiled_graph("a"), execution_snapshot, ExecutionLimits())[0]

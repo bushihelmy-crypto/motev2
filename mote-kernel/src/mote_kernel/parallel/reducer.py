@@ -12,7 +12,7 @@ class ParallelTransitionError(ValueError):
 
 
 def _require_identity(value: str, kind: str) -> None:
-    if not value or value != value.strip():
+    if not value or value != value.strip() or "\n" in value or "\r" in value:
         raise ParallelTransitionError(f"{kind} identity must be non-empty and trimmed")
 
 
@@ -148,10 +148,7 @@ def _release(snapshot: ParallelSnapshot, participant_id: ParticipantId) -> Paral
     )
 
 
-def reduce_parallel(snapshot: ParallelSnapshot, command: ParallelCommand) -> ParallelSnapshot:
-    """Return a new resource snapshot without mutating the prior snapshot."""
-
-    _validate_snapshot(snapshot)
+def _apply_command(snapshot: ParallelSnapshot, command: ParallelCommand) -> ParallelSnapshot:
     if isinstance(command, AcquireResources):
         result = _acquire(snapshot, command)
     else:
@@ -161,10 +158,27 @@ def reduce_parallel(snapshot: ParallelSnapshot, command: ParallelCommand) -> Par
     return result
 
 
+def reduce_parallel(snapshot: ParallelSnapshot, command: ParallelCommand) -> ParallelSnapshot:
+    """Return a new resource snapshot without mutating the prior snapshot."""
+
+    validate_parallel_snapshot(snapshot)
+    result = _apply_command(snapshot, command)
+    validate_parallel_snapshot(result)
+    return result
+
+
 def validate_parallel_snapshot(snapshot: ParallelSnapshot) -> None:
     """Reject a corrupt resource snapshot without changing it."""
 
     _validate_snapshot(snapshot)
+    replayed = ParallelSnapshot(tuple(ResourceLock(resource.resource_id) for resource in snapshot.resources))
+    for acquisition in snapshot.acquisitions:
+        replayed = _apply_command(
+            replayed,
+            AcquireResources(acquisition.participant_id, acquisition.required),
+        )
+    if replayed != snapshot:
+        raise ParallelTransitionError("parallel snapshot does not match its replayed acquisition sequence")
 
 
 __all__ = ["ParallelTransitionError", "reduce_parallel", "validate_parallel_snapshot"]
