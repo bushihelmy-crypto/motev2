@@ -38,7 +38,8 @@ from mote_kernel.state.graph_state import (
 )
 from mote_kernel.state.graph_state import GraphDefinitionId as StateGraphDefinitionId
 from mote_kernel.state.graph_state.command import RequestGraphRunInterrupt, ResolveGraphRunInterrupt
-from mote_kernel.state.graph_state.reducer import GraphStateTransitionError, reduce_graph_run
+from mote_kernel.state.graph_state.reducer import reduce_graph_run
+from mote_kernel.state.graph_state.validation import GraphStateTransitionError
 
 
 class Utf8ResolutionDecoder:

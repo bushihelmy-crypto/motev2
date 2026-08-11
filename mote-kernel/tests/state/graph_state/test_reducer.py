@@ -46,7 +46,7 @@ from mote_kernel.state.graph_state import (
     reduce_graph_run,
 )
 from mote_kernel.state.graph_state.command import RequestGraphRunInterrupt, ResolveGraphRunInterrupt
-from mote_kernel.state.graph_state.reducer import validate_graph_run_state
+from mote_kernel.state.graph_state.validation import validate_graph_run_state
 
 FILE = ResourceId("file")
 DATABASE = ResourceId("database")

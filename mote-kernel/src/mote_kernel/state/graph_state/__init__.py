@@ -34,7 +34,8 @@ from mote_kernel.state.graph_state.model import (
     GraphTaskId,
     ParentGraphTask,
 )
-from mote_kernel.state.graph_state.reducer import GraphStateTransitionError, reduce_graph_run
+from mote_kernel.state.graph_state.reducer import reduce_graph_run
+from mote_kernel.state.graph_state.validation import GraphStateTransitionError
 
 __all__ = [
     "AbortGraphRun",

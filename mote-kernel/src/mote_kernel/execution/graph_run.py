@@ -53,7 +53,7 @@ from mote_kernel.state.graph_state.model import (
 from mote_kernel.state.graph_state.model import (
     GraphRunId as StateGraphRunId,
 )
-from mote_kernel.state.graph_state.reducer import validate_graph_run_state
+from mote_kernel.state.graph_state.validation import validate_graph_run_state
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")

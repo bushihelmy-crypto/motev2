@@ -13,7 +13,7 @@ from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import NestedTaskFailure, PreparedNestedRun
 from mote_kernel.execution.snapshot import ExecutionSnapshot
 from mote_kernel.state.graph_state import GraphRunId, GraphRunStatus, GraphTaskId, ParentGraphTask
-from mote_kernel.state.graph_state.reducer import validate_graph_run_state
+from mote_kernel.state.graph_state.validation import validate_graph_run_state
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
