@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, fields
 
 import pytest
-from tests.execution.engine.factories import compiled_graph, snapshot
+from tests.execution.engine.factories import compiled_graph, identity, snapshot
 
 from mote_kernel.execution.engine import GraphTask, plan_tasks
 from mote_kernel.execution.engine.task import task_identity
@@ -205,7 +205,7 @@ def test_parallel_limit_allows_exactly_the_configured_batch_size() -> None:
 
 
 def test_nested_graph_node_is_planned_as_one_parent_task() -> None:
-    def child_node(node_input: str) -> NodeSuccess[str]:
+    async def child_node(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
@@ -265,10 +265,7 @@ def test_terminal_snapshot_cannot_retain_join_progress(status: ExecutionStatus) 
         GraphDefinition[str, str](
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(
-                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
-                for node_id in ("a", "b", "c")
-            ),
+            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
             edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
             entries=(NodeId("a"), NodeId("b")),
         )
@@ -293,10 +290,7 @@ def test_corrupt_recovered_join_progress_fails_closed(progress: JoinProgress) ->
         GraphDefinition[str, str](
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(
-                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
-                for node_id in ("a", "b", "c")
-            ),
+            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
             edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
             entries=(NodeId("a"), NodeId("b")),
         )
@@ -331,10 +325,7 @@ def test_recovered_snapshot_rejects_duplicate_join_progress() -> None:
         GraphDefinition[str, str](
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(
-                NodeDefinition(NodeId(node_id), lambda node_input: NodeSuccess(node_input))
-                for node_id in ("a", "b", "c")
-            ),
+            nodes=tuple(NodeDefinition(NodeId(node_id), identity) for node_id in ("a", "b", "c")),
             edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("c")),),
             entries=(NodeId("a"), NodeId("b")),
         )
@@ -382,7 +373,7 @@ def test_planner_accepts_large_deterministic_frontier_at_exact_limit() -> None:
 def test_planner_does_not_invoke_node() -> None:
     calls = 0
 
-    def forbidden_node(node_input: str) -> NodeSuccess[str]:
+    async def forbidden_node(node_input: str) -> NodeSuccess[str]:
         nonlocal calls
         calls += 1
         return NodeSuccess(node_input)

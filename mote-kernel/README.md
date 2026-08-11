@@ -9,6 +9,7 @@ The project is in its initial architecture and implementation phase. Its intende
 - One execution engine for every agent flow.
 - Graph state and domain state evolve independently and commit atomically.
 - Durable state is committed before the in-memory snapshot advances.
+- Concurrent nodes share one immutable input snapshot and must treat it as read-only.
 - Concrete model, prompt, tool, storage, and extension capabilities enter through narrow typed ports.
 - Optional capabilities are selected when a Role is assembled, not checked repeatedly during execution.
 

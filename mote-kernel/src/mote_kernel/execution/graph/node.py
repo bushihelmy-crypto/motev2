@@ -12,10 +12,10 @@ OutputT_co = TypeVar("OutputT_co", covariant=True)
 
 
 class Node(Protocol[InputT, OutputT_co]):
-    """Execute one node invocation without graph-level retry."""
+    """Execute once against a shared immutable input snapshot without graph-level retry."""
 
-    def __call__(self, node_input: InputT) -> "NodeOutcome[OutputT_co]":
-        """Return the typed outcome of exactly one node invocation."""
+    async def __call__(self, node_input: InputT) -> "NodeOutcome[OutputT_co]":
+        """Return a typed outcome without mutating the shared input snapshot."""
         ...
 
 

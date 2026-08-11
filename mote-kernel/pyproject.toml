@@ -32,6 +32,7 @@ dev = [
   "pre-commit>=4.0",
   "pyright>=1.1.390",
   "pytest>=8.3",
+  "pytest-asyncio>=0.25",
   "pytest-cov>=6.0",
   "ruff>=0.9",
   "twine>=6.0",
@@ -64,6 +65,7 @@ addopts = ["--strict-config", "--strict-markers", "-ra"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 xfail_strict = true
+asyncio_mode = "strict"
 
 [tool.coverage.run]
 branch = true

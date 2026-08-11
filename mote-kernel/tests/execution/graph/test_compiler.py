@@ -17,7 +17,7 @@ from mote_kernel.parallel import ResourceDefinition, ResourceId
 def test_compilation_never_invokes_nodes() -> None:
     calls = 0
 
-    def must_not_run(node_input: str) -> NodeSuccess[str]:
+    async def must_not_run(node_input: str) -> NodeSuccess[str]:
         nonlocal calls
         calls += 1
         raise AssertionError(node_input)

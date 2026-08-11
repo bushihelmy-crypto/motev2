@@ -14,7 +14,7 @@ OutputT = TypeVar("OutputT")
 
 @dataclass(frozen=True, slots=True)
 class StepRequest(Generic[InputT, OutputT]):
-    """Execute one superstep against one committed graph-run position."""
+    """Execute one superstep with one shared immutable node input snapshot."""
 
     graph: CompiledGraph[InputT, OutputT]
     state: GraphRunState

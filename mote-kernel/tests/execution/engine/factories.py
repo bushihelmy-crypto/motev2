@@ -22,7 +22,7 @@ from mote_kernel.execution.snapshot import (
 )
 
 
-def identity(node_input: str) -> NodeSuccess[str]:
+async def identity(node_input: str) -> NodeSuccess[str]:
     return NodeSuccess(node_input)
 
 

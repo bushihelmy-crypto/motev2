@@ -58,7 +58,7 @@ def _require_parallel_matches_graph(request: StepRequest[InputT, OutputT], snaps
         raise ResultCollectionError("committed parallel snapshot does not match graph resource order")
 
 
-def execute_superstep(request: StepRequest[InputT, OutputT]) -> StepResult[InputT, OutputT]:
+async def execute_superstep(request: StepRequest[InputT, OutputT]) -> StepResult[InputT, OutputT]:
     """Execute one frontier and propose, but never commit, its state command."""
 
     snapshot = project_execution_snapshot(request.state)
@@ -176,7 +176,7 @@ def execute_superstep(request: StepRequest[InputT, OutputT]) -> StepResult[Input
             for task, definition in executable_definitions
             if not definition.resources or task.task_id in committed_resource_ids
         )
-        batch_results = execute_tasks(request.graph, executable_tasks, request.node_input)
+        batch_results = await execute_tasks(request.graph, executable_tasks, request.node_input)
         released = parallel_snapshot
         for task in reversed(committed_resource_tasks):
             released = reduce_parallel(released, ReleaseResources(ParticipantId(task.task_id)))
@@ -195,7 +195,7 @@ def execute_superstep(request: StepRequest[InputT, OutputT]) -> StepResult[Input
         return ExecutedSuperstep(combined, project_graph_command(transition))
     if prepared_nested:
         return PreparedFrontier(None, prepared_nested)
-    results = execute_tasks(request.graph, pending_tasks, request.node_input, request.nested_results)
+    results = await execute_tasks(request.graph, pending_tasks, request.node_input, request.nested_results)
     combined = tuple(sorted((*request.settled_results, *results), key=lambda result: result.task.sort_key))
     transition = settle_tasks(request.graph, snapshot, tasks, combined)
     return ExecutedSuperstep(combined, project_graph_command(transition))

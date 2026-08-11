@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** Graph nodes now implement an async `Node` protocol, and callers must `await step_graph()`.
+  Graph execution is async-only and does not provide a synchronous compatibility path.
+- Concurrent nodes now share one immutable input snapshot, which node implementations must treat as read-only.
+
 ### Added
 
 - Initial repository, packaging, quality, testing, and community infrastructure.

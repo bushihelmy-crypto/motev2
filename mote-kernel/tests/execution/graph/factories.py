@@ -12,7 +12,7 @@ from mote_kernel.execution.graph import (
 from mote_kernel.parallel import ResourceDefinition
 
 
-def identity(node_input: str) -> NodeSuccess[str]:
+async def identity(node_input: str) -> NodeSuccess[str]:
     return NodeSuccess(node_input)
 
 

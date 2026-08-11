@@ -27,7 +27,7 @@ from mote_kernel.parallel import (
 FILE = ResourceId("file")
 
 
-def execute(node_input: str) -> NodeSuccess[str]:
+async def execute(node_input: str) -> NodeSuccess[str]:
     return NodeSuccess(node_input)
 
 

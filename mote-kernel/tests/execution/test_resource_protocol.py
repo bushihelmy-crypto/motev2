@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from mote_kernel.execution import (
@@ -51,6 +53,7 @@ from mote_kernel.state.graph_state import GraphDefinitionId as StateDefinitionId
 from mote_kernel.state.graph_state import GraphDefinitionVersion as StateDefinitionVersion
 
 FILE = ResourceId("file")
+pytestmark = pytest.mark.asyncio
 
 
 def state() -> GraphRunState:
@@ -64,11 +67,11 @@ def state() -> GraphRunState:
     )
 
 
-def test_resource_frontier_uses_prepare_execute_release_batches_before_settlement() -> None:
+async def test_resource_frontier_uses_prepare_execute_release_batches_before_settlement() -> None:
     calls: list[str] = []
 
     def node(name: str) -> NodeDefinition[str, str]:
-        def execute(node_input: str) -> NodeSuccess[str]:
+        async def execute(node_input: str) -> NodeSuccess[str]:
             calls.append(name)
             return NodeSuccess(f"{name}:{node_input}")
 
@@ -85,18 +88,18 @@ def test_resource_frontier_uses_prepare_execute_release_batches_before_settlemen
         )
     )
 
-    prepared_a = step_graph(StepRequest(graph, state(), "input"))
+    prepared_a = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared_a, PreparedFrontier)
     assert prepared_a.admission is not None
     assert calls == []
 
     admitted_a = reduce_graph_run(state(), prepared_a.admission.command)
-    executed_a = step_graph(StepRequest(graph, admitted_a, "input"))
+    executed_a = await step_graph(StepRequest(graph, admitted_a, "input"))
     assert isinstance(executed_a, ExecutedFrontierBatch)
     assert calls == ["a"]
 
     released_a = reduce_graph_run(admitted_a, executed_a.command)
-    executed_b = step_graph(
+    executed_b = await step_graph(
         StepRequest(
             graph,
             released_a,
@@ -110,10 +113,12 @@ def test_resource_frontier_uses_prepare_execute_release_batches_before_settlemen
     assert tuple(result.task.node_id for result in executed_b.results) == (NodeId("a"), NodeId("b"))
 
 
-def test_nonconflicting_resource_tasks_execute_in_one_committed_batch() -> None:
+async def test_nonconflicting_resource_tasks_execute_in_one_committed_batch() -> None:
     database = ResourceId("database")
+    both_started = asyncio.Barrier(2)
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
+        await asyncio.wait_for(both_started.wait(), timeout=2)
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -130,20 +135,184 @@ def test_nonconflicting_resource_tasks_execute_in_one_committed_batch() -> None:
         )
     )
 
-    prepared = step_graph(StepRequest(graph, state(), "input"))
+    prepared = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
 
     admitted = reduce_graph_run(state(), prepared.admission.command)
-    executed = step_graph(StepRequest(graph, admitted, "input"))
+    executed = await step_graph(StepRequest(graph, admitted, "input"))
     assert isinstance(executed, ExecutedSuperstep)
     assert len(executed.results) == 2
 
 
-def test_resource_and_resource_free_tasks_share_the_committed_execution_batch() -> None:
+async def test_cancelling_partially_completed_resource_batch_preserves_recoverable_state_for_retry() -> None:
+    database = ResourceId("database")
+    completed_a = asyncio.Event()
+    started_b = asyncio.Event()
+    allow_b_completion = asyncio.Event()
+    cancelled: list[str] = []
     calls: list[str] = []
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute_a(node_input: str) -> NodeSuccess[str]:
+        calls.append("a")
+        completed_a.set()
+        return NodeSuccess(f"a:{node_input}")
+
+    async def execute_b(node_input: str) -> NodeSuccess[str]:
+        calls.append("b")
+        started_b.set()
+        try:
+            await allow_b_completion.wait()
+        except asyncio.CancelledError:
+            cancelled.append("b")
+            raise
+        return NodeSuccess(f"b:{node_input}")
+
+    graph = compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("resource.graph"),
+            GraphDefinitionVersion(1),
+            (
+                NodeDefinition(NodeId("a"), execute_a, (FILE,)),
+                NodeDefinition(NodeId("b"), execute_b, (database,)),
+            ),
+            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
+            (NodeId("a"), NodeId("b")),
+            (ResourceDefinition(FILE, 10), ResourceDefinition(database, 20)),
+        )
+    )
+    initial = state()
+    prepared = await step_graph(StepRequest(graph, initial, "input"))
+    assert isinstance(prepared, PreparedFrontier)
+    assert prepared.admission is not None
+    admitted = reduce_graph_run(initial, prepared.admission.command)
+    assert admitted.parallel is not None
+    committed_resources = tuple(
+        (resource.resource_id, resource.owner, resource.waiters) for resource in admitted.parallel.resources
+    )
+    committed_acquisitions = tuple(
+        (
+            acquisition.participant_id,
+            acquisition.required,
+            acquisition.acquired,
+            acquisition.waiting_for,
+        )
+        for acquisition in admitted.parallel.acquisitions
+    )
+
+    execution = asyncio.create_task(step_graph(StepRequest(graph, admitted, "input")))
+    async with asyncio.timeout(2):
+        await asyncio.gather(completed_a.wait(), started_b.wait())
+    execution.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+
+    assert cancelled == ["b"]
+    assert admitted.parallel is not None
+    assert (
+        tuple((resource.resource_id, resource.owner, resource.waiters) for resource in admitted.parallel.resources)
+        == committed_resources
+    )
+    assert (
+        tuple(
+            (
+                acquisition.participant_id,
+                acquisition.required,
+                acquisition.acquired,
+                acquisition.waiting_for,
+            )
+            for acquisition in admitted.parallel.acquisitions
+        )
+        == committed_acquisitions
+    )
+    assert all(resource.owner is not None for resource in admitted.parallel.resources)
+    assert admitted.settled_tasks == ()
+
+    allow_b_completion.set()
+    retried = await step_graph(StepRequest(graph, admitted, "input"))
+
+    assert isinstance(retried, ExecutedSuperstep)
+    assert retried.command == CompleteGraphRun(0)
+    assert calls.count("a") == 2
+    assert calls.count("b") == 2
+    assert tuple(result.output for result in retried.results if isinstance(result, TaskSuccess)) == (
+        "a:input",
+        "b:input",
+    )
+
+
+async def test_resource_wait_queue_recovers_from_node_exception_by_replaying_committed_state() -> None:
+    attempts_a = 0
+    calls_b = 0
+
+    async def execute_a(node_input: str) -> NodeSuccess[str]:
+        nonlocal attempts_a
+        attempts_a += 1
+        if attempts_a == 1:
+            raise RuntimeError("a failed before settlement")
+        return NodeSuccess(f"a:{node_input}")
+
+    async def execute_b(node_input: str) -> NodeSuccess[str]:
+        nonlocal calls_b
+        calls_b += 1
+        return NodeSuccess(f"b:{node_input}")
+
+    graph = compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("resource.graph"),
+            GraphDefinitionVersion(1),
+            (
+                NodeDefinition(NodeId("a"), execute_a, (FILE,)),
+                NodeDefinition(NodeId("b"), execute_b, (FILE,)),
+            ),
+            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
+            (NodeId("a"), NodeId("b")),
+            (ResourceDefinition(FILE, 10),),
+        )
+    )
+    initial = state()
+    prepared = await step_graph(StepRequest(graph, initial, "input"))
+    assert isinstance(prepared, PreparedFrontier)
+    assert prepared.admission is not None
+    task_a = prepared.admission.admitted[0]
+    task_b = prepared.admission.waiting[0]
+    admitted = reduce_graph_run(initial, prepared.admission.command)
+
+    with pytest.raises(RuntimeError, match="before settlement"):
+        await step_graph(StepRequest(graph, admitted, "input"))
+
+    assert admitted.parallel is not None
+    assert admitted.parallel.resources == (
+        ResourceLock(FILE, ParticipantId(task_a.task_id), (ParticipantId(task_b.task_id),)),
+    )
+    assert admitted.settled_tasks == ()
+    assert attempts_a == 1
+    assert calls_b == 0
+
+    replayed = await step_graph(StepRequest(graph, admitted, "input"))
+    assert isinstance(replayed, ExecutedFrontierBatch)
+    released = reduce_graph_run(admitted, replayed.command)
+    assert released.parallel is not None
+    assert released.parallel.resources == (ResourceLock(FILE, ParticipantId(task_b.task_id)),)
+    assert released.settled_tasks == (GraphTaskId(task_a.task_id),)
+
+    completed = await step_graph(StepRequest(graph, released, "input", settled_results=replayed.results))
+
+    assert isinstance(completed, ExecutedSuperstep)
+    assert completed.command == CompleteGraphRun(0)
+    assert attempts_a == 2
+    assert calls_b == 1
+    assert tuple(result.output for result in completed.results if isinstance(result, TaskSuccess)) == (
+        "a:input",
+        "b:input",
+    )
+
+
+async def test_resource_and_resource_free_tasks_share_the_committed_execution_batch() -> None:
+    calls: list[str] = []
+
+    async def execute(node_input: str) -> NodeSuccess[str]:
         calls.append(node_input)
         return NodeSuccess(node_input)
 
@@ -161,21 +330,21 @@ def test_resource_and_resource_free_tasks_share_the_committed_execution_batch() 
         )
     )
 
-    prepared = step_graph(StepRequest(graph, state(), "input"))
+    prepared = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     assert calls == []
 
     admitted = reduce_graph_run(state(), prepared.admission.command)
-    executed = step_graph(StepRequest(graph, admitted, "input"))
+    executed = await step_graph(StepRequest(graph, admitted, "input"))
 
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == ["input", "input"]
     assert tuple(result.task.node_id for result in executed.results) == (NodeId("a"), NodeId("b"))
 
 
-def test_settled_results_must_uniquely_belong_to_current_frontier() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_settled_results_must_uniquely_belong_to_current_frontier() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -187,12 +356,12 @@ def test_settled_results_must_uniquely_belong_to_current_frontier() -> None:
             (NodeId("a"), NodeId("b")),
         )
     )
-    task = step_graph(StepRequest(graph, state(), "input"))
+    task = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(task, ExecutedSuperstep)
     duplicate = TaskSuccess(task.results[0].task, "prior")
 
     with pytest.raises(ResultCollectionError, match="settled"):
-        step_graph(StepRequest(graph, state(), "input", settled_results=(duplicate, duplicate)))
+        await step_graph(StepRequest(graph, state(), "input", settled_results=(duplicate, duplicate)))
 
 
 @pytest.mark.parametrize(
@@ -203,10 +372,10 @@ def test_settled_results_must_uniquely_belong_to_current_frontier() -> None:
         GraphTask(TaskId("3:run:0:1:a"), ExecutionRunId("run"), 0, NodeId("b")),
     ],
 )
-def test_settled_result_coordinates_fail_before_other_nodes_execute(corrupt_task: GraphTask) -> None:
+async def test_settled_result_coordinates_fail_before_other_nodes_execute(corrupt_task: GraphTask) -> None:
     calls: list[str] = []
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         calls.append(node_input)
         return NodeSuccess(node_input)
 
@@ -222,16 +391,16 @@ def test_settled_result_coordinates_fail_before_other_nodes_execute(corrupt_task
     corrupted = TaskSuccess(corrupt_task, "prior")
 
     with pytest.raises(ResultCollectionError, match="exactly match"):
-        step_graph(StepRequest(graph, state(), "input", settled_results=(corrupted,)))
+        await step_graph(StepRequest(graph, state(), "input", settled_results=(corrupted,)))
 
     assert calls == []
 
 
-def test_settled_result_values_must_match_committed_settled_task_state() -> None:
+async def test_settled_result_values_must_match_committed_settled_task_state() -> None:
     graph_state = state()
     object.__setattr__(graph_state, "settled_tasks", (GraphTaskId("3:run:0:1:a"),))
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -245,7 +414,7 @@ def test_settled_result_values_must_match_committed_settled_task_state() -> None
     )
 
     with pytest.raises(ResultCollectionError, match="exactly cover"):
-        step_graph(StepRequest(graph, graph_state, "input"))
+        await step_graph(StepRequest(graph, graph_state, "input"))
 
     object.__setattr__(graph_state, "settled_tasks", (GraphTaskId("unknown"),))
     unknown = TaskSuccess(
@@ -253,11 +422,11 @@ def test_settled_result_values_must_match_committed_settled_task_state() -> None
         "prior",
     )
     with pytest.raises(ResultCollectionError):
-        step_graph(StepRequest(graph, graph_state, "input", settled_results=(unknown,)))
+        await step_graph(StepRequest(graph, graph_state, "input", settled_results=(unknown,)))
 
 
-def test_resource_and_nested_tasks_do_not_cross_execution_protocols() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_resource_and_nested_tasks_do_not_cross_execution_protocols() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
@@ -281,23 +450,23 @@ def test_resource_and_nested_tasks_do_not_cross_execution_protocols() -> None:
         )
     )
 
-    prepared = step_graph(StepRequest(graph, state(), "input"))
+    prepared = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     assert tuple(task.node_id for task in prepared.admission.admitted) == (NodeId("a"),)
     assert tuple(run.parent_task.node_id for run in prepared.nested_runs) == (NodeId("b"),)
 
     admitted = reduce_graph_run(state(), prepared.admission.command)
-    executed = step_graph(StepRequest(graph, admitted, "input"))
+    executed = await step_graph(StepRequest(graph, admitted, "input"))
 
     assert isinstance(executed, ExecutedFrontierBatch)
     assert tuple(result.task.node_id for result in executed.results) == (NodeId("a"),)
 
 
-def test_committed_parallel_snapshot_must_match_compiled_resource_order() -> None:
+async def test_committed_parallel_snapshot_must_match_compiled_resource_order() -> None:
     database = ResourceId("database")
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -314,11 +483,11 @@ def test_committed_parallel_snapshot_must_match_compiled_resource_order() -> Non
     object.__setattr__(mismatched, "parallel", ParallelSnapshot((ResourceLock(FILE),)))
 
     with pytest.raises(ResultCollectionError, match="resource order"):
-        step_graph(StepRequest(graph, mismatched, "input"))
+        await step_graph(StepRequest(graph, mismatched, "input"))
 
 
-def test_parallel_snapshot_is_validated_without_pending_resource_tasks() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_parallel_snapshot_is_validated_without_pending_resource_tasks() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -334,11 +503,11 @@ def test_parallel_snapshot_is_validated_without_pending_resource_tasks() -> None
     object.__setattr__(mismatched, "parallel", ParallelSnapshot((ResourceLock(FILE),)))
 
     with pytest.raises(ResultCollectionError, match="resource order"):
-        step_graph(StepRequest(graph, mismatched, "input"))
+        await step_graph(StepRequest(graph, mismatched, "input"))
 
 
-def test_parallel_snapshot_rejects_stale_acquisition_without_pending_resource_tasks() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_parallel_snapshot_rejects_stale_acquisition_without_pending_resource_tasks() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -359,11 +528,11 @@ def test_parallel_snapshot_rejects_stale_acquisition_without_pending_resource_ta
     object.__setattr__(stale, "parallel", acquired)
 
     with pytest.raises(ResultCollectionError, match="outside pending resource tasks"):
-        step_graph(StepRequest(graph, stale, "input"))
+        await step_graph(StepRequest(graph, stale, "input"))
 
 
-def test_parallel_snapshot_rejects_acquisition_for_a_settled_resource_task() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_parallel_snapshot_rejects_acquisition_for_a_settled_resource_task() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -389,7 +558,7 @@ def test_parallel_snapshot_rejects_acquisition_for_a_settled_resource_task() -> 
     object.__setattr__(corrupted, "settled_tasks", (GraphTaskId(task_a.task_id),))
 
     with pytest.raises(ResultCollectionError, match="outside pending resource tasks"):
-        step_graph(
+        await step_graph(
             StepRequest(
                 graph,
                 corrupted,
@@ -399,10 +568,10 @@ def test_parallel_snapshot_rejects_acquisition_for_a_settled_resource_task() -> 
         )
 
 
-def test_settled_resource_then_nested_rejects_mismatched_parallel_before_child_preparation() -> None:
+async def test_settled_resource_then_nested_rejects_mismatched_parallel_before_child_preparation() -> None:
     database = ResourceId("database")
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
@@ -431,7 +600,7 @@ def test_settled_resource_then_nested_rejects_mismatched_parallel_before_child_p
     object.__setattr__(recovered, "settled_tasks", (GraphTaskId(task_a.task_id),))
 
     with pytest.raises(ResultCollectionError, match="resource order"):
-        step_graph(
+        await step_graph(
             StepRequest(
                 graph,
                 recovered,
@@ -441,8 +610,8 @@ def test_settled_resource_then_nested_rejects_mismatched_parallel_before_child_p
         )
 
 
-def test_settled_resource_then_nested_allows_matching_released_parallel_snapshot() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_settled_resource_then_nested_allows_matching_released_parallel_snapshot() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
@@ -470,7 +639,7 @@ def test_settled_resource_then_nested_allows_matching_released_parallel_snapshot
     object.__setattr__(recovered, "parallel", ParallelSnapshot((ResourceLock(FILE),)))
     object.__setattr__(recovered, "settled_tasks", (GraphTaskId(task_a.task_id),))
 
-    prepared = step_graph(
+    prepared = await step_graph(
         StepRequest(
             graph,
             recovered,
@@ -484,8 +653,8 @@ def test_settled_resource_then_nested_allows_matching_released_parallel_snapshot
     assert tuple(run.parent_task.node_id for run in prepared.nested_runs) == (NodeId("b"),)
 
 
-def test_failed_resource_task_releases_lock_and_settles_failure() -> None:
-    def fail(node_input: str) -> NodeFailure:
+async def test_failed_resource_task_releases_lock_and_settles_failure() -> None:
+    async def fail(node_input: str) -> NodeFailure:
         return NodeFailure(f"failed: {node_input}")
 
     graph = compile_graph(
@@ -498,28 +667,28 @@ def test_failed_resource_task_releases_lock_and_settles_failure() -> None:
             (ResourceDefinition(FILE, 10),),
         )
     )
-    prepared = step_graph(StepRequest(graph, state(), "input"))
+    prepared = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     admitted = reduce_graph_run(state(), prepared.admission.command)
 
-    first = step_graph(StepRequest(graph, admitted, "input"))
+    first = await step_graph(StepRequest(graph, admitted, "input"))
     assert isinstance(first, ExecutedFrontierBatch)
     released = reduce_graph_run(admitted, first.command)
     assert released.parallel is not None
     assert released.parallel.resources[0].owner is not None
 
-    completed = step_graph(StepRequest(graph, released, "input", settled_results=first.results))
+    completed = await step_graph(StepRequest(graph, released, "input", settled_results=first.results))
     assert isinstance(completed, ExecutedSuperstep)
     assert isinstance(completed.command, FailGraphRun)
     assert completed.command.failure == "failed: input"
 
 
-def test_conditional_route_acquires_only_the_selected_target_resource() -> None:
-    def choose(node_input: str) -> NodeSuccess[str]:
+async def test_conditional_route_acquires_only_the_selected_target_resource() -> None:
+    async def choose(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input, SelectRoute(RouteId("left")))
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     graph = compile_graph(
@@ -549,22 +718,22 @@ def test_conditional_route_acquires_only_the_selected_target_resource() -> None:
         0,
         (GraphNodeId("a"),),
     )
-    routed = step_graph(StepRequest(graph, initial, "input"))
+    routed = await step_graph(StepRequest(graph, initial, "input"))
     assert isinstance(routed, ExecutedSuperstep)
     next_state = reduce_graph_run(initial, routed.command)
 
-    prepared = step_graph(StepRequest(graph, next_state, "input"))
+    prepared = await step_graph(StepRequest(graph, next_state, "input"))
 
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     assert tuple(task.node_id for task in prepared.admission.admitted) == (NodeId("left"),)
 
 
-def test_partially_held_multi_resource_task_does_not_execute_before_full_admission() -> None:
+async def test_partially_held_multi_resource_task_does_not_execute_before_full_admission() -> None:
     database = ResourceId("database")
     calls: list[str] = []
 
-    def execute(node_input: str) -> NodeSuccess[str]:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         calls.append(node_input)
         return NodeSuccess(node_input)
 
@@ -582,7 +751,7 @@ def test_partially_held_multi_resource_task_does_not_execute_before_full_admissi
         )
     )
 
-    prepared = step_graph(StepRequest(graph, state(), "input"))
+    prepared = await step_graph(StepRequest(graph, state(), "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     assert tuple(task.node_id for task in prepared.admission.admitted) == (NodeId("a"),)
@@ -590,15 +759,15 @@ def test_partially_held_multi_resource_task_does_not_execute_before_full_admissi
     assert calls == []
 
     admitted = reduce_graph_run(state(), prepared.admission.command)
-    first = step_graph(StepRequest(graph, admitted, "input"))
+    first = await step_graph(StepRequest(graph, admitted, "input"))
 
     assert isinstance(first, ExecutedFrontierBatch)
     assert tuple(result.task.node_id for result in first.results) == (NodeId("a"),)
     assert calls == ["input"]
 
 
-def test_resource_batch_then_nested_graph_can_settle_one_frontier() -> None:
-    def execute(node_input: str) -> NodeSuccess[str]:
+async def test_resource_batch_then_nested_graph_can_settle_one_frontier() -> None:
+    async def execute(node_input: str) -> NodeSuccess[str]:
         return NodeSuccess(node_input)
 
     child = GraphDefinition[str, str](
@@ -622,25 +791,25 @@ def test_resource_batch_then_nested_graph_can_settle_one_frontier() -> None:
         )
     )
     initial = state()
-    prepared = step_graph(StepRequest(graph, initial, "input"))
+    prepared = await step_graph(StepRequest(graph, initial, "input"))
     assert isinstance(prepared, PreparedFrontier)
     assert prepared.admission is not None
     assert len(prepared.nested_runs) == 1
     nested_run = prepared.nested_runs[0]
 
     child_state = reduce_graph_run(None, nested_run.command)
-    child_execution = step_graph(StepRequest(nested_run.graph, child_state, "input"))
+    child_execution = await step_graph(StepRequest(nested_run.graph, child_state, "input"))
     assert isinstance(child_execution, ExecutedSuperstep)
     child_result = child_execution.results[0]
     assert isinstance(child_result, TaskSuccess)
     completed_child = reduce_graph_run(child_state, child_execution.command)
 
     admitted = reduce_graph_run(initial, prepared.admission.command)
-    batch = step_graph(StepRequest(graph, admitted, "input"))
+    batch = await step_graph(StepRequest(graph, admitted, "input"))
     assert isinstance(batch, ExecutedFrontierBatch)
     released = reduce_graph_run(admitted, batch.command)
 
-    completed = step_graph(
+    completed = await step_graph(
         StepRequest(
             graph,
             released,

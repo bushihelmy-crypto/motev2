@@ -10,10 +10,10 @@ InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 
 
-def step_graph(request: StepRequest[InputT, OutputT]) -> StepResult[InputT, OutputT]:
+async def step_graph(request: StepRequest[InputT, OutputT]) -> StepResult[InputT, OutputT]:
     """Execute exactly one superstep without mutating or persisting state."""
 
-    return execute_superstep(request)
+    return await execute_superstep(request)
 
 
 __all__ = ["step_graph"]

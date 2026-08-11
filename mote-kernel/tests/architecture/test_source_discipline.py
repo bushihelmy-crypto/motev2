@@ -16,6 +16,38 @@ def _relative(path: Path) -> str:
     return path.relative_to(PACKAGE_ROOT).as_posix()
 
 
+def _top_level_definition(relative: str, name: str) -> ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef:
+    path = PACKAGE_ROOT / relative
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name
+    )
+
+
+def _top_level_function(relative: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    definition = _top_level_definition(relative, name)
+    if isinstance(definition, ast.ClassDef):
+        raise AssertionError(f"{relative}:{name} is not a function")
+    return definition
+
+
+def _class_method(relative: str, class_name: str, method_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    path = PACKAGE_ROOT / relative
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    class_definition = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    return next(
+        node
+        for node in class_definition.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == method_name
+    )
+
+
+def _top_level_docstring(relative: str, name: str) -> str:
+    return ast.get_docstring(_top_level_definition(relative, name)) or ""
+
+
 def test_imports_form_a_contiguous_module_header() -> None:
     violations = production_import_placement_violations(PACKAGE_ROOT)
     assert not violations, f"imports must form one contiguous module-header block: {violations}"
@@ -96,3 +128,24 @@ def test_execution_is_the_only_generic_executor_owner() -> None:
         "only execution/executor.py may own the generic graph executor; "
         f"use capability-specific names such as node_executor.py elsewhere: {executor_modules}"
     )
+
+
+def test_concurrent_node_input_contract_remains_explicit() -> None:
+    contracts = (
+        _top_level_docstring("execution/graph/node.py", "Node"),
+        _top_level_docstring("execution/request.py", "StepRequest"),
+        _top_level_docstring("execution/engine/scheduler.py", "execute_tasks"),
+    )
+
+    assert all("immutable" in contract and "shared" in contract for contract in contracts)
+
+
+def test_graph_execution_contract_remains_async_only() -> None:
+    execution_functions = (
+        _top_level_function("execution/executor.py", "step_graph"),
+        _top_level_function("execution/engine/superstep.py", "execute_superstep"),
+        _top_level_function("execution/engine/scheduler.py", "execute_tasks"),
+        _class_method("execution/graph/node.py", "Node", "__call__"),
+    )
+
+    assert all(isinstance(definition, ast.AsyncFunctionDef) for definition in execution_functions)
