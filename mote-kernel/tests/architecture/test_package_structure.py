@@ -38,6 +38,11 @@ REQUIRED_PACKAGES = frozenset(
 FORBIDDEN_PACKAGE_NAMES = frozenset({"common", "helper", "helpers", "misc", "shared", "util", "utils"})
 
 
+def _is_production_directory(path: Path) -> bool:
+    relative = path.relative_to(PACKAGE_ROOT)
+    return path.is_dir() and path.name != "__pycache__" and not any(part.startswith(".") for part in relative.parts)
+
+
 def test_confirmed_kernel_packages_exist() -> None:
     missing = sorted(path for path in REQUIRED_PACKAGES if not (PACKAGE_ROOT / path / "__init__.py").is_file())
     assert not missing, f"missing confirmed Kernel packages: {missing}"
@@ -56,6 +61,6 @@ def test_every_production_package_is_explicit() -> None:
     violations = sorted(
         path.relative_to(PACKAGE_ROOT).as_posix()
         for path in PACKAGE_ROOT.rglob("*")
-        if path.is_dir() and path.name != "__pycache__" and not (path / "__init__.py").is_file()
+        if _is_production_directory(path) and not (path / "__init__.py").is_file()
     )
     assert not violations, f"production package directories require __init__.py: {violations}"
