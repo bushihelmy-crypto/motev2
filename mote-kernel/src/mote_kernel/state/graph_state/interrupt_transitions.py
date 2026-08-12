@@ -14,7 +14,6 @@ from mote_kernel.state.graph_state.model import (
     GraphRunState,
     GraphRunStatus,
 )
-from mote_kernel.state.graph_state.transition_guard import require_interrupt_generation
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError, validated_graph_run_state
 
 
@@ -50,8 +49,6 @@ def request_graph_interrupt(state: GraphRunState, command: RequestGraphRunInterr
 
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can request an interrupt")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("interrupt request was based on a stale superstep")
     if state.execution is not None:
         raise GraphStateTransitionError("graph execution must drain before interruption")
     codec = state.resolution_codec
@@ -85,8 +82,6 @@ def resolve_graph_interrupt(state: GraphRunState, command: ResolveGraphRunInterr
     """Persist one exact resolution and resume its graph run."""
 
     interrupt = state.interrupt
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("interrupt resolution was based on a stale superstep")
     if (
         state.status is not GraphRunStatus.SUSPENDED
         or interrupt is None
@@ -112,9 +107,6 @@ def abort_graph_run(state: GraphRunState, command: AbortGraphRun) -> GraphRunSta
 
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED}:
         raise GraphStateTransitionError("a terminal graph cannot abort again")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("abort command was based on a stale superstep")
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     if state.execution is not None or state.resources is not None:
         raise GraphStateTransitionError("graph execution and resources must be fenced before abort")
     return validated_graph_run_state(

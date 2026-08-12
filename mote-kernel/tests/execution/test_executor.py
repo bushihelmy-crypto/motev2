@@ -94,17 +94,14 @@ def child_state(
         started,
         ClaimGraphExecution(
             0,
-            0,
-            None,
-            None,
             GraphExecutionAttemptId("child-fixture"),
             (GraphTaskId("child-fixture-task"),),
         ),
     )
     execution = GraphExecutionToken(1, GraphExecutionAttemptId("child-fixture"))
     if failure is None:
-        return reduce_graph_run(claimed, CompleteGraphRun(0, execution, None))
-    return reduce_graph_run(claimed, FailGraphExecution(0, execution, None, GraphFailure(failure)))
+        return reduce_graph_run(claimed, CompleteGraphRun(claimed.revision, execution))
+    return reduce_graph_run(claimed, FailGraphExecution(claimed.revision, execution, GraphFailure(failure)))
 
 
 async def test_step_executes_direct_node_once_and_proposes_advance_without_mutating_state() -> None:
@@ -130,14 +127,14 @@ async def test_step_executes_direct_node_once_and_proposes_advance_without_mutat
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == ["input"]
     assert isinstance(executed.command, AdvanceGraphRun)
-    assert executed.command.expected_superstep == 0
+    assert executed.command.expected_revision == 1
     assert executed.command.frontier == (GraphNodeId("b"),)
     assert isinstance(executed.results[0], TaskSuccess)
     assert executed.results[0].output == "INPUT"
     assert committed.superstep == 0
     assert committed.frontier == (GraphNodeId("a"),)
     with pytest.raises(FrozenInstanceError):
-        executed.command.expected_superstep = 1  # type: ignore[misc]
+        executed.command.expected_revision = 2  # type: ignore[misc]
 
 
 async def test_step_executes_frontier_concurrently_and_collects_results_in_deterministic_order() -> None:
@@ -177,7 +174,7 @@ async def test_step_executes_frontier_concurrently_and_collects_results_in_deter
         "b:input",
     )
     assert isinstance(executed.command, CompleteGraphRun)
-    assert executed.command.expected_superstep == 0
+    assert executed.command.expected_revision == 1
 
 
 async def test_concurrent_runs_share_compiled_graph_without_cross_run_state() -> None:
@@ -231,8 +228,8 @@ async def test_concurrent_runs_share_compiled_graph_without_cross_run_state() ->
     assert isinstance(second, ExecutedSuperstep)
     assert isinstance(first.command, CompleteGraphRun)
     assert isinstance(second.command, CompleteGraphRun)
-    assert first.command.expected_superstep == 0
-    assert second.command.expected_superstep == 0
+    assert first.command.expected_revision == 1
+    assert second.command.expected_revision == 1
     assert first.command.execution.generation == second.command.execution.generation == 1
     assert first.command.execution.attempt_id != second.command.execution.attempt_id
     assert isinstance(first.results[0], TaskSuccess)
@@ -419,7 +416,7 @@ async def test_step_preserves_typed_conditional_routing() -> None:
 
     assert isinstance(executed, ExecutedSuperstep)
     assert isinstance(executed.command, AdvanceGraphRun)
-    assert executed.command.expected_superstep == 0
+    assert executed.command.expected_revision == 1
     assert executed.command.frontier == (GraphNodeId("right"),)
 
 
@@ -446,7 +443,7 @@ async def test_node_failure_becomes_fail_command_without_retry() -> None:
     assert isinstance(executed, ExecutedSuperstep)
     assert calls == 1
     assert isinstance(executed.command, FailGraphExecution)
-    assert executed.command.expected_superstep == 3
+    assert executed.command.expected_revision == 1
     assert executed.command.failure == GraphFailure("failed: input")
     assert executed.results == (TaskFailure(executed.results[0].task, "failed: input"),)
 
@@ -620,7 +617,7 @@ async def test_node_success_subclass_satisfies_runtime_contract() -> None:
 
     assert isinstance(executed, ExecutedSuperstep)
     assert isinstance(executed.command, CompleteGraphRun)
-    assert executed.command.expected_superstep == 0
+    assert executed.command.expected_revision == 1
     assert isinstance(executed.results[0], TaskSuccess)
     assert executed.results[0].output == "input"
 
@@ -656,7 +653,7 @@ async def test_nested_graph_prepares_child_run_then_settles_parent_from_child_re
     executed_child = await execute_step(step_request(nested_run.graph, started_child_state, "input"))
     assert isinstance(executed_child, ExecutedSuperstep)
     assert isinstance(executed_child.command, CompleteGraphRun)
-    assert executed_child.command.expected_superstep == 0
+    assert executed_child.command.expected_revision == 1
     child_result = executed_child.results[0]
     assert isinstance(child_result, TaskSuccess)
 
@@ -677,7 +674,7 @@ async def test_nested_graph_prepares_child_run_then_settles_parent_from_child_re
 
     assert isinstance(executed_parent, ExecutedSuperstep)
     assert isinstance(executed_parent.command, CompleteGraphRun)
-    assert executed_parent.command.expected_superstep == 0
+    assert executed_parent.command.expected_revision == 1
     assert executed_parent.results == (TaskSuccess(nested_run.parent_task, "input"),)
 
 
@@ -710,9 +707,6 @@ async def test_nested_wait_rejects_retained_execution_ownership() -> None:
         state(),
         ClaimGraphExecution(
             0,
-            0,
-            None,
-            None,
             GraphExecutionAttemptId("test-attempt"),
             (GraphTaskId(parent_task.task_id),),
         ),
@@ -1121,7 +1115,7 @@ async def test_partially_completed_nested_frontier_prepares_only_missing_child()
     assert isinstance(settled, ExecutedSuperstep)
     assert tuple(result.task.node_id for result in settled.results) == (NodeId("a"), NodeId("b"))
     assert isinstance(settled.command, CompleteGraphRun)
-    assert settled.command.expected_superstep == 0
+    assert settled.command.expected_revision == 1
 
 
 async def test_mixed_nested_success_and_failure_fails_parent_deterministically() -> None:
@@ -1171,7 +1165,7 @@ async def test_mixed_nested_success_and_failure_fails_parent_deterministically()
     assert isinstance(reversed_result.command, FailGraphExecution)
     assert forward.command.failure == GraphFailure("b failed")
     assert reversed_result.command.failure == GraphFailure("b failed")
-    assert forward.command.expected_superstep == reversed_result.command.expected_superstep == 0
+    assert forward.command.expected_revision == reversed_result.command.expected_revision == 1
     assert forward.command.execution.generation == reversed_result.command.execution.generation == 1
     assert forward.command.execution.attempt_id != reversed_result.command.execution.attempt_id
     assert tuple(result.task.node_id for result in forward.results) == (NodeId("a"), NodeId("b"))
@@ -1232,7 +1226,7 @@ async def test_regular_sibling_waits_for_nested_child_and_executes_once_when_chi
     assert calls == ["input"]
     assert tuple(result.task.node_id for result in executed.results) == (NodeId("a"), NodeId("b"))
     assert isinstance(executed.command, CompleteGraphRun)
-    assert executed.command.expected_superstep == 0
+    assert executed.command.expected_revision == 1
 
 
 async def test_stale_nested_completion_from_prior_superstep_is_rejected() -> None:
@@ -1340,7 +1334,7 @@ async def test_nested_completion_participates_in_cross_superstep_join() -> None:
         frozenset({GraphNodeId("a")}),
     )
     assert isinstance(first.command, AdvanceGraphRun)
-    assert first.command.expected_superstep == 0
+    assert first.command.expected_revision == 1
     assert first.command.frontier == (GraphNodeId("b"),)
     assert first.command.join_progress == (expected_progress,)
     second_state = GraphRunState(
@@ -1357,7 +1351,7 @@ async def test_nested_completion_participates_in_cross_superstep_join() -> None:
 
     assert isinstance(second, ExecutedSuperstep)
     assert isinstance(second.command, AdvanceGraphRun)
-    assert second.command.expected_superstep == 1
+    assert second.command.expected_revision == 1
     assert second.command.frontier == (GraphNodeId("joined"),)
 
 

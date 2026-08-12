@@ -105,6 +105,7 @@ class ExecutionSnapshot:
     execution_sequence: int = 0
     execution: ExecutionLeaseSnapshot | None = None
     interrupt: InterruptRecord | None = None
+    revision: int = 0
 
 
 __all__ = [

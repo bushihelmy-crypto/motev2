@@ -87,6 +87,7 @@ def project_execution_snapshot(state: GraphRunState) -> ExecutionSnapshot:
         status=_EXECUTION_STATUS[state.status],
         superstep=state.superstep,
         frontier=tuple(NodeId(node_id) for node_id in state.frontier),
+        revision=state.revision,
         parent=(ParentTaskRef(GraphRunId(parent.run_id), ParentTaskId(parent.task_id)) if parent is not None else None),
         join_progress=tuple(
             JoinProgress(
@@ -158,9 +159,8 @@ def project_graph_command(transition: ExecutionTransition) -> GraphRunCommand:
 
     if isinstance(transition, AdvanceTransition):
         return AdvanceGraphRun(
-            expected_superstep=transition.expected_superstep,
+            expected_revision=transition.expected_revision,
             execution=_project_execution_token(transition.execution),
-            expected_interrupt_generation=transition.expected_interrupt_generation,
             frontier=tuple(GraphNodeId(node_id) for node_id in transition.frontier),
             join_progress=tuple(
                 GraphJoinProgress(
@@ -173,14 +173,12 @@ def project_graph_command(transition: ExecutionTransition) -> GraphRunCommand:
         )
     if isinstance(transition, CompleteTransition):
         return CompleteGraphRun(
-            transition.expected_superstep,
+            transition.expected_revision,
             _project_execution_token(transition.execution),
-            transition.expected_interrupt_generation,
         )
     return FailGraphExecution(
-        transition.expected_superstep,
+        transition.expected_revision,
         _project_execution_token(transition.execution),
-        transition.expected_interrupt_generation,
         GraphFailure(transition.failure),
     )
 

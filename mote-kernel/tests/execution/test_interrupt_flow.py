@@ -132,7 +132,7 @@ async def test_claim_is_owned_by_one_executor_and_consumed_at_most_once() -> Non
         apply(
             claimed,
             RequestGraphRunInterrupt(
-                claimed.superstep,
+                claimed.revision,
                 GraphInterruptIdentity(claimed.run_id, GraphInterruptId("pause"), 1),
                 GraphInterruptPayload(b"request"),
             ),
@@ -189,7 +189,7 @@ async def test_cancelled_parallel_claim_requires_explicit_fencing() -> None:
     with pytest.raises(ResultCollectionError, match="already been consumed"):
         await executor.execute(claim, request(claimed, "worker"))
 
-    fenced = apply(claimed, FenceGraphExecution(claimed.superstep, claimed.execution.token))
+    fenced = apply(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
     retry = await prepare_claim(executor, fenced, "retry")
     retried = apply(fenced, retry.command)
 
@@ -232,7 +232,7 @@ async def test_parallel_node_exception_settles_sibling_but_keeps_claim_fenced() 
     assert completed == ["b", "a"]
     assert claim.consumed
     assert claimed.execution is not None
-    fenced = apply(claimed, FenceGraphExecution(claimed.superstep, claimed.execution.token))
+    fenced = apply(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
     assert fenced.execution is None
 
 
@@ -327,7 +327,7 @@ async def test_fenced_unstarted_claim_cannot_execute_against_current_state() -> 
     prepared_claim = await prepare_claim(executor, initial, "worker")
     claimed = apply(initial, prepared_claim.command)
     assert claimed.execution is not None
-    fenced = apply(claimed, FenceGraphExecution(claimed.superstep, claimed.execution.token))
+    fenced = apply(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
 
     with pytest.raises(ResultCollectionError, match="does not match committed"):
         await executor.execute(prepared_claim, request(fenced, "worker"))
@@ -355,12 +355,12 @@ async def test_late_settlement_cannot_overwrite_a_reclaimed_execution() -> None:
     first_state = apply(initial, first_claim.command)
     first_result = await executor.execute(first_claim, request(first_state, "worker-one"))
     assert first_state.execution is not None
-    fenced = apply(first_state, FenceGraphExecution(first_state.superstep, first_state.execution.token))
+    fenced = apply(first_state, FenceGraphExecution(first_state.revision, first_state.execution.token))
     retry_claim = await prepare_claim(executor, fenced, "worker-two")
     retry_state = apply(fenced, retry_claim.command)
     retry_result = await executor.execute(retry_claim, request(retry_state, "worker-two"))
 
-    with pytest.raises(GraphStateTransitionError, match="own the active execution lease"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         apply(retry_state, first_result.command)
 
     completed = apply(retry_state, retry_result.command)
@@ -458,7 +458,7 @@ async def test_suspended_run_prepares_as_idle_without_an_execution_claim() -> No
     suspended = apply(
         initial,
         RequestGraphRunInterrupt(
-            initial.superstep,
+            initial.revision,
             GraphInterruptIdentity(initial.run_id, GraphInterruptId("pause"), 1),
             GraphInterruptPayload(b"request"),
         ),
@@ -498,12 +498,12 @@ def resolved(executor: GraphExecutor[str, str]) -> GraphRunState:
     identity = GraphInterruptIdentity(initial.run_id, GraphInterruptId("pause"), 1)
     requested = apply(
         initial,
-        RequestGraphRunInterrupt(initial.superstep, identity, GraphInterruptPayload(b"request")),
+        RequestGraphRunInterrupt(initial.revision, identity, GraphInterruptPayload(b"request")),
     )
     return apply(
         requested,
         ResolveGraphRunInterrupt(
-            requested.superstep,
+            requested.revision,
             identity,
             GraphInterruptPayload(b"approved"),
         ),
@@ -618,11 +618,11 @@ async def test_two_interrupt_generations_deliver_only_their_own_resolution() -> 
     first_identity = GraphInterruptIdentity(current.run_id, GraphInterruptId("pause"), 1)
     current = apply(
         current,
-        RequestGraphRunInterrupt(current.superstep, first_identity, GraphInterruptPayload(b"request-one")),
+        RequestGraphRunInterrupt(current.revision, first_identity, GraphInterruptPayload(b"request-one")),
     )
     current = apply(
         current,
-        ResolveGraphRunInterrupt(current.superstep, first_identity, GraphInterruptPayload(b"answer-one")),
+        ResolveGraphRunInterrupt(current.revision, first_identity, GraphInterruptPayload(b"answer-one")),
     )
     first_claim = await prepare_claim(executor, current, "worker-one")
     first_claimed = apply(current, first_claim.command)
@@ -637,11 +637,11 @@ async def test_two_interrupt_generations_deliver_only_their_own_resolution() -> 
     second_identity = GraphInterruptIdentity(current.run_id, GraphInterruptId("pause"), 2)
     current = apply(
         current,
-        RequestGraphRunInterrupt(current.superstep, second_identity, GraphInterruptPayload(b"request-two")),
+        RequestGraphRunInterrupt(current.revision, second_identity, GraphInterruptPayload(b"request-two")),
     )
     current = apply(
         current,
-        ResolveGraphRunInterrupt(current.superstep, second_identity, GraphInterruptPayload(b"answer-two")),
+        ResolveGraphRunInterrupt(current.revision, second_identity, GraphInterruptPayload(b"answer-two")),
     )
     second_claim = await prepare_claim(executor, current, "worker-two")
     second_claimed = apply(current, second_claim.command)
@@ -692,7 +692,7 @@ async def test_resolution_decode_failure_retains_claim_until_explicit_fencing() 
     assert claimed.execution is not None
     fenced = apply(
         claimed,
-        FenceGraphExecution(claimed.superstep, claimed.execution.token),
+        FenceGraphExecution(claimed.revision, claimed.execution.token),
     )
     assert fenced.execution is None
 
@@ -721,7 +721,7 @@ async def test_resolution_is_redelivered_after_exception_until_progress_commits(
     assert first_claimed.execution is not None
     fenced = apply(
         first_claimed,
-        FenceGraphExecution(first_claimed.superstep, first_claimed.execution.token),
+        FenceGraphExecution(first_claimed.revision, first_claimed.execution.token),
     )
     retry_claim = await prepare_claim(executor, fenced, "worker-two")
     retry_claimed = apply(fenced, retry_claim.command)

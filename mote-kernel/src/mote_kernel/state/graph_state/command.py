@@ -37,9 +37,8 @@ class StartGraphRun:
 class AdvanceGraphRun:
     """Commit the next frontier after one superstep settles."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: GraphExecutionToken
-    expected_interrupt_generation: int | None
     frontier: tuple[GraphNodeId, ...]
     join_progress: tuple[GraphJoinProgress, ...] = ()
 
@@ -48,10 +47,7 @@ class AdvanceGraphRun:
 class ClaimGraphExecution:
     """Atomically claim one task batch for one executor attempt."""
 
-    expected_superstep: int
-    expected_execution_sequence: int
-    expected_resources: ResourceSnapshot | None
-    expected_interrupt_generation: int | None
+    expected_revision: int
     attempt_id: GraphExecutionAttemptId
     task_ids: tuple[GraphTaskId, ...]
 
@@ -60,7 +56,7 @@ class ClaimGraphExecution:
 class FenceGraphExecution:
     """Clear one exact lease only after its executor has been stopped and fenced."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: GraphExecutionToken
 
 
@@ -68,7 +64,7 @@ class FenceGraphExecution:
 class RequestGraphRunInterrupt:
     """Suspend one quiescent run with a caller-assigned tree interrupt identity."""
 
-    expected_superstep: int
+    expected_revision: int
     identity: GraphInterruptIdentity
     request_payload: GraphInterruptPayload
 
@@ -77,7 +73,7 @@ class RequestGraphRunInterrupt:
 class ResolveGraphRunInterrupt:
     """Persist one exact interrupt resolution and resume its graph run."""
 
-    expected_superstep: int
+    expected_revision: int
     identity: GraphInterruptIdentity
     resolution_payload: GraphInterruptPayload
 
@@ -86,18 +82,16 @@ class ResolveGraphRunInterrupt:
 class CompleteGraphRun:
     """Mark a running graph as successfully complete."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: GraphExecutionToken
-    expected_interrupt_generation: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class FailGraphExecution:
     """Fail a running graph from a settled, fenced execution attempt."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: GraphExecutionToken
-    expected_interrupt_generation: int | None
     failure: GraphFailure
 
 
@@ -105,8 +99,7 @@ class FailGraphExecution:
 class AbortGraphRun:
     """Terminate a quiescent running or suspended graph without claiming execution."""
 
-    expected_superstep: int
-    expected_interrupt_generation: int | None
+    expected_revision: int
     failure: GraphFailure
 
 
@@ -114,9 +107,7 @@ class AbortGraphRun:
 class UpdateGraphResources:
     """Commit resource admission before an executor attempt is claimed."""
 
-    expected_superstep: int
-    expected_resources: ResourceSnapshot | None
-    expected_interrupt_generation: int | None
+    expected_revision: int
     resources: ResourceSnapshot
 
 

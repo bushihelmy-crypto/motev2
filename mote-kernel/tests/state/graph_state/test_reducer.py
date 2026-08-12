@@ -171,14 +171,10 @@ def claim(
     attempt_id: GraphExecutionAttemptId = ATTEMPT,
     task_ids: tuple[GraphTaskId, ...] = (TASK,),
 ) -> GraphRunState:
-    generation = state.interrupt.identity.generation if state.interrupt is not None else None
     return reduce_graph_run(
         state,
         ClaimGraphExecution(
-            state.superstep,
-            state.execution_sequence,
-            state.resources,
-            generation,
+            state.revision,
             attempt_id,
             task_ids,
         ),
@@ -208,12 +204,12 @@ def test_interrupt_request_and_resolution_are_pure_graph_run_transitions() -> No
 
     suspended = reduce_graph_run(
         initial,
-        RequestGraphRunInterrupt(initial.superstep, identity, GraphInterruptPayload(b"request")),
+        RequestGraphRunInterrupt(initial.revision, identity, GraphInterruptPayload(b"request")),
     )
     resumed = reduce_graph_run(
         suspended,
         ResolveGraphRunInterrupt(
-            suspended.superstep,
+            suspended.revision,
             identity,
             GraphInterruptPayload(b"approved"),
         ),
@@ -253,11 +249,11 @@ def test_interrupt_round_trip_preserves_the_recoverable_graph_position() -> None
 
     suspended = reduce_graph_run(
         initial,
-        RequestGraphRunInterrupt(4, identity, GraphInterruptPayload(b"request")),
+        RequestGraphRunInterrupt(initial.revision, identity, GraphInterruptPayload(b"request")),
     )
     resumed = reduce_graph_run(
         suspended,
-        ResolveGraphRunInterrupt(4, identity, GraphInterruptPayload(b"resolution")),
+        ResolveGraphRunInterrupt(suspended.revision, identity, GraphInterruptPayload(b"resolution")),
     )
 
     for state in (suspended, resumed):
@@ -286,7 +282,7 @@ def test_interrupt_request_requires_codec_fenced_execution_and_monotonic_identit
     with pytest.raises(GraphStateTransitionError, match="monotonically"):
         reduce_graph_run(
             running_state(superstep=1, interrupt_record=consumed, resolution_codec=CODEC),
-            RequestGraphRunInterrupt(1, identity, GraphInterruptPayload(b"request")),
+            RequestGraphRunInterrupt(0, identity, GraphInterruptPayload(b"request")),
         )
 
 
@@ -331,25 +327,25 @@ def test_interrupt_resolution_requires_exact_suspended_generation() -> None:
         reduce_graph_run(
             suspended,
             ResolveGraphRunInterrupt(
-                0,
+                suspended.revision,
                 GraphInterruptIdentity(initial.run_id, GraphInterruptId("other"), 1),
                 GraphInterruptPayload(b"approved"),
             ),
         )
-    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         reduce_graph_run(
             suspended,
-            ResolveGraphRunInterrupt(1, identity, GraphInterruptPayload(b"approved")),
+            ResolveGraphRunInterrupt(0, identity, GraphInterruptPayload(b"approved")),
         )
 
     resolved = reduce_graph_run(
         suspended,
-        ResolveGraphRunInterrupt(0, identity, GraphInterruptPayload(b"approved")),
+        ResolveGraphRunInterrupt(suspended.revision, identity, GraphInterruptPayload(b"approved")),
     )
     with pytest.raises(GraphStateTransitionError, match="suspended generation"):
         reduce_graph_run(
             resolved,
-            ResolveGraphRunInterrupt(0, identity, GraphInterruptPayload(b"duplicate")),
+            ResolveGraphRunInterrupt(resolved.revision, identity, GraphInterruptPayload(b"duplicate")),
         )
 
 
@@ -363,7 +359,7 @@ def test_interrupt_request_rejects_wrong_status_stale_step_and_unfinished_resolu
     )
     with pytest.raises(GraphStateTransitionError, match="only a running"):
         reduce_graph_run(completed, command)
-    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         reduce_graph_run(
             running_state(resolution_codec=CODEC),
             RequestGraphRunInterrupt(1, identity, GraphInterruptPayload(b"request")),
@@ -379,11 +375,11 @@ def test_interrupt_request_rejects_wrong_status_stale_step_and_unfinished_resolu
 @pytest.mark.parametrize(
     "prepared_command",
     [
-        ClaimGraphExecution(0, 0, None, None, ATTEMPT, (TASK,)),
-        UpdateGraphResources(0, None, None, released()),
+        ClaimGraphExecution(0, ATTEMPT, (TASK,)),
+        UpdateGraphResources(0, released()),
     ],
 )
-def test_interrupt_generation_fences_prepared_claim_and_admission(
+def test_revision_fences_prepared_claim_and_admission_across_interrupt_round_trip(
     prepared_command: ClaimGraphExecution | UpdateGraphResources,
 ) -> None:
     initial = running_state(resolution_codec=CODEC)
@@ -393,14 +389,14 @@ def test_interrupt_generation_fences_prepared_claim_and_admission(
         RequestGraphRunInterrupt(0, identity, GraphInterruptPayload(b"request")),
     )
 
-    with pytest.raises(GraphStateTransitionError, match="running"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         reduce_graph_run(suspended, prepared_command)
 
     resumed = reduce_graph_run(
         suspended,
-        ResolveGraphRunInterrupt(0, identity, GraphInterruptPayload(b"resolution")),
+        ResolveGraphRunInterrupt(suspended.revision, identity, GraphInterruptPayload(b"resolution")),
     )
-    with pytest.raises(GraphStateTransitionError, match="interrupt generation"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         reduce_graph_run(resumed, prepared_command)
 
 
@@ -531,7 +527,7 @@ def test_start_rejects_existing_state_and_other_commands_require_a_state() -> No
     with pytest.raises(GraphStateTransitionError, match="existing"):
         reduce_graph_run(running_state(), command)
     with pytest.raises(GraphStateTransitionError, match="started"):
-        reduce_graph_run(None, AbortGraphRun(0, None, GraphFailure("abort")))
+        reduce_graph_run(None, AbortGraphRun(0, GraphFailure("abort")))
 
 
 def test_claim_is_the_only_way_to_obtain_execution_ownership() -> None:
@@ -544,14 +540,11 @@ def test_claim_is_the_only_way_to_obtain_execution_ownership() -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        ClaimGraphExecution(1, 0, None, None, ATTEMPT, (TASK,)),
-        ClaimGraphExecution(0, 1, None, None, ATTEMPT, (TASK,)),
-        ClaimGraphExecution(0, 0, released(), None, ATTEMPT, (TASK,)),
-        ClaimGraphExecution(0, 0, None, 1, ATTEMPT, (TASK,)),
-        ClaimGraphExecution(0, 0, None, None, GraphExecutionAttemptId(""), (TASK,)),
-        ClaimGraphExecution(0, 0, None, None, ATTEMPT, ()),
-        ClaimGraphExecution(0, 0, None, None, ATTEMPT, (TASK, TASK)),
-        ClaimGraphExecution(0, 0, None, None, ATTEMPT, (GraphTaskId("bad\n"),)),
+        ClaimGraphExecution(1, ATTEMPT, (TASK,)),
+        ClaimGraphExecution(0, GraphExecutionAttemptId(""), (TASK,)),
+        ClaimGraphExecution(0, ATTEMPT, ()),
+        ClaimGraphExecution(0, ATTEMPT, (TASK, TASK)),
+        ClaimGraphExecution(0, ATTEMPT, (GraphTaskId("bad\n"),)),
     ],
 )
 def test_claim_rejects_stale_or_invalid_commands(command: ClaimGraphExecution) -> None:
@@ -562,22 +555,28 @@ def test_claim_rejects_stale_or_invalid_commands(command: ClaimGraphExecution) -
 def test_claim_rejects_terminal_and_existing_execution() -> None:
     terminal = replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=())
     with pytest.raises(GraphStateTransitionError, match="running"):
-        reduce_graph_run(terminal, ClaimGraphExecution(0, 0, None, None, ATTEMPT, (TASK,)))
+        reduce_graph_run(terminal, ClaimGraphExecution(0, ATTEMPT, (TASK,)))
     claimed = claim(running_state())
     with pytest.raises(GraphStateTransitionError, match="already"):
-        reduce_graph_run(claimed, ClaimGraphExecution(0, 0, None, None, ATTEMPT, (GraphTaskId("other"),)))
+        reduce_graph_run(claimed, ClaimGraphExecution(claimed.revision, ATTEMPT, (GraphTaskId("other"),)))
 
 
 def test_fence_clears_only_the_exact_active_execution() -> None:
     claimed = claim(running_state())
-    fenced = reduce_graph_run(claimed, FenceGraphExecution(0, token(claimed)))
+    fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, token(claimed)))
 
     assert fenced.execution is None
     assert fenced.execution_sequence == 1
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(claimed, FenceGraphExecution(1, token(claimed)))
+        reduce_graph_run(claimed, FenceGraphExecution(0, token(claimed)))
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(claimed, FenceGraphExecution(0, GraphExecutionToken(1, GraphExecutionAttemptId("other"))))
+        reduce_graph_run(
+            claimed,
+            FenceGraphExecution(
+                claimed.revision,
+                GraphExecutionToken(1, GraphExecutionAttemptId("other")),
+            ),
+        )
     terminal = replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=())
     with pytest.raises(GraphStateTransitionError, match="running"):
         reduce_graph_run(terminal, FenceGraphExecution(0, GraphExecutionToken(1, ATTEMPT)))
@@ -585,40 +584,36 @@ def test_fence_clears_only_the_exact_active_execution() -> None:
 
 def test_reclaim_after_fencing_advances_the_execution_generation() -> None:
     first = claim(running_state())
-    fenced = reduce_graph_run(first, FenceGraphExecution(0, token(first)))
+    fenced = reduce_graph_run(first, FenceGraphExecution(first.revision, token(first)))
     second = claim(fenced, attempt_id=GraphExecutionAttemptId("attempt-b"))
 
     assert token(first) == GraphExecutionToken(1, ATTEMPT)
     assert token(second) == GraphExecutionToken(2, GraphExecutionAttemptId("attempt-b"))
     with pytest.raises(GraphStateTransitionError, match="own"):
-        reduce_graph_run(second, CompleteGraphRun(0, token(first), None))
+        reduce_graph_run(second, CompleteGraphRun(second.revision, token(first)))
 
 
-def test_resource_admission_uses_superstep_parallel_and_interrupt_cas() -> None:
+def test_resource_admission_uses_revision_cas() -> None:
     state = running_state(interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED), resolution_codec=CODEC)
-    admitted = reduce_graph_run(state, UpdateGraphResources(0, None, 2, acquired()))
+    admitted = reduce_graph_run(state, UpdateGraphResources(state.revision, acquired()))
 
     assert admitted.resources == acquired()
-    for command in (
-        UpdateGraphResources(1, acquired(), 2, released()),
-        UpdateGraphResources(0, acquired(), 2, released()),
-        UpdateGraphResources(0, None, 3, released()),
-    ):
-        with pytest.raises(GraphStateTransitionError):
-            reduce_graph_run(state, command)
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
+        reduce_graph_run(admitted, UpdateGraphResources(state.revision, released()))
     with pytest.raises(GraphStateTransitionError, match="during execution"):
-        reduce_graph_run(claim(state), UpdateGraphResources(0, None, 2, acquired()))
+        claimed = claim(state)
+        reduce_graph_run(claimed, UpdateGraphResources(claimed.revision, acquired()))
 
 
 def test_resource_admission_clears_only_when_the_claimed_superstep_settles() -> None:
     admitted = reduce_graph_run(
         running_state(),
-        UpdateGraphResources(0, None, None, acquired()),
+        UpdateGraphResources(0, acquired()),
     )
     claimed = claim(admitted)
     advanced = reduce_graph_run(
         claimed,
-        AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("b"),)),
+        AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("b"),)),
     )
 
     assert admitted.resources == acquired()
@@ -629,10 +624,10 @@ def test_resource_admission_clears_only_when_the_claimed_superstep_settles() -> 
 def test_resource_admission_rejects_invalid_parallel_state_and_status() -> None:
     invalid = ResourceSnapshot((ResourceLock(FILE), ResourceLock(FILE)))
     with pytest.raises(GraphStateTransitionError, match="invalid"):
-        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, invalid))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, invalid))
     terminal = replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=())
     with pytest.raises(GraphStateTransitionError, match="running"):
-        reduce_graph_run(terminal, UpdateGraphResources(0, None, None, released()))
+        reduce_graph_run(terminal, UpdateGraphResources(0, released()))
 
 
 def test_resource_admission_cannot_replace_a_committed_owner() -> None:
@@ -641,7 +636,7 @@ def test_resource_admission_cannot_replace_a_committed_owner() -> None:
     state = running_state(resources=committed)
 
     with pytest.raises(GraphStateTransitionError, match="rewrite committed acquisitions"):
-        reduce_graph_run(state, UpdateGraphResources(0, committed, None, replacement))
+        reduce_graph_run(state, UpdateGraphResources(0, replacement))
 
 
 def test_resource_admission_accepts_only_a_replayable_extension() -> None:
@@ -652,7 +647,7 @@ def test_resource_admission_accepts_only_a_replayable_extension() -> None:
     extended = reduce_resources(committed, AcquireResources(second_participant, (DATABASE,)))
     state = running_state(resources=committed)
 
-    updated = reduce_graph_run(state, UpdateGraphResources(0, committed, None, extended))
+    updated = reduce_graph_run(state, UpdateGraphResources(0, extended))
 
     assert updated.resources == extended
 
@@ -665,7 +660,7 @@ def test_resource_admission_rejects_an_unreplayable_acquisition() -> None:
     )
 
     with pytest.raises(GraphStateTransitionError, match="legal acquisition sequence"):
-        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, proposed))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, proposed))
 
 
 def test_resource_admission_rejects_a_valid_snapshot_with_non_fifo_history() -> None:
@@ -680,7 +675,7 @@ def test_resource_admission_rejects_a_valid_snapshot_with_non_fifo_history() -> 
     )
 
     with pytest.raises(GraphStateTransitionError, match="replayed acquisition sequence"):
-        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, proposed))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, proposed))
     with pytest.raises(GraphStateTransitionError, match="resources state is invalid"):
         validate_graph_run_state(running_state(resources=proposed))
 
@@ -688,12 +683,11 @@ def test_resource_admission_rejects_a_valid_snapshot_with_non_fifo_history() -> 
 def test_progress_requires_exact_execution_token() -> None:
     state = claim(running_state())
     commands = (
-        AdvanceGraphRun(0, GraphExecutionToken(1, GraphExecutionAttemptId("other")), None, (GraphNodeId("b"),)),
-        CompleteGraphRun(0, GraphExecutionToken(1, GraphExecutionAttemptId("other")), None),
+        AdvanceGraphRun(state.revision, GraphExecutionToken(1, GraphExecutionAttemptId("other")), (GraphNodeId("b"),)),
+        CompleteGraphRun(state.revision, GraphExecutionToken(1, GraphExecutionAttemptId("other"))),
         FailGraphExecution(
-            0,
+            state.revision,
             GraphExecutionToken(1, GraphExecutionAttemptId("other")),
-            None,
             GraphFailure("failed"),
         ),
     )
@@ -702,17 +696,7 @@ def test_progress_requires_exact_execution_token() -> None:
             reduce_graph_run(state, command)
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        AdvanceGraphRun(0, GraphExecutionToken(1, ATTEMPT), 3, (GraphNodeId("b"),)),
-        CompleteGraphRun(0, GraphExecutionToken(1, ATTEMPT), 3),
-        FailGraphExecution(0, GraphExecutionToken(1, ATTEMPT), 3, GraphFailure("failed")),
-    ],
-)
-def test_each_progress_transition_rejects_a_stale_interrupt_generation(
-    command: AdvanceGraphRun | CompleteGraphRun | FailGraphExecution,
-) -> None:
+def test_progress_transition_rejects_a_stale_revision() -> None:
     state = claim(
         running_state(
             interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED),
@@ -720,8 +704,8 @@ def test_each_progress_transition_rejects_a_stale_interrupt_generation(
         )
     )
 
-    with pytest.raises(GraphStateTransitionError, match="interrupt generation"):
-        reduce_graph_run(state, command)
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
+        reduce_graph_run(state, AdvanceGraphRun(0, token(state), (GraphNodeId("b"),)))
 
 
 def test_advance_commits_frontier_join_progress_and_consumption_receipt() -> None:
@@ -733,7 +717,7 @@ def test_advance_commits_frontier_join_progress_and_consumption_receipt() -> Non
     state = claim(running_state(interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED), resolution_codec=CODEC))
     advanced = reduce_graph_run(
         state,
-        AdvanceGraphRun(0, token(state), 2, (GraphNodeId("b"),), (progress,)),
+        AdvanceGraphRun(state.revision, token(state), (GraphNodeId("b"),), (progress,)),
     )
 
     assert advanced.superstep == 1
@@ -746,11 +730,11 @@ def test_advance_commits_frontier_join_progress_and_consumption_receipt() -> Non
     )
 
 
-def test_advance_is_pure_and_guards_expected_superstep() -> None:
+def test_advance_is_pure_and_guards_expected_revision() -> None:
     claimed = claim(running_state(superstep=2))
     advanced = reduce_graph_run(
         claimed,
-        AdvanceGraphRun(2, token(claimed), None, (GraphNodeId("b"),)),
+        AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("b"),)),
     )
 
     assert claimed.superstep == 2
@@ -758,8 +742,8 @@ def test_advance_is_pure_and_guards_expected_superstep() -> None:
     assert claimed.execution is not None
     assert advanced.superstep == 3
     assert advanced.frontier == (GraphNodeId("b"),)
-    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
-        reduce_graph_run(claimed, AdvanceGraphRun(1, token(claimed), None, (GraphNodeId("b"),)))
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
+        reduce_graph_run(claimed, AdvanceGraphRun(0, token(claimed), (GraphNodeId("b"),)))
 
 
 def test_advance_normalizes_join_progress_order() -> None:
@@ -777,7 +761,7 @@ def test_advance_normalizes_join_progress_order() -> None:
 
     advanced = reduce_graph_run(
         claimed,
-        AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("next"),), (second, first)),
+        AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("next"),), (second, first)),
     )
 
     assert advanced.join_progress == (first, second)
@@ -789,7 +773,7 @@ def test_advance_rejects_each_invalid_join_progress_shape(progress: GraphJoinPro
     with pytest.raises(GraphStateTransitionError):
         reduce_graph_run(
             claimed,
-            AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("next"),), (progress,)),
+            AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("next"),), (progress,)),
         )
 
 
@@ -803,7 +787,7 @@ def test_advance_rejects_duplicate_join_progress() -> None:
     with pytest.raises(GraphStateTransitionError, match="repeats"):
         reduce_graph_run(
             claimed,
-            AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("next"),), (progress, progress)),
+            AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("next"),), (progress, progress)),
         )
 
 
@@ -830,12 +814,12 @@ def test_advance_rejects_invalid_recoverable_position(
 ) -> None:
     state = claim(running_state())
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(state, AdvanceGraphRun(0, token(state), None, frontier, progress))
+        reduce_graph_run(state, AdvanceGraphRun(state.revision, token(state), frontier, progress))
 
 
 def test_complete_clears_the_frontier_only_after_a_claim() -> None:
     completed_state = claim(running_state(superstep=3))
-    completed = reduce_graph_run(completed_state, CompleteGraphRun(3, token(completed_state), None))
+    completed = reduce_graph_run(completed_state, CompleteGraphRun(completed_state.revision, token(completed_state)))
 
     assert completed.status is GraphRunStatus.COMPLETED
     assert completed.frontier == ()
@@ -851,14 +835,14 @@ def test_complete_rejects_unresolved_join_progress() -> None:
     claimed = claim(replace(running_state(), join_progress=(progress,)))
 
     with pytest.raises(GraphStateTransitionError, match="unresolved join progress"):
-        reduce_graph_run(claimed, CompleteGraphRun(0, token(claimed), None))
+        reduce_graph_run(claimed, CompleteGraphRun(claimed.revision, token(claimed)))
 
 
 def test_execution_failure_clears_the_frontier_only_after_a_claim() -> None:
     failed_state = claim(running_state(superstep=4))
     failed = reduce_graph_run(
         failed_state,
-        FailGraphExecution(4, token(failed_state), None, GraphFailure("node failed")),
+        FailGraphExecution(failed_state.revision, token(failed_state), GraphFailure("node failed")),
     )
 
     assert failed.status is GraphRunStatus.FAILED
@@ -876,7 +860,7 @@ def test_execution_failure_consumes_a_resolution_only_after_the_claimed_node_ran
 
     failed = reduce_graph_run(
         claimed,
-        FailGraphExecution(0, token(claimed), 2, GraphFailure("node failed")),
+        FailGraphExecution(claimed.revision, token(claimed), GraphFailure("node failed")),
     )
 
     assert failed.interrupt == interrupt(
@@ -885,33 +869,31 @@ def test_execution_failure_consumes_a_resolution_only_after_the_claimed_node_ran
     )
 
 
-def test_progress_rejects_stale_superstep_generation_status_and_failure() -> None:
+def test_progress_rejects_stale_revision_status_and_invalid_failure() -> None:
     resolved = claim(
         running_state(interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED), resolution_codec=CODEC)
     )
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(resolved, CompleteGraphRun(1, token(resolved), 2))
+        reduce_graph_run(resolved, CompleteGraphRun(0, token(resolved)))
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(resolved, CompleteGraphRun(0, token(resolved), 3))
-    with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(resolved, FailGraphExecution(0, token(resolved), 2, GraphFailure("")))
+        reduce_graph_run(resolved, FailGraphExecution(resolved.revision, token(resolved), GraphFailure("")))
     terminal = replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=())
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(terminal, CompleteGraphRun(0, GraphExecutionToken(1, ATTEMPT), None))
+        reduce_graph_run(terminal, CompleteGraphRun(0, GraphExecutionToken(1, ATTEMPT)))
     with pytest.raises(GraphStateTransitionError, match="running"):
         reduce_graph_run(
             terminal,
-            AdvanceGraphRun(0, GraphExecutionToken(1, ATTEMPT), None, (GraphNodeId("b"),)),
+            AdvanceGraphRun(0, GraphExecutionToken(1, ATTEMPT), (GraphNodeId("b"),)),
         )
-    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
-        reduce_graph_run(resolved, AdvanceGraphRun(1, token(resolved), 2, (GraphNodeId("b"),)))
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
+        reduce_graph_run(resolved, AdvanceGraphRun(0, token(resolved), (GraphNodeId("b"),)))
     with pytest.raises(GraphStateTransitionError, match="running"):
         reduce_graph_run(
             terminal,
-            FailGraphExecution(0, GraphExecutionToken(1, ATTEMPT), None, GraphFailure("failed")),
+            FailGraphExecution(0, GraphExecutionToken(1, ATTEMPT), GraphFailure("failed")),
         )
-    with pytest.raises(GraphStateTransitionError, match="stale superstep"):
-        reduce_graph_run(resolved, FailGraphExecution(1, token(resolved), 2, GraphFailure("failed")))
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
+        reduce_graph_run(resolved, FailGraphExecution(0, token(resolved), GraphFailure("failed")))
 
 
 def test_abort_cancels_unconsumed_resolution_without_claim() -> None:
@@ -919,7 +901,7 @@ def test_abort_cancels_unconsumed_resolution_without_claim() -> None:
         interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED),
         resolution_codec=CODEC,
     )
-    aborted = reduce_graph_run(state, AbortGraphRun(0, 2, GraphFailure("operator abort")))
+    aborted = reduce_graph_run(state, AbortGraphRun(state.revision, GraphFailure("operator abort")))
 
     assert aborted.status is GraphRunStatus.FAILED
     assert aborted.interrupt == replace(
@@ -936,7 +918,7 @@ def test_abort_cancels_a_requested_suspended_interrupt() -> None:
         status=GraphRunStatus.SUSPENDED,
     )
 
-    aborted = reduce_graph_run(suspended, AbortGraphRun(0, 2, GraphFailure("operator abort")))
+    aborted = reduce_graph_run(suspended, AbortGraphRun(suspended.revision, GraphFailure("operator abort")))
 
     assert aborted.status is GraphRunStatus.FAILED
     assert aborted.frontier == ()
@@ -950,18 +932,18 @@ def test_abort_cancels_a_requested_suspended_interrupt() -> None:
 def test_abort_preserves_finalized_interrupt_and_rejects_unsafe_state() -> None:
     consumed = interrupt(GraphInterruptLifecycle.CONSUMED, receipt=GraphInterruptReceipt(0))
     state = running_state(superstep=1, interrupt_record=consumed, resolution_codec=CODEC)
-    assert reduce_graph_run(state, AbortGraphRun(1, 2, GraphFailure("abort"))).interrupt == consumed
+    assert reduce_graph_run(state, AbortGraphRun(state.revision, GraphFailure("abort"))).interrupt == consumed
     for unsafe in (
         claim(running_state()),
         running_state(resources=released()),
         replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=()),
     ):
         with pytest.raises(GraphStateTransitionError):
-            reduce_graph_run(unsafe, AbortGraphRun(unsafe.superstep, None, GraphFailure("abort")))
+            reduce_graph_run(unsafe, AbortGraphRun(unsafe.revision, GraphFailure("abort")))
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(running_state(), AbortGraphRun(1, None, GraphFailure("abort")))
+        reduce_graph_run(running_state(), AbortGraphRun(1, GraphFailure("abort")))
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(running_state(), AbortGraphRun(0, None, GraphFailure("")))
+        reduce_graph_run(running_state(), AbortGraphRun(0, GraphFailure("")))
 
 
 @pytest.mark.parametrize(
@@ -970,6 +952,7 @@ def test_abort_preserves_finalized_interrupt_and_rejects_unsafe_state() -> None:
         replace(running_state(), definition_version=GraphDefinitionVersion(0)),
         replace(running_state(), definition_version=GraphDefinitionVersion(-1)),
         replace(running_state(), superstep=-1),
+        replace(running_state(), revision=-1),
         replace(running_state(), execution_sequence=-1),
         replace(running_state(), frontier=(GraphNodeId(""),)),
         replace(running_state(), parent=ParentGraphTask(GraphRunId("run"), GraphTaskId("task"))),
@@ -1097,7 +1080,7 @@ def test_valid_recovered_parent_linkage_can_transition() -> None:
     claimed = claim(recovered)
     advanced = reduce_graph_run(
         claimed,
-        AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("b"),)),
+        AdvanceGraphRun(claimed.revision, token(claimed), (GraphNodeId("b"),)),
     )
 
     assert advanced.parent == parent

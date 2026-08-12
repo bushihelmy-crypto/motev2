@@ -23,19 +23,17 @@ def select_transition(
     execution = snapshot.execution
     if execution is None:
         raise ResultCollectionError("settlement requires a committed execution lease")
-    interrupt_generation = snapshot.interrupt.generation if snapshot.interrupt is not None else None
     if collected.failure is not None:
-        return FailTransition(snapshot.superstep, execution.token, interrupt_generation, collected.failure.failure)
+        return FailTransition(snapshot.revision, execution.token, collected.failure.failure)
     decision = route_results(graph, snapshot, collected)
     if decision.frontier:
         return AdvanceTransition(
-            snapshot.superstep,
+            snapshot.revision,
             execution.token,
-            interrupt_generation,
             decision.frontier,
             decision.join_progress,
         )
-    return CompleteTransition(snapshot.superstep, execution.token, interrupt_generation)
+    return CompleteTransition(snapshot.revision, execution.token)
 
 
 __all__: list[str] = []

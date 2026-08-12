@@ -16,21 +16,21 @@ TOKEN = ExecutionToken(1, ExecutionAttemptId("test-attempt"))
 
 def test_success_with_next_frontier_advances() -> None:
     graph = topology("a", "b", edges=(direct("a", "b"),))
-    planned_snapshot = snapshot(superstep=4)
+    planned_snapshot = snapshot(superstep=4, revision=7)
     task = plan_tasks(graph, planned_snapshot, ExecutionLimits())[0]
     execution_snapshot = lease_snapshot(planned_snapshot, task.task_id)
     assert settle_tasks(graph, execution_snapshot, (task,), (TaskSuccess(task, "output"),)) == AdvanceTransition(
-        4, TOKEN, None, (NodeId("b"),)
+        7, TOKEN, (NodeId("b"),)
     )
 
 
 def test_success_without_next_frontier_completes() -> None:
     graph = topology("a", edges=(direct("a", END),))
-    planned_snapshot = snapshot(superstep=2)
+    planned_snapshot = snapshot(superstep=2, revision=7)
     task = plan_tasks(graph, planned_snapshot, ExecutionLimits())[0]
     execution_snapshot = lease_snapshot(planned_snapshot, task.task_id)
     assert settle_tasks(graph, execution_snapshot, (task,), (TaskSuccess(task, "output"),)) == CompleteTransition(
-        2, TOKEN, None
+        7, TOKEN
     )
 
 
@@ -44,7 +44,7 @@ def test_conditional_route_to_end_completes() -> None:
         execution_snapshot,
         (task,),
         (TaskSuccess(task, "output", SelectRoute(RouteId("finish"))),),
-    ) == CompleteTransition(2, TOKEN, None)
+    ) == CompleteTransition(0, TOKEN)
 
 
 def test_join_to_end_completes_after_all_sources() -> None:
@@ -57,7 +57,7 @@ def test_join_to_end_completes_after_all_sources() -> None:
         execution_snapshot,
         tasks,
         tuple(TaskSuccess(task, "output") for task in tasks),
-    ) == CompleteTransition(2, TOKEN, None)
+    ) == CompleteTransition(0, TOKEN)
 
 
 def test_join_to_end_cannot_complete_before_all_sources_arrive() -> None:
@@ -76,7 +76,7 @@ def test_failure_selects_superstep_bound_fail_transition_without_routing() -> No
     task = plan_tasks(graph, planned_snapshot, ExecutionLimits())[0]
     execution_snapshot = lease_snapshot(planned_snapshot, task.task_id)
     assert settle_tasks(graph, execution_snapshot, (task,), (TaskFailure(task, "node failed"),)) == FailTransition(
-        3, TOKEN, None, "node failed"
+        0, TOKEN, "node failed"
     )
 
 
@@ -114,9 +114,8 @@ def test_advance_transition_carries_partial_join_progress() -> None:
     )
 
     assert settle_tasks(graph, execution_snapshot, (task,), (TaskSuccess(task, "output"),)) == AdvanceTransition(
-        6,
+        0,
         TOKEN,
-        None,
         (NodeId("b"),),
         (progress,),
     )

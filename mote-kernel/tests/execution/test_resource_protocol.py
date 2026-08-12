@@ -209,7 +209,7 @@ async def test_cancelling_a_resource_wave_keeps_the_committed_claim_fenced() -> 
         await executor.execute(claim, StepRequest(claimed, "input", DIRECT_ATTEMPT))
     fenced = reduce_graph_run(
         claimed,
-        FenceGraphExecution(claimed.superstep, claimed.execution.token),
+        FenceGraphExecution(claimed.revision, claimed.execution.token),
     )
     assert fenced.execution is None
 
@@ -358,7 +358,7 @@ async def test_resource_node_exception_keeps_the_claim_for_explicit_fencing() ->
     assert claimed.execution is not None
     fenced = reduce_graph_run(
         claimed,
-        FenceGraphExecution(claimed.superstep, claimed.execution.token),
+        FenceGraphExecution(claimed.revision, claimed.execution.token),
     )
     assert fenced.execution is None
 
@@ -535,7 +535,7 @@ async def test_only_one_resource_claim_can_be_accepted_after_admission() -> None
 
     claimed = reduce_graph_run(admitted, first.execution.command)
 
-    with pytest.raises(GraphStateTransitionError, match="active execution lease"):
+    with pytest.raises(GraphStateTransitionError, match="stale revision"):
         reduce_graph_run(claimed, second.execution.command)
     with pytest.raises(ResultCollectionError, match="does not match committed"):
         await executor.execute(

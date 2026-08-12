@@ -98,6 +98,8 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         raise GraphStateTransitionError("graph definition version must be positive")
     if state.superstep < 0:
         raise GraphStateTransitionError("graph superstep cannot be negative")
+    if state.revision < 0:
+        raise GraphStateTransitionError("graph revision cannot be negative")
     if state.execution_sequence < 0:
         raise GraphStateTransitionError("graph execution sequence cannot be negative")
     _validate_resolution_codec(state.resolution_codec)

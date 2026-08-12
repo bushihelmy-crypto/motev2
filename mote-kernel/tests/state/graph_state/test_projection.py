@@ -87,6 +87,7 @@ def test_projection_maps_every_authoritative_graph_run_fact() -> None:
         status=GraphRunStatus.RUNNING,
         superstep=7,
         frontier=(GraphNodeId("b"), GraphNodeId("a")),
+        revision=11,
         parent=ParentGraphTask(GraphRunId("root"), GraphTaskId("parent-task")),
         join_progress=(
             GraphJoinProgress(
@@ -108,6 +109,7 @@ def test_projection_maps_every_authoritative_graph_run_fact() -> None:
         status=ExecutionStatus.RUNNING,
         superstep=7,
         frontier=(NodeId("b"), NodeId("a")),
+        revision=11,
         parent=ParentTaskRef(ExecutionRunId("root"), ParentTaskId("parent-task")),
         join_progress=(
             JoinProgress(
@@ -208,12 +210,9 @@ def test_advance_transition_projects_every_state_command_fact() -> None:
         frozenset({NodeId("a")}),
     )
 
-    assert project_graph_command(
-        AdvanceTransition(4, EXECUTION_TOKEN, 8, (NodeId("d"),), (progress,))
-    ) == AdvanceGraphRun(
-        4,
-        STATE_TOKEN,
+    assert project_graph_command(AdvanceTransition(8, EXECUTION_TOKEN, (NodeId("d"),), (progress,))) == AdvanceGraphRun(
         8,
+        STATE_TOKEN,
         (GraphNodeId("d"),),
         (
             GraphJoinProgress(
@@ -226,9 +225,9 @@ def test_advance_transition_projects_every_state_command_fact() -> None:
 
 
 def test_terminal_transitions_project_token_generation_and_failure() -> None:
-    assert project_graph_command(CompleteTransition(5, EXECUTION_TOKEN, 8)) == CompleteGraphRun(5, STATE_TOKEN, 8)
-    assert project_graph_command(FailTransition(6, EXECUTION_TOKEN, 8, "node failed")) == FailGraphExecution(
-        6, STATE_TOKEN, 8, GraphFailure("node failed")
+    assert project_graph_command(CompleteTransition(5, EXECUTION_TOKEN)) == CompleteGraphRun(5, STATE_TOKEN)
+    assert project_graph_command(FailTransition(6, EXECUTION_TOKEN, "node failed")) == FailGraphExecution(
+        6, STATE_TOKEN, GraphFailure("node failed")
     )
 
 
@@ -248,7 +247,7 @@ def leased_state(*, superstep: int = 0) -> GraphRunState:
 def test_advance_transition_projects_through_reducer_into_durable_state() -> None:
     advanced = reduce_graph_run(
         leased_state(superstep=3),
-        project_graph_command(AdvanceTransition(3, EXECUTION_TOKEN, None, (NodeId("d"),))),
+        project_graph_command(AdvanceTransition(0, EXECUTION_TOKEN, (NodeId("d"),))),
     )
 
     assert advanced.superstep == 4
@@ -258,7 +257,7 @@ def test_advance_transition_projects_through_reducer_into_durable_state() -> Non
 def test_complete_transition_projects_through_reducer_into_durable_state() -> None:
     completed = reduce_graph_run(
         leased_state(superstep=3),
-        project_graph_command(CompleteTransition(3, EXECUTION_TOKEN, None)),
+        project_graph_command(CompleteTransition(0, EXECUTION_TOKEN)),
     )
 
     assert completed.status is GraphRunStatus.COMPLETED
@@ -268,7 +267,7 @@ def test_complete_transition_projects_through_reducer_into_durable_state() -> No
 def test_fail_transition_projects_through_reducer_into_durable_state() -> None:
     failed = reduce_graph_run(
         leased_state(superstep=3),
-        project_graph_command(FailTransition(3, EXECUTION_TOKEN, None, "node failed")),
+        project_graph_command(FailTransition(0, EXECUTION_TOKEN, "node failed")),
     )
 
     assert failed.status is GraphRunStatus.FAILED

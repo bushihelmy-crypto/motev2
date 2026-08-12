@@ -123,6 +123,7 @@ class GraphRunState:
     execution: GraphExecutionLease | None = None
     interrupt: GraphInterruptRecord | None = None
     resolution_codec: GraphResolutionCodec | None = None
+    revision: int = 0
 
 
 __all__ = [

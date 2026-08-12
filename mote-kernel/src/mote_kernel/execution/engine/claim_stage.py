@@ -14,13 +14,6 @@ from mote_kernel.state.graph_state import (
 )
 
 
-def interrupt_generation(state: GraphRunState) -> int | None:
-    """Return the exact interrupt generation observed by a prepared command."""
-
-    interrupt = state.interrupt
-    return interrupt.identity.generation if interrupt is not None else None
-
-
 def prepare_claim(
     owner: ExecutionClaimOwner,
     state: GraphRunState,
@@ -33,10 +26,7 @@ def prepare_claim(
     claim_id = ExecutionAttemptId(str(uuid4()))
     token = ExecutionToken(state.execution_sequence + 1, claim_id)
     command = ClaimGraphExecution(
-        state.superstep,
-        state.execution_sequence,
-        state.resources,
-        interrupt_generation(state),
+        state.revision,
         GraphExecutionAttemptId(claim_id),
         tuple(GraphTaskId(task_id) for task_id in task_ids),
     )
@@ -51,4 +41,4 @@ def require_claim_tasks(claim: PreparedExecutionClaim, tasks: tuple[GraphTask, .
         raise ResultCollectionError("execution claim tasks do not match the prepared frontier")
 
 
-__all__ = ["interrupt_generation", "prepare_claim", "require_claim_tasks"]
+__all__ = ["prepare_claim", "require_claim_tasks"]

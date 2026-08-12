@@ -11,9 +11,8 @@ from mote_kernel.execution.snapshot import ExecutionToken, JoinProgress
 class AdvanceTransition:
     """Advance one settled superstep to the next committed frontier."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: ExecutionToken
-    expected_interrupt_generation: int | None
     frontier: tuple[NodeId, ...]
     join_progress: tuple[JoinProgress, ...] = ()
 
@@ -22,18 +21,16 @@ class AdvanceTransition:
 class CompleteTransition:
     """Complete a settled graph with no remaining work."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: ExecutionToken
-    expected_interrupt_generation: int | None
 
 
 @dataclass(frozen=True, slots=True)
 class FailTransition:
     """Fail the superstep that produced the associated task failure."""
 
-    expected_superstep: int
+    expected_revision: int
     execution: ExecutionToken
-    expected_interrupt_generation: int | None
     failure: str
 
 

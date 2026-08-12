@@ -4,7 +4,7 @@ from typing import TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
 from mote_kernel.execution.engine.admission import admit_tasks
-from mote_kernel.execution.engine.claim_stage import interrupt_generation, prepare_claim, require_claim_tasks
+from mote_kernel.execution.engine.claim_stage import prepare_claim, require_claim_tasks
 from mote_kernel.execution.engine.frontier import prepare_frontier
 from mote_kernel.execution.engine.resolution_input import effective_node_input
 from mote_kernel.execution.engine.resource_stage import (
@@ -56,9 +56,7 @@ async def prepare_superstep(
                     admission.admitted,
                     admission.waiting,
                     UpdateGraphResources(
-                        request.state.superstep,
-                        resources,
-                        interrupt_generation(request.state),
+                        request.state.revision,
                         admission.snapshot,
                     ),
                 ),

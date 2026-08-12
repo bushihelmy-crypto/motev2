@@ -39,6 +39,7 @@ def lease_snapshot(execution_snapshot: ExecutionSnapshot, *task_ids: str) -> Exe
         status=execution_snapshot.status,
         superstep=execution_snapshot.superstep,
         frontier=execution_snapshot.frontier,
+        revision=execution_snapshot.revision,
         parent=execution_snapshot.parent,
         join_progress=execution_snapshot.join_progress,
         resources=execution_snapshot.resources,
@@ -95,6 +96,7 @@ def snapshot(
     *,
     status: ExecutionStatus = ExecutionStatus.RUNNING,
     superstep: int = 0,
+    revision: int = 0,
     frontier: tuple[str, ...] = ("a",),
     run_id: str = "run",
     definition_id: str = "test.graph",
@@ -112,6 +114,7 @@ def snapshot(
         status=status,
         superstep=superstep,
         frontier=tuple(NodeId(node_id) for node_id in frontier),
+        revision=revision,
         parent=(
             ParentTaskRef(GraphRunId(parent_run_id), ParentTaskId(parent_task_id))
             if parent_run_id is not None

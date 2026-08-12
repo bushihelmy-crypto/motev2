@@ -7,7 +7,6 @@ from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_command import AcquireResources
 from mote_kernel.state.graph_state.resource_model import ResourceLock, ResourceSnapshot
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, reduce_resources
-from mote_kernel.state.graph_state.transition_guard import require_interrupt_generation
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError, validated_graph_run_state
 
 
@@ -42,11 +41,6 @@ def update_graph_resources(state: GraphRunState, command: UpdateGraphResources) 
         raise GraphStateTransitionError("only a running graph can update resource admission")
     if state.execution is not None:
         raise GraphStateTransitionError("resource admission cannot change during execution")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("resource admission was based on a stale superstep")
-    if command.expected_resources != state.resources:
-        raise GraphStateTransitionError("resource admission was based on a stale snapshot")
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     _validate_admission_transition(state.resources, command.resources)
     return validated_graph_run_state(replace(state, resources=command.resources))
 

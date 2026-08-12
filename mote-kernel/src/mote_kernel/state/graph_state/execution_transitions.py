@@ -18,10 +18,7 @@ from mote_kernel.state.graph_state.model import (
     GraphRunState,
     GraphRunStatus,
 )
-from mote_kernel.state.graph_state.transition_guard import (
-    require_execution_lease,
-    require_interrupt_generation,
-)
+from mote_kernel.state.graph_state.transition_guard import require_execution_lease
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError, validated_graph_run_state
 
 
@@ -53,13 +50,6 @@ def claim_graph_execution(state: GraphRunState, command: ClaimGraphExecution) ->
         raise GraphStateTransitionError("only a running graph can claim execution")
     if state.execution is not None:
         raise GraphStateTransitionError("graph already has an active execution lease")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("execution claim was based on a stale superstep")
-    if command.expected_execution_sequence != state.execution_sequence:
-        raise GraphStateTransitionError("execution claim was based on a stale execution sequence")
-    if command.expected_resources != state.resources:
-        raise GraphStateTransitionError("execution claim was based on a stale resources snapshot")
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     token = GraphExecutionToken(state.execution_sequence + 1, command.attempt_id)
     return validated_graph_run_state(
         replace(
@@ -75,8 +65,6 @@ def fence_graph_execution(state: GraphRunState, command: FenceGraphExecution) ->
 
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can fence execution")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("execution fence was based on a stale superstep")
     require_execution_lease(state, command.execution)
     return validated_graph_run_state(replace(state, execution=None))
 
@@ -86,10 +74,7 @@ def advance_graph_run(state: GraphRunState, command: AdvanceGraphRun) -> GraphRu
 
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can advance")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("advance command was based on a stale superstep")
     require_execution_lease(state, command.execution)
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     return validated_graph_run_state(
         replace(
             state,
@@ -108,10 +93,7 @@ def complete_graph_run(state: GraphRunState, command: CompleteGraphRun) -> Graph
 
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can complete")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("complete command was based on a stale superstep")
     require_execution_lease(state, command.execution)
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     if state.join_progress:
         raise GraphStateTransitionError("a graph cannot complete with unresolved join progress")
     return validated_graph_run_state(
@@ -132,10 +114,7 @@ def fail_graph_execution(state: GraphRunState, command: FailGraphExecution) -> G
 
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph execution can fail")
-    if command.expected_superstep != state.superstep:
-        raise GraphStateTransitionError("execution failure was based on a stale superstep")
     require_execution_lease(state, command.execution)
-    require_interrupt_generation(state, command.expected_interrupt_generation)
     return validated_graph_run_state(
         replace(
             state,
