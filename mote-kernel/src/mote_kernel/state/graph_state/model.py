@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import NewType
 
-from mote_kernel.parallel import ParallelSnapshot
+from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 
 GraphRunId = NewType("GraphRunId", str)
 GraphDefinitionId = NewType("GraphDefinitionId", str)
@@ -118,7 +118,7 @@ class GraphRunState:
     parent: ParentGraphTask | None = None
     failure: GraphFailure | None = None
     join_progress: tuple[GraphJoinProgress, ...] = ()
-    parallel: ParallelSnapshot | None = None
+    resources: ResourceSnapshot | None = None
     execution_sequence: int = 0
     execution: GraphExecutionLease | None = None
     interrupt: GraphInterruptRecord | None = None

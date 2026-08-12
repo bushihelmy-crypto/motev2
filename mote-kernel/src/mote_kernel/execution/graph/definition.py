@@ -6,7 +6,7 @@ from typing import Generic, NewType, TypeAlias, TypeVar
 from mote_kernel.execution.graph.edge import Edge
 from mote_kernel.execution.graph.node import NodeDefinition, NodeId
 from mote_kernel.execution.graph.resolution import ResolutionBinding
-from mote_kernel.parallel import ResourceDefinition
+from mote_kernel.execution.resource import ResourceDefinition
 
 GraphDefinitionId = NewType("GraphDefinitionId", str)
 GraphDefinitionVersion = NewType("GraphDefinitionVersion", int)

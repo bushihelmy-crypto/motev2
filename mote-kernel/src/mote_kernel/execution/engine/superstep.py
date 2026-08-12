@@ -9,7 +9,7 @@ from mote_kernel.execution.engine.frontier import prepare_frontier
 from mote_kernel.execution.engine.resolution_input import effective_node_input
 from mote_kernel.execution.engine.resource_stage import (
     execute_resource_waves,
-    initial_parallel_snapshot,
+    initial_resource_snapshot,
     validated_resource_tasks,
 )
 from mote_kernel.execution.engine.scheduler import execute_tasks
@@ -23,7 +23,7 @@ from mote_kernel.execution.result import (
     PreparedFrontier,
     PreparedResourceAdmission,
 )
-from mote_kernel.state.graph_state import UpdateGraphParallel
+from mote_kernel.state.graph_state import UpdateGraphResources
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -37,14 +37,14 @@ async def prepare_superstep(
     """Prepare nested runs, resource admission, or one linear execution claim."""
 
     frontier = prepare_frontier(graph, request)
-    parallel = request.state.parallel
-    resource_tasks = validated_resource_tasks(graph, frontier, parallel)
+    resources = request.state.resources
+    resource_tasks = validated_resource_tasks(graph, frontier, resources)
     if not frontier.pending_tasks:
         return PreparedFrontier(None, ())
     if frontier.nested_runs:
         return PreparedFrontier(None, frontier.nested_runs)
     if resource_tasks:
-        current = parallel or initial_parallel_snapshot(graph)
+        current = resources or initial_resource_snapshot(graph)
         admission = admit_tasks(
             graph,
             tuple(task for task, _definition in frontier.executable_definitions),
@@ -55,9 +55,9 @@ async def prepare_superstep(
                 PreparedResourceAdmission(
                     admission.admitted,
                     admission.waiting,
-                    UpdateGraphParallel(
+                    UpdateGraphResources(
                         request.state.superstep,
-                        parallel,
+                        resources,
                         interrupt_generation(request.state),
                         admission.snapshot,
                     ),
@@ -84,17 +84,17 @@ async def execute_claimed_superstep(
     """Invoke and settle the exact recomputed batch of one consumed accepted claim."""
 
     frontier = prepare_frontier(graph, request)
-    parallel = request.state.parallel
-    resource_tasks = validated_resource_tasks(graph, frontier, parallel)
+    resources = request.state.resources
+    resource_tasks = validated_resource_tasks(graph, frontier, resources)
     require_claim_tasks(claim, frontier.pending_tasks)
     node_input = effective_node_input(graph, request.state, request.node_input)
     if resource_tasks:
-        if parallel is None:
-            raise ResultCollectionError("resource execution requires a committed parallel snapshot")
+        if resources is None:
+            raise ResultCollectionError("resource execution requires a committed resources snapshot")
         results = await execute_resource_waves(
             graph,
             frontier,
-            parallel,
+            resources,
             resource_tasks,
             node_input,
             request.nested_results,

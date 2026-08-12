@@ -1,1 +1,0 @@
-"""Parallel state-machine tests."""

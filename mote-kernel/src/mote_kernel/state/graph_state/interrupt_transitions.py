@@ -70,7 +70,7 @@ def request_graph_interrupt(state: GraphRunState, command: RequestGraphRunInterr
         replace(
             state,
             status=GraphRunStatus.SUSPENDED,
-            parallel=None,
+            resources=None,
             interrupt=GraphInterruptRecord(
                 identity,
                 command.request_payload,
@@ -115,7 +115,7 @@ def abort_graph_run(state: GraphRunState, command: AbortGraphRun) -> GraphRunSta
     if command.expected_superstep != state.superstep:
         raise GraphStateTransitionError("abort command was based on a stale superstep")
     require_interrupt_generation(state, command.expected_interrupt_generation)
-    if state.execution is not None or state.parallel is not None:
+    if state.execution is not None or state.resources is not None:
         raise GraphStateTransitionError("graph execution and resources must be fenced before abort")
     return validated_graph_run_state(
         replace(

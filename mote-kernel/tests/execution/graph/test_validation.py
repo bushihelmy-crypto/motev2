@@ -27,7 +27,7 @@ from mote_kernel.execution.graph import (
     RouteId,
     compile_graph,
 )
-from mote_kernel.parallel import ResourceDefinition, ResourceId
+from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 
 
 class Decoder:

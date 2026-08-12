@@ -12,16 +12,15 @@ from mote_kernel.execution.graph import (
     compile_graph,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.execution.snapshot import GraphRunId
-from mote_kernel.parallel import (
+from mote_kernel.state.graph_state import (
     AcquireResources,
-    ParallelSnapshot,
-    ParallelTransitionError,
     ParticipantId,
-    ResourceDefinition,
-    ResourceId,
     ResourceLock,
-    reduce_parallel,
+    ResourceSnapshot,
+    ResourceTransitionError,
+    reduce_resources,
 )
 
 FILE = ResourceId("file")
@@ -51,7 +50,7 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
         )
     )
 
-    admission = admit_tasks(graph, (task("c"), task("b"), task("a")), ParallelSnapshot((ResourceLock(FILE),)))
+    admission = admit_tasks(graph, (task("c"), task("b"), task("a")), ResourceSnapshot((ResourceLock(FILE),)))
 
     assert tuple(item.task_id for item in admission.admitted) == (TaskId("a"), TaskId("c"))
     assert tuple(item.task_id for item in admission.waiting) == (TaskId("b"),)
@@ -70,7 +69,7 @@ def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
             (ResourceDefinition(FILE, 10),),
         )
     )
-    first = admit_tasks(graph, (task("a"),), ParallelSnapshot((ResourceLock(FILE),)))
+    first = admit_tasks(graph, (task("a"),), ResourceSnapshot((ResourceLock(FILE),)))
 
     second = admit_tasks(graph, (task("a"),), first.snapshot)
 
@@ -97,33 +96,33 @@ def test_admission_rejects_duplicate_unknown_and_stale_batch_tasks() -> None:
     graph = resource_graph()
     duplicate = (task("a"), task("a"))
 
-    with pytest.raises(ParallelTransitionError, match="unique"):
-        admit_tasks(graph, duplicate, ParallelSnapshot((ResourceLock(FILE),)))
-    with pytest.raises(ParallelTransitionError, match="unknown graph node"):
-        admit_tasks(graph, (task("unknown"),), ParallelSnapshot((ResourceLock(FILE),)))
-    acquired = reduce_parallel(
-        ParallelSnapshot((ResourceLock(FILE),)),
+    with pytest.raises(ResourceTransitionError, match="unique"):
+        admit_tasks(graph, duplicate, ResourceSnapshot((ResourceLock(FILE),)))
+    with pytest.raises(ResourceTransitionError, match="unknown graph node"):
+        admit_tasks(graph, (task("unknown"),), ResourceSnapshot((ResourceLock(FILE),)))
+    acquired = reduce_resources(
+        ResourceSnapshot((ResourceLock(FILE),)),
         AcquireResources(ParticipantId("a"), (FILE,)),
     )
-    with pytest.raises(ParallelTransitionError, match="outside"):
+    with pytest.raises(ResourceTransitionError, match="outside"):
         admit_tasks(graph, (task("free"),), acquired)
 
 
 def test_admission_rejects_acquisition_for_free_task_and_requirement_drift() -> None:
     graph = resource_graph()
-    acquired = reduce_parallel(
-        ParallelSnapshot((ResourceLock(FILE),)),
+    acquired = reduce_resources(
+        ResourceSnapshot((ResourceLock(FILE),)),
         AcquireResources(ParticipantId("free"), (FILE,)),
     )
-    with pytest.raises(ParallelTransitionError, match="resource-free"):
+    with pytest.raises(ResourceTransitionError, match="resource-free"):
         admit_tasks(graph, (task("free"),), acquired)
 
-    drifted = reduce_parallel(
-        ParallelSnapshot((ResourceLock(FILE),)),
+    drifted = reduce_resources(
+        ResourceSnapshot((ResourceLock(FILE),)),
         AcquireResources(ParticipantId("a"), (FILE,)),
     )
     object.__setattr__(drifted.acquisitions[0], "required", ())
-    with pytest.raises(ParallelTransitionError, match="does not match"):
+    with pytest.raises(ResourceTransitionError, match="does not match"):
         admit_tasks(graph, (task("a"),), drifted)
 
 
@@ -145,8 +144,8 @@ def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
         )
     )
 
-    with pytest.raises(ParallelTransitionError, match="executable node"):
-        admit_tasks(graph, (task("a"),), ParallelSnapshot(()))
+    with pytest.raises(ResourceTransitionError, match="executable node"):
+        admit_tasks(graph, (task("a"),), ResourceSnapshot(()))
 
 
 def test_admission_is_independent_of_input_task_order() -> None:
@@ -163,7 +162,7 @@ def test_admission_is_independent_of_input_task_order() -> None:
             (ResourceDefinition(FILE, 10),),
         )
     )
-    snapshot = ParallelSnapshot((ResourceLock(FILE),))
+    snapshot = ResourceSnapshot((ResourceLock(FILE),))
 
     forward = admit_tasks(graph, (task("a"), task("b")), snapshot)
     reverse = admit_tasks(graph, (task("b"), task("a")), snapshot)

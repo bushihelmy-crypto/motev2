@@ -96,7 +96,7 @@ def project_execution_snapshot(state: GraphRunState) -> ExecutionSnapshot:
             )
             for progress in state.join_progress
         ),
-        parallel=state.parallel,
+        resources=state.resources,
         execution_sequence=state.execution_sequence,
         execution=(
             ExecutionLeaseSnapshot(

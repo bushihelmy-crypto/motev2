@@ -41,7 +41,7 @@ def lease_snapshot(execution_snapshot: ExecutionSnapshot, *task_ids: str) -> Exe
         frontier=execution_snapshot.frontier,
         parent=execution_snapshot.parent,
         join_progress=execution_snapshot.join_progress,
-        parallel=execution_snapshot.parallel,
+        resources=execution_snapshot.resources,
         execution_sequence=1,
         execution=ExecutionLeaseSnapshot(
             ExecutionToken(1, ExecutionAttemptId("test-attempt")),

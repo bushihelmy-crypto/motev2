@@ -18,7 +18,7 @@ REQUIRED_PACKAGES = frozenset(
         "observability",
         "observe",
         "operations",
-        "parallel",
+        "execution/resource",
         "role",
         "role/restore",
         "state",

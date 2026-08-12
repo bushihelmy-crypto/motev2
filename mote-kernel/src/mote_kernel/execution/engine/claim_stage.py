@@ -35,7 +35,7 @@ def prepare_claim(
     command = ClaimGraphExecution(
         state.superstep,
         state.execution_sequence,
-        state.parallel,
+        state.resources,
         interrupt_generation(state),
         GraphExecutionAttemptId(claim_id),
         tuple(GraphTaskId(task_id) for task_id in task_ids),

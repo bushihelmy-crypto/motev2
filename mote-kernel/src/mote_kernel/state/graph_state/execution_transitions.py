@@ -57,8 +57,8 @@ def claim_graph_execution(state: GraphRunState, command: ClaimGraphExecution) ->
         raise GraphStateTransitionError("execution claim was based on a stale superstep")
     if command.expected_execution_sequence != state.execution_sequence:
         raise GraphStateTransitionError("execution claim was based on a stale execution sequence")
-    if command.expected_parallel != state.parallel:
-        raise GraphStateTransitionError("execution claim was based on a stale parallel snapshot")
+    if command.expected_resources != state.resources:
+        raise GraphStateTransitionError("execution claim was based on a stale resources snapshot")
     require_interrupt_generation(state, command.expected_interrupt_generation)
     token = GraphExecutionToken(state.execution_sequence + 1, command.attempt_id)
     return validated_graph_run_state(
@@ -96,7 +96,7 @@ def advance_graph_run(state: GraphRunState, command: AdvanceGraphRun) -> GraphRu
             superstep=state.superstep + 1,
             frontier=tuple(sorted(command.frontier)),
             join_progress=tuple(sorted(command.join_progress, key=_join_sort_key)),
-            parallel=None,
+            resources=None,
             execution=None,
             interrupt=consume_graph_resolution(state),
         )
@@ -120,7 +120,7 @@ def complete_graph_run(state: GraphRunState, command: CompleteGraphRun) -> Graph
             status=GraphRunStatus.COMPLETED,
             frontier=(),
             join_progress=(),
-            parallel=None,
+            resources=None,
             execution=None,
             interrupt=consume_graph_resolution(state),
         )
@@ -143,7 +143,7 @@ def fail_graph_execution(state: GraphRunState, command: FailGraphExecution) -> G
             frontier=(),
             failure=command.failure,
             join_progress=(),
-            parallel=None,
+            resources=None,
             execution=None,
             interrupt=consume_graph_resolution(state),
         )

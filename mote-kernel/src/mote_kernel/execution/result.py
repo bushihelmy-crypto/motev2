@@ -11,7 +11,7 @@ from mote_kernel.state.graph_state import (
     GraphRunCommand,
     GraphRunState,
     StartGraphRun,
-    UpdateGraphParallel,
+    UpdateGraphResources,
 )
 
 InputT = TypeVar("InputT")
@@ -52,7 +52,7 @@ class PreparedResourceAdmission:
 
     admitted: tuple[GraphTask, ...]
     waiting: tuple[GraphTask, ...]
-    command: UpdateGraphParallel
+    command: UpdateGraphResources
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,7 +9,7 @@ from mote_kernel.state.graph_state.command import (
     FenceGraphExecution,
     GraphRunCommand,
     StartGraphRun,
-    UpdateGraphParallel,
+    UpdateGraphResources,
 )
 from mote_kernel.state.graph_state.model import (
     GraphDefinitionId,
@@ -35,10 +35,24 @@ from mote_kernel.state.graph_state.model import (
     ParentGraphTask,
 )
 from mote_kernel.state.graph_state.reducer import reduce_graph_run
+from mote_kernel.state.graph_state.resource_command import AcquireResources, ReleaseResources, ResourceCommand
+from mote_kernel.state.graph_state.resource_model import (
+    ParticipantId,
+    ResourceAcquisition,
+    ResourceId,
+    ResourceLock,
+    ResourceSnapshot,
+)
+from mote_kernel.state.graph_state.resource_reducer import (
+    ResourceTransitionError,
+    reduce_resources,
+    validate_resource_snapshot,
+)
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError
 
 __all__ = [
     "AbortGraphRun",
+    "AcquireResources",
     "AdvanceGraphRun",
     "ClaimGraphExecution",
     "CompleteGraphRun",
@@ -67,7 +81,17 @@ __all__ = [
     "GraphStateTransitionError",
     "GraphTaskId",
     "ParentGraphTask",
+    "ParticipantId",
+    "ReleaseResources",
+    "ResourceAcquisition",
+    "ResourceCommand",
+    "ResourceId",
+    "ResourceLock",
+    "ResourceSnapshot",
+    "ResourceTransitionError",
     "StartGraphRun",
-    "UpdateGraphParallel",
+    "UpdateGraphResources",
     "reduce_graph_run",
+    "reduce_resources",
+    "validate_resource_snapshot",
 ]

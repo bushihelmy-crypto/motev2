@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from mote_kernel.parallel import ParallelSnapshot
 from mote_kernel.state.graph_state.model import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -19,6 +18,7 @@ from mote_kernel.state.graph_state.model import (
     GraphTaskId,
     ParentGraphTask,
 )
+from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +50,7 @@ class ClaimGraphExecution:
 
     expected_superstep: int
     expected_execution_sequence: int
-    expected_parallel: ParallelSnapshot | None
+    expected_resources: ResourceSnapshot | None
     expected_interrupt_generation: int | None
     attempt_id: GraphExecutionAttemptId
     task_ids: tuple[GraphTaskId, ...]
@@ -111,13 +111,13 @@ class AbortGraphRun:
 
 
 @dataclass(frozen=True, slots=True)
-class UpdateGraphParallel:
+class UpdateGraphResources:
     """Commit resource admission before an executor attempt is claimed."""
 
     expected_superstep: int
-    expected_parallel: ParallelSnapshot | None
+    expected_resources: ResourceSnapshot | None
     expected_interrupt_generation: int | None
-    parallel: ParallelSnapshot
+    resources: ResourceSnapshot
 
 
 GraphRunCommand: TypeAlias = (
@@ -130,7 +130,7 @@ GraphRunCommand: TypeAlias = (
     | CompleteGraphRun
     | FailGraphExecution
     | AbortGraphRun
-    | UpdateGraphParallel
+    | UpdateGraphResources
 )
 
 __all__ = [
@@ -144,5 +144,5 @@ __all__ = [
     "RequestGraphRunInterrupt",
     "ResolveGraphRunInterrupt",
     "StartGraphRun",
-    "UpdateGraphParallel",
+    "UpdateGraphResources",
 ]

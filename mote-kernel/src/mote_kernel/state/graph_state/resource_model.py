@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import NewType
 
-from mote_kernel.parallel.definition import ResourceId
+ResourceId = NewType("ResourceId", str)
 
 ParticipantId = NewType("ParticipantId", str)
 
@@ -34,11 +34,11 @@ class ResourceAcquisition:
 
 
 @dataclass(frozen=True, slots=True)
-class ParallelSnapshot:
+class ResourceSnapshot:
     """Read-only lock ownership and acquisition progress."""
 
     resources: tuple[ResourceLock, ...]
     acquisitions: tuple[ResourceAcquisition, ...] = ()
 
 
-__all__ = ["ParallelSnapshot", "ParticipantId", "ResourceAcquisition", "ResourceLock"]
+__all__ = ["ParticipantId", "ResourceAcquisition", "ResourceId", "ResourceLock", "ResourceSnapshot"]

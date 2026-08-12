@@ -1,6 +1,5 @@
 """Authoritative invariants for recovered graph-run state."""
 
-from mote_kernel.parallel import ParallelTransitionError, validate_parallel_snapshot
 from mote_kernel.state.graph_state.model import (
     GraphInterruptLifecycle,
     GraphInterruptRecord,
@@ -9,6 +8,7 @@ from mote_kernel.state.graph_state.model import (
     GraphRunState,
     GraphRunStatus,
 )
+from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
 
 
 class GraphStateTransitionError(ValueError):
@@ -122,17 +122,17 @@ def validate_graph_run_state(state: GraphRunState) -> None:
             _require_identity(task_id, "execution lease task identity")
         if state.status is not GraphRunStatus.RUNNING:
             raise GraphStateTransitionError("only a running graph may retain an execution lease")
-    if state.parallel is not None:
+    if state.resources is not None:
         try:
-            validate_parallel_snapshot(state.parallel)
-        except ParallelTransitionError as error:
-            raise GraphStateTransitionError("graph parallel state is invalid") from error
+            validate_resource_snapshot(state.resources)
+        except ResourceTransitionError as error:
+            raise GraphStateTransitionError("graph resources state is invalid") from error
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.frontier:
         raise GraphStateTransitionError("a terminal graph cannot retain a frontier")
     if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.join_progress:
         raise GraphStateTransitionError("a terminal graph cannot retain join progress")
-    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.parallel is not None:
-        raise GraphStateTransitionError("a terminal graph cannot retain parallel state")
+    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.resources is not None:
+        raise GraphStateTransitionError("a terminal graph cannot retain resources state")
     interrupt = state.interrupt
     if interrupt is not None:
         validate_graph_interrupt_record(interrupt, state.resolution_codec, state.superstep)
@@ -146,7 +146,7 @@ def validate_graph_run_state(state: GraphRunState) -> None:
     if state.status is GraphRunStatus.SUSPENDED:
         if interrupt is None or interrupt.lifecycle is not GraphInterruptLifecycle.REQUESTED:
             raise GraphStateTransitionError("suspended graph requires a requested interrupt")
-        if state.parallel is not None or execution is not None:
+        if state.resources is not None or execution is not None:
             raise GraphStateTransitionError("suspended graph must be scheduler-quiescent")
     elif interrupt is not None and interrupt.lifecycle is GraphInterruptLifecycle.REQUESTED:
         raise GraphStateTransitionError("only a suspended graph may retain a requested interrupt")

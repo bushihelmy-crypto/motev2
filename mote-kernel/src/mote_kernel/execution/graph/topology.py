@@ -9,7 +9,7 @@ from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefin
 from mote_kernel.execution.graph.edge import JoinEdge, RouteId
 from mote_kernel.execution.graph.identity import NodeId
 from mote_kernel.execution.graph.resolution import ResolutionBinding
-from mote_kernel.parallel import ResourceDefinition, ResourceId
+from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")

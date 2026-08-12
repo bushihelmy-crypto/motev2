@@ -3,8 +3,7 @@
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from mote_kernel.parallel.definition import ResourceId
-from mote_kernel.parallel.model import ParticipantId
+from mote_kernel.state.graph_state.resource_model import ParticipantId, ResourceId
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +21,6 @@ class ReleaseResources:
     participant_id: ParticipantId
 
 
-ParallelCommand: TypeAlias = AcquireResources | ReleaseResources
+ResourceCommand: TypeAlias = AcquireResources | ReleaseResources
 
-__all__ = ["AcquireResources", "ParallelCommand", "ReleaseResources"]
+__all__ = ["AcquireResources", "ReleaseResources", "ResourceCommand"]

@@ -5,7 +5,7 @@ from enum import Enum, auto
 from typing import NewType
 
 from mote_kernel.execution.graph import GraphDefinitionId, GraphDefinitionVersion, NodeId
-from mote_kernel.parallel import ParallelSnapshot
+from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 
 GraphRunId = NewType("GraphRunId", str)
 ParentTaskId = NewType("ParentTaskId", str)
@@ -101,7 +101,7 @@ class ExecutionSnapshot:
     frontier: tuple[NodeId, ...]
     parent: ParentTaskRef | None = None
     join_progress: tuple[JoinProgress, ...] = ()
-    parallel: ParallelSnapshot | None = None
+    resources: ResourceSnapshot | None = None
     execution_sequence: int = 0
     execution: ExecutionLeaseSnapshot | None = None
     interrupt: InterruptRecord | None = None

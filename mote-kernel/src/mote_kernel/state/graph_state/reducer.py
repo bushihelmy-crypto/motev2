@@ -10,7 +10,7 @@ from mote_kernel.state.graph_state.command import (
     RequestGraphRunInterrupt,
     ResolveGraphRunInterrupt,
     StartGraphRun,
-    UpdateGraphParallel,
+    UpdateGraphResources,
 )
 from mote_kernel.state.graph_state.execution_transitions import (
     advance_graph_run,
@@ -26,7 +26,7 @@ from mote_kernel.state.graph_state.interrupt_transitions import (
     resolve_graph_interrupt,
 )
 from mote_kernel.state.graph_state.model import GraphRunState
-from mote_kernel.state.graph_state.parallel_transitions import update_graph_parallel
+from mote_kernel.state.graph_state.resource_transitions import update_graph_resources
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError, validate_graph_run_state
 
 
@@ -48,8 +48,8 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
         return request_graph_interrupt(state, command)
     if isinstance(command, ResolveGraphRunInterrupt):
         return resolve_graph_interrupt(state, command)
-    if isinstance(command, UpdateGraphParallel):
-        return update_graph_parallel(state, command)
+    if isinstance(command, UpdateGraphResources):
+        return update_graph_resources(state, command)
     if isinstance(command, AdvanceGraphRun):
         return advance_graph_run(state, command)
     if isinstance(command, CompleteGraphRun):

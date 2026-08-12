@@ -32,18 +32,11 @@ from mote_kernel.execution.graph import (
     compile_graph,
 )
 from mote_kernel.execution.graph.command import SelectRoute
+from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.execution.result import TaskFailure, TaskSuccess
 from mote_kernel.execution.snapshot import ExecutionAttemptId
-from mote_kernel.parallel import (
-    AcquireResources,
-    ParallelSnapshot,
-    ParticipantId,
-    ResourceDefinition,
-    ResourceId,
-    ResourceLock,
-    reduce_parallel,
-)
 from mote_kernel.state.graph_state import (
+    AcquireResources,
     CompleteGraphRun,
     FenceGraphExecution,
     GraphNodeId,
@@ -51,7 +44,11 @@ from mote_kernel.state.graph_state import (
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
+    ParticipantId,
+    ResourceLock,
+    ResourceSnapshot,
     reduce_graph_run,
+    reduce_resources,
 )
 from mote_kernel.state.graph_state import GraphDefinitionId as StateDefinitionId
 from mote_kernel.state.graph_state import GraphDefinitionVersion as StateDefinitionVersion
@@ -61,7 +58,7 @@ DATABASE = ResourceId("database")
 DIRECT_ATTEMPT = ExecutionAttemptId("direct-stage-test")
 
 
-def state(*, frontier: tuple[str, ...] = ("a", "b"), parallel: ParallelSnapshot | None = None) -> GraphRunState:
+def state(*, frontier: tuple[str, ...] = ("a", "b"), resources: ResourceSnapshot | None = None) -> GraphRunState:
     return GraphRunState(
         GraphRunId("run"),
         StateDefinitionId("resource.graph"),
@@ -69,7 +66,7 @@ def state(*, frontier: tuple[str, ...] = ("a", "b"), parallel: ParallelSnapshot 
         GraphRunStatus.RUNNING,
         0,
         tuple(GraphNodeId(node_id) for node_id in frontier),
-        parallel=parallel,
+        resources=resources,
     )
 
 
@@ -147,7 +144,7 @@ async def test_conflicting_resource_frontier_executes_all_waves_under_one_claim(
     assert calls == ["a", "b"]
     completed = reduce_claim_result(claimed)
     assert completed.status is GraphRunStatus.COMPLETED
-    assert completed.parallel is None
+    assert completed.resources is None
     assert completed.execution is None
 
 
@@ -231,7 +228,7 @@ async def test_cancelling_a_resource_wave_keeps_the_committed_claim_fenced() -> 
     assert calls.count("b") == 2
     assert completed.status is GraphRunStatus.COMPLETED
     assert completed.execution is None
-    assert completed.parallel is None
+    assert completed.resources is None
 
 
 @pytest.mark.asyncio
@@ -378,7 +375,7 @@ async def test_resource_node_exception_keeps_the_claim_for_explicit_fencing() ->
     assert attempts == 2
     assert calls == ["a", "a", "b"]
     assert completed.status is GraphRunStatus.COMPLETED
-    assert completed.parallel is None
+    assert completed.resources is None
 
 
 @pytest.mark.asyncio
@@ -448,27 +445,27 @@ async def test_active_execution_cannot_reenter_resource_admission() -> None:
 async def test_committed_parallel_snapshot_must_match_graph_and_pending_tasks(case: str) -> None:
     graph = _resource_free_graph()
     if case == "wrong-order":
-        parallel = ParallelSnapshot((ResourceLock(DATABASE),))
+        resources = ResourceSnapshot((ResourceLock(DATABASE),))
         message = "resource order"
     else:
-        parallel = reduce_parallel(
-            ParallelSnapshot((ResourceLock(FILE),)),
+        resources = reduce_resources(
+            ResourceSnapshot((ResourceLock(FILE),)),
             AcquireResources(ParticipantId("stale"), (FILE,)),
         )
         message = "outside pending resource tasks"
 
     with pytest.raises(ResultCollectionError, match=message):
-        await execute_step(step_request(graph, state(frontier=("a",), parallel=parallel), "input"))
+        await execute_step(step_request(graph, state(frontier=("a",), resources=resources), "input"))
 
 
 @pytest.mark.asyncio
 async def test_claimed_stage_revalidates_pending_resource_participants() -> None:
     graph = _resource_free_graph()
-    stale = reduce_parallel(
-        ParallelSnapshot((ResourceLock(FILE),)),
+    stale = reduce_resources(
+        ResourceSnapshot((ResourceLock(FILE),)),
         AcquireResources(ParticipantId("stale"), (FILE,)),
     )
-    stale_state = state(frontier=("a",), parallel=stale)
+    stale_state = state(frontier=("a",), resources=stale)
     direct_request = StepRequest(stale_state, "input", DIRECT_ATTEMPT)
     direct_frontier = prepare_frontier(graph, direct_request)
     owner = ExecutionClaimOwner()
@@ -490,14 +487,14 @@ async def test_claimed_stage_revalidates_pending_resource_participants() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "parallel",
-    [None, ParallelSnapshot((ResourceLock(FILE),))],
+    "resources",
+    [None, ResourceSnapshot((ResourceLock(FILE),))],
 )
 async def test_resource_free_frontier_skips_admission_and_clears_prior_scheduler_state(
-    parallel: ParallelSnapshot | None,
+    resources: ResourceSnapshot | None,
 ) -> None:
     graph = _resource_free_graph()
-    initial = state(frontier=("a",), parallel=parallel)
+    initial = state(frontier=("a",), resources=resources)
     executor = GraphExecutor(graph)
 
     prepared = await executor.prepare(StepRequest(initial, "input", DIRECT_ATTEMPT))
@@ -510,7 +507,7 @@ async def test_resource_free_frontier_skips_admission_and_clears_prior_scheduler
         StepRequest(claimed, "input", DIRECT_ATTEMPT),
     )
     completed = reduce_graph_run(claimed, result.command)
-    assert completed.parallel is None
+    assert completed.resources is None
 
 
 @pytest.mark.asyncio
@@ -630,7 +627,7 @@ async def test_claimed_resource_stage_rejects_missing_admission() -> None:
     )
     missing_admission = state(
         frontier=("a",),
-        parallel=ParallelSnapshot((ResourceLock(FILE),)),
+        resources=ResourceSnapshot((ResourceLock(FILE),)),
     )
     direct_request = StepRequest(missing_admission, "input", DIRECT_ATTEMPT)
     direct_frontier = prepare_frontier(graph, direct_request)
@@ -680,7 +677,7 @@ async def test_claimed_resource_stage_rejects_absent_parallel_snapshot() -> None
     claimed = reduce_graph_run(missing_admission, direct_claim.command)
     await direct_claim.consume(owner, claimed, DIRECT_ATTEMPT)
 
-    with pytest.raises(ResultCollectionError, match="committed parallel snapshot"):
+    with pytest.raises(ResultCollectionError, match="committed resources snapshot"):
         await execute_claimed_superstep(
             graph,
             StepRequest(claimed, "input", DIRECT_ATTEMPT),

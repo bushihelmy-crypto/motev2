@@ -5,7 +5,7 @@ from typing import Generic, Protocol, TypeVar
 
 from mote_kernel.execution.graph.identity import NodeId
 from mote_kernel.execution.graph.outcome import NodeOutcome
-from mote_kernel.parallel import ResourceId
+from mote_kernel.execution.resource import ResourceId
 
 InputT = TypeVar("InputT", contravariant=True)
 OutputT_co = TypeVar("OutputT_co", covariant=True)

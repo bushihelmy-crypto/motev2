@@ -1,9 +1,8 @@
-"""Stable declarations for exclusive Kernel resources."""
+"""Stable declarations for exclusive execution resources."""
 
 from dataclasses import dataclass
-from typing import NewType
 
-ResourceId = NewType("ResourceId", str)
+from mote_kernel.state.graph_state.resource_model import ResourceId
 
 
 @dataclass(frozen=True, slots=True)

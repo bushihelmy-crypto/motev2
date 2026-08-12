@@ -3,17 +3,9 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from mote_kernel.parallel import (
-    AcquireResources,
-    ParallelSnapshot,
-    ParticipantId,
-    ResourceAcquisition,
-    ResourceId,
-    ResourceLock,
-    reduce_parallel,
-)
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
+    AcquireResources,
     AdvanceGraphRun,
     ClaimGraphExecution,
     CompleteGraphRun,
@@ -41,9 +33,15 @@ from mote_kernel.state.graph_state import (
     GraphStateTransitionError,
     GraphTaskId,
     ParentGraphTask,
+    ParticipantId,
+    ResourceAcquisition,
+    ResourceId,
+    ResourceLock,
+    ResourceSnapshot,
     StartGraphRun,
-    UpdateGraphParallel,
+    UpdateGraphResources,
     reduce_graph_run,
+    reduce_resources,
 )
 from mote_kernel.state.graph_state.command import RequestGraphRunInterrupt, ResolveGraphRunInterrupt
 from mote_kernel.state.graph_state.validation import validate_graph_run_state
@@ -117,7 +115,7 @@ def running_state(
     *,
     superstep: int = 0,
     frontier: tuple[GraphNodeId, ...] = (GraphNodeId("a"),),
-    parallel: ParallelSnapshot | None = None,
+    resources: ResourceSnapshot | None = None,
     execution_sequence: int = 0,
     execution: GraphExecutionLease | None = None,
     interrupt_record: GraphInterruptRecord | None = None,
@@ -130,7 +128,7 @@ def running_state(
         GraphRunStatus.RUNNING,
         superstep,
         frontier,
-        parallel=parallel,
+        resources=resources,
         execution_sequence=execution_sequence,
         execution=execution,
         interrupt=interrupt_record,
@@ -179,7 +177,7 @@ def claim(
         ClaimGraphExecution(
             state.superstep,
             state.execution_sequence,
-            state.parallel,
+            state.resources,
             generation,
             attempt_id,
             task_ids,
@@ -192,16 +190,16 @@ def token(state: GraphRunState) -> GraphExecutionToken:
     return state.execution.token
 
 
-def acquired(task_id: GraphTaskId = TASK) -> ParallelSnapshot:
+def acquired(task_id: GraphTaskId = TASK) -> ResourceSnapshot:
     participant = ParticipantId(task_id)
-    return ParallelSnapshot(
+    return ResourceSnapshot(
         (ResourceLock(FILE, participant),),
         (ResourceAcquisition(participant, (FILE,), (FILE,)),),
     )
 
 
-def released() -> ParallelSnapshot:
-    return ParallelSnapshot((ResourceLock(FILE),))
+def released() -> ResourceSnapshot:
+    return ResourceSnapshot((ResourceLock(FILE),))
 
 
 def test_interrupt_request_and_resolution_are_pure_graph_run_transitions() -> None:
@@ -293,7 +291,7 @@ def test_interrupt_request_requires_codec_fenced_execution_and_monotonic_identit
 
 
 def test_interrupt_request_atomically_releases_unclaimed_resource_admission() -> None:
-    initial = running_state(parallel=acquired(), resolution_codec=CODEC)
+    initial = running_state(resources=acquired(), resolution_codec=CODEC)
     identity = GraphInterruptIdentity(initial.run_id, GraphInterruptId("pause"), 1)
 
     suspended = reduce_graph_run(
@@ -302,7 +300,7 @@ def test_interrupt_request_atomically_releases_unclaimed_resource_admission() ->
     )
 
     assert suspended.status is GraphRunStatus.SUSPENDED
-    assert suspended.parallel is None
+    assert suspended.resources is None
 
 
 @pytest.mark.parametrize(
@@ -382,11 +380,11 @@ def test_interrupt_request_rejects_wrong_status_stale_step_and_unfinished_resolu
     "prepared_command",
     [
         ClaimGraphExecution(0, 0, None, None, ATTEMPT, (TASK,)),
-        UpdateGraphParallel(0, None, None, released()),
+        UpdateGraphResources(0, None, None, released()),
     ],
 )
 def test_interrupt_generation_fences_prepared_claim_and_admission(
-    prepared_command: ClaimGraphExecution | UpdateGraphParallel,
+    prepared_command: ClaimGraphExecution | UpdateGraphResources,
 ) -> None:
     initial = running_state(resolution_codec=CODEC)
     identity = GraphInterruptIdentity(initial.run_id, GraphInterruptId("pause"), 1)
@@ -598,24 +596,24 @@ def test_reclaim_after_fencing_advances_the_execution_generation() -> None:
 
 def test_resource_admission_uses_superstep_parallel_and_interrupt_cas() -> None:
     state = running_state(interrupt_record=interrupt(GraphInterruptLifecycle.RESOLVED), resolution_codec=CODEC)
-    admitted = reduce_graph_run(state, UpdateGraphParallel(0, None, 2, acquired()))
+    admitted = reduce_graph_run(state, UpdateGraphResources(0, None, 2, acquired()))
 
-    assert admitted.parallel == acquired()
+    assert admitted.resources == acquired()
     for command in (
-        UpdateGraphParallel(1, acquired(), 2, released()),
-        UpdateGraphParallel(0, acquired(), 2, released()),
-        UpdateGraphParallel(0, None, 3, released()),
+        UpdateGraphResources(1, acquired(), 2, released()),
+        UpdateGraphResources(0, acquired(), 2, released()),
+        UpdateGraphResources(0, None, 3, released()),
     ):
         with pytest.raises(GraphStateTransitionError):
             reduce_graph_run(state, command)
     with pytest.raises(GraphStateTransitionError, match="during execution"):
-        reduce_graph_run(claim(state), UpdateGraphParallel(0, None, 2, acquired()))
+        reduce_graph_run(claim(state), UpdateGraphResources(0, None, 2, acquired()))
 
 
 def test_resource_admission_clears_only_when_the_claimed_superstep_settles() -> None:
     admitted = reduce_graph_run(
         running_state(),
-        UpdateGraphParallel(0, None, None, acquired()),
+        UpdateGraphResources(0, None, None, acquired()),
     )
     claimed = claim(admitted)
     advanced = reduce_graph_run(
@@ -623,57 +621,57 @@ def test_resource_admission_clears_only_when_the_claimed_superstep_settles() -> 
         AdvanceGraphRun(0, token(claimed), None, (GraphNodeId("b"),)),
     )
 
-    assert admitted.parallel == acquired()
-    assert claimed.parallel == acquired()
-    assert advanced.parallel is None
+    assert admitted.resources == acquired()
+    assert claimed.resources == acquired()
+    assert advanced.resources is None
 
 
 def test_resource_admission_rejects_invalid_parallel_state_and_status() -> None:
-    invalid = ParallelSnapshot((ResourceLock(FILE), ResourceLock(FILE)))
+    invalid = ResourceSnapshot((ResourceLock(FILE), ResourceLock(FILE)))
     with pytest.raises(GraphStateTransitionError, match="invalid"):
-        reduce_graph_run(running_state(), UpdateGraphParallel(0, None, None, invalid))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, invalid))
     terminal = replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=())
     with pytest.raises(GraphStateTransitionError, match="running"):
-        reduce_graph_run(terminal, UpdateGraphParallel(0, None, None, released()))
+        reduce_graph_run(terminal, UpdateGraphResources(0, None, None, released()))
 
 
 def test_resource_admission_cannot_replace_a_committed_owner() -> None:
     committed = acquired()
     replacement = acquired(GraphTaskId("task-b"))
-    state = running_state(parallel=committed)
+    state = running_state(resources=committed)
 
     with pytest.raises(GraphStateTransitionError, match="rewrite committed acquisitions"):
-        reduce_graph_run(state, UpdateGraphParallel(0, committed, None, replacement))
+        reduce_graph_run(state, UpdateGraphResources(0, committed, None, replacement))
 
 
 def test_resource_admission_accepts_only_a_replayable_extension() -> None:
     first_participant = ParticipantId(TASK)
     second_participant = ParticipantId("task-b")
-    empty = ParallelSnapshot((ResourceLock(FILE), ResourceLock(DATABASE)))
-    committed = reduce_parallel(empty, AcquireResources(first_participant, (FILE,)))
-    extended = reduce_parallel(committed, AcquireResources(second_participant, (DATABASE,)))
-    state = running_state(parallel=committed)
+    empty = ResourceSnapshot((ResourceLock(FILE), ResourceLock(DATABASE)))
+    committed = reduce_resources(empty, AcquireResources(first_participant, (FILE,)))
+    extended = reduce_resources(committed, AcquireResources(second_participant, (DATABASE,)))
+    state = running_state(resources=committed)
 
-    updated = reduce_graph_run(state, UpdateGraphParallel(0, committed, None, extended))
+    updated = reduce_graph_run(state, UpdateGraphResources(0, committed, None, extended))
 
-    assert updated.parallel == extended
+    assert updated.resources == extended
 
 
 def test_resource_admission_rejects_an_unreplayable_acquisition() -> None:
     participant = ParticipantId("task-b")
-    proposed = ParallelSnapshot(
+    proposed = ResourceSnapshot(
         (ResourceLock(FILE),),
         (ResourceAcquisition(participant, (DATABASE,), (), DATABASE),),
     )
 
     with pytest.raises(GraphStateTransitionError, match="legal acquisition sequence"):
-        reduce_graph_run(running_state(), UpdateGraphParallel(0, None, None, proposed))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, proposed))
 
 
 def test_resource_admission_rejects_a_valid_snapshot_with_non_fifo_history() -> None:
     owner = ParticipantId("owner")
     waiter = ParticipantId("waiter")
-    proposed = ParallelSnapshot(
+    proposed = ResourceSnapshot(
         (ResourceLock(FILE, owner, (waiter,)),),
         (
             ResourceAcquisition(waiter, (FILE,), (), FILE),
@@ -682,9 +680,9 @@ def test_resource_admission_rejects_a_valid_snapshot_with_non_fifo_history() -> 
     )
 
     with pytest.raises(GraphStateTransitionError, match="replayed acquisition sequence"):
-        reduce_graph_run(running_state(), UpdateGraphParallel(0, None, None, proposed))
-    with pytest.raises(GraphStateTransitionError, match="parallel state is invalid"):
-        validate_graph_run_state(running_state(parallel=proposed))
+        reduce_graph_run(running_state(), UpdateGraphResources(0, None, None, proposed))
+    with pytest.raises(GraphStateTransitionError, match="resources state is invalid"):
+        validate_graph_run_state(running_state(resources=proposed))
 
 
 def test_progress_requires_exact_execution_token() -> None:
@@ -955,7 +953,7 @@ def test_abort_preserves_finalized_interrupt_and_rejects_unsafe_state() -> None:
     assert reduce_graph_run(state, AbortGraphRun(1, 2, GraphFailure("abort"))).interrupt == consumed
     for unsafe in (
         claim(running_state()),
-        running_state(parallel=released()),
+        running_state(resources=released()),
         replace(running_state(), status=GraphRunStatus.COMPLETED, frontier=()),
     ):
         with pytest.raises(GraphStateTransitionError):
@@ -985,7 +983,7 @@ def test_abort_preserves_finalized_interrupt_and_rejects_unsafe_state() -> None:
             execution_sequence=1,
             execution=GraphExecutionLease(GraphExecutionToken(1, ATTEMPT), ()),
         ),
-        replace(running_state(), parallel=ParallelSnapshot((ResourceLock(FILE), ResourceLock(FILE)))),
+        replace(running_state(), resources=ResourceSnapshot((ResourceLock(FILE), ResourceLock(FILE)))),
         replace(running_state(), status=GraphRunStatus.COMPLETED),
         replace(
             running_state(),
@@ -999,7 +997,7 @@ def test_abort_preserves_finalized_interrupt_and_rejects_unsafe_state() -> None:
                 ),
             ),
         ),
-        replace(running_state(parallel=released()), status=GraphRunStatus.COMPLETED, frontier=()),
+        replace(running_state(resources=released()), status=GraphRunStatus.COMPLETED, frontier=()),
         replace(running_state(), failure=GraphFailure("failed")),
         running_state(
             interrupt_record=interrupt(
@@ -1198,7 +1196,7 @@ def test_suspended_and_terminal_states_require_quiescent_consistent_interrupts()
             )
         )
     with pytest.raises(GraphStateTransitionError, match="quiescent"):
-        validate_graph_run_state(replace(suspended, parallel=released()))
+        validate_graph_run_state(replace(suspended, resources=released()))
     with pytest.raises(GraphStateTransitionError):
         validate_graph_run_state(
             replace(
