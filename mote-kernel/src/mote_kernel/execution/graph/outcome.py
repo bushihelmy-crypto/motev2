@@ -1,30 +1,30 @@
 """Typed outcomes of exactly one graph-node invocation."""
 
 from dataclasses import dataclass, field
-from typing import Generic, Never, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
-from mote_kernel.execution.graph.command import Continue, RoutingCommand
+from mote_kernel.state.graph_state.frontier_model import GraphFailure, GraphInterruptPayload
+from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution
 
 OutputT_co = TypeVar("OutputT_co", covariant=True)
 
 
-class NodeOutcome(Generic[OutputT_co]):
-    """Open result boundary for one graph-node invocation."""
-
-
 @dataclass(frozen=True, slots=True)
-class NodeSuccess(NodeOutcome[OutputT_co], Generic[OutputT_co]):
-    """One successful node invocation and its routing decision."""
-
+class NodeSuccess(Generic[OutputT_co]):
     output: OutputT_co
-    routing: RoutingCommand = field(default_factory=Continue)
+    routing: GraphRoutingContribution = field(default_factory=ContinueGraphRouting)
 
 
 @dataclass(frozen=True, slots=True)
-class NodeFailure(NodeOutcome[Never]):
-    """One final node-level failure after capability-local failover."""
-
-    failure: str
+class NodeFailure:
+    failure: GraphFailure
 
 
-__all__ = ["NodeFailure", "NodeOutcome", "NodeSuccess"]
+@dataclass(frozen=True, slots=True)
+class NodeInterrupt:
+    request_payload: GraphInterruptPayload
+
+
+NodeOutcome: TypeAlias = NodeSuccess[OutputT_co] | NodeFailure | NodeInterrupt
+
+__all__ = ["NodeFailure", "NodeInterrupt", "NodeOutcome", "NodeSuccess"]

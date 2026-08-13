@@ -1,15 +1,14 @@
-"""Committed resource admission and wave execution for one frontier."""
+"""Validation and execution of committed resource waves."""
 
 from typing import TypeVar
 
-from mote_kernel.execution.engine.frontier import PreparedSuperstep
 from mote_kernel.execution.engine.scheduler import execute_tasks
-from mote_kernel.execution.engine.task import GraphTask
+from mote_kernel.execution.engine.task import ExecutableTask, GraphTask
 from mote_kernel.execution.errors import ResultCollectionError
-from mote_kernel.execution.graph import CompiledGraph
-from mote_kernel.execution.result import NestedTaskResult, TaskResult
+from mote_kernel.execution.graph import CompiledGraph, NodeDefinition
+from mote_kernel.execution.result import TaskResult
 from mote_kernel.state.graph_state import (
-    ParticipantId,
+    GraphNodeId,
     ReleaseResources,
     ResourceLock,
     ResourceSnapshot,
@@ -21,80 +20,63 @@ OutputT = TypeVar("OutputT")
 
 
 def initial_resource_snapshot(graph: CompiledGraph[InputT, OutputT]) -> ResourceSnapshot:
-    """Create the empty lock table fixed by compiled resource order."""
-
     return ResourceSnapshot(tuple(ResourceLock(resource_id) for resource_id in graph.resource_order))
 
 
-def validated_resource_tasks(
+def validated_resource_nodes(
     graph: CompiledGraph[InputT, OutputT],
-    frontier: PreparedSuperstep[InputT, OutputT],
+    tasks: tuple[GraphTask, ...],
     resources: ResourceSnapshot | None,
-) -> frozenset[ParticipantId]:
-    """Return resource task identities after validating committed admission ownership."""
-
-    if (
-        resources is not None
-        and tuple(resource.resource_id for resource in resources.resources) != graph.resource_order
-    ):
-        raise ResultCollectionError("committed resources snapshot does not match graph resource order")
-    resource_tasks = frozenset(
-        ParticipantId(task.task_id) for task, definition in frontier.executable_definitions if definition.resources
+) -> frozenset[GraphNodeId]:
+    if resources is not None and tuple(lock.resource_id for lock in resources.resources) != graph.resource_order:
+        raise ResultCollectionError("committed resources do not match graph resource order")
+    resource_nodes = frozenset(
+        task.node_id
+        for task in tasks
+        if isinstance(definition := graph.nodes[task.node_id], NodeDefinition) and definition.resources
     )
-    if (
-        resources is not None
-        and not frozenset(acquisition.participant_id for acquisition in resources.acquisitions) <= resource_tasks
-    ):
-        raise ResultCollectionError(
-            "committed resources snapshot contains an acquisition outside pending resource tasks"
-        )
-    return resource_tasks
-
-
-def _committed_resource_batch(
-    frontier: PreparedSuperstep[InputT, OutputT],
-    resources: ResourceSnapshot,
-) -> tuple[GraphTask, ...]:
-    acquisitions = {acquisition.participant_id: acquisition for acquisition in resources.acquisitions}
-    return tuple(
-        task
-        for task, definition in frontier.executable_definitions
-        if definition.resources
-        and (acquisition := acquisitions.get(ParticipantId(task.task_id))) is not None
-        and acquisition.admitted
-    )
+    if resources is not None and {item.node_id for item in resources.acquisitions} != set(resource_nodes):
+        raise ResultCollectionError("committed acquisitions do not exactly cover resource-requiring nodes")
+    if resources is not None:
+        acquisitions = {item.node_id: item for item in resources.acquisitions}
+        for node_id in resource_nodes:
+            definition = graph.nodes[node_id]
+            if not isinstance(definition, NodeDefinition) or acquisitions[node_id].required != definition.resources:
+                raise ResultCollectionError("committed acquisition does not match compiled requirements")
+    return resource_nodes
 
 
 async def execute_resource_waves(
     graph: CompiledGraph[InputT, OutputT],
-    frontier: PreparedSuperstep[InputT, OutputT],
+    executables: tuple[ExecutableTask[InputT], ...],
     resources: ResourceSnapshot,
-    resource_tasks: frozenset[ParticipantId],
-    node_input: InputT,
-    nested_results: tuple[NestedTaskResult[OutputT], ...],
+    resource_nodes: frozenset[GraphNodeId],
 ) -> tuple[TaskResult[OutputT], ...]:
-    """Execute every admitted resource wave under one committed execution claim."""
-
     current = resources
-    remaining = set(resource_tasks)
-    nonresource = tuple(task for task in frontier.pending_tasks if ParticipantId(task.task_id) not in resource_tasks)
+    remaining = set(resource_nodes)
+    nonresource = tuple(item for item in executables if item.task.node_id not in resource_nodes)
+    by_node = {item.task.node_id: item for item in executables}
     collected: list[TaskResult[OutputT]] = []
     first_wave = True
-    nested_by_id = {result.task_id: result for result in nested_results}
     while remaining:
-        committed = tuple(
-            task for task in _committed_resource_batch(frontier, current) if ParticipantId(task.task_id) in remaining
+        admitted = tuple(
+            acquisition.node_id
+            for acquisition in current.acquisitions
+            if acquisition.node_id in remaining and acquisition.admitted
         )
-        if not committed:
-            raise ResultCollectionError("resource scheduler cannot advance a committed acquisition")
-        wave = (*nonresource, *committed) if first_wave else committed
-        wave_nested_results = tuple(nested_by_id[task.task_id] for task in wave if task.task_id in nested_by_id)
-        collected.extend(await execute_tasks(graph, wave, node_input, wave_nested_results))
-        for task in reversed(committed):
-            current = reduce_resources(current, ReleaseResources(ParticipantId(task.task_id)))
-            remaining.remove(ParticipantId(task.task_id))
+        if not admitted:
+            raise ResultCollectionError("resource scheduler cannot advance committed acquisition")
+        wave = (
+            (*nonresource, *(by_node[node_id] for node_id in admitted))
+            if first_wave
+            else tuple(by_node[node_id] for node_id in admitted)
+        )
+        collected.extend(await execute_tasks(graph, wave))
+        for node_id in reversed(admitted):
+            current = reduce_resources(current, ReleaseResources(node_id))
+            remaining.remove(node_id)
         first_wave = False
     return tuple(collected)
 
 
-__all__: list[str] = []
+__all__ = ["execute_resource_waves", "initial_resource_snapshot", "validated_resource_nodes"]

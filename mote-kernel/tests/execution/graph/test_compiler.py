@@ -4,11 +4,11 @@ from mote_kernel.execution.graph import (
     END,
     ConditionalEdge,
     DirectEdge,
+    GraphNodeId,
+    GraphRouteId,
     JoinEdge,
     NodeDefinition,
-    NodeId,
     NodeSuccess,
-    RouteId,
     compile_graph,
 )
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
@@ -22,83 +22,83 @@ def test_compilation_never_invokes_nodes() -> None:
         calls += 1
         raise AssertionError(node_input)
 
-    definition = graph(nodes=(NodeDefinition(NodeId("a"), must_not_run),))
+    definition = graph(nodes=(NodeDefinition(GraphNodeId("a"), must_not_run),))
     compiled = compile_graph(definition)
 
     assert calls == 0
-    assert compiled.nodes[NodeId("a")].node is must_not_run  # type: ignore[union-attr]
+    assert compiled.nodes[GraphNodeId("a")].node is must_not_run  # type: ignore[union-attr]
 
 
 def test_compile_indexes_conditional_routes_and_joins() -> None:
     definition = graph(
         nodes=(node("a"), node("b"), node("c"), node("d")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("b")),
-            ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
-            JoinEdge((NodeId("b"), NodeId("c")), NodeId("d")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
+            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d")),
         ),
     )
     compiled = compile_graph(definition)
 
-    assert compiled.conditional_targets[NodeId("a")][RouteId("left")] == NodeId("b")
-    assert compiled.conditional_targets[NodeId("a")][RouteId("right")] == NodeId("c")
-    expected_join = JoinEdge((NodeId("b"), NodeId("c")), NodeId("d"))
-    assert compiled.joins_by_source[NodeId("b")] == (expected_join,)
-    assert compiled.joins_by_source[NodeId("c")] == (expected_join,)
+    assert compiled.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("b")
+    assert compiled.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("c")
+    expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d"))
+    assert compiled.joins_by_source[GraphNodeId("b")] == (expected_join,)
+    assert compiled.joins_by_source[GraphNodeId("c")] == (expected_join,)
 
 
 def test_join_to_end_preserves_its_runtime_barrier() -> None:
     definition = graph(
         nodes=(node("a"), node("b")),
-        edges=(JoinEdge((NodeId("a"), NodeId("b")), END),),
-        entries=(NodeId("a"), NodeId("b")),
+        edges=(JoinEdge((GraphNodeId("a"), GraphNodeId("b")), END),),
+        entries=(GraphNodeId("a"), GraphNodeId("b")),
     )
 
     compiled = compile_graph(definition)
 
-    expected_join = JoinEdge((NodeId("a"), NodeId("b")), END)
-    assert compiled.joins_by_source[NodeId("a")] == (expected_join,)
-    assert compiled.joins_by_source[NodeId("b")] == (expected_join,)
+    expected_join = JoinEdge((GraphNodeId("a"), GraphNodeId("b")), END)
+    assert compiled.joins_by_source[GraphNodeId("a")] == (expected_join,)
+    assert compiled.joins_by_source[GraphNodeId("b")] == (expected_join,)
 
 
 def test_cycles_and_self_loops_compile() -> None:
     cycle = graph(
         nodes=(node("a"), node("b")),
-        edges=(DirectEdge(NodeId("a"), NodeId("b")), DirectEdge(NodeId("b"), NodeId("a"))),
+        edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")), DirectEdge(GraphNodeId("b"), GraphNodeId("a"))),
     )
-    self_loop = graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("a"), NodeId("a")),))
+    self_loop = graph(nodes=(node("a"),), edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("a")),))
 
-    assert compile_graph(cycle).direct_targets[NodeId("b")] == (NodeId("a"),)
-    assert compile_graph(self_loop).direct_targets[NodeId("a")] == (NodeId("a"),)
+    assert compile_graph(cycle).direct_targets[GraphNodeId("b")] == (GraphNodeId("a"),)
+    assert compile_graph(self_loop).direct_targets[GraphNodeId("a")] == (GraphNodeId("a"),)
 
 
 def test_multiple_entries_and_direct_fan_out_are_sorted() -> None:
     definition = graph(
         nodes=(node("d"), node("c"), node("b"), node("a")),
-        edges=(DirectEdge(NodeId("a"), NodeId("d")), DirectEdge(NodeId("a"), NodeId("c"))),
-        entries=(NodeId("b"), NodeId("a")),
+        edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("d")), DirectEdge(GraphNodeId("a"), GraphNodeId("c"))),
+        entries=(GraphNodeId("b"), GraphNodeId("a")),
     )
     compiled = compile_graph(definition)
 
-    assert compiled.entries == (NodeId("a"), NodeId("b"))
-    assert compiled.direct_targets[NodeId("a")] == (NodeId("c"), NodeId("d"))
+    assert compiled.entries == (GraphNodeId("a"), GraphNodeId("b"))
+    assert compiled.direct_targets[GraphNodeId("a")] == (GraphNodeId("c"), GraphNodeId("d"))
 
 
 def test_declaration_order_does_not_change_compiled_indexes() -> None:
     first = graph(
         nodes=(node("a"), node("b"), node("c"), node("d")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
-            JoinEdge((NodeId("c"), NodeId("b")), NodeId("d")),
-            ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("b")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
+            JoinEdge((GraphNodeId("c"), GraphNodeId("b")), GraphNodeId("d")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
         ),
     )
     second = graph(
         nodes=(node("d"), node("c"), node("b"), node("a")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("b")),
-            JoinEdge((NodeId("b"), NodeId("c")), NodeId("d")),
-            ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("c")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
+            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
         ),
     )
 
@@ -120,38 +120,38 @@ def test_direct_and_conditional_edges_may_share_a_source() -> None:
     definition = graph(
         nodes=(node("a"), node("b"), node("c")),
         edges=(
-            DirectEdge(NodeId("a"), NodeId("b")),
-            ConditionalEdge(NodeId("a"), RouteId("optional"), NodeId("c")),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("optional"), GraphNodeId("c")),
         ),
     )
     compiled = compile_graph(definition)
 
-    assert compiled.direct_targets[NodeId("a")] == (NodeId("b"),)
-    assert compiled.conditional_targets[NodeId("a")][RouteId("optional")] == NodeId("c")
+    assert compiled.direct_targets[GraphNodeId("a")] == (GraphNodeId("b"),)
+    assert compiled.conditional_targets[GraphNodeId("a")][GraphRouteId("optional")] == GraphNodeId("c")
 
 
 def test_multiple_routes_may_share_a_target_and_identity_across_sources() -> None:
     definition = graph(
         nodes=(node("a"), node("b"), node("c")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("first"), NodeId("c")),
-            ConditionalEdge(NodeId("a"), RouteId("second"), NodeId("c")),
-            ConditionalEdge(NodeId("b"), RouteId("first"), NodeId("c")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("first"), GraphNodeId("c")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("second"), GraphNodeId("c")),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("first"), GraphNodeId("c")),
         ),
-        entries=(NodeId("a"), NodeId("b")),
+        entries=(GraphNodeId("a"), GraphNodeId("b")),
     )
     compiled = compile_graph(definition)
 
-    assert tuple(compiled.conditional_targets[NodeId("a")]) == (RouteId("first"), RouteId("second"))
-    assert compiled.conditional_targets[NodeId("b")][RouteId("first")] == NodeId("c")
+    assert tuple(compiled.conditional_targets[GraphNodeId("a")]) == (GraphRouteId("first"), GraphRouteId("second"))
+    assert compiled.conditional_targets[GraphNodeId("b")][GraphRouteId("first")] == GraphNodeId("c")
 
 
 def test_compiling_the_same_definition_is_idempotent() -> None:
     definition = graph(
         nodes=(node("a"), node("b")),
         edges=(
-            DirectEdge(NodeId("a"), NodeId("b")),
-            ConditionalEdge(NodeId("b"), RouteId("finish"), END),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("finish"), END),
         ),
     )
 
@@ -166,7 +166,7 @@ def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> N
     definition = graph(
         nodes=(
             NodeDefinition(
-                NodeId("a"),
+                GraphNodeId("a"),
                 node("a").node,
                 (ResourceId("database"), ResourceId("file")),
             ),
@@ -178,7 +178,7 @@ def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> N
     )
 
     compiled = compile_graph(definition)
-    compiled_node = compiled.nodes[NodeId("a")]
+    compiled_node = compiled.nodes[GraphNodeId("a")]
 
     assert isinstance(compiled_node, NodeDefinition)
     assert compiled.resource_order == (ResourceId("file"), ResourceId("database"))

@@ -1,20 +1,26 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
-from tests.execution.driver import (
-    execute_claim,
-    execute_step,
-    reduce_claim_result,
-    reduce_graph_command,
-    step_request,
-)
+from tests.execution.driver import ATTEMPT_ID, apply_command
 
-from mote_kernel.execution import ExecutedSuperstep, GraphExecutor, NestedTaskSuccess, PreparedFrontier, StepRequest
-from mote_kernel.execution.claim import ExecutionClaimOwner
-from mote_kernel.execution.engine.claim_stage import prepare_claim
-from mote_kernel.execution.engine.frontier import prepare_frontier
-from mote_kernel.execution.engine.superstep import execute_claimed_superstep
-from mote_kernel.execution.errors import ResultCollectionError, SnapshotMismatchError
+from mote_kernel.execution import (
+    ActiveChild,
+    AwaitingResume,
+    CompletedChild,
+    ExecutableFrontier,
+    GraphExecutor,
+    MissingChild,
+    OverrideNodeInput,
+    ResumeFailedNodeRequest,
+    ResumeRequest,
+    StartMissingChildren,
+    StepRequest,
+    TaskFailure,
+    TaskInterrupt,
+    WaitingForChildren,
+)
+from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.graph import (
     END,
     CompiledGraph,
@@ -23,92 +29,89 @@ from mote_kernel.execution.graph import (
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphNodeId,
+    GraphRouteId,
     NestedGraphNodeDefinition,
     NodeDefinition,
     NodeFailure,
-    NodeId,
+    NodeInterrupt,
     NodeSuccess,
-    RouteId,
+    ResumeInputBinding,
+    SelectGraphRoute,
     compile_graph,
 )
-from mote_kernel.execution.graph.command import SelectRoute
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
-from mote_kernel.execution.result import TaskFailure, TaskSuccess
-from mote_kernel.execution.snapshot import ExecutionAttemptId
 from mote_kernel.state.graph_state import (
-    AcquireResources,
-    CompleteGraphRun,
+    AbortGraphRun,
+    ClaimGraphExecution,
+    CompleteGraphFrontier,
+    ContinueGraphRouting,
     FenceGraphExecution,
-    GraphNodeId,
+    GraphAbortReason,
+    GraphExecutionAttemptId,
+    GraphFailure,
+    GraphInterruptPayload,
+    GraphResumeInputCodecId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
-    ParticipantId,
+    ParentGraphActivation,
+    ResourceAcquisition,
     ResourceLock,
     ResourceSnapshot,
+    ResourceTransitionError,
+    SettleGraphExecution,
+    SucceededGraphNodeOutcome,
     reduce_graph_run,
-    reduce_resources,
 )
-from mote_kernel.state.graph_state import GraphDefinitionId as StateDefinitionId
-from mote_kernel.state.graph_state import GraphDefinitionVersion as StateDefinitionVersion
 
+pytestmark = pytest.mark.asyncio
 FILE = ResourceId("file")
 DATABASE = ResourceId("database")
-DIRECT_ATTEMPT = ExecutionAttemptId("direct-stage-test")
 
 
-def state(*, frontier: tuple[str, ...] = ("a", "b"), resources: ResourceSnapshot | None = None) -> GraphRunState:
-    return GraphRunState(
-        GraphRunId("run"),
-        StateDefinitionId("resource.graph"),
-        StateDefinitionVersion(1),
-        GraphRunStatus.RUNNING,
-        0,
-        tuple(GraphNodeId(node_id) for node_id in frontier),
-        resources=resources,
-    )
+class Utf8Codec:
+    def encode(self, value: str) -> bytes:
+        return value.encode()
+
+    def decode(self, payload: bytes) -> str:
+        return payload.decode()
 
 
-async def _echo(node_input: str) -> NodeSuccess[str]:
+async def echo(node_input: str) -> NodeSuccess[str]:
     return NodeSuccess(node_input)
 
 
-def _resource_and_nested_graph() -> CompiledGraph[str, str]:
-    child = GraphDefinition[str, str](
-        GraphDefinitionId("child.graph"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(NodeId("child"), _echo),),
-        (DirectEdge(NodeId("child"), END),),
-        (NodeId("child"),),
-    )
-    return compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), _echo, (FILE,)), NestedGraphNodeDefinition(NodeId("b"), child)),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-
-
-def _resource_free_graph() -> CompiledGraph[str, str]:
+def resource_graph(*nodes: NodeDefinition[str, str]) -> CompiledGraph[str, str]:
     return compile_graph(
         GraphDefinition(
             GraphDefinitionId("resource.graph"),
             GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), _echo),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
+            nodes,
+            tuple(DirectEdge(node.node_id, END) for node in nodes),
+            tuple(node.node_id for node in nodes),
+            (ResourceDefinition(FILE, 10), ResourceDefinition(DATABASE, 20)),
         )
     )
 
 
-@pytest.mark.asyncio
-async def test_conflicting_resource_frontier_executes_all_waves_under_one_claim() -> None:
+def started(executor: GraphExecutor[str, str]) -> GraphRunState:
+    return reduce_graph_run(None, executor.start_command(GraphRunId("run")))
+
+
+async def admitted_state(
+    graph: CompiledGraph[str, str],
+    executor: GraphExecutor[str, str],
+    initial: GraphRunState,
+) -> tuple[ExecutableFrontier, GraphRunState]:
+    prepared = await executor.prepare(StepRequest(initial, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier)
+    assert prepared.admission is not None
+    return prepared, apply_command(initial, prepared.admission.command)
+
+
+async def test_conflicting_resources_execute_all_waves_under_one_all_pending_claim() -> None:
     calls: list[str] = []
 
     def node(name: str) -> NodeDefinition[str, str]:
@@ -116,469 +119,364 @@ async def test_conflicting_resource_frontier_executes_all_waves_under_one_claim(
             calls.append(name)
             return NodeSuccess(f"{name}:{node_input}")
 
-        return NodeDefinition(NodeId(name), execute, (FILE,))
+        return NodeDefinition(GraphNodeId(name), execute, (FILE,))
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (node("a"), node("b")),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    initial = state()
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier)
-    assert prepared.admission is not None
-    assert tuple(task.node_id for task in prepared.admission.admitted) == (NodeId("a"),)
-    assert tuple(task.node_id for task in prepared.admission.waiting) == (NodeId("b"),)
-    assert calls == []
-
-    admitted = reduce_graph_command(initial, prepared.admission.command)
-    claimed = await execute_claim(step_request(graph, admitted, "input"))
-
-    assert isinstance(claimed.result, ExecutedSuperstep)
-    assert tuple(result.task.node_id for result in claimed.result.results) == (NodeId("a"), NodeId("b"))
-    assert calls == ["a", "b"]
-    completed = reduce_claim_result(claimed)
-    assert completed.status is GraphRunStatus.COMPLETED
-    assert completed.resources is None
-    assert completed.execution is None
-
-
-@pytest.mark.asyncio
-async def test_cancelling_a_resource_wave_keeps_the_committed_claim_fenced() -> None:
-    completed_a = asyncio.Event()
-    started_b = asyncio.Event()
-    allow_b_completion = asyncio.Event()
-    cancelled: list[str] = []
-    calls: list[str] = []
-
-    async def execute_a(node_input: str) -> NodeSuccess[str]:
-        calls.append("a")
-        completed_a.set()
-        return NodeSuccess(f"a:{node_input}")
-
-    async def execute_b(node_input: str) -> NodeSuccess[str]:
-        calls.append("b")
-        started_b.set()
-        try:
-            await allow_b_completion.wait()
-        except asyncio.CancelledError:
-            cancelled.append("b")
-            raise
-        return NodeSuccess(f"b:{node_input}")
-
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(NodeId("a"), execute_a, (FILE,)),
-                NodeDefinition(NodeId("b"), execute_b, (DATABASE,)),
-            ),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10), ResourceDefinition(DATABASE, 20)),
-        )
-    )
+    graph = resource_graph(node("a"), node("b"))
     executor = GraphExecutor(graph)
-    initial = state()
-    admission = await executor.prepare(StepRequest(initial, "input", DIRECT_ATTEMPT))
+    initial = started(executor)
+    admission, admitted = await admitted_state(graph, executor, initial)
+
     assert admission.admission is not None
-    admitted = reduce_graph_run(initial, admission.admission.command)
-    prepared = await executor.prepare(StepRequest(admitted, "input", DIRECT_ATTEMPT))
-    assert prepared.execution is not None
-    claim = prepared.execution
-    claimed = reduce_graph_run(admitted, claim.command)
-
-    running = asyncio.create_task(executor.execute(claim, StepRequest(claimed, "input", DIRECT_ATTEMPT)))
-    async with asyncio.timeout(2):
-        await asyncio.gather(completed_a.wait(), started_b.wait())
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-
-    assert sorted(calls) == ["a", "b"]
-    assert cancelled == ["b"]
-    assert claim.consumed
-    assert claimed.execution is not None
-    with pytest.raises(ResultCollectionError, match="already been consumed"):
-        await executor.execute(claim, StepRequest(claimed, "input", DIRECT_ATTEMPT))
-    fenced = reduce_graph_run(
-        claimed,
-        FenceGraphExecution(claimed.revision, claimed.execution.token),
+    assert admission.admission.admitted_node_ids == (GraphNodeId("a"),)
+    assert admission.admission.waiting_node_ids == (GraphNodeId("b"),)
+    assert admitted.resources is not None
+    assert tuple(item.node_id for item in admitted.resources.acquisitions) == (
+        GraphNodeId("a"),
+        GraphNodeId("b"),
     )
-    assert fenced.execution is None
 
-    allow_b_completion.set()
-    retry = await executor.prepare(StepRequest(fenced, "input", DIRECT_ATTEMPT))
-    assert retry.execution is not None
-    retried_claim = retry.execution
-    retried_state = reduce_graph_run(fenced, retried_claim.command)
-    retried = await executor.execute(
-        retried_claim,
-        StepRequest(retried_state, "input", DIRECT_ATTEMPT),
-    )
-    completed = reduce_graph_run(retried_state, retried.command)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    assert prepared.claim.command.node_ids == (GraphNodeId("a"), GraphNodeId("b"))
+    claimed = apply_command(admitted, prepared.claim.command)
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+    completed = apply_command(claimed, result.command)
 
-    assert calls.count("a") == 2
-    assert calls.count("b") == 2
+    assert calls == ["a", "b"]
     assert completed.status is GraphRunStatus.COMPLETED
-    assert completed.execution is None
     assert completed.resources is None
+    assert completed.execution is None
 
 
-@pytest.mark.asyncio
-async def test_nonconflicting_resources_execute_in_one_wave() -> None:
-    both_started = asyncio.Barrier(2)
+async def test_resource_free_sibling_shares_batch_without_fake_acquisition() -> None:
+    barrier = asyncio.Barrier(2)
     calls: list[str] = []
 
-    def node(name: str, resource_id: ResourceId) -> NodeDefinition[str, str]:
+    def node(name: str, resources: tuple[ResourceId, ...]) -> NodeDefinition[str, str]:
         async def execute(node_input: str) -> NodeSuccess[str]:
             calls.append(name)
-            await asyncio.wait_for(both_started.wait(), timeout=2)
+            await asyncio.wait_for(barrier.wait(), timeout=2)
             return NodeSuccess(node_input)
 
-        return NodeDefinition(NodeId(name), execute, (resource_id,))
+        return NodeDefinition(GraphNodeId(name), execute, resources)
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (
-                node("a", FILE),
-                node("b", DATABASE),
-            ),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10), ResourceDefinition(DATABASE, 20)),
-        )
-    )
-    initial = state()
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is not None
-    assert len(prepared.admission.admitted) == 2
-    admitted = reduce_graph_command(initial, prepared.admission.command)
+    graph = resource_graph(node("a", (FILE,)), node("b", ()))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    assert admitted.resources is not None
+    assert tuple(item.node_id for item in admitted.resources.acquisitions) == (GraphNodeId("a"),)
 
-    executed = await execute_step(step_request(graph, admitted, "input"))
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    assert prepared.claim.command.node_ids == (GraphNodeId("a"), GraphNodeId("b"))
+    claimed = apply_command(admitted, prepared.claim.command)
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
 
-    assert isinstance(executed, ExecutedSuperstep)
     assert sorted(calls) == ["a", "b"]
+    assert apply_command(claimed, result.command).status is GraphRunStatus.COMPLETED
 
 
-@pytest.mark.asyncio
-async def test_partially_held_multi_resource_task_waits_for_full_admission() -> None:
-    holder_entered = asyncio.Event()
-    release_holder = asyncio.Event()
-    calls: list[str] = []
-
-    async def hold_database(node_input: str) -> NodeSuccess[str]:
-        calls.append("holder")
-        holder_entered.set()
-        await release_holder.wait()
-        return NodeSuccess(node_input)
-
-    async def use_both(node_input: str) -> NodeSuccess[str]:
-        calls.append("multi")
-        return NodeSuccess(node_input)
-
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(NodeId("a"), hold_database, (DATABASE,)),
-                NodeDefinition(NodeId("b"), use_both, (FILE, DATABASE)),
-            ),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10), ResourceDefinition(DATABASE, 20)),
-        )
+async def test_resource_free_frontier_accepts_and_clears_empty_scheduler_snapshot() -> None:
+    graph = resource_graph(NodeDefinition(GraphNodeId("free"), echo))
+    executor = GraphExecutor(graph)
+    initial = replace(
+        started(executor),
+        resources=ResourceSnapshot((ResourceLock(FILE), ResourceLock(DATABASE))),
     )
-    initial = state()
-    admission = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(admission, PreparedFrontier) and admission.admission is not None
-    admitted = reduce_graph_command(initial, admission.admission.command)
 
-    execution = asyncio.create_task(execute_step(step_request(graph, admitted, "input")))
-    await holder_entered.wait()
-    assert calls == ["holder"]
-    release_holder.set()
-    result = await execution
+    prepared = await executor.prepare(StepRequest(initial, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(initial, prepared.claim.command)
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+    completed = apply_command(claimed, result.command)
 
-    assert isinstance(result, ExecutedSuperstep)
-    assert calls == ["holder", "multi"]
+    assert completed.status is GraphRunStatus.COMPLETED
+    assert completed.resources is None
 
 
-@pytest.mark.asyncio
-async def test_resource_node_exception_keeps_the_claim_for_explicit_fencing() -> None:
+async def test_resource_exception_retains_lease_and_admission_until_exact_fence() -> None:
     calls: list[str] = []
     attempts = 0
 
-    async def fail(node_input: str) -> NodeSuccess[str]:
+    async def fail_once(node_input: str) -> NodeSuccess[str]:
         nonlocal attempts
         attempts += 1
         calls.append("a")
         if attempts == 1:
-            raise RuntimeError("node exploded")
+            raise RuntimeError(node_input)
         return NodeSuccess(node_input)
 
     async def waiting(node_input: str) -> NodeSuccess[str]:
         calls.append("b")
         return NodeSuccess(node_input)
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), fail, (FILE,)), NodeDefinition(NodeId("b"), waiting, (FILE,))),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10),),
-        )
+    graph = resource_graph(
+        NodeDefinition(GraphNodeId("a"), fail_once, (FILE,)),
+        NodeDefinition(GraphNodeId("b"), waiting, (FILE,)),
     )
     executor = GraphExecutor(graph)
-    initial = state()
-    admission = await executor.prepare(StepRequest(initial, "input", DIRECT_ATTEMPT))
-    assert admission.admission is not None
-    admitted = reduce_graph_run(initial, admission.admission.command)
-    prepared = await executor.prepare(StepRequest(admitted, "input", DIRECT_ATTEMPT))
-    assert prepared.execution is not None
-    claim = prepared.execution
-    claimed = reduce_graph_run(admitted, claim.command)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    prepared = await executor.prepare(StepRequest(admitted, "explode", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
 
-    with pytest.raises(RuntimeError, match="exploded"):
-        await executor.execute(claim, StepRequest(claimed, "input", DIRECT_ATTEMPT))
+    with pytest.raises(RuntimeError, match="explode"):
+        await executor.execute(prepared.claim, StepRequest(claimed, "explode", ATTEMPT_ID, ()))
 
     assert calls == ["a"]
-    assert claim.consumed
-    assert claimed.execution is not None
-    fenced = reduce_graph_run(
-        claimed,
-        FenceGraphExecution(claimed.revision, claimed.execution.token),
-    )
-    assert fenced.execution is None
+    assert claimed.execution is not None and claimed.resources is not None
+    fenced = apply_command(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
+    assert fenced.execution is None and fenced.resources is None
 
-    retry = await executor.prepare(StepRequest(fenced, "input", DIRECT_ATTEMPT))
-    assert retry.execution is not None
-    retried_claim = retry.execution
-    retried_state = reduce_graph_run(fenced, retried_claim.command)
-    retried = await executor.execute(
-        retried_claim,
-        StepRequest(retried_state, "input", DIRECT_ATTEMPT),
-    )
-    completed = reduce_graph_run(retried_state, retried.command)
-
-    assert attempts == 2
+    _, readmitted = await admitted_state(graph, executor, fenced)
+    retry = await executor.prepare(StepRequest(readmitted, "retry", ATTEMPT_ID, ()))
+    assert isinstance(retry, ExecutableFrontier) and retry.claim is not None
+    retry_state = apply_command(readmitted, retry.claim.command)
+    result = await executor.execute(retry.claim, StepRequest(retry_state, "retry", ATTEMPT_ID, ()))
+    assert apply_command(retry_state, result.command).status is GraphRunStatus.COMPLETED
     assert calls == ["a", "a", "b"]
-    assert completed.status is GraphRunStatus.COMPLETED
-    assert completed.resources is None
 
 
-@pytest.mark.asyncio
-async def test_resource_and_resource_free_tasks_share_the_claim() -> None:
-    both_started = asyncio.Barrier(2)
-    calls: list[str] = []
+async def test_cancelled_resource_execution_keeps_committed_state_for_fence() -> None:
+    started_task = asyncio.Event()
+    blocked = asyncio.Event()
 
-    def node(name: str, resources: tuple[ResourceId, ...] = ()) -> NodeDefinition[str, str]:
-        async def execute(node_input: str) -> NodeSuccess[str]:
-            calls.append(name)
-            await asyncio.wait_for(both_started.wait(), timeout=2)
-            return NodeSuccess(node_input)
-
-        return NodeDefinition(NodeId(name), execute, resources)
-
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (node("a", (FILE,)), node("b")),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    initial = state()
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is not None
-    admitted = reduce_graph_command(initial, prepared.admission.command)
-
-    executed = await execute_step(step_request(graph, admitted, "input"))
-
-    assert isinstance(executed, ExecutedSuperstep)
-    assert sorted(calls) == ["a", "b"]
-
-
-@pytest.mark.asyncio
-async def test_active_execution_cannot_reenter_resource_admission() -> None:
-    async def execute(node_input: str) -> NodeSuccess[str]:
+    async def wait_forever(node_input: str) -> NodeSuccess[str]:
+        started_task.set()
+        await blocked.wait()
         return NodeSuccess(node_input)
 
-    graph = compile_graph(
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), wait_forever, (FILE,)))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+    running = asyncio.create_task(executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ())))
+    await asyncio.wait_for(started_task.wait(), timeout=2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert claimed.execution is not None and claimed.resources is not None
+    fenced = apply_command(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
+    assert fenced.execution is None and fenced.resources is None
+
+
+def nested_resource_graph() -> CompiledGraph[str, str]:
+    child = GraphDefinition(
+        GraphDefinitionId("child.graph"),
+        GraphDefinitionVersion(1),
+        (NodeDefinition(GraphNodeId("child"), echo),),
+        (DirectEdge(GraphNodeId("child"), END),),
+        (GraphNodeId("child"),),
+    )
+    return compile_graph(
         GraphDefinition(
             GraphDefinitionId("resource.graph"),
             GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), execute, (FILE,)),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
+            (
+                NodeDefinition(GraphNodeId("resource"), echo, (FILE,)),
+                NestedGraphNodeDefinition(GraphNodeId("nested"), child),
+            ),
+            (DirectEdge(GraphNodeId("resource"), END), DirectEdge(GraphNodeId("nested"), END)),
+            (GraphNodeId("nested"), GraphNodeId("resource")),
             (ResourceDefinition(FILE, 10),),
         )
     )
-    initial = state(frontier=("a",))
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is not None
-    admitted = reduce_graph_command(initial, prepared.admission.command)
+
+
+async def test_missing_child_precedes_admission_then_only_resource_node_participates() -> None:
+    graph = nested_resource_graph()
     executor = GraphExecutor(graph)
-    claim = await executor.prepare(step_request(graph, admitted, "input").execution_request())
-    assert claim.execution is not None
-    claimed = reduce_graph_command(admitted, claim.execution.command)
-
-    with pytest.raises(SnapshotMismatchError, match="active execution lease"):
-        await executor.prepare(step_request(graph, claimed, "input").execution_request())
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["wrong-order", "stale-acquisition"])
-async def test_committed_parallel_snapshot_must_match_graph_and_pending_tasks(case: str) -> None:
-    graph = _resource_free_graph()
-    if case == "wrong-order":
-        resources = ResourceSnapshot((ResourceLock(DATABASE),))
-        message = "resource order"
-    else:
-        resources = reduce_resources(
-            ResourceSnapshot((ResourceLock(FILE),)),
-            AcquireResources(ParticipantId("stale"), (FILE,)),
-        )
-        message = "outside pending resource tasks"
-
-    with pytest.raises(ResultCollectionError, match=message):
-        await execute_step(step_request(graph, state(frontier=("a",), resources=resources), "input"))
-
-
-@pytest.mark.asyncio
-async def test_claimed_stage_revalidates_pending_resource_participants() -> None:
-    graph = _resource_free_graph()
-    stale = reduce_resources(
-        ResourceSnapshot((ResourceLock(FILE),)),
-        AcquireResources(ParticipantId("stale"), (FILE,)),
+    parent = started(executor)
+    activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
+    missing = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (MissingChild(activation),)))
+    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
+    child = reduce_graph_run(None, missing.action.children[0].command)
+    child_claim = reduce_graph_run(
+        child,
+        ClaimGraphExecution(child.revision, GraphExecutionAttemptId("child"), (GraphNodeId("child"),)),
     )
-    stale_state = state(frontier=("a",), resources=stale)
-    direct_request = StepRequest(stale_state, "input", DIRECT_ATTEMPT)
-    direct_frontier = prepare_frontier(graph, direct_request)
-    owner = ExecutionClaimOwner()
-    direct_claim = prepare_claim(
-        owner,
-        stale_state,
-        DIRECT_ATTEMPT,
-        direct_frontier.pending_tasks,
+    assert child_claim.execution is not None
+    child_completed = reduce_graph_run(
+        child_claim,
+        SettleGraphExecution(
+            child_claim.revision,
+            child_claim.execution.token,
+            (SucceededGraphNodeOutcome(GraphNodeId("child"), ContinueGraphRouting()),),
+            CompleteGraphFrontier(),
+        ),
     )
-    claimed = reduce_graph_run(stale_state, direct_claim.command)
-    await direct_claim.consume(owner, claimed, DIRECT_ATTEMPT)
-    with pytest.raises(ResultCollectionError, match="outside pending resource tasks"):
-        await execute_claimed_superstep(
-            graph,
-            StepRequest(claimed, "input", DIRECT_ATTEMPT),
-            direct_claim,
-        )
+    projection = CompletedChild(activation, child_completed, "child-output", ContinueGraphRouting())
+    admission = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (projection,)))
+    assert isinstance(admission, ExecutableFrontier) and admission.admission is not None
+    admitted = apply_command(parent, admission.admission.command)
+    assert admitted.resources is not None
+    assert tuple(item.node_id for item in admitted.resources.acquisitions) == (GraphNodeId("resource"),)
+
+    claim = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, (projection,)))
+    assert isinstance(claim, ExecutableFrontier) and claim.claim is not None
+    assert claim.claim.command.node_ids == (GraphNodeId("nested"), GraphNodeId("resource"))
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "resources",
-    [None, ResourceSnapshot((ResourceLock(FILE),))],
-)
-async def test_resource_free_frontier_skips_admission_and_clears_prior_scheduler_state(
-    resources: ResourceSnapshot | None,
-) -> None:
-    graph = _resource_free_graph()
-    initial = state(frontier=("a",), resources=resources)
+async def test_compiled_resource_requirement_drift_fails_before_claim() -> None:
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), echo, (FILE,)))
     executor = GraphExecutor(graph)
-
-    prepared = await executor.prepare(StepRequest(initial, "input", DIRECT_ATTEMPT))
-
-    assert prepared.admission is None
-    assert prepared.execution is not None
-    claimed = reduce_graph_run(initial, prepared.execution.command)
-    result = await executor.execute(
-        prepared.execution,
-        StepRequest(claimed, "input", DIRECT_ATTEMPT),
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    assert admitted.resources is not None
+    drifted = replace(
+        admitted,
+        resources=ResourceSnapshot(
+            (ResourceLock(FILE), ResourceLock(DATABASE, GraphNodeId("a"))),
+            (
+                ResourceAcquisition(
+                    GraphNodeId("a"),
+                    (DATABASE,),
+                    (DATABASE,),
+                ),
+            ),
+        ),
     )
-    completed = reduce_graph_run(claimed, result.command)
-    assert completed.resources is None
+    with pytest.raises(ResourceTransitionError, match="requirements"):
+        await executor.prepare(StepRequest(drifted, "input", ATTEMPT_ID, ()))
 
 
-@pytest.mark.asyncio
-async def test_only_one_resource_claim_can_be_accepted_after_admission() -> None:
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), _echo, (FILE,)),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
+async def test_committed_resource_snapshot_rejects_wrong_order_and_stale_participant() -> None:
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), echo, (FILE,)))
     executor = GraphExecutor(graph)
-    initial = state(frontier=("a",))
-    admission = await executor.prepare(StepRequest(initial, "input", DIRECT_ATTEMPT))
-    assert admission.admission is not None
-    admitted = reduce_graph_run(initial, admission.admission.command)
-    first = await executor.prepare(StepRequest(admitted, "input", DIRECT_ATTEMPT))
-    second = await executor.prepare(StepRequest(admitted, "input", DIRECT_ATTEMPT))
-    assert first.execution is not None
-    assert second.execution is not None
-    assert first.execution.command.attempt_id != second.execution.command.attempt_id
+    initial = started(executor)
+    wrong_order = replace(
+        initial,
+        resources=ResourceSnapshot((ResourceLock(DATABASE), ResourceLock(FILE))),
+    )
+    with pytest.raises(ResourceTransitionError, match="resource order"):
+        await executor.prepare(StepRequest(wrong_order, "input", ATTEMPT_ID, ()))
 
-    claimed = reduce_graph_run(admitted, first.execution.command)
+    stale = replace(
+        initial,
+        resources=ResourceSnapshot(
+            (ResourceLock(FILE, GraphNodeId("stale")), ResourceLock(DATABASE)),
+            (
+                ResourceAcquisition(
+                    GraphNodeId("stale"),
+                    (FILE,),
+                    (FILE,),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(GraphStateTransitionError, match="outside current pending"):
+        await executor.prepare(StepRequest(stale, "input", ATTEMPT_ID, ()))
 
+
+async def test_competing_claims_after_admission_have_one_durable_winner() -> None:
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), echo, (FILE,)))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    first = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    second = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(first, ExecutableFrontier) and first.claim is not None
+    assert isinstance(second, ExecutableFrontier) and second.claim is not None
+    assert first.claim.command.attempt_id != second.claim.command.attempt_id
+
+    claimed = apply_command(admitted, first.claim.command)
     with pytest.raises(GraphStateTransitionError, match="stale revision"):
-        reduce_graph_run(claimed, second.execution.command)
-    with pytest.raises(ResultCollectionError, match="does not match committed"):
-        await executor.execute(
-            second.execution,
-            StepRequest(claimed, "input", DIRECT_ATTEMPT),
-        )
-    assert not second.execution.consumed
+        apply_command(claimed, second.claim.command)
+    with pytest.raises(ResultCollectionError, match="committed graph state"):
+        await executor.execute(second.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+    assert not second.claim.consumed
 
 
-@pytest.mark.asyncio
-async def test_three_conflicting_resource_tasks_execute_once_in_fifo_order() -> None:
+async def test_claimed_resource_stage_revalidates_exact_participants() -> None:
+    graph = resource_graph(
+        NodeDefinition(GraphNodeId("a"), echo, (FILE,)),
+        NodeDefinition(GraphNodeId("b"), echo),
+    )
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    prepared = await executor.prepare(StepRequest(initial, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.admission is not None
+    admitted = apply_command(initial, prepared.admission.command)
+    claim = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(claim, ExecutableFrontier) and claim.claim is not None
+    claimed = apply_command(admitted, claim.claim.command)
+    forged = replace(
+        claimed,
+        resources=ResourceSnapshot(
+            (ResourceLock(FILE, GraphNodeId("b")), ResourceLock(DATABASE)),
+            (ResourceAcquisition(GraphNodeId("b"), (FILE,), (FILE,)),),
+        ),
+    )
+
+    with pytest.raises(ResultCollectionError, match="exactly cover"):
+        await executor.execute(claim.claim, StepRequest(forged, "input", ATTEMPT_ID, ()))
+    assert claim.claim.consumed
+
+
+async def test_resource_frontier_waits_for_active_child_before_admission() -> None:
+    graph = nested_resource_graph()
+    executor = GraphExecutor(graph)
+    parent = started(executor)
+    activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
+    missing = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (MissingChild(activation),)))
+    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
+    child = reduce_graph_run(None, missing.action.children[0].command)
+
+    waiting = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (ActiveChild(activation, child),)))
+
+    assert isinstance(waiting, WaitingForChildren)
+    assert waiting.action.children == (ActiveChild(activation, child),)
+    assert parent.resources is parent.execution is None
+
+
+async def test_quiescent_abort_clears_unclaimed_admission() -> None:
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), echo, (FILE,)))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    assert admitted.resources is not None and admitted.execution is None
+
+    aborted = apply_command(admitted, AbortGraphRun(admitted.revision, GraphAbortReason("stop")))
+
+    assert aborted.status is GraphRunStatus.ABORTED
+    assert aborted.resources is None
+
+
+async def test_nonconflicting_resource_nodes_execute_in_one_concurrent_wave() -> None:
+    barrier = asyncio.Barrier(2)
     calls: list[str] = []
 
-    def node(name: str) -> NodeDefinition[str, str]:
+    def node(name: str, resource: ResourceId) -> NodeDefinition[str, str]:
         async def execute(node_input: str) -> NodeSuccess[str]:
             calls.append(name)
+            await asyncio.wait_for(barrier.wait(), timeout=2)
             return NodeSuccess(node_input)
 
-        return NodeDefinition(NodeId(name), execute, (FILE,))
+        return NodeDefinition(GraphNodeId(name), execute, (resource,))
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (node("a"), node("b"), node("c")),
-            tuple(DirectEdge(NodeId(name), END) for name in ("a", "b", "c")),
-            tuple(NodeId(name) for name in ("a", "b", "c")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    initial = state(frontier=("a", "b", "c"))
-    admission = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(admission, PreparedFrontier) and admission.admission is not None
-    admitted = reduce_graph_command(initial, admission.admission.command)
+    graph = resource_graph(node("a", FILE), node("b", DATABASE))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    admission, admitted = await admitted_state(graph, executor, initial)
+    assert admission.admission is not None
+    assert admission.admission.admitted_node_ids == (GraphNodeId("a"), GraphNodeId("b"))
+    assert admission.admission.waiting_node_ids == ()
 
-    result = await execute_claim(step_request(graph, admitted, "input"))
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
 
-    assert calls == ["a", "b", "c"]
-    assert len(result.result.results) == 3
+    assert sorted(calls) == ["a", "b"]
+    assert apply_command(claimed, result.command).status is GraphRunStatus.COMPLETED
 
 
-@pytest.mark.asyncio
-async def test_resource_free_task_executes_once_across_multiple_resource_waves() -> None:
+async def test_partial_multi_resource_acquisition_executes_after_prefix_owner_releases() -> None:
     calls: list[str] = []
 
     def node(name: str, resources: tuple[ResourceId, ...]) -> NodeDefinition[str, str]:
@@ -586,253 +484,325 @@ async def test_resource_free_task_executes_once_across_multiple_resource_waves()
             calls.append(name)
             return NodeSuccess(node_input)
 
-        return NodeDefinition(NodeId(name), execute, resources)
+        return NodeDefinition(GraphNodeId(name), execute, resources)
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (node("a", (FILE,)), node("b", (FILE,)), node("c", ())),
-            tuple(DirectEdge(NodeId(name), END) for name in ("a", "b", "c")),
-            tuple(NodeId(name) for name in ("a", "b", "c")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    initial = state(frontier=("a", "b", "c"))
-    admission = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(admission, PreparedFrontier) and admission.admission is not None
-    admitted = reduce_graph_command(initial, admission.admission.command)
+    graph = resource_graph(node("a", (DATABASE,)), node("b", (FILE, DATABASE)))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    admission, admitted = await admitted_state(graph, executor, initial)
+    assert admission.admission is not None
+    assert admission.admission.admitted_node_ids == (GraphNodeId("a"),)
+    assert admission.admission.waiting_node_ids == (GraphNodeId("b"),)
+    assert admitted.resources is not None
+    b_acquisition = admitted.resources.acquisitions[1]
+    assert b_acquisition.acquired == (FILE,)
+    assert b_acquisition.waiting_for == DATABASE
 
-    await execute_claim(step_request(graph, admitted, "input"))
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
 
-    assert calls.count("a") == 1
-    assert calls.count("b") == 1
-    assert calls.count("c") == 1
-
-
-@pytest.mark.asyncio
-async def test_claimed_resource_stage_rejects_missing_admission() -> None:
-    async def execute(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input)
-
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), execute, (FILE,)),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    missing_admission = state(
-        frontier=("a",),
-        resources=ResourceSnapshot((ResourceLock(FILE),)),
-    )
-    direct_request = StepRequest(missing_admission, "input", DIRECT_ATTEMPT)
-    direct_frontier = prepare_frontier(graph, direct_request)
-    owner = ExecutionClaimOwner()
-    direct_claim = prepare_claim(
-        owner,
-        missing_admission,
-        DIRECT_ATTEMPT,
-        direct_frontier.pending_tasks,
-    )
-    claimed = reduce_graph_run(missing_admission, direct_claim.command)
-    await direct_claim.consume(owner, claimed, DIRECT_ATTEMPT)
-
-    with pytest.raises(ResultCollectionError, match="cannot advance"):
-        await execute_claimed_superstep(
-            graph,
-            StepRequest(claimed, "input", DIRECT_ATTEMPT),
-            direct_claim,
-        )
+    assert calls == ["a", "b"]
+    assert apply_command(claimed, result.command).status is GraphRunStatus.COMPLETED
 
 
-@pytest.mark.asyncio
-async def test_claimed_resource_stage_rejects_absent_parallel_snapshot() -> None:
-    async def execute(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input)
+async def test_three_conflicting_resource_nodes_execute_once_in_fifo_order() -> None:
+    calls: list[str] = []
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), execute, (FILE,)),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    missing_admission = state(frontier=("a",))
-    direct_request = StepRequest(missing_admission, "input", DIRECT_ATTEMPT)
-    direct_frontier = prepare_frontier(graph, direct_request)
-    owner = ExecutionClaimOwner()
-    direct_claim = prepare_claim(
-        owner,
-        missing_admission,
-        DIRECT_ATTEMPT,
-        direct_frontier.pending_tasks,
-    )
-    claimed = reduce_graph_run(missing_admission, direct_claim.command)
-    await direct_claim.consume(owner, claimed, DIRECT_ATTEMPT)
+    def node(name: str) -> NodeDefinition[str, str]:
+        async def execute(node_input: str) -> NodeSuccess[str]:
+            calls.append(name)
+            return NodeSuccess(node_input)
 
-    with pytest.raises(ResultCollectionError, match="committed resources snapshot"):
-        await execute_claimed_superstep(
-            graph,
-            StepRequest(claimed, "input", DIRECT_ATTEMPT),
-            direct_claim,
-        )
+        return NodeDefinition(GraphNodeId(name), execute, (FILE,))
+
+    graph = resource_graph(node("c"), node("a"), node("b"))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    admission, admitted = await admitted_state(graph, executor, initial)
+    assert admission.admission is not None
+    assert admission.admission.admitted_node_ids == (GraphNodeId("a"),)
+    assert admission.admission.waiting_node_ids == (GraphNodeId("b"), GraphNodeId("c"))
+
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+    await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+
+    assert calls == ["a", "b", "c"]
+    assert len(calls) == len(set(calls))
 
 
-@pytest.mark.asyncio
-async def test_failed_resource_node_settles_failure_after_releasing_scheduler_state() -> None:
+async def test_resource_free_node_executes_only_in_first_of_multiple_resource_waves() -> None:
+    calls: list[str] = []
+
+    def node(name: str, resources: tuple[ResourceId, ...] = ()) -> NodeDefinition[str, str]:
+        async def execute(node_input: str) -> NodeSuccess[str]:
+            calls.append(name)
+            return NodeSuccess(node_input)
+
+        return NodeDefinition(GraphNodeId(name), execute, resources)
+
+    graph = resource_graph(node("a", (FILE,)), node("b", (FILE,)), node("free"))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+
+    assert calls.count("free") == 1
+    assert calls == ["free", "a", "b"]
+    assert len(result.results) == 3
+
+
+async def test_typed_resource_failure_settles_after_releasing_scheduler_state() -> None:
     async def fail(node_input: str) -> NodeFailure:
-        return NodeFailure(f"failed: {node_input}")
+        return NodeFailure(GraphFailure(f"failed:{node_input}"))
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), fail, (FILE,)), NodeDefinition(NodeId("b"), fail, (FILE,))),
-            (DirectEdge(NodeId("a"), END), DirectEdge(NodeId("b"), END)),
-            (NodeId("a"), NodeId("b")),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    initial = state()
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is not None
-    admitted = reduce_graph_command(initial, prepared.admission.command)
+    graph = resource_graph(NodeDefinition(GraphNodeId("a"), fail, (FILE,)))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
 
-    claimed = await execute_claim(step_request(graph, admitted, "input"))
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+    failed = apply_command(claimed, result.command)
 
-    assert isinstance(claimed.result.results[0], TaskFailure)
-    failed = reduce_claim_result(claimed)
-    assert failed.status is GraphRunStatus.FAILED
+    assert isinstance(result.results[0], TaskFailure)
+    assert failed.status is GraphRunStatus.RUNNING
+    assert failed.execution is failed.resources is None
 
 
-@pytest.mark.asyncio
-async def test_conditional_route_acquires_only_selected_target_resource() -> None:
-    async def choose(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input, SelectRoute(RouteId("left")))
+async def test_resource_waves_collect_failure_and_interrupt_without_blocking_waiters() -> None:
+    calls: list[str] = []
 
-    async def execute(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input)
+    async def fail(node_input: str) -> NodeFailure:
+        calls.append("a")
+        return NodeFailure(GraphFailure(f"failed:{node_input}"))
 
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.graph"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(NodeId("a"), choose),
-                NodeDefinition(NodeId("left"), execute, (FILE,)),
-                NodeDefinition(NodeId("right"), execute, (FILE,)),
-            ),
-            (
-                ConditionalEdge(NodeId("a"), RouteId("left"), NodeId("left")),
-                ConditionalEdge(NodeId("a"), RouteId("right"), NodeId("right")),
-                DirectEdge(NodeId("left"), END),
-                DirectEdge(NodeId("right"), END),
-            ),
-            (NodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
-        )
-    )
-    first = await execute_claim(step_request(graph, state(frontier=("a",)), "input"))
-    next_state = reduce_claim_result(first)
-    prepared = await execute_step(step_request(graph, next_state, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is not None
-    assert tuple(task.node_id for task in prepared.admission.admitted) == (NodeId("left"),)
+    async def interrupt(node_input: str) -> NodeInterrupt:
+        calls.append("b")
+        return NodeInterrupt(GraphInterruptPayload(f"question:{node_input}".encode()))
 
-
-@pytest.mark.asyncio
-async def test_resource_and_completed_nested_task_settle_one_frontier() -> None:
-    graph = _resource_and_nested_graph()
-    initial = state()
-    prepared = await execute_step(step_request(graph, initial, "input"))
-    assert isinstance(prepared, PreparedFrontier) and prepared.admission is None
-    nested = prepared.nested_runs[0]
-    child_state = reduce_graph_run(None, nested.command)
-    child_claimed = await execute_claim(step_request(nested.graph, child_state, "input"))
-    child_result = child_claimed.result.results[0]
-    assert isinstance(child_result, TaskSuccess)
-    completed_child = reduce_claim_result(child_claimed)
-    nested_result = NestedTaskSuccess(nested.parent_task.task_id, completed_child, child_result.output)
-    admission = await execute_step(
-        step_request(
-            graph,
-            initial,
-            "input",
-            nested_results=(nested_result,),
-        )
-    )
-    assert isinstance(admission, PreparedFrontier) and admission.admission is not None
-    admitted = reduce_graph_command(initial, admission.admission.command)
-
-    executed = await execute_step(
-        step_request(
-            graph,
-            admitted,
-            "input",
-            nested_results=(nested_result,),
-        )
-    )
-
-    assert isinstance(executed, ExecutedSuperstep)
-    assert isinstance(executed.command, CompleteGraphRun)
-    assert tuple(result.task.node_id for result in executed.results) == (NodeId("a"), NodeId("b"))
-
-
-@pytest.mark.asyncio
-async def test_resource_frontier_prepares_nested_run_before_resource_admission() -> None:
-    graph = _resource_and_nested_graph()
-    initial = state()
-    waiting = await execute_step(step_request(graph, initial, "input"))
-
-    assert isinstance(waiting, PreparedFrontier)
-    assert waiting.admission is None
-    assert len(waiting.nested_runs) == 1
-    assert waiting.execution is None
-
-
-@pytest.mark.asyncio
-async def test_claimed_stage_rejects_waiting_for_an_unstarted_nested_run() -> None:
-    async def execute(node_input: str) -> NodeSuccess[str]:
-        return NodeSuccess(node_input)
-
-    child = GraphDefinition[str, str](
-        GraphDefinitionId("child.graph"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(NodeId("child"), execute),),
-        (DirectEdge(NodeId("child"), END),),
-        (NodeId("child"),),
-    )
+    codec = Utf8Codec()
     graph = compile_graph(
         GraphDefinition[str, str](
             GraphDefinitionId("resource.graph"),
             GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(NodeId("a"), child),),
-            (DirectEdge(NodeId("a"), END),),
-            (NodeId("a"),),
+            (
+                NodeDefinition(GraphNodeId("a"), fail, (FILE,)),
+                NodeDefinition(GraphNodeId("b"), interrupt, (FILE,)),
+            ),
+            (DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
+            (GraphNodeId("a"), GraphNodeId("b")),
+            (ResourceDefinition(FILE, 10),),
+            ResumeInputBinding(GraphResumeInputCodecId("utf8.v1"), 1, codec, codec),
         )
     )
-    initial = state(frontier=("a",))
-    direct_request = StepRequest(initial, "input", DIRECT_ATTEMPT)
-    direct_frontier = prepare_frontier(graph, direct_request)
-    owner = ExecutionClaimOwner()
-    direct_claim = prepare_claim(
-        owner,
-        initial,
-        DIRECT_ATTEMPT,
-        direct_frontier.pending_tasks,
-    )
-    claimed = reduce_graph_run(initial, direct_claim.command)
-    await direct_claim.consume(owner, claimed, DIRECT_ATTEMPT)
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    admission, admitted = await admitted_state(graph, executor, initial)
+    assert admission.admission is not None
+    assert admission.admission.admitted_node_ids == (GraphNodeId("a"),)
+    assert admission.admission.waiting_node_ids == (GraphNodeId("b"),)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
 
-    with pytest.raises(ResultCollectionError, match="waiting for nested"):
-        await execute_claimed_superstep(
-            graph,
-            StepRequest(claimed, "input", DIRECT_ATTEMPT),
-            direct_claim,
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+    awaiting = apply_command(claimed, result.command)
+
+    assert calls == ["a", "b"]
+    assert isinstance(result.results[0], TaskFailure)
+    assert isinstance(result.results[1], TaskInterrupt)
+    assert awaiting.execution is awaiting.resources is None
+    assert await executor.prepare(StepRequest(awaiting, "ignored", ATTEMPT_ID, ())) == AwaitingResume(
+        (GraphNodeId("a"),),
+        (GraphNodeId("b"),),
+    )
+
+
+async def test_later_resource_wave_exception_discards_all_earlier_typed_results() -> None:
+    calls: list[str] = []
+
+    async def succeed(node_input: str) -> NodeSuccess[str]:
+        calls.append("a")
+        return NodeSuccess(node_input)
+
+    async def explode(node_input: str) -> NodeSuccess[str]:
+        calls.append("b")
+        raise RuntimeError(f"later:{node_input}")
+
+    graph = resource_graph(
+        NodeDefinition(GraphNodeId("a"), succeed, (FILE,)),
+        NodeDefinition(GraphNodeId("b"), explode, (FILE,)),
+    )
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, admitted = await admitted_state(graph, executor, initial)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, ()))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+
+    with pytest.raises(RuntimeError, match="later:input"):
+        await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, ()))
+
+    assert calls == ["a", "b"]
+    assert claimed.execution is not None and claimed.resources is not None
+    fenced = apply_command(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
+    assert fenced.execution is fenced.resources is None
+    assert fenced.frontier == initial.frontier
+
+
+async def test_failure_override_survives_resource_admission_and_reaches_only_its_node() -> None:
+    received: dict[str, list[str]] = {"a": [], "b": []}
+
+    def fail_once(name: str):
+        async def execute(node_input: str):
+            received[name].append(node_input)
+            if len(received[name]) == 1:
+                return NodeFailure(GraphFailure(f"{name} failed"))
+            return NodeSuccess(node_input)
+
+        return execute
+
+    codec = Utf8Codec()
+    graph = compile_graph(
+        GraphDefinition[str, str](
+            GraphDefinitionId("resource-resume.graph"),
+            GraphDefinitionVersion(1),
+            (
+                NodeDefinition(GraphNodeId("a"), fail_once("a"), (FILE,)),
+                NodeDefinition(GraphNodeId("b"), fail_once("b"), (FILE,)),
+            ),
+            (DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
+            (GraphNodeId("a"), GraphNodeId("b")),
+            (ResourceDefinition(FILE, 10),),
+            ResumeInputBinding(GraphResumeInputCodecId("utf8.v1"), 1, codec, codec),
         )
+    )
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    _, first_admitted = await admitted_state(graph, executor, initial)
+    first_prepared = await executor.prepare(StepRequest(first_admitted, "initial", ATTEMPT_ID, ()))
+    assert isinstance(first_prepared, ExecutableFrontier) and first_prepared.claim is not None
+    first_claimed = apply_command(first_admitted, first_prepared.claim.command)
+    first_result = await executor.execute(
+        first_prepared.claim,
+        StepRequest(first_claimed, "initial", ATTEMPT_ID, ()),
+    )
+    failed = apply_command(first_claimed, first_result.command)
+    resumed = apply_command(
+        failed,
+        executor.resume(
+            ResumeRequest(
+                failed,
+                (
+                    ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("override-a")),
+                    ResumeFailedNodeRequest(GraphNodeId("b"), OverrideNodeInput("override-b")),
+                ),
+            )
+        ),
+    )
+
+    _, readmitted = await admitted_state(graph, executor, resumed)
+    retry = await executor.prepare(StepRequest(readmitted, "request-default", ATTEMPT_ID, ()))
+    assert isinstance(retry, ExecutableFrontier) and retry.claim is not None
+    retry_claimed = apply_command(readmitted, retry.claim.command)
+    retry_result = await executor.execute(
+        retry.claim,
+        StepRequest(retry_claimed, "request-default", ATTEMPT_ID, ()),
+    )
+
+    assert received == {"a": ["initial", "override-a"], "b": ["initial", "override-b"]}
+    assert apply_command(retry_claimed, retry_result.command).status is GraphRunStatus.COMPLETED
+
+
+async def test_conditional_route_acquires_only_selected_target_resource() -> None:
+    calls: list[str] = []
+
+    async def choose(node_input: str) -> NodeSuccess[str]:
+        calls.append("choose")
+        return NodeSuccess(node_input, SelectGraphRoute(GraphRouteId("right")))
+
+    async def target(node_input: str) -> NodeSuccess[str]:
+        calls.append("right")
+        return NodeSuccess(node_input)
+
+    graph = compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("resource.graph"),
+            GraphDefinitionVersion(1),
+            (
+                NodeDefinition(GraphNodeId("choose"), choose),
+                NodeDefinition(GraphNodeId("left"), target, (FILE,)),
+                NodeDefinition(GraphNodeId("right"), target, (FILE,)),
+            ),
+            (
+                ConditionalEdge(GraphNodeId("choose"), GraphRouteId("left"), GraphNodeId("left")),
+                ConditionalEdge(GraphNodeId("choose"), GraphRouteId("right"), GraphNodeId("right")),
+                DirectEdge(GraphNodeId("left"), END),
+                DirectEdge(GraphNodeId("right"), END),
+            ),
+            (GraphNodeId("choose"),),
+            (ResourceDefinition(FILE, 10),),
+        )
+    )
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    first = await executor.prepare(StepRequest(initial, "input", ATTEMPT_ID, ()))
+    assert isinstance(first, ExecutableFrontier) and first.claim is not None
+    first_claimed = apply_command(initial, first.claim.command)
+    first_result = await executor.execute(first.claim, StepRequest(first_claimed, "input", ATTEMPT_ID, ()))
+    routed = apply_command(first_claimed, first_result.command)
+
+    admission = await executor.prepare(StepRequest(routed, "input", ATTEMPT_ID, ()))
+    assert isinstance(admission, ExecutableFrontier) and admission.admission is not None
+    admitted = apply_command(routed, admission.admission.command)
+    assert admitted.resources is not None
+    assert tuple(item.node_id for item in admitted.resources.acquisitions) == (GraphNodeId("right"),)
+
+
+async def test_resource_and_completed_nested_node_settle_one_frontier() -> None:
+    graph = nested_resource_graph()
+    executor = GraphExecutor(graph)
+    parent = started(executor)
+    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
+    missing = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (MissingChild(activation),)))
+    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
+    child = reduce_graph_run(None, missing.action.children[0].command)
+    child_claim = reduce_graph_run(
+        child,
+        ClaimGraphExecution(child.revision, GraphExecutionAttemptId("child"), (GraphNodeId("child"),)),
+    )
+    assert child_claim.execution is not None
+    child_completed = reduce_graph_run(
+        child_claim,
+        SettleGraphExecution(
+            child_claim.revision,
+            child_claim.execution.token,
+            (SucceededGraphNodeOutcome(GraphNodeId("child"), ContinueGraphRouting()),),
+            CompleteGraphFrontier(),
+        ),
+    )
+    projection = CompletedChild(activation, child_completed, "child-output", ContinueGraphRouting())
+    admission = await executor.prepare(StepRequest(parent, "input", ATTEMPT_ID, (projection,)))
+    assert isinstance(admission, ExecutableFrontier) and admission.admission is not None
+    admitted = apply_command(parent, admission.admission.command)
+    prepared = await executor.prepare(StepRequest(admitted, "input", ATTEMPT_ID, (projection,)))
+    assert isinstance(prepared, ExecutableFrontier) and prepared.claim is not None
+    claimed = apply_command(admitted, prepared.claim.command)
+
+    result = await executor.execute(prepared.claim, StepRequest(claimed, "input", ATTEMPT_ID, (projection,)))
+
+    assert tuple(item.task.node_id for item in result.results) == (
+        GraphNodeId("nested"),
+        GraphNodeId("resource"),
+    )
+    assert apply_command(claimed, result.command).status is GraphRunStatus.COMPLETED

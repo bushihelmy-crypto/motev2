@@ -22,7 +22,6 @@ REQUIRED_PACKAGES = frozenset(
         "role",
         "role/restore",
         "state",
-        "state/domain_state",
         "state/graph_state",
         "think",
         "think/commands",

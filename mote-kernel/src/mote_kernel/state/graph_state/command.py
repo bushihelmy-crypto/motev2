@@ -1,112 +1,140 @@
-"""Typed commands that change recoverable graph-run state."""
+"""Typed transition inputs for recoverable graph-run state."""
 
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from mote_kernel.state.graph_state.model import (
+from mote_kernel.state.graph_state.frontier_model import (
+    GraphFailure,
+    GraphInterruptPayload,
+    GraphNodeInputBinding,
+    GraphNodeInterruptIdentity,
+    GraphResumeInputCodec,
+    GraphSkipReason,
+    OverrideGraphNodeInput,
+)
+from mote_kernel.state.graph_state.identity import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphExecutionToken,
-    GraphFailure,
-    GraphInterruptIdentity,
-    GraphInterruptPayload,
-    GraphJoinProgress,
+    GraphInterruptId,
     GraphNodeId,
-    GraphResolutionCodec,
     GraphRunId,
-    GraphTaskId,
-    ParentGraphTask,
+)
+from mote_kernel.state.graph_state.model import (
+    GraphAbortReason,
+    GraphExecutionToken,
+    GraphJoinProgress,
+    ParentGraphActivation,
 )
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
+from mote_kernel.state.graph_state.routing import GraphRoutingContribution
+
+
+@dataclass(frozen=True, slots=True)
+class SucceededGraphNodeOutcome:
+    node_id: GraphNodeId
+    routing: GraphRoutingContribution
+
+
+@dataclass(frozen=True, slots=True)
+class FailedGraphNodeOutcome:
+    node_id: GraphNodeId
+    failure: GraphFailure
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptedGraphNodeOutcome:
+    node_id: GraphNodeId
+    identity: GraphNodeInterruptIdentity
+    request_payload: GraphInterruptPayload
+
+
+GraphNodeOutcome: TypeAlias = SucceededGraphNodeOutcome | FailedGraphNodeOutcome | InterruptedGraphNodeOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class AdvanceGraphFrontier:
+    node_ids: tuple[GraphNodeId, ...]
+    join_progress: tuple[GraphJoinProgress, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteGraphFrontier:
+    pass
+
+
+GraphFrontierResolution: TypeAlias = AdvanceGraphFrontier | CompleteGraphFrontier
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeFailedNode:
+    node_id: GraphNodeId
+    input: GraphNodeInputBinding
+
+
+@dataclass(frozen=True, slots=True)
+class SkipFailedNode:
+    node_id: GraphNodeId
+    reason: GraphSkipReason
+    routing: GraphRoutingContribution
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeInterruptedNode:
+    node_id: GraphNodeId
+    interrupt_id: GraphInterruptId
+    input: OverrideGraphNodeInput
+
+
+GraphNodeResumeAction: TypeAlias = ResumeFailedNode | SkipFailedNode | ResumeInterruptedNode
 
 
 @dataclass(frozen=True, slots=True)
 class StartGraphRun:
-    """Create a graph run at its initial committed frontier."""
-
     run_id: GraphRunId
     definition_id: GraphDefinitionId
     definition_version: GraphDefinitionVersion
-    frontier: tuple[GraphNodeId, ...]
-    parent: ParentGraphTask | None = None
-    resolution_codec: GraphResolutionCodec | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AdvanceGraphRun:
-    """Commit the next frontier after one superstep settles."""
-
-    expected_revision: int
-    execution: GraphExecutionToken
-    frontier: tuple[GraphNodeId, ...]
-    join_progress: tuple[GraphJoinProgress, ...] = ()
+    node_ids: tuple[GraphNodeId, ...]
+    parent: ParentGraphActivation | None = None
+    resume_input_codec: GraphResumeInputCodec | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ClaimGraphExecution:
-    """Atomically claim one task batch for one executor attempt."""
-
     expected_revision: int
     attempt_id: GraphExecutionAttemptId
-    task_ids: tuple[GraphTaskId, ...]
+    node_ids: tuple[GraphNodeId, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class FenceGraphExecution:
-    """Clear one exact lease only after its executor has been stopped and fenced."""
-
     expected_revision: int
     execution: GraphExecutionToken
 
 
 @dataclass(frozen=True, slots=True)
-class RequestGraphRunInterrupt:
-    """Suspend one quiescent run with a caller-assigned tree interrupt identity."""
-
-    expected_revision: int
-    identity: GraphInterruptIdentity
-    request_payload: GraphInterruptPayload
-
-
-@dataclass(frozen=True, slots=True)
-class ResolveGraphRunInterrupt:
-    """Persist one exact interrupt resolution and resume its graph run."""
-
-    expected_revision: int
-    identity: GraphInterruptIdentity
-    resolution_payload: GraphInterruptPayload
-
-
-@dataclass(frozen=True, slots=True)
-class CompleteGraphRun:
-    """Mark a running graph as successfully complete."""
-
+class SettleGraphExecution:
     expected_revision: int
     execution: GraphExecutionToken
+    outcomes: tuple[GraphNodeOutcome, ...]
+    resolution: GraphFrontierResolution | None
 
 
 @dataclass(frozen=True, slots=True)
-class FailGraphExecution:
-    """Fail a running graph from a settled, fenced execution attempt."""
-
+class ResumeGraphNodes:
     expected_revision: int
-    execution: GraphExecutionToken
-    failure: GraphFailure
+    actions: tuple[GraphNodeResumeAction, ...]
+    resolution: GraphFrontierResolution | None
 
 
 @dataclass(frozen=True, slots=True)
 class AbortGraphRun:
-    """Terminate a quiescent running or suspended graph without claiming execution."""
-
     expected_revision: int
-    failure: GraphFailure
+    reason: GraphAbortReason
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateGraphResources:
-    """Commit resource admission before an executor attempt is claimed."""
-
     expected_revision: int
     resources: ResourceSnapshot
 
@@ -115,25 +143,31 @@ GraphRunCommand: TypeAlias = (
     StartGraphRun
     | ClaimGraphExecution
     | FenceGraphExecution
-    | RequestGraphRunInterrupt
-    | ResolveGraphRunInterrupt
-    | AdvanceGraphRun
-    | CompleteGraphRun
-    | FailGraphExecution
+    | SettleGraphExecution
+    | ResumeGraphNodes
     | AbortGraphRun
     | UpdateGraphResources
 )
 
+
 __all__ = [
     "AbortGraphRun",
-    "AdvanceGraphRun",
+    "AdvanceGraphFrontier",
     "ClaimGraphExecution",
-    "CompleteGraphRun",
-    "FailGraphExecution",
+    "CompleteGraphFrontier",
+    "FailedGraphNodeOutcome",
     "FenceGraphExecution",
+    "GraphFrontierResolution",
+    "GraphNodeOutcome",
+    "GraphNodeResumeAction",
     "GraphRunCommand",
-    "RequestGraphRunInterrupt",
-    "ResolveGraphRunInterrupt",
+    "InterruptedGraphNodeOutcome",
+    "ResumeFailedNode",
+    "ResumeGraphNodes",
+    "ResumeInterruptedNode",
+    "SettleGraphExecution",
+    "SkipFailedNode",
     "StartGraphRun",
+    "SucceededGraphNodeOutcome",
     "UpdateGraphResources",
 ]

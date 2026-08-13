@@ -3,6 +3,7 @@
 from dataclasses import replace
 
 from mote_kernel.state.graph_state.command import UpdateGraphResources
+from mote_kernel.state.graph_state.frontier_model import GraphFrontierStatus, frontier_status
 from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_command import AcquireResources
 from mote_kernel.state.graph_state.resource_model import ResourceLock, ResourceSnapshot
@@ -26,7 +27,7 @@ def _validate_admission_transition(
         for acquisition in proposed.acquisitions[prior_acquisitions:]:
             replayed = reduce_resources(
                 replayed,
-                AcquireResources(acquisition.participant_id, acquisition.required),
+                AcquireResources(acquisition.node_id, acquisition.required),
             )
     except ResourceTransitionError as error:
         raise GraphStateTransitionError("resource admission is not a legal acquisition sequence") from error
@@ -41,6 +42,8 @@ def update_graph_resources(state: GraphRunState, command: UpdateGraphResources) 
         raise GraphStateTransitionError("only a running graph can update resource admission")
     if state.execution is not None:
         raise GraphStateTransitionError("resource admission cannot change during execution")
+    if frontier_status(state.frontier) is not GraphFrontierStatus.EXECUTABLE:
+        raise GraphStateTransitionError("resource admission requires an executable frontier")
     _validate_admission_transition(state.resources, command.resources)
     return validated_graph_run_state(replace(state, resources=command.resources))
 

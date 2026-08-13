@@ -1,14 +1,19 @@
-"""Async task invocation with deterministic result collection."""
+"""Async task invocation with deterministic typed outcome collection."""
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TypeVar
 
-from mote_kernel.execution.engine.task import GraphTask, TaskId
-from mote_kernel.execution.errors import NodeExecutionContractError, ResultCollectionError
-from mote_kernel.execution.graph import CompiledGraph, NestedGraphNodeDefinition, NodeFailure, NodeSuccess
-from mote_kernel.execution.result import NestedTaskFailure, NestedTaskResult, TaskFailure, TaskResult, TaskSuccess
+from mote_kernel.execution.engine.task import ExecutableTask
+from mote_kernel.execution.errors import NodeExecutionContractError
+from mote_kernel.execution.graph import (
+    CompiledGraph,
+    NestedGraphNodeDefinition,
+    NodeFailure,
+    NodeInterrupt,
+    NodeSuccess,
+)
+from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -16,75 +21,45 @@ OutputT = TypeVar("OutputT")
 
 @dataclass(frozen=True, slots=True)
 class _TaskRaised:
-    """An ordinary node exception retained until its whole batch settles."""
-
     error: Exception
 
 
 async def _execute_task(
-    graph: CompiledGraph[InputT, OutputT],
-    task: GraphTask,
-    node_input: InputT,
-    nested_by_task: Mapping[TaskId, NestedTaskResult[OutputT]],
+    graph: CompiledGraph[InputT, OutputT], executable: ExecutableTask[InputT]
 ) -> TaskResult[OutputT]:
+    task = executable.task
     definition = graph.nodes[task.node_id]
     if isinstance(definition, NestedGraphNodeDefinition):
-        nested = nested_by_task[task.task_id]
-        if isinstance(nested, NestedTaskFailure):
-            return TaskFailure(task, nested.failure)
-        return TaskSuccess(task, nested.output, nested.routing)
-    match await definition.node(node_input):
-        case NodeSuccess(output=output, routing=routing):
-            return TaskSuccess(task, output, routing)
-        case NodeFailure(failure=failure):
-            return TaskFailure(task, failure)
-        case invalid:
-            raise NodeExecutionContractError(f"node returned an invalid outcome: {type(invalid).__name__}")
+        raise NodeExecutionContractError("nested task must be projected to an executable terminal outcome")
+    outcome = await definition.node(executable.effective_input)
+    if isinstance(outcome, NodeSuccess):
+        return TaskSuccess(task, outcome.output, outcome.routing)
+    if isinstance(outcome, NodeFailure):
+        return TaskFailure(task, outcome.failure)
+    if isinstance(outcome, NodeInterrupt):  # pyright: ignore[reportUnnecessaryIsInstance]
+        return TaskInterrupt(task, outcome.request_payload)
+    raise NodeExecutionContractError("graph node returned an unsupported outcome")
 
 
-async def _capture_task_exception(
-    graph: CompiledGraph[InputT, OutputT],
-    task: GraphTask,
-    node_input: InputT,
-    nested_by_task: Mapping[TaskId, NestedTaskResult[OutputT]],
+async def _capture(
+    graph: CompiledGraph[InputT, OutputT], executable: ExecutableTask[InputT]
 ) -> TaskResult[OutputT] | _TaskRaised:
     try:
-        return await _execute_task(graph, task, node_input, nested_by_task)
+        return await _execute_task(graph, executable)
     except Exception as error:
         return _TaskRaised(error)
 
 
 async def execute_tasks(
-    graph: CompiledGraph[InputT, OutputT],
-    tasks: tuple[GraphTask, ...],
-    node_input: InputT,
-    nested_results: tuple[NestedTaskResult[OutputT], ...] = (),
+    graph: CompiledGraph[InputT, OutputT], executables: tuple[ExecutableTask[InputT], ...]
 ) -> tuple[TaskResult[OutputT], ...]:
-    """Invoke a concurrent batch with one shared immutable input and collect results in task order."""
-
-    nested_by_task = {result.task_id: result for result in nested_results}
-    nested_task_ids = {
-        task.task_id for task in tasks if isinstance(graph.nodes[task.node_id], NestedGraphNodeDefinition)
-    }
-    if set(nested_by_task) != nested_task_ids:
-        raise ResultCollectionError("nested task results must exactly cover planned nested graph tasks")
-    if not tasks:
+    if not executables:
         return ()
-
-    async with asyncio.TaskGroup() as task_group:
+    async with asyncio.TaskGroup() as group:
         scheduled = tuple(
-            task_group.create_task(
-                _capture_task_exception(
-                    graph,
-                    task,
-                    node_input,
-                    nested_by_task,
-                ),
-                name=f"mote-graph:{task.task_id}",
-            )
-            for task in tasks
+            group.create_task(_capture(graph, executable), name=f"mote-graph:{executable.task.task_id}")
+            for executable in executables
         )
-
     results: list[TaskResult[OutputT]] = []
     for scheduled_task in scheduled:
         outcome = scheduled_task.result()
@@ -94,4 +69,4 @@ async def execute_tasks(
     return tuple(results)
 
 
-__all__: list[str] = []
+__all__ = ["execute_tasks"]

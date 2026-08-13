@@ -1,186 +1,37 @@
-"""Graph-run state projections owned by the execution subsystem."""
+"""Pure projections between authoritative graph state and execution."""
 
 from typing import TypeVar
 
-from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefinitionVersion
-from mote_kernel.execution.graph.identity import NodeId
-from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.snapshot import (
-    ExecutionAttemptId,
-    ExecutionLeaseSnapshot,
-    ExecutionSnapshot,
-    ExecutionStatus,
-    ExecutionTaskId,
-    ExecutionToken,
+from mote_kernel.execution.errors import SnapshotMismatchError
+from mote_kernel.execution.graph import CompiledGraph
+from mote_kernel.state.graph_state import (
+    GraphResumeInputCodec,
     GraphRunId,
-    InterruptId,
-    InterruptLifecycle,
-    InterruptPayload,
-    InterruptReceipt,
-    InterruptRecord,
-    JoinProgress,
-    ParentTaskId,
-    ParentTaskRef,
-    ResolutionCodecId,
-)
-from mote_kernel.execution.transition import AdvanceTransition, CompleteTransition, ExecutionTransition
-from mote_kernel.state.graph_state.command import (
-    AdvanceGraphRun,
-    CompleteGraphRun,
-    FailGraphExecution,
-    GraphRunCommand,
+    ParentGraphActivation,
     StartGraphRun,
+    child_graph_run_id,
 )
-from mote_kernel.state.graph_state.model import (
-    GraphDefinitionId as StateGraphDefinitionId,
-)
-from mote_kernel.state.graph_state.model import (
-    GraphDefinitionVersion as StateGraphDefinitionVersion,
-)
-from mote_kernel.state.graph_state.model import (
-    GraphExecutionAttemptId,
-    GraphExecutionToken,
-    GraphFailure,
-    GraphInterruptLifecycle,
-    GraphJoinProgress,
-    GraphNodeId,
-    GraphResolutionCodec,
-    GraphResolutionCodecId,
-    GraphRunState,
-    GraphRunStatus,
-    ParentGraphTask,
-)
-from mote_kernel.state.graph_state.model import (
-    GraphRunId as StateGraphRunId,
-)
-from mote_kernel.state.graph_state.validation import validate_graph_run_state
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 
-_EXECUTION_STATUS = {
-    GraphRunStatus.RUNNING: ExecutionStatus.RUNNING,
-    GraphRunStatus.SUSPENDED: ExecutionStatus.SUSPENDED,
-    GraphRunStatus.COMPLETED: ExecutionStatus.COMPLETED,
-    GraphRunStatus.FAILED: ExecutionStatus.FAILED,
-}
-
-_INTERRUPT_LIFECYCLE = {
-    GraphInterruptLifecycle.REQUESTED: InterruptLifecycle.REQUESTED,
-    GraphInterruptLifecycle.RESOLVED: InterruptLifecycle.RESOLVED,
-    GraphInterruptLifecycle.CONSUMED: InterruptLifecycle.CONSUMED,
-    GraphInterruptLifecycle.CANCELLED: InterruptLifecycle.CANCELLED,
-}
-
-
-def project_execution_snapshot(state: GraphRunState) -> ExecutionSnapshot:
-    """Project committed graph-run facts into execution-owned DTOs."""
-
-    validate_graph_run_state(state)
-    parent = state.parent
-    execution = state.execution
-    interrupt = state.interrupt
-    return ExecutionSnapshot(
-        run_id=GraphRunId(state.run_id),
-        definition_id=GraphDefinitionId(state.definition_id),
-        definition_version=GraphDefinitionVersion(state.definition_version),
-        status=_EXECUTION_STATUS[state.status],
-        superstep=state.superstep,
-        frontier=tuple(NodeId(node_id) for node_id in state.frontier),
-        revision=state.revision,
-        parent=(ParentTaskRef(GraphRunId(parent.run_id), ParentTaskId(parent.task_id)) if parent is not None else None),
-        join_progress=tuple(
-            JoinProgress(
-                tuple(NodeId(source) for source in progress.sources),
-                NodeId(progress.target),
-                frozenset(NodeId(source) for source in progress.arrived),
-            )
-            for progress in state.join_progress
-        ),
-        resources=state.resources,
-        execution_sequence=state.execution_sequence,
-        execution=(
-            ExecutionLeaseSnapshot(
-                ExecutionToken(
-                    execution.token.generation,
-                    ExecutionAttemptId(execution.token.attempt_id),
-                ),
-                tuple(ExecutionTaskId(task_id) for task_id in execution.task_ids),
-            )
-            if execution is not None
-            else None
-        ),
-        interrupt=(
-            InterruptRecord(
-                GraphRunId(interrupt.identity.root_run_id),
-                InterruptId(interrupt.identity.interrupt_id),
-                interrupt.identity.generation,
-                InterruptPayload(interrupt.request_payload),
-                ResolutionCodecId(interrupt.resolution_codec.codec_id),
-                interrupt.resolution_codec.version,
-                _INTERRUPT_LIFECYCLE[interrupt.lifecycle],
-                (InterruptPayload(interrupt.resolution_payload) if interrupt.resolution_payload is not None else None),
-                InterruptReceipt(interrupt.receipt.superstep) if interrupt.receipt is not None else None,
-            )
-            if interrupt is not None
-            else None
-        ),
-    )
-
-
-def _project_execution_token(token: ExecutionToken) -> GraphExecutionToken:
-    return GraphExecutionToken(token.generation, GraphExecutionAttemptId(token.attempt_id))
-
 
 def project_start_graph_command(
     graph: CompiledGraph[InputT, OutputT],
-    run_id: StateGraphRunId,
-    parent: ParentGraphTask | None = None,
+    run_id: GraphRunId,
+    parent: ParentGraphActivation | None = None,
 ) -> StartGraphRun:
-    """Derive initial durable graph state only from one compiled graph definition."""
-
-    resolution = graph.resolution
+    if parent is not None and run_id != child_graph_run_id(parent.run_id, parent.superstep, parent.node_id):
+        raise SnapshotMismatchError("child graph run identity does not match its parent activation")
+    binding = graph.resume_input
     return StartGraphRun(
-        run_id,
-        StateGraphDefinitionId(graph.definition_id),
-        StateGraphDefinitionVersion(graph.version),
-        tuple(GraphNodeId(node_id) for node_id in graph.entries),
-        parent,
-        (
-            GraphResolutionCodec(GraphResolutionCodecId(resolution.codec_id), resolution.version)
-            if resolution is not None
-            else None
-        ),
+        run_id=run_id,
+        definition_id=graph.definition_id,
+        definition_version=graph.version,
+        node_ids=graph.entries,
+        parent=parent,
+        resume_input_codec=(GraphResumeInputCodec(binding.codec_id, binding.version) if binding is not None else None),
     )
 
 
-def project_graph_command(transition: ExecutionTransition) -> GraphRunCommand:
-    """Project an execution outcome into the authoritative state command."""
-
-    if isinstance(transition, AdvanceTransition):
-        return AdvanceGraphRun(
-            expected_revision=transition.expected_revision,
-            execution=_project_execution_token(transition.execution),
-            frontier=tuple(GraphNodeId(node_id) for node_id in transition.frontier),
-            join_progress=tuple(
-                GraphJoinProgress(
-                    tuple(GraphNodeId(source) for source in progress.sources),
-                    GraphNodeId(progress.target),
-                    frozenset(GraphNodeId(source) for source in progress.arrived),
-                )
-                for progress in transition.join_progress
-            ),
-        )
-    if isinstance(transition, CompleteTransition):
-        return CompleteGraphRun(
-            transition.expected_revision,
-            _project_execution_token(transition.execution),
-        )
-    return FailGraphExecution(
-        transition.expected_revision,
-        _project_execution_token(transition.execution),
-        GraphFailure(transition.failure),
-    )
-
-
-__all__ = ["project_execution_snapshot", "project_graph_command", "project_start_graph_command"]
+__all__ = ["project_start_graph_command"]

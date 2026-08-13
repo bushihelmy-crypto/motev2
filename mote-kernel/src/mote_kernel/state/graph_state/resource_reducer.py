@@ -2,9 +2,9 @@
 
 from dataclasses import replace
 
-from mote_kernel.state.graph_state.resource_command import AcquireResources, ResourceCommand
+from mote_kernel.state.graph_state.identity import GraphNodeId
+from mote_kernel.state.graph_state.resource_command import AcquireResources, ReleaseResources, ResourceCommand
 from mote_kernel.state.graph_state.resource_model import (
-    ParticipantId,
     ResourceAcquisition,
     ResourceId,
     ResourceLock,
@@ -30,19 +30,19 @@ def _validate_snapshot(snapshot: ResourceSnapshot) -> None:
         if len(resource.waiters) != len(frozenset(resource.waiters)):
             raise ResourceTransitionError("resource waiters must be unique")
         if resource.owner is not None:
-            _require_identity(resource.owner, "participant")
+            _require_identity(resource.owner, "node")
             if resource.owner in resource.waiters:
                 raise ResourceTransitionError("resource owner cannot also be waiting")
         for waiter in resource.waiters:
-            _require_identity(waiter, "participant")
+            _require_identity(waiter, "node")
 
-    acquisitions = {acquisition.participant_id: acquisition for acquisition in snapshot.acquisitions}
+    acquisitions = {acquisition.node_id: acquisition for acquisition in snapshot.acquisitions}
     if len(acquisitions) != len(snapshot.acquisitions):
         raise ResourceTransitionError("resources snapshot repeats an acquisition")
     positions = {resource_id: position for position, resource_id in enumerate(resource_ids)}
     known_resources = frozenset(resource_ids)
     for acquisition in snapshot.acquisitions:
-        _require_identity(acquisition.participant_id, "participant")
+        _require_identity(acquisition.node_id, "node")
         if not acquisition.required:
             raise ResourceTransitionError("an acquisition requires at least one resource")
         if len(acquisition.required) != len(frozenset(acquisition.required)):
@@ -62,11 +62,11 @@ def _validate_snapshot(snapshot: ResourceSnapshot) -> None:
             raise ResourceTransitionError("an acquisition can only wait for its next resource")
         for resource_id in acquisition.acquired:
             resource = snapshot.resources[positions[resource_id]]
-            if resource.owner != acquisition.participant_id:
+            if resource.owner != acquisition.node_id:
                 raise ResourceTransitionError("acquired resource ownership does not match its acquisition")
         if acquisition.waiting_for is not None:
             resource = snapshot.resources[positions[acquisition.waiting_for]]
-            if acquisition.participant_id not in resource.waiters:
+            if acquisition.node_id not in resource.waiters:
                 raise ResourceTransitionError("waiting acquisition is absent from the resource queue")
 
     participants = frozenset(acquisitions)
@@ -87,24 +87,22 @@ def _advance(
         next_resource_id = acquisition.required[len(acquired)]
         position = positions[next_resource_id]
         resource = resources[position]
-        can_acquire = resource.owner is None and (
-            not resource.waiters or resource.waiters[0] == acquisition.participant_id
-        )
+        can_acquire = resource.owner is None and (not resource.waiters or resource.waiters[0] == acquisition.node_id)
         if not can_acquire:
-            resources[position] = replace(resource, waiters=(*resource.waiters, acquisition.participant_id))
+            resources[position] = replace(resource, waiters=(*resource.waiters, acquisition.node_id))
             return replace(acquisition, acquired=tuple(acquired), waiting_for=next_resource_id)
         waiters = resource.waiters[1:] if resource.waiters else ()
-        resources[position] = replace(resource, owner=acquisition.participant_id, waiters=waiters)
+        resources[position] = replace(resource, owner=acquisition.node_id, waiters=waiters)
         acquired.append(next_resource_id)
     return replace(acquisition, acquired=tuple(acquired), waiting_for=None)
 
 
 def _acquire(snapshot: ResourceSnapshot, command: AcquireResources) -> ResourceSnapshot:
-    _require_identity(command.participant_id, "participant")
+    _require_identity(command.node_id, "node")
     if not command.resources:
         return snapshot
-    if any(acquisition.participant_id == command.participant_id for acquisition in snapshot.acquisitions):
-        raise ResourceTransitionError("participant already has an acquisition")
+    if any(acquisition.node_id == command.node_id for acquisition in snapshot.acquisitions):
+        raise ResourceTransitionError("node already has an acquisition")
     positions = {resource.resource_id: position for position, resource in enumerate(snapshot.resources)}
     if len(command.resources) != len(frozenset(command.resources)):
         raise ResourceTransitionError("resource request contains duplicates")
@@ -116,19 +114,19 @@ def _acquire(snapshot: ResourceSnapshot, command: AcquireResources) -> ResourceS
     resources = list(snapshot.resources)
     acquisition = _advance(
         resources,
-        ResourceAcquisition(command.participant_id, command.resources, ()),
+        ResourceAcquisition(command.node_id, command.resources, ()),
         positions,
     )
     return ResourceSnapshot(tuple(resources), (*snapshot.acquisitions, acquisition))
 
 
-def _release(snapshot: ResourceSnapshot, participant_id: ParticipantId) -> ResourceSnapshot:
+def _release(snapshot: ResourceSnapshot, node_id: GraphNodeId) -> ResourceSnapshot:
     acquisition = next(
-        (item for item in snapshot.acquisitions if item.participant_id == participant_id),
+        (item for item in snapshot.acquisitions if item.node_id == node_id),
         None,
     )
     if acquisition is None:
-        raise ResourceTransitionError("participant has no acquisition to release")
+        raise ResourceTransitionError("node has no acquisition to release")
     if not acquisition.admitted:
         raise ResourceTransitionError("only an admitted participant can release resources")
 
@@ -139,26 +137,30 @@ def _release(snapshot: ResourceSnapshot, participant_id: ParticipantId) -> Resou
         resource = resources[position]
         resources[position] = replace(resource, owner=None)
 
-    acquisitions = [item for item in snapshot.acquisitions if item.participant_id != participant_id]
-    by_participant = {item.participant_id: item for item in acquisitions}
+    acquisitions = [item for item in snapshot.acquisitions if item.node_id != node_id]
+    by_node = {item.node_id: item for item in acquisitions}
     for resource in tuple(resources):
         position = positions[resource.resource_id]
         current = resources[position]
         if current.owner is None and current.waiters:
             waiter = current.waiters[0]
-            by_participant[waiter] = _advance(resources, by_participant[waiter], positions)
+            by_node[waiter] = _advance(resources, by_node[waiter], positions)
     return ResourceSnapshot(
         tuple(resources),
-        tuple(by_participant[item.participant_id] for item in acquisitions),
+        tuple(by_node[item.node_id] for item in acquisitions),
     )
 
 
 def _apply_command(snapshot: ResourceSnapshot, command: ResourceCommand) -> ResourceSnapshot:
+    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        command, AcquireResources | ReleaseResources
+    ):
+        raise ResourceTransitionError("resource command has an unsupported variant")
     if isinstance(command, AcquireResources):
         result = _acquire(snapshot, command)
     else:
-        _require_identity(command.participant_id, "participant")
-        result = _release(snapshot, command.participant_id)
+        _require_identity(command.node_id, "node")
+        result = _release(snapshot, command.node_id)
     _validate_snapshot(result)
     return result
 
@@ -180,7 +182,7 @@ def validate_resource_snapshot(snapshot: ResourceSnapshot) -> None:
     for acquisition in snapshot.acquisitions:
         replayed = _apply_command(
             replayed,
-            AcquireResources(acquisition.participant_id, acquisition.required),
+            AcquireResources(acquisition.node_id, acquisition.required),
         )
     if replayed != snapshot:
         raise ResourceTransitionError("resources snapshot does not match its replayed acquisition sequence")

@@ -3,22 +3,19 @@
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from mote_kernel.state.graph_state.resource_model import ParticipantId, ResourceId
+from mote_kernel.state.graph_state.identity import GraphNodeId
+from mote_kernel.state.graph_state.resource_model import ResourceId
 
 
 @dataclass(frozen=True, slots=True)
 class AcquireResources:
-    """Begin acquiring a fixed resource set in snapshot order."""
-
-    participant_id: ParticipantId
+    node_id: GraphNodeId
     resources: tuple[ResourceId, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ReleaseResources:
-    """Release every resource held by one admitted participant."""
-
-    participant_id: ParticipantId
+    node_id: GraphNodeId
 
 
 ResourceCommand: TypeAlias = AcquireResources | ReleaseResources

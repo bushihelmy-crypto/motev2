@@ -96,3 +96,24 @@ def test_workflow_does_not_depend_on_tools_or_act() -> None:
             if imported_root in {"act", "tools"}:
                 violations.append(f"{relative}:{line} imports {imported_root}")
     assert not violations, f"workflow receives node execution through a narrow injected boundary: {violations}"
+
+
+def test_graph_state_model_layers_remain_acyclic() -> None:
+    forbidden_by_module = {
+        "identity.py": {"routing", "frontier_model", "model", "command"},
+        "routing.py": {"frontier_model", "model", "command"},
+        "frontier_model.py": {"model", "command"},
+        "model.py": {"command"},
+    }
+    violations: list[str] = []
+    state_root = PACKAGE_ROOT / "state" / "graph_state"
+    prefix = "mote_kernel.state.graph_state."
+    for filename, forbidden in forbidden_by_module.items():
+        path = state_root / filename
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith(prefix):
+                imported = node.module.removeprefix(prefix).partition(".")[0]
+                if imported in forbidden:
+                    violations.append(f"{filename}:{node.lineno} imports {imported}")
+    assert not violations, f"graph state model ownership must remain acyclic: {violations}"

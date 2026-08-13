@@ -1,12 +1,14 @@
 from dataclasses import FrozenInstanceError
+from typing import cast
 
 import pytest
 
 from mote_kernel.state.graph_state import (
     AcquireResources,
-    ParticipantId,
+    GraphNodeId,
     ReleaseResources,
     ResourceAcquisition,
+    ResourceCommand,
     ResourceId,
     ResourceLock,
     ResourceSnapshot,
@@ -17,9 +19,9 @@ from mote_kernel.state.graph_state import (
 
 FILE = ResourceId("file")
 DATABASE = ResourceId("database")
-A = ParticipantId("a")
-B = ParticipantId("b")
-C = ParticipantId("c")
+A = GraphNodeId("a")
+B = GraphNodeId("b")
+C = GraphNodeId("c")
 
 
 def empty_snapshot() -> ResourceSnapshot:
@@ -56,7 +58,7 @@ def test_release_wakes_fifo_head_and_advances_its_available_prefix() -> None:
     released = reduce_resources(state, ReleaseResources(A))
 
     assert released.resources == (ResourceLock(FILE, B), ResourceLock(DATABASE, B))
-    assert tuple(item.participant_id for item in released.acquisitions) == (B,)
+    assert tuple(item.node_id for item in released.acquisitions) == (B,)
     assert released.acquisitions[0].admitted
 
 
@@ -70,7 +72,7 @@ def test_three_contenders_are_admitted_in_fifo_order() -> None:
 
     assert after_a.resources[0] == ResourceLock(FILE, B, (C,))
     assert after_b.resources[0] == ResourceLock(FILE, C)
-    assert after_b.acquisitions[0].participant_id == C
+    assert after_b.acquisitions[0].node_id == C
     assert after_b.acquisitions[0].admitted
 
 
@@ -94,8 +96,8 @@ def test_partially_held_task_keeps_prefix_until_later_resource_releases() -> Non
         AcquireResources(A, (DATABASE, FILE)),
         AcquireResources(A, (FILE, FILE)),
         AcquireResources(A, (ResourceId("unknown"),)),
-        AcquireResources(ParticipantId(""), (FILE,)),
-        AcquireResources(ParticipantId("bad\nparticipant"), (FILE,)),
+        AcquireResources(GraphNodeId(""), (FILE,)),
+        AcquireResources(GraphNodeId("bad\nnode"), (FILE,)),
     ],
 )
 def test_invalid_acquisition_fails_closed(command: AcquireResources) -> None:
@@ -120,7 +122,9 @@ def test_empty_resource_request_is_a_noop_and_missing_release_fails() -> None:
     with pytest.raises(ResourceTransitionError, match="no acquisition"):
         reduce_resources(snapshot, ReleaseResources(A))
     with pytest.raises(ResourceTransitionError, match="identity"):
-        reduce_resources(snapshot, ReleaseResources(ParticipantId(" ")))
+        reduce_resources(snapshot, ReleaseResources(GraphNodeId(" ")))
+    with pytest.raises(ResourceTransitionError, match="unsupported variant"):
+        reduce_resources(snapshot, cast(ResourceCommand, object()))
 
 
 @pytest.mark.parametrize(
@@ -131,8 +135,8 @@ def test_empty_resource_request_is_a_noop_and_missing_release_fails() -> None:
         ResourceSnapshot((ResourceLock(ResourceId("bad\nresource")),)),
         ResourceSnapshot((ResourceLock(FILE, waiters=(A, A)),)),
         ResourceSnapshot((ResourceLock(FILE, A, (A,)),), (ResourceAcquisition(A, (FILE,), (FILE,)),)),
-        ResourceSnapshot((ResourceLock(FILE, ParticipantId("")),)),
-        ResourceSnapshot((ResourceLock(FILE, waiters=(ParticipantId(""),)),)),
+        ResourceSnapshot((ResourceLock(FILE, GraphNodeId("")),)),
+        ResourceSnapshot((ResourceLock(FILE, waiters=(GraphNodeId(""),)),)),
         ResourceSnapshot(
             (ResourceLock(FILE, A),),
             (ResourceAcquisition(A, (FILE,), (FILE,)), ResourceAcquisition(A, (FILE,), (FILE,))),
@@ -185,7 +189,7 @@ def test_waiter_must_be_queued_on_the_resource_it_is_waiting_for() -> None:
     )
 
     with pytest.raises(ResourceTransitionError, match="waiting elsewhere"):
-        reduce_resources(snapshot, AcquireResources(ParticipantId("c"), ()))
+        reduce_resources(snapshot, AcquireResources(GraphNodeId("c"), ()))
 
 
 def test_snapshot_validation_rejects_non_fifo_history_that_looks_structurally_valid() -> None:

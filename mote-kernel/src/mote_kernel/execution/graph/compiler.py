@@ -4,8 +4,7 @@ from typing import TypeVar
 
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge, RouteId
-from mote_kernel.execution.graph.identity import NodeId
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import NodeDefinition
 from mote_kernel.execution.graph.topology import (
     CompiledGraph,
@@ -16,6 +15,7 @@ from mote_kernel.execution.graph.topology import (
     immutable_route_mapping,
 )
 from mote_kernel.execution.graph.validation import validate_graph
+from mote_kernel.state.graph_state.identity import GraphNodeId, GraphRouteId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -41,9 +41,9 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
         )
         for node in definition.nodes
     }
-    direct_targets: dict[NodeId, list[NodeId]] = {node_id: [] for node_id in nodes}
-    conditional_targets: dict[NodeId, dict[RouteId, NodeId]] = {node_id: {} for node_id in nodes}
-    joins_by_source: dict[NodeId, list[JoinEdge]] = {node_id: [] for node_id in nodes}
+    direct_targets: dict[GraphNodeId, list[GraphNodeId]] = {node_id: [] for node_id in nodes}
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {node_id: {} for node_id in nodes}
+    joins_by_source: dict[GraphNodeId, list[JoinEdge]] = {node_id: [] for node_id in nodes}
 
     for edge in definition.edges:
         if isinstance(edge, DirectEdge):
@@ -69,7 +69,7 @@ def compile_graph(definition: GraphDefinition[InputT, OutputT]) -> CompiledGraph
         joins_by_source=immutable_join_mapping(joins_by_source),
         resources=immutable_resource_mapping({resource.resource_id: resource for resource in definition.resources}),
         resource_order=resource_order,
-        resolution=definition.resolution,
+        resume_input=definition.resume_input,
     )
 
 

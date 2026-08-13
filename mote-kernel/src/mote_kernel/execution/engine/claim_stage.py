@@ -1,44 +1,38 @@
-"""Preparation and verification of uniquely identified execution claims."""
+"""Preparation and verification of all-pending batch claims."""
 
 from uuid import uuid4
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim, prepare_execution_claim
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import ResultCollectionError
-from mote_kernel.execution.snapshot import ExecutionAttemptId, ExecutionTaskId, ExecutionToken
+from mote_kernel.execution.request import ExecutionRequestAttemptId
 from mote_kernel.state.graph_state import (
     ClaimGraphExecution,
     GraphExecutionAttemptId,
+    GraphExecutionToken,
     GraphRunState,
-    GraphTaskId,
 )
 
 
 def prepare_claim(
     owner: ExecutionClaimOwner,
     state: GraphRunState,
-    attempt_id: ExecutionAttemptId,
+    request_attempt_id: ExecutionRequestAttemptId,
     tasks: tuple[GraphTask, ...],
 ) -> PreparedExecutionClaim:
-    """Prepare one linear capability and its authoritative claim command."""
-
-    task_ids = tuple(sorted(ExecutionTaskId(task.task_id) for task in tasks))
-    claim_id = ExecutionAttemptId(str(uuid4()))
-    token = ExecutionToken(state.execution_sequence + 1, claim_id)
-    command = ClaimGraphExecution(
-        state.revision,
-        GraphExecutionAttemptId(claim_id),
-        tuple(GraphTaskId(task_id) for task_id in task_ids),
-    )
-    return prepare_execution_claim(owner, command, token, task_ids, attempt_id)
+    node_ids = tuple(task.node_id for task in tasks)
+    task_ids = tuple(task.task_id for task in tasks)
+    attempt_id = GraphExecutionAttemptId(str(uuid4()))
+    token = GraphExecutionToken(state.execution_sequence + 1, attempt_id)
+    command = ClaimGraphExecution(state.revision, attempt_id, node_ids)
+    return prepare_execution_claim(owner, command, token, node_ids, task_ids, request_attempt_id)
 
 
 def require_claim_tasks(claim: PreparedExecutionClaim, tasks: tuple[GraphTask, ...]) -> None:
-    """Reject any recomputed task batch that differs from the accepted claim."""
-
-    task_ids = tuple(sorted(ExecutionTaskId(task.task_id) for task in tasks))
-    if claim.snapshot.task_ids != task_ids:
-        raise ResultCollectionError("execution claim tasks do not match the prepared frontier")
+    if claim.snapshot.node_ids != tuple(task.node_id for task in tasks) or claim.snapshot.task_ids != tuple(
+        task.task_id for task in tasks
+    ):
+        raise ResultCollectionError("execution claim tasks do not match current pending nodes")
 
 
 __all__ = ["prepare_claim", "require_claim_tasks"]

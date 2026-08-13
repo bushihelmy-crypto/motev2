@@ -1,22 +1,22 @@
 import pytest
 
-from mote_kernel.execution.engine import GraphTask, TaskId, admit_tasks
+from mote_kernel.execution.engine.admission import admit_tasks
+from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.graph import (
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphNodeId,
     NestedGraphNodeDefinition,
     NodeDefinition,
-    NodeId,
     NodeSuccess,
     compile_graph,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
-from mote_kernel.execution.snapshot import GraphRunId
 from mote_kernel.state.graph_state import (
     AcquireResources,
-    ParticipantId,
+    GraphRunId,
     ResourceLock,
     ResourceSnapshot,
     ResourceTransitionError,
@@ -31,7 +31,7 @@ async def execute(node_input: str) -> NodeSuccess[str]:
 
 
 def task(name: str) -> GraphTask:
-    return GraphTask(TaskId(name), GraphRunId("run"), 0, NodeId(name))
+    return GraphTask(TaskId(name), GraphRunId("run"), 0, GraphNodeId(name))
 
 
 def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
@@ -40,22 +40,22 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
             (
-                NodeDefinition(NodeId("a"), execute, (FILE,)),
-                NodeDefinition(NodeId("b"), execute, (FILE,)),
-                NodeDefinition(NodeId("c"), execute),
+                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
+                NodeDefinition(GraphNodeId("b"), execute, (FILE,)),
+                NodeDefinition(GraphNodeId("c"), execute),
             ),
             (),
-            (NodeId("a"), NodeId("b"), NodeId("c")),
+            (GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c")),
             (ResourceDefinition(FILE, 10),),
         )
     )
 
     admission = admit_tasks(graph, (task("c"), task("b"), task("a")), ResourceSnapshot((ResourceLock(FILE),)))
 
-    assert tuple(item.task_id for item in admission.admitted) == (TaskId("a"), TaskId("c"))
-    assert tuple(item.task_id for item in admission.waiting) == (TaskId("b"),)
-    assert admission.snapshot.resources[0].owner == ParticipantId("a")
-    assert admission.snapshot.resources[0].waiters == (ParticipantId("b"),)
+    assert admission.admitted_node_ids == (GraphNodeId("a"),)
+    assert admission.waiting_node_ids == (GraphNodeId("b"),)
+    assert admission.snapshot.resources[0].owner == GraphNodeId("a")
+    assert admission.snapshot.resources[0].waiters == (GraphNodeId("b"),)
 
 
 def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
@@ -63,9 +63,9 @@ def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            (NodeDefinition(NodeId("a"), execute, (FILE,)),),
+            (NodeDefinition(GraphNodeId("a"), execute, (FILE,)),),
             (),
-            (NodeId("a"),),
+            (GraphNodeId("a"),),
             (ResourceDefinition(FILE, 10),),
         )
     )
@@ -76,17 +76,24 @@ def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
     assert second == first
 
 
+def test_admission_rejects_snapshot_with_noncompiled_resource_order() -> None:
+    graph = resource_graph()
+
+    with pytest.raises(ResourceTransitionError, match="resource order"):
+        admit_tasks(graph, (task("a"),), ResourceSnapshot(()))
+
+
 def resource_graph() -> CompiledGraph[str, str]:
     return compile_graph(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
             (
-                NodeDefinition(NodeId("a"), execute, (FILE,)),
-                NodeDefinition(NodeId("free"), execute),
+                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
+                NodeDefinition(GraphNodeId("free"), execute),
             ),
             (),
-            (NodeId("a"), NodeId("free")),
+            (GraphNodeId("a"), GraphNodeId("free")),
             (ResourceDefinition(FILE, 10),),
         )
     )
@@ -102,7 +109,7 @@ def test_admission_rejects_duplicate_unknown_and_stale_batch_tasks() -> None:
         admit_tasks(graph, (task("unknown"),), ResourceSnapshot((ResourceLock(FILE),)))
     acquired = reduce_resources(
         ResourceSnapshot((ResourceLock(FILE),)),
-        AcquireResources(ParticipantId("a"), (FILE,)),
+        AcquireResources(GraphNodeId("a"), (FILE,)),
     )
     with pytest.raises(ResourceTransitionError, match="outside"):
         admit_tasks(graph, (task("free"),), acquired)
@@ -112,14 +119,14 @@ def test_admission_rejects_acquisition_for_free_task_and_requirement_drift() -> 
     graph = resource_graph()
     acquired = reduce_resources(
         ResourceSnapshot((ResourceLock(FILE),)),
-        AcquireResources(ParticipantId("free"), (FILE,)),
+        AcquireResources(GraphNodeId("free"), (FILE,)),
     )
     with pytest.raises(ResourceTransitionError, match="resource-free"):
         admit_tasks(graph, (task("free"),), acquired)
 
     drifted = reduce_resources(
         ResourceSnapshot((ResourceLock(FILE),)),
-        AcquireResources(ParticipantId("a"), (FILE,)),
+        AcquireResources(GraphNodeId("a"), (FILE,)),
     )
     object.__setattr__(drifted.acquisitions[0], "required", ())
     with pytest.raises(ResourceTransitionError, match="does not match"):
@@ -130,17 +137,17 @@ def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
     child = GraphDefinition(
         GraphDefinitionId("child"),
         GraphDefinitionVersion(1),
-        (NodeDefinition(NodeId("child-step"), execute),),
+        (NodeDefinition(GraphNodeId("child-step"), execute),),
         (),
-        (NodeId("child-step"),),
+        (GraphNodeId("child-step"),),
     )
     graph = compile_graph(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(NodeId("a"), child),),
+            (NestedGraphNodeDefinition(GraphNodeId("a"), child),),
             (),
-            (NodeId("a"),),
+            (GraphNodeId("a"),),
         )
     )
 
@@ -154,11 +161,11 @@ def test_admission_is_independent_of_input_task_order() -> None:
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
             (
-                NodeDefinition(NodeId("a"), execute, (FILE,)),
-                NodeDefinition(NodeId("b"), execute, (FILE,)),
+                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
+                NodeDefinition(GraphNodeId("b"), execute, (FILE,)),
             ),
             (),
-            (NodeId("a"), NodeId("b")),
+            (GraphNodeId("a"), GraphNodeId("b")),
             (ResourceDefinition(FILE, 10),),
         )
     )

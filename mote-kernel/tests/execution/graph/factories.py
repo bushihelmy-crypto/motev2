@@ -4,9 +4,9 @@ from mote_kernel.execution.graph import (
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphNodeId,
     JoinEdge,
     NodeDefinition,
-    NodeId,
     NodeSuccess,
 )
 from mote_kernel.execution.resource import ResourceDefinition
@@ -17,14 +17,14 @@ async def identity(node_input: str) -> NodeSuccess[str]:
 
 
 def node(node_id: str) -> NodeDefinition[str, str]:
-    return NodeDefinition(NodeId(node_id), identity)
+    return NodeDefinition(GraphNodeId(node_id), identity)
 
 
 def graph(
     *,
     nodes: tuple[NodeDefinition[str, str], ...],
     edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
-    entries: tuple[NodeId, ...] = (NodeId("a"),),
+    entries: tuple[GraphNodeId, ...] = (GraphNodeId("a"),),
     resources: tuple[ResourceDefinition, ...] = (),
 ) -> GraphDefinition[str, str]:
     return GraphDefinition(

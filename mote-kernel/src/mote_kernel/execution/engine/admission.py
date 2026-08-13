@@ -1,4 +1,4 @@
-"""Pure admission planning for graph tasks with resource requirements."""
+"""Pure resource admission planning by authoritative node identity."""
 
 from dataclasses import dataclass
 from typing import TypeVar
@@ -7,7 +7,7 @@ from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.graph import CompiledGraph, NodeDefinition
 from mote_kernel.state.graph_state import (
     AcquireResources,
-    ParticipantId,
+    GraphNodeId,
     ResourceSnapshot,
     ResourceTransitionError,
     reduce_resources,
@@ -19,11 +19,9 @@ OutputT = TypeVar("OutputT")
 
 @dataclass(frozen=True, slots=True)
 class TaskAdmission:
-    """A deterministic proposal that must be committed before execution."""
-
     snapshot: ResourceSnapshot
-    admitted: tuple[GraphTask, ...]
-    waiting: tuple[GraphTask, ...]
+    admitted_node_ids: tuple[GraphNodeId, ...]
+    waiting_node_ids: tuple[GraphNodeId, ...]
 
 
 def admit_tasks(
@@ -31,49 +29,38 @@ def admit_tasks(
     tasks: tuple[GraphTask, ...],
     snapshot: ResourceSnapshot,
 ) -> TaskAdmission:
-    """Propose ordered resource acquisitions for tasks not already represented."""
-
-    task_by_participant = {ParticipantId(task.task_id): task for task in tasks}
-    if len(task_by_participant) != len(tasks):
-        raise ResourceTransitionError("admission tasks must have unique identities")
-    known_participants = {acquisition.participant_id for acquisition in snapshot.acquisitions}
-    if not known_participants <= set(task_by_participant):
-        raise ResourceTransitionError("resource snapshot contains an acquisition outside the planned task batch")
-
+    if tuple(lock.resource_id for lock in snapshot.resources) != graph.resource_order:
+        raise ResourceTransitionError("resource snapshot does not match compiled resource order")
+    task_by_node = {task.node_id: task for task in tasks}
+    if len(task_by_node) != len(tasks):
+        raise ResourceTransitionError("admission tasks must have unique node identities")
+    if not set(task_by_node) <= set(graph.nodes):
+        raise ResourceTransitionError("admission task references an unknown graph node")
+    known = {acquisition.node_id for acquisition in snapshot.acquisitions}
+    if not known <= set(task_by_node):
+        raise ResourceTransitionError("resource snapshot contains an acquisition outside planned nodes")
     proposed = snapshot
-    acquisition_by_participant = {acquisition.participant_id: acquisition for acquisition in snapshot.acquisitions}
-    admitted: list[GraphTask] = []
-    waiting: list[GraphTask] = []
+    acquisitions = {acquisition.node_id: acquisition for acquisition in snapshot.acquisitions}
+    admitted: list[GraphNodeId] = []
+    waiting: list[GraphNodeId] = []
     for task in sorted(tasks, key=lambda item: item.sort_key):
-        node = graph.nodes.get(task.node_id)
-        if node is None:
-            raise ResourceTransitionError("admission task references an unknown graph node")
-        if not isinstance(node, NodeDefinition):
+        definition = graph.nodes[task.node_id]
+        if not isinstance(definition, NodeDefinition):
             raise ResourceTransitionError("admission only accepts executable node tasks")
-        requirements = node.resources
-        participant_id = ParticipantId(task.task_id)
-        acquisition = acquisition_by_participant.get(participant_id)
+        requirements = definition.resources
+        acquisition = acquisitions.get(task.node_id)
         if not requirements:
             if acquisition is not None:
-                raise ResourceTransitionError("resource-free task unexpectedly has an acquisition")
-            admitted.append(task)
+                raise ResourceTransitionError("resource-free node unexpectedly has an acquisition")
             continue
         if acquisition is None:
-            proposed = reduce_resources(proposed, AcquireResources(participant_id, requirements))
+            proposed = reduce_resources(proposed, AcquireResources(task.node_id, requirements))
             acquisition = proposed.acquisitions[-1]
-            acquisition_by_participant[participant_id] = acquisition
+            acquisitions[task.node_id] = acquisition
         elif acquisition.required != requirements:
-            raise ResourceTransitionError("task acquisition does not match its compiled resource requirements")
-        if acquisition.admitted:
-            admitted.append(task)
-        else:
-            waiting.append(task)
-
-    return TaskAdmission(
-        proposed,
-        tuple(admitted),
-        tuple(waiting),
-    )
+            raise ResourceTransitionError("node acquisition does not match compiled requirements")
+        (admitted if acquisition.admitted else waiting).append(task.node_id)
+    return TaskAdmission(proposed, tuple(admitted), tuple(waiting))
 
 
 __all__ = ["TaskAdmission", "admit_tasks"]

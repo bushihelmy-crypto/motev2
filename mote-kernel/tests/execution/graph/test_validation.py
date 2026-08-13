@@ -19,18 +19,21 @@ from mote_kernel.execution.graph import (
     GraphDefinition,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphNodeId,
+    GraphRouteId,
     JoinEdge,
     NodeDefinition,
-    NodeId,
-    ResolutionBinding,
-    ResolutionCodecId,
-    RouteId,
+    ResumeInputBinding,
     compile_graph,
 )
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
+from mote_kernel.state.graph_state import GraphResumeInputCodecId
 
 
-class Decoder:
+class Codec:
+    def encode(self, value: str) -> bytes:
+        return value.encode()
+
     def decode(self, payload: bytes) -> str:
         return payload.decode()
 
@@ -40,7 +43,7 @@ class Decoder:
     [
         (graph(nodes=(node("a"),), entries=()), MissingEntryError),
         (
-            GraphDefinition(GraphDefinitionId(""), GraphDefinitionVersion(1), (node("a"),), (), (NodeId("a"),)),
+            GraphDefinition(GraphDefinitionId(""), GraphDefinitionVersion(1), (node("a"),), (), (GraphNodeId("a"),)),
             InvalidGraphIdentityError,
         ),
         (
@@ -49,7 +52,7 @@ class Decoder:
                 GraphDefinitionVersion(1),
                 (node("a"),),
                 (),
-                (NodeId("a"),),
+                (GraphNodeId("a"),),
             ),
             InvalidGraphIdentityError,
         ),
@@ -59,50 +62,50 @@ class Decoder:
                 GraphDefinitionVersion(0),
                 (node("a"),),
                 (),
-                (NodeId("a"),),
+                (GraphNodeId("a"),),
             ),
             InvalidGraphIdentityError,
         ),
-        (graph(nodes=(node(""),), entries=(NodeId(""),)), InvalidGraphIdentityError),
-        (graph(nodes=(node(" a"),), entries=(NodeId(" a"),)), InvalidGraphIdentityError),
+        (graph(nodes=(node(""),), entries=(GraphNodeId(""),)), InvalidGraphIdentityError),
+        (graph(nodes=(node(" a"),), entries=(GraphNodeId(" a"),)), InvalidGraphIdentityError),
         (graph(nodes=(node(END),), entries=(END,)), InvalidGraphIdentityError),
         (graph(nodes=(node("a"), node("a"))), DuplicateNodeError),
-        (graph(nodes=(node("a"),), entries=(NodeId("a"), NodeId("a"))), DuplicateBoundaryError),
+        (graph(nodes=(node("a"),), entries=(GraphNodeId("a"), GraphNodeId("a"))), DuplicateBoundaryError),
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(DirectEdge(NodeId("a"), NodeId("b")), DirectEdge(NodeId("a"), NodeId("b"))),
+                edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")), DirectEdge(GraphNodeId("a"), GraphNodeId("b"))),
             ),
             DuplicateEdgeError,
         ),
-        (graph(nodes=(node("a"),), entries=(NodeId("missing"),)), UnknownNodeError),
-        (graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("a"), NodeId("missing")),)), UnknownNodeError),
-        (graph(nodes=(node("a"),), edges=(DirectEdge(NodeId("missing"), NodeId("a")),)), UnknownNodeError),
+        (graph(nodes=(node("a"),), entries=(GraphNodeId("missing"),)), UnknownNodeError),
+        (graph(nodes=(node("a"),), edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("missing")),)), UnknownNodeError),
+        (graph(nodes=(node("a"),), edges=(DirectEdge(GraphNodeId("missing"), GraphNodeId("a")),)), UnknownNodeError),
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(ConditionalEdge(NodeId("missing"), RouteId("next"), NodeId("b")),),
+                edges=(ConditionalEdge(GraphNodeId("missing"), GraphRouteId("next"), GraphNodeId("b")),),
             ),
             UnknownNodeError,
         ),
         (
             graph(
                 nodes=(node("a"),),
-                edges=(ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("missing")),),
+                edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId("next"), GraphNodeId("missing")),),
             ),
             UnknownNodeError,
         ),
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(JoinEdge((NodeId("a"), NodeId("missing")), NodeId("b")),),
+                edges=(JoinEdge((GraphNodeId("a"), GraphNodeId("missing")), GraphNodeId("b")),),
             ),
             UnknownNodeError,
         ),
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(JoinEdge((NodeId("a"), NodeId("b")), NodeId("missing")),),
+                edges=(JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("missing")),),
             ),
             UnknownNodeError,
         ),
@@ -110,14 +113,14 @@ class Decoder:
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(ConditionalEdge(NodeId("a"), RouteId(""), NodeId("b")),),
+                edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId(""), GraphNodeId("b")),),
             ),
             InvalidGraphIdentityError,
         ),
         (
             graph(
                 nodes=(node("a"), node("b")),
-                edges=(ConditionalEdge(NodeId("a"), RouteId(" next"), NodeId("b")),),
+                edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId(" next"), GraphNodeId("b")),),
             ),
             InvalidGraphIdentityError,
         ),
@@ -132,8 +135,8 @@ def test_duplicate_conditional_route_fails_closed() -> None:
     definition = graph(
         nodes=(node("a"), node("b"), node("c")),
         edges=(
-            ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("b")),
-            ConditionalEdge(NodeId("a"), RouteId("next"), NodeId("c")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("next"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("next"), GraphNodeId("c")),
         ),
     )
 
@@ -162,20 +165,21 @@ def test_node_resource_requirements_must_be_unique_and_declared() -> None:
     with pytest.raises(InvalidResourceDefinitionError, match="unknown"):
         compile_graph(
             graph(
-                nodes=(NodeDefinition(NodeId("a"), node("a").node, (ResourceId("database"),)),),
+                nodes=(NodeDefinition(GraphNodeId("a"), node("a").node, (ResourceId("database"),)),),
                 resources=declared,
             )
         )
     with pytest.raises(InvalidResourceDefinitionError, match="repeats"):
         compile_graph(
             graph(
-                nodes=(NodeDefinition(NodeId("a"), node("a").node, (ResourceId("file"), ResourceId("file"))),),
+                nodes=(NodeDefinition(GraphNodeId("a"), node("a").node, (ResourceId("file"), ResourceId("file"))),),
                 resources=declared,
             )
         )
 
 
-def test_resolution_codec_version_must_be_positive() -> None:
+def test_resume_input_codec_version_must_be_positive() -> None:
+    codec = Codec()
     with pytest.raises(InvalidGraphIdentityError, match="codec version"):
         compile_graph(
             GraphDefinition(
@@ -183,7 +187,7 @@ def test_resolution_codec_version_must_be_positive() -> None:
                 GraphDefinitionVersion(1),
                 (node("a"),),
                 (),
-                (NodeId("a"),),
-                resolution=ResolutionBinding(ResolutionCodecId("input"), 0, Decoder()),
+                (GraphNodeId("a"),),
+                resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 0, codec, codec),
             )
         )

@@ -1,79 +1,204 @@
-"""Graph-owned execution engine with explicit prepare and one-shot execute phases."""
+"""Sole graph executor with explicit prepare, execute, and resume projections."""
 
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
-from mote_kernel.execution.engine.resolution_input import require_resolution_binding
-from mote_kernel.execution.engine.superstep import execute_claimed_superstep, prepare_superstep
+from mote_kernel.execution.engine.resume_input import encode_resume_input, require_resume_input_binding
+from mote_kernel.execution.engine.routing import resolve_routing, validate_routing_contribution
+from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
+from mote_kernel.execution.engine.superstep import execute_claimed_frontier, prepare_superstep
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph import CompiledGraph, NestedGraphNodeDefinition, compile_graph
 from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.execution.request import StepRequest
-from mote_kernel.execution.result import ExecutedSuperstep, PreparedFrontier
-from mote_kernel.state.graph_state import GraphRunId, ParentGraphTask, StartGraphRun
+from mote_kernel.execution.request import (
+    OverrideNodeInput,
+    ResumeFailedNodeRequest,
+    ResumeInterruptedNodeRequest,
+    ResumeRequest,
+    SkipFailedNodeRequest,
+    StepRequest,
+    UseRequestInput,
+)
+from mote_kernel.execution.result import ExecutedFrontierAttempt, PrepareDisposition
+from mote_kernel.state.graph_state import (
+    FailedGraphNode,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    GraphFrontierNode,
+    GraphFrontierState,
+    GraphFrontierStatus,
+    GraphNodeId,
+    GraphNodeSettlement,
+    GraphRunId,
+    GraphRunState,
+    GraphRunStatus,
+    InterruptedGraphNode,
+    PendingGraphNode,
+    ResumeFailedNode,
+    ResumeGraphNodes,
+    ResumeInterruptedNode,
+    SkipFailedNode,
+    SkippedGraphNode,
+    StartGraphRun,
+    UseStepRequestInput,
+    frontier_node,
+    frontier_status,
+    graph_interrupt_id,
+    routing_contributions,
+)
+from mote_kernel.state.graph_state.validation import validate_graph_frontier
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
-GraphKey = tuple[str, int]
+GraphKey = tuple[GraphDefinitionId, GraphDefinitionVersion]
 
 
-def _compiled_graphs(root: CompiledGraph[InputT, OutputT]) -> Mapping[GraphKey, CompiledGraph[InputT, OutputT]]:
+def _compile_graph_family(
+    root: CompiledGraph[InputT, OutputT],
+) -> tuple[
+    Mapping[GraphKey, CompiledGraph[InputT, OutputT]],
+    frozenset[tuple[GraphKey, GraphNodeId]],
+]:
     graphs: dict[GraphKey, CompiledGraph[InputT, OutputT]] = {}
-    root_key = (root.definition_id, root.version)
-    pending: dict[GraphKey, CompiledGraph[InputT, OutputT]] = {root_key: root}
+    parent_nodes: set[tuple[GraphKey, GraphNodeId]] = set()
+    pending = {(root.definition_id, root.version): root}
     while pending:
         key, graph = pending.popitem()
         graphs[key] = graph
         for definition in graph.nodes.values():
             if isinstance(definition, NestedGraphNodeDefinition):
-                child_key = (definition.graph.definition_id, definition.graph.version)
+                child = compile_graph(definition.graph)
+                child_key = (child.definition_id, child.version)
+                parent_nodes.add((child_key, definition.node_id))
                 if child_key not in graphs and child_key not in pending:
-                    pending[child_key] = compile_graph(definition.graph)
-    return MappingProxyType(graphs)
+                    pending[child_key] = child
+    return MappingProxyType(graphs), frozenset(parent_nodes)
 
 
 class GraphExecutor(Generic[InputT, OutputT]):
-    """Own one immutable compiled graph family and every executable decoder within it."""
-
-    __slots__ = ("_claim_owner", "_graphs", "_root_key")
+    __slots__ = ("_claim_owner", "_graphs", "_parent_nodes", "_root_key")
 
     def __init__(self, graph: CompiledGraph[InputT, OutputT]) -> None:
-        self._graphs = _compiled_graphs(graph)
+        self._graphs, self._parent_nodes = _compile_graph_family(graph)
         self._root_key = (graph.definition_id, graph.version)
         self._claim_owner = ExecutionClaimOwner()
 
-    def start_command(self, run_id: GraphRunId, parent: ParentGraphTask | None = None) -> StartGraphRun:
-        """Create initial state for this executor's root graph definition."""
+    def start_command(self, run_id: GraphRunId) -> StartGraphRun:
+        return project_start_graph_command(self._graphs[self._root_key], run_id)
 
-        return project_start_graph_command(self._graphs[self._root_key], run_id, parent)
-
-    def _graph_for(self, request: StepRequest[InputT, OutputT]) -> CompiledGraph[InputT, OutputT]:
-        state = request.state
-        graph = self._graphs.get((state.definition_id, state.definition_version))
+    def _graph_for_state(self, state: GraphRunState) -> CompiledGraph[InputT, OutputT]:
+        key = (state.definition_id, state.definition_version)
+        graph = self._graphs.get(key)
         if graph is None:
             raise SnapshotMismatchError("graph run is not owned by this graph executor")
-        require_resolution_binding(graph, state)
+        if key == self._root_key:
+            if state.parent is not None:
+                raise SnapshotMismatchError("root graph state cannot carry a parent activation")
+        elif state.parent is None:
+            raise SnapshotMismatchError("nested graph state requires a parent activation")
         return graph
 
-    async def prepare(self, request: StepRequest[InputT, OutputT]) -> PreparedFrontier[InputT, OutputT]:
-        """Prepare admission, nested runs, or one claim without invoking graph nodes."""
-
-        if request.state.execution is not None:
-            raise SnapshotMismatchError("an active execution lease requires its original one-shot claim")
-        return await prepare_superstep(self._claim_owner, self._graph_for(request), request)
+    async def prepare(self, request: StepRequest[InputT, OutputT]) -> PrepareDisposition[InputT, OutputT]:
+        graph = self._graph_for_state(request.state)
+        require_snapshot_matches_graph(graph, request.state, self._parent_nodes)
+        return await prepare_superstep(self._claim_owner, graph, request)
 
     async def execute(
         self,
         claim: PreparedExecutionClaim,
         request: StepRequest[InputT, OutputT],
-    ) -> ExecutedSuperstep[OutputT]:
-        """Consume one exact durably accepted claim and invoke its task batch at most once."""
+    ) -> ExecutedFrontierAttempt[OutputT]:
+        graph = self._graph_for_state(request.state)
+        require_snapshot_matches_graph(graph, request.state, self._parent_nodes)
+        await claim.consume(self._claim_owner, request.state, request.request_attempt_id)
+        return await execute_claimed_frontier(graph, request, claim)
 
-        graph = self._graph_for(request)
-        await claim.consume(self._claim_owner, request.state, request.attempt_id)
-        return await execute_claimed_superstep(graph, request, claim)
+    def resume(self, request: ResumeRequest[InputT]) -> ResumeGraphNodes:
+        state = request.state
+        graph = self._graph_for_state(state)
+        require_snapshot_matches_graph(graph, state, self._parent_nodes)
+        if state.status is not GraphRunStatus.RUNNING or state.execution is not None or state.resources is not None:
+            raise SnapshotMismatchError("resume requires one quiescent running graph")
+        require_resume_input_binding(graph, state)
+        if any(
+            not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                requested,
+                ResumeFailedNodeRequest | ResumeInterruptedNodeRequest | SkipFailedNodeRequest,
+            )
+            for requested in request.actions
+        ):
+            raise SnapshotMismatchError("resume request has an unsupported action variant")
+        requested_ids = tuple(action.node_id for action in request.actions)
+        if (
+            not requested_ids
+            or requested_ids != tuple(sorted(requested_ids))
+            or len(requested_ids) != len(set(requested_ids))
+        ):
+            raise SnapshotMismatchError("resume actions must be non-empty, distinct, and canonical")
+        actions: list[ResumeFailedNode | ResumeInterruptedNode | SkipFailedNode] = []
+        replacements: dict[GraphNodeId, GraphNodeSettlement] = {}
+        for requested in request.actions:
+            current = frontier_node(state.frontier, requested.node_id)
+            if current is None:
+                raise SnapshotMismatchError("resume request references an unknown frontier node")
+            if isinstance(requested, ResumeFailedNodeRequest):
+                if not isinstance(current.settlement, FailedGraphNode):
+                    raise SnapshotMismatchError("failure resume requires a failed node")
+                if isinstance(requested.input, OverrideNodeInput):
+                    binding = encode_resume_input(graph, requested.input.value)
+                elif isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                    requested.input, UseRequestInput
+                ):
+                    binding = UseStepRequestInput()
+                else:
+                    raise SnapshotMismatchError("failure resume input has an unsupported variant")
+                action = ResumeFailedNode(requested.node_id, binding)
+                replacement = PendingGraphNode(binding)
+            elif isinstance(requested, ResumeInterruptedNodeRequest):
+                if not isinstance(current.settlement, InterruptedGraphNode):
+                    raise SnapshotMismatchError("interrupt resume requires an interrupted node")
+                identity = current.settlement.interrupt.identity
+                if requested.interrupt_id != graph_interrupt_id(
+                    identity.run_id,
+                    identity.superstep,
+                    identity.node_id,
+                    identity.execution_generation,
+                ):
+                    raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
+                if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                    requested.input, OverrideNodeInput
+                ):
+                    raise SnapshotMismatchError("interrupt resume input has an unsupported variant")
+                binding = encode_resume_input(graph, requested.input.value)
+                action = ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding)
+                replacement = PendingGraphNode(binding)
+            else:
+                validate_routing_contribution(graph, requested.node_id, requested.routing)
+                action = SkipFailedNode(requested.node_id, requested.reason, requested.routing)
+                if not isinstance(current.settlement, FailedGraphNode):
+                    raise SnapshotMismatchError("skip requires a failed node")
+                replacement = SkippedGraphNode(
+                    current.settlement.failure,
+                    requested.reason,
+                    requested.routing,
+                )
+            actions.append(action)
+            replacements[requested.node_id] = replacement
+        simulated = GraphFrontierState(
+            tuple(
+                GraphFrontierNode(node.node_id, replacements.get(node.node_id, node.settlement))
+                for node in state.frontier.nodes
+            )
+        )
+        validate_graph_frontier(state, simulated)
+        resolution = (
+            resolve_routing(graph, routing_contributions(simulated), state.join_progress)
+            if frontier_status(simulated) is GraphFrontierStatus.SETTLED
+            else None
+        )
+        return ResumeGraphNodes(state.revision, tuple(actions), resolution)
 
 
 __all__ = ["GraphExecutor"]

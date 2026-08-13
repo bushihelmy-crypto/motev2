@@ -1,38 +1,30 @@
 """Static graph edge definitions."""
 
 from dataclasses import dataclass
-from typing import NewType, TypeAlias
+from typing import TypeAlias
 
-from mote_kernel.execution.graph.identity import NodeId
-
-RouteId = NewType("RouteId", str)
+from mote_kernel.state.graph_state.identity import GraphNodeId, GraphRouteId
 
 
 @dataclass(frozen=True, slots=True)
 class DirectEdge:
-    """Advance from one completed node to one target node."""
-
-    source: NodeId
-    target: NodeId
+    source: GraphNodeId
+    target: GraphNodeId
 
 
 @dataclass(frozen=True, slots=True)
 class ConditionalEdge:
-    """Declare one valid route from a source under a stable route identity."""
-
-    source: NodeId
-    route: RouteId
-    target: NodeId
+    source: GraphNodeId
+    route: GraphRouteId
+    target: GraphNodeId
 
 
 @dataclass(frozen=True, slots=True)
 class JoinEdge:
-    """Advance only after every source in the join has completed."""
-
-    sources: tuple[NodeId, ...]
-    target: NodeId
+    sources: tuple[GraphNodeId, ...]
+    target: GraphNodeId
 
 
 Edge: TypeAlias = DirectEdge | ConditionalEdge | JoinEdge
 
-__all__ = ["ConditionalEdge", "DirectEdge", "Edge", "JoinEdge", "RouteId"]
+__all__ = ["ConditionalEdge", "DirectEdge", "Edge", "JoinEdge"]

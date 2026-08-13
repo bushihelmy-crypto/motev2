@@ -5,11 +5,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
-from mote_kernel.execution.graph.definition import GraphDefinitionId, GraphDefinitionVersion, GraphNode
-from mote_kernel.execution.graph.edge import JoinEdge, RouteId
-from mote_kernel.execution.graph.identity import NodeId
-from mote_kernel.execution.graph.resolution import ResolutionBinding
+from mote_kernel.execution.graph.definition import GraphNode
+from mote_kernel.execution.graph.edge import JoinEdge
+from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
+from mote_kernel.state.graph_state.identity import (
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    GraphNodeId,
+    GraphRouteId,
+)
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -17,55 +22,47 @@ OutputT = TypeVar("OutputT")
 
 @dataclass(frozen=True, slots=True)
 class CompiledGraph(Generic[InputT, OutputT]):
-    """An immutable graph topology with deterministic runtime indexes."""
-
     definition_id: GraphDefinitionId
     version: GraphDefinitionVersion
-    nodes: Mapping[NodeId, GraphNode[InputT, OutputT]]
-    entries: tuple[NodeId, ...]
-    direct_targets: Mapping[NodeId, tuple[NodeId, ...]]
-    conditional_targets: Mapping[NodeId, Mapping[RouteId, NodeId]]
-    joins_by_source: Mapping[NodeId, tuple[JoinEdge, ...]]
+    nodes: Mapping[GraphNodeId, GraphNode[InputT, OutputT]]
+    entries: tuple[GraphNodeId, ...]
+    direct_targets: Mapping[GraphNodeId, tuple[GraphNodeId, ...]]
+    conditional_targets: Mapping[GraphNodeId, Mapping[GraphRouteId, GraphNodeId]]
+    joins_by_source: Mapping[GraphNodeId, tuple[JoinEdge, ...]]
     resources: Mapping[ResourceId, ResourceDefinition]
     resource_order: tuple[ResourceId, ...]
-    resolution: ResolutionBinding[InputT] | None
+    resume_input: ResumeInputBinding[InputT] | None
 
 
-def immutable_mapping(values: dict[NodeId, tuple[NodeId, ...]]) -> Mapping[NodeId, tuple[NodeId, ...]]:
-    """Return a read-only copy of a node index."""
-
+def immutable_mapping(
+    values: dict[GraphNodeId, tuple[GraphNodeId, ...]],
+) -> Mapping[GraphNodeId, tuple[GraphNodeId, ...]]:
     return MappingProxyType(dict(sorted(values.items())))
 
 
 def immutable_route_mapping(
-    values: dict[NodeId, dict[RouteId, NodeId]],
-) -> Mapping[NodeId, Mapping[RouteId, NodeId]]:
-    """Return a deeply read-only copy of a conditional-route index."""
-
+    values: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> Mapping[GraphNodeId, Mapping[GraphRouteId, GraphNodeId]]:
     return MappingProxyType(
         {node_id: MappingProxyType(dict(sorted(routes.items()))) for node_id, routes in sorted(values.items())}
     )
 
 
 def immutable_node_mapping(
-    values: dict[NodeId, GraphNode[InputT, OutputT]],
-) -> Mapping[NodeId, GraphNode[InputT, OutputT]]:
-    """Return a read-only copy of the node index."""
-
+    values: dict[GraphNodeId, GraphNode[InputT, OutputT]],
+) -> Mapping[GraphNodeId, GraphNode[InputT, OutputT]]:
     return MappingProxyType(dict(sorted(values.items())))
 
 
 def immutable_resource_mapping(
     values: dict[ResourceId, ResourceDefinition],
 ) -> Mapping[ResourceId, ResourceDefinition]:
-    """Return a read-only copy of a resource definition index."""
-
     return MappingProxyType(dict(sorted(values.items())))
 
 
-def immutable_join_mapping(values: dict[NodeId, list[JoinEdge]]) -> Mapping[NodeId, tuple[JoinEdge, ...]]:
-    """Return a read-only join index with deterministic edge order."""
-
+def immutable_join_mapping(
+    values: dict[GraphNodeId, list[JoinEdge]],
+) -> Mapping[GraphNodeId, tuple[JoinEdge, ...]]:
     return MappingProxyType(
         {
             node_id: tuple(sorted(edges, key=lambda edge: (edge.target, edge.sources)))

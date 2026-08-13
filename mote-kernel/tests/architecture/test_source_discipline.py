@@ -44,10 +44,6 @@ def _class_method(relative: str, class_name: str, method_name: str) -> ast.Funct
     )
 
 
-def _top_level_docstring(relative: str, name: str) -> str:
-    return ast.get_docstring(_top_level_definition(relative, name)) or ""
-
-
 def test_imports_form_a_contiguous_module_header() -> None:
     violations = production_import_placement_violations(PACKAGE_ROOT)
     assert not violations, f"imports must form one contiguous module-header block: {violations}"
@@ -130,14 +126,25 @@ def test_execution_is_the_only_generic_executor_owner() -> None:
     )
 
 
-def test_concurrent_node_input_contract_remains_explicit() -> None:
-    contracts = (
-        _top_level_docstring("execution/graph/node.py", "Node"),
-        _top_level_docstring("execution/request.py", "StepRequest"),
-        _top_level_docstring("execution/engine/scheduler.py", "execute_tasks"),
-    )
+def test_node_scoped_effective_input_contract_remains_explicit() -> None:
+    executable = _top_level_definition("execution/engine/task.py", "ExecutableTask")
+    request = _top_level_definition("execution/request.py", "StepRequest")
+    assert isinstance(executable, ast.ClassDef)
+    assert isinstance(request, ast.ClassDef)
 
-    assert all("immutable" in contract and "shared" in contract for contract in contracts)
+    executable_fields = {
+        target.id
+        for statement in executable.body
+        if isinstance(statement, ast.AnnAssign) and isinstance(target := statement.target, ast.Name)
+    }
+    request_fields = {
+        target.id
+        for statement in request.body
+        if isinstance(statement, ast.AnnAssign) and isinstance(target := statement.target, ast.Name)
+    }
+
+    assert executable_fields == {"task", "effective_input"}
+    assert {"state", "node_input", "request_attempt_id", "child_projections", "limits"} <= request_fields
 
 
 def test_graph_execution_contract_remains_async_only() -> None:
@@ -145,7 +152,7 @@ def test_graph_execution_contract_remains_async_only() -> None:
         _class_method("execution/executor.py", "GraphExecutor", "prepare"),
         _class_method("execution/executor.py", "GraphExecutor", "execute"),
         _top_level_function("execution/engine/superstep.py", "prepare_superstep"),
-        _top_level_function("execution/engine/superstep.py", "execute_claimed_superstep"),
+        _top_level_function("execution/engine/superstep.py", "execute_claimed_frontier"),
         _top_level_function("execution/engine/scheduler.py", "execute_tasks"),
         _class_method("execution/graph/node.py", "Node", "__call__"),
     )

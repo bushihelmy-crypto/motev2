@@ -1,14 +1,23 @@
 """Authoritative invariants for recovered graph-run state."""
 
-from mote_kernel.state.graph_state.model import (
-    GraphInterruptLifecycle,
-    GraphInterruptRecord,
-    GraphJoinProgress,
-    GraphResolutionCodec,
-    GraphRunState,
-    GraphRunStatus,
+from mote_kernel.state.graph_state.frontier_model import (
+    FailedGraphNode,
+    GraphFrontierState,
+    GraphFrontierStatus,
+    GraphNodeInterruptIdentity,
+    InterruptedGraphNode,
+    OverrideGraphNodeInput,
+    PendingGraphNode,
+    SkippedGraphNode,
+    SucceededGraphNode,
+    UseStepRequestInput,
+    frontier_status,
+    pending_node_ids,
 )
+from mote_kernel.state.graph_state.identity import child_graph_run_id
+from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
+from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution, SelectGraphRoute
 
 
 class GraphStateTransitionError(ValueError):
@@ -20,27 +29,18 @@ def _require_identity(value: str, field: str) -> None:
         raise GraphStateTransitionError(f"{field} must be non-empty and trimmed")
 
 
-def _validate_frontier(frontier: tuple[str, ...], *, required: bool) -> None:
-    if required and not frontier:
-        raise GraphStateTransitionError("a running graph requires a non-empty frontier")
-    if len(frontier) != len(set(frontier)):
-        raise GraphStateTransitionError("a graph frontier cannot contain duplicate nodes")
-    for node_id in frontier:
-        _require_identity(node_id, "frontier node identity")
-
-
 def _validate_join_progress(progress: tuple[GraphJoinProgress, ...]) -> None:
+    if progress != tuple(sorted(progress, key=lambda item: (item.sources, item.target))):
+        raise GraphStateTransitionError("join progress must use canonical order")
     seen: set[tuple[tuple[str, ...], str]] = set()
     for join in progress:
-        if not join.sources or len(join.sources) != len(set(join.sources)):
-            raise GraphStateTransitionError("join progress requires distinct sources")
-        if join.sources != tuple(sorted(join.sources)):
-            raise GraphStateTransitionError("join progress sources must use canonical order")
+        if not join.sources or join.sources != tuple(sorted(set(join.sources))):
+            raise GraphStateTransitionError("join progress requires distinct canonical sources")
+        if join.target in join.sources:
+            raise GraphStateTransitionError("join target cannot be a source")
         for source in join.sources:
             _require_identity(source, "join source identity")
         _require_identity(join.target, "join target identity")
-        if join.target in join.sources:
-            raise GraphStateTransitionError("join target cannot be a source")
         if not join.arrived or not join.arrived < frozenset(join.sources):
             raise GraphStateTransitionError("join progress must contain partial arrivals")
         key = (join.sources, join.target)
@@ -49,44 +49,75 @@ def _validate_join_progress(progress: tuple[GraphJoinProgress, ...]) -> None:
         seen.add(key)
 
 
-def _validate_resolution_codec(codec: GraphResolutionCodec | None) -> None:
-    if codec is None:
-        return
-    _require_identity(codec.codec_id, "resolution codec identity")
-    if codec.version < 1:
-        raise GraphStateTransitionError("resolution codec version must be positive")
-
-
-def validate_graph_interrupt_record(
-    record: GraphInterruptRecord,
-    resolution_codec: GraphResolutionCodec | None,
-    maximum_receipt_superstep: int,
-) -> None:
-    """Validate the single durable interrupt-record representation."""
-
-    identity = record.identity
-    _require_identity(identity.root_run_id, "interrupt root graph run identity")
-    _require_identity(identity.interrupt_id, "interrupt identity")
-    _validate_resolution_codec(record.resolution_codec)
-    if identity.generation < 1:
-        raise GraphStateTransitionError("interrupt generation must be positive")
-    if record.resolution_codec != resolution_codec:
-        raise GraphStateTransitionError("interrupt codec must match its graph definition")
-    if record.lifecycle is GraphInterruptLifecycle.REQUESTED:
-        if record.resolution_payload is not None or record.receipt is not None:
-            raise GraphStateTransitionError("requested interrupt cannot retain resolution state")
-    elif record.lifecycle is GraphInterruptLifecycle.RESOLVED:
-        if record.resolution_payload is None or record.receipt is not None:
-            raise GraphStateTransitionError("resolved interrupt requires an unconsumed payload")
-    elif record.lifecycle is GraphInterruptLifecycle.CONSUMED:
-        if record.resolution_payload is None or record.receipt is None:
-            raise GraphStateTransitionError("consumed interrupt requires its payload and receipt")
-    elif record.lifecycle is GraphInterruptLifecycle.CANCELLED and record.receipt is None:
-        raise GraphStateTransitionError("cancelled interrupt requires a terminal receipt")
-    if record.receipt is not None and (
-        record.receipt.superstep < 0 or record.receipt.superstep > maximum_receipt_superstep
+def _validate_interrupt_identity(state: GraphRunState, identity: GraphNodeInterruptIdentity) -> None:
+    if (
+        identity.run_id != state.run_id
+        or identity.superstep != state.superstep
+        or identity.execution_generation < 1
+        or identity.execution_generation > state.execution_sequence
     ):
-        raise GraphStateTransitionError("interrupt receipt references an invalid superstep")
+        raise GraphStateTransitionError("interrupt identity does not match its current activation")
+
+
+def _validate_routing(routing: GraphRoutingContribution) -> None:
+    match routing:
+        case SelectGraphRoute(route=route):
+            _require_identity(route, "graph route identity")
+        case ContinueGraphRouting():
+            pass
+        case _:
+            raise GraphStateTransitionError("frontier node has an unsupported routing contribution")
+
+
+def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) -> None:
+    """Validate one durable or transition-local Frontier against its run coordinates."""
+
+    node_ids = tuple(node.node_id for node in frontier.nodes)
+    if node_ids != tuple(sorted(node_ids)) or len(node_ids) != len(set(node_ids)):
+        raise GraphStateTransitionError("frontier node identities must be distinct and canonical")
+    needs_codec = False
+    for node in frontier.nodes:
+        _require_identity(node.node_id, "frontier node identity")
+        # The wildcard also rejects malformed values reconstructed outside the
+        # statically typed in-process construction path.
+        match node.settlement:
+            case PendingGraphNode(input=node_input):
+                match node_input:
+                    case OverrideGraphNodeInput(payload=payload):
+                        if not isinstance(payload, bytes):  # pyright: ignore[reportUnnecessaryIsInstance]
+                            raise GraphStateTransitionError("resume input payload must be opaque bytes")
+                        needs_codec = True
+                    case UseStepRequestInput():
+                        pass
+                    case _:
+                        raise GraphStateTransitionError("pending node has an unsupported input binding")
+            case SucceededGraphNode(routing=routing):
+                _validate_routing(routing)
+            case FailedGraphNode(failure=failure):
+                _require_identity(failure, "graph failure")
+            case InterruptedGraphNode(interrupt=interrupt):
+                needs_codec = True
+                identity = interrupt.identity
+                if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+                    interrupt.request_payload, bytes
+                ):
+                    raise GraphStateTransitionError("interrupt request payload must be opaque bytes")
+                if identity.node_id != node.node_id:
+                    raise GraphStateTransitionError("interrupt identity node does not match its frontier node")
+                _validate_interrupt_identity(state, identity)
+            case SkippedGraphNode(failure=failure, reason=reason, routing=routing):
+                _require_identity(failure, "skipped graph failure")
+                _require_identity(reason, "graph skip reason")
+                _validate_routing(routing)
+            case _:
+                raise GraphStateTransitionError("frontier node has an unsupported settlement")
+    codec = state.resume_input_codec
+    if needs_codec and codec is None:
+        raise GraphStateTransitionError("override or interrupt settlement requires a resume input codec")
+    if codec is not None:
+        _require_identity(codec.codec_id, "resume input codec identity")
+        if codec.version < 1:
+            raise GraphStateTransitionError("resume input codec version must be positive")
 
 
 def validate_graph_run_state(state: GraphRunState) -> None:
@@ -96,91 +127,67 @@ def validate_graph_run_state(state: GraphRunState) -> None:
     _require_identity(state.definition_id, "graph definition identity")
     if state.definition_version < 1:
         raise GraphStateTransitionError("graph definition version must be positive")
-    if state.superstep < 0:
-        raise GraphStateTransitionError("graph superstep cannot be negative")
-    if state.revision < 0:
-        raise GraphStateTransitionError("graph revision cannot be negative")
-    if state.execution_sequence < 0:
-        raise GraphStateTransitionError("graph execution sequence cannot be negative")
-    _validate_resolution_codec(state.resolution_codec)
+    if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
+        raise GraphStateTransitionError("graph counters cannot be negative")
     if state.parent is not None:
         _require_identity(state.parent.run_id, "parent graph run identity")
-        _require_identity(state.parent.task_id, "parent graph task identity")
-        if state.parent.run_id == state.run_id:
-            raise GraphStateTransitionError("a graph run cannot be its own parent")
-    _validate_frontier(
-        state.frontier,
-        required=state.status in {GraphRunStatus.RUNNING, GraphRunStatus.SUSPENDED},
-    )
+        _require_identity(state.parent.node_id, "parent graph node identity")
+        if state.parent.superstep < 0 or state.parent.run_id == state.run_id:
+            raise GraphStateTransitionError("parent graph activation is invalid")
+        if state.run_id != child_graph_run_id(
+            state.parent.run_id,
+            state.parent.superstep,
+            state.parent.node_id,
+        ):
+            raise GraphStateTransitionError("child graph run identity does not match its parent activation")
     _validate_join_progress(state.join_progress)
-    execution = state.execution
-    if execution is not None:
-        if execution.token.generation < 1 or execution.token.generation != state.execution_sequence:
-            raise GraphStateTransitionError("execution lease generation must match the graph sequence")
-        _require_identity(execution.token.attempt_id, "execution attempt identity")
-        if not execution.task_ids or len(execution.task_ids) != len(frozenset(execution.task_ids)):
-            raise GraphStateTransitionError("execution lease requires distinct task identities")
-        for task_id in execution.task_ids:
-            _require_identity(task_id, "execution lease task identity")
-        if state.status is not GraphRunStatus.RUNNING:
-            raise GraphStateTransitionError("only a running graph may retain an execution lease")
+    validate_graph_frontier(state, state.frontier)
     if state.resources is not None:
         try:
             validate_resource_snapshot(state.resources)
         except ResourceTransitionError as error:
             raise GraphStateTransitionError("graph resources state is invalid") from error
-    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.frontier:
-        raise GraphStateTransitionError("a terminal graph cannot retain a frontier")
-    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.join_progress:
-        raise GraphStateTransitionError("a terminal graph cannot retain join progress")
-    if state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED} and state.resources is not None:
-        raise GraphStateTransitionError("a terminal graph cannot retain resources state")
-    interrupt = state.interrupt
-    if interrupt is not None:
-        validate_graph_interrupt_record(interrupt, state.resolution_codec, state.superstep)
-        if (
-            state.status is GraphRunStatus.RUNNING
-            and interrupt.lifecycle is GraphInterruptLifecycle.CONSUMED
-            and interrupt.receipt is not None
-            and interrupt.receipt.superstep >= state.superstep
-        ):
-            raise GraphStateTransitionError("running graph requires a consumed interrupt from an earlier superstep")
-    if state.status is GraphRunStatus.SUSPENDED:
-        if interrupt is None or interrupt.lifecycle is not GraphInterruptLifecycle.REQUESTED:
-            raise GraphStateTransitionError("suspended graph requires a requested interrupt")
-        if state.resources is not None or execution is not None:
-            raise GraphStateTransitionError("suspended graph must be scheduler-quiescent")
-    elif interrupt is not None and interrupt.lifecycle is GraphInterruptLifecycle.REQUESTED:
-        raise GraphStateTransitionError("only a suspended graph may retain a requested interrupt")
-    if (
-        state.status in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED}
-        and interrupt is not None
-        and interrupt.lifecycle not in {GraphInterruptLifecycle.CONSUMED, GraphInterruptLifecycle.CANCELLED}
-    ):
-        raise GraphStateTransitionError("terminal graph can only retain a finalized interrupt")
-    if (
-        state.status not in {GraphRunStatus.COMPLETED, GraphRunStatus.FAILED}
-        and interrupt is not None
-        and interrupt.lifecycle is GraphInterruptLifecycle.CANCELLED
-    ):
-        raise GraphStateTransitionError("cancelled interrupt requires a terminal graph")
-    if state.status is GraphRunStatus.FAILED:
-        if state.failure is None:
-            raise GraphStateTransitionError("a failed graph requires a failure")
-        _require_identity(state.failure, "graph failure")
-    elif state.failure is not None:
-        raise GraphStateTransitionError("only a failed graph may retain a failure")
+        pending = frozenset(pending_node_ids(state.frontier))
+        if not pending:
+            raise GraphStateTransitionError("resource admission requires current pending nodes")
+        if not frozenset(acquisition.node_id for acquisition in state.resources.acquisitions) <= pending:
+            raise GraphStateTransitionError("resource participant is outside current pending nodes")
+
+    execution = state.execution
+    if execution is not None:
+        if state.status is not GraphRunStatus.RUNNING:
+            raise GraphStateTransitionError("only a running graph may retain an execution lease")
+        if execution.token.generation != state.execution_sequence or execution.token.generation < 1:
+            raise GraphStateTransitionError("execution lease generation must match the graph sequence")
+        _require_identity(execution.token.attempt_id, "execution attempt identity")
+        if execution.node_ids != pending_node_ids(state.frontier):
+            raise GraphStateTransitionError("execution lease must exactly cover all pending nodes")
+
+    match state.status:
+        case GraphRunStatus.RUNNING:
+            if not state.frontier.nodes:
+                raise GraphStateTransitionError("a running graph requires a non-empty frontier")
+            status = frontier_status(state.frontier)
+            if status is GraphFrontierStatus.SETTLED:
+                raise GraphStateTransitionError("a running graph cannot retain a settled frontier")
+            if state.abort is not None:
+                raise GraphStateTransitionError("a running graph cannot retain an abort")
+        case GraphRunStatus.COMPLETED:
+            if state.frontier.nodes or state.join_progress or state.resources is not None:
+                raise GraphStateTransitionError("a completed graph must use the canonical empty position")
+            if state.abort is not None:
+                raise GraphStateTransitionError("a completed graph cannot retain an abort")
+        case GraphRunStatus.ABORTED:
+            if not state.frontier.nodes or state.abort is None or state.resources is not None:
+                raise GraphStateTransitionError("an aborted graph must retain one quiescent diagnostic frontier")
+            _require_identity(state.abort.reason, "graph abort reason")
+        case _:
+            raise GraphStateTransitionError("graph run has an unsupported lifecycle status")
 
 
 def validated_graph_run_state(state: GraphRunState) -> GraphRunState:
-    """Validate and return one transition result."""
-
     validate_graph_run_state(state)
     return state
 
 
-__all__ = [
-    "GraphStateTransitionError",
-    "validate_graph_interrupt_record",
-    "validate_graph_run_state",
-]
+__all__ = ["GraphStateTransitionError", "validate_graph_run_state"]

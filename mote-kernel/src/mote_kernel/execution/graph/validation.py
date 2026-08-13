@@ -20,13 +20,11 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import (
     GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
     NestedGraphNodeDefinition,
 )
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
-from mote_kernel.execution.graph.identity import NodeId
 from mote_kernel.execution.graph.node import NodeDefinition
+from mote_kernel.state.graph_state.identity import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -50,16 +48,16 @@ def _require_identity(value: str, *, kind: str) -> None:
         raise InvalidGraphIdentityError(f"{kind} identity must be non-empty and trimmed: {value!r}")
 
 
-def _validate_resolution(definition: GraphDefinition[InputT, OutputT]) -> None:
-    binding = definition.resolution
+def _validate_resume_input(definition: GraphDefinition[InputT, OutputT]) -> None:
+    binding = definition.resume_input
     if binding is None:
         return
-    _require_identity(binding.codec_id, kind="resolution codec")
+    _require_identity(binding.codec_id, kind="resume input codec")
     if binding.version < 1:
-        raise InvalidGraphIdentityError("resolution codec version must be positive")
+        raise InvalidGraphIdentityError("resume input codec version must be positive")
 
 
-def _validate_node_references(definition: GraphDefinition[InputT, OutputT], node_ids: frozenset[NodeId]) -> None:
+def _validate_node_references(definition: GraphDefinition[InputT, OutputT], node_ids: frozenset[GraphNodeId]) -> None:
     for entry in definition.entries:
         if entry not in node_ids:
             raise UnknownNodeError(f"entry references unknown node: {entry}")
@@ -74,7 +72,7 @@ def _validate_node_references(definition: GraphDefinition[InputT, OutputT], node
 
 
 def _validate_joins(definition: GraphDefinition[InputT, OutputT]) -> None:
-    seen: set[tuple[frozenset[NodeId], NodeId]] = set()
+    seen: set[tuple[frozenset[GraphNodeId], GraphNodeId]] = set()
     for edge in definition.edges:
         if not isinstance(edge, JoinEdge):
             continue
@@ -91,7 +89,7 @@ def _validate_duplicates(definition: GraphDefinition[InputT, OutputT]) -> None:
     if len(frozenset(definition.entries)) != len(definition.entries):
         raise DuplicateBoundaryError("graph definition contains duplicate entries")
     direct_edges: set[DirectEdge] = set()
-    conditional_routes: set[tuple[NodeId, str]] = set()
+    conditional_routes: set[tuple[GraphNodeId, str]] = set()
     for edge in definition.edges:
         if isinstance(edge, DirectEdge):
             if edge in direct_edges:
@@ -141,8 +139,8 @@ def _validate_resources(definition: GraphDefinition[InputT, OutputT]) -> None:
             )
 
 
-def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[NodeId]:
-    outgoing: dict[NodeId, set[NodeId]] = {node.node_id: set() for node in definition.nodes}
+def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[GraphNodeId]:
+    outgoing: dict[GraphNodeId, set[GraphNodeId]] = {node.node_id: set() for node in definition.nodes}
     joins: list[JoinEdge] = []
     for edge in definition.edges:
         if isinstance(edge, DirectEdge | ConditionalEdge):
@@ -152,7 +150,7 @@ def _reachable_nodes(definition: GraphDefinition[InputT, OutputT]) -> frozenset[
             joins.append(edge)
 
     pending = deque(definition.entries)
-    reachable: set[NodeId] = set()
+    reachable: set[GraphNodeId] = set()
     while pending or any(
         edge.target != END and set(edge.sources) <= reachable and edge.target not in reachable for edge in joins
     ):
@@ -208,7 +206,7 @@ def _validate_graph(
 
     known_nodes = frozenset(node_ids)
     _validate_resources(definition)
-    _validate_resolution(definition)
+    _validate_resume_input(definition)
     _validate_duplicates(definition)
     _validate_node_references(definition, known_nodes)
     _validate_joins(definition)
