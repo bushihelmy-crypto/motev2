@@ -32,7 +32,7 @@ jobs:
           python -m venv /tmp/mote-kernel-wheel-check
           /tmp/mote-kernel-wheel-check/bin/python -m pip install dist/*.whl
           /tmp/mote-kernel-wheel-check/bin/python -c "import mote_kernel; print(mote_kernel.__version__)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mote-kernel-python-distributions
           path: mote-kernel/dist/
