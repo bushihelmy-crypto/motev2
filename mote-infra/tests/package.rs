@@ -1,3 +1,5 @@
+//! External smoke tests for the public crate surface.
+
 use mote_infra::VERSION;
 
 #[test]
