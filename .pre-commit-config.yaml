@@ -20,9 +20,15 @@ repos:
         files: ^mote-kernel/(src|tests)/.*\.py$
   - repo: local
     hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --manifest-path mote-infra/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^mote-infra/.*\.rs$
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(.secrets.baseline|mote-kernel/third_party_licenses/)
+        exclude: ^(\.secrets\.baseline|mote-(kernel|infra)/third_party_licenses/)

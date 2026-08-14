@@ -14,6 +14,21 @@ python -m pip install -e '.[dev]'
 make check
 ```
 
+For the Rust Infra:
+
+```bash
+cd mote-infra
+make check
+```
+
+Install `cargo-deny` before running the dependency license, source, and advisory checks:
+
+```bash
+cargo install cargo-deny --version 0.19.7 --locked
+cd mote-infra
+make security
+```
+
 Run repository hooks from the monorepo root:
 
 ```bash

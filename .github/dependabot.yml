@@ -7,6 +7,10 @@ updates:
     groups:
       kernel-development-dependencies:
         dependency-type: development
+  - package-ecosystem: cargo
+    directory: /mote-infra
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:
