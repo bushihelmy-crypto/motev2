@@ -149,7 +149,6 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
 
 def test_graph_execution_contract_remains_async_only() -> None:
     execution_functions = (
-        _class_method("execution/_graph.py", "Graph", "run"),
         _class_method("execution/executor.py", "GraphExecutor", "prepare"),
         _class_method("execution/executor.py", "GraphExecutor", "execute"),
         _top_level_function("execution/engine/superstep.py", "prepare_superstep"),

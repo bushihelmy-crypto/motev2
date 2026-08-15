@@ -8,14 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- **Breaking:** `mote_kernel.execution` now exports only the `Graph` facade; executor, session, request/result,
-  topology, and state transition types remain internal owner-module contracts.
 - **Breaking:** Graph nodes now implement an async `Node` protocol, and callers must `await step_graph()`.
   Graph execution is async-only and does not provide a synchronous compatibility path.
 - Concurrent nodes now share one immutable input snapshot, which node implementations must treat as read-only.
 
 ### Added
 
-- The `Graph` builder and its single async `run()` path, including per-transition commit confirmation and
-  selective failure, interrupt, and skip resume inputs.
 - Initial repository, packaging, quality, testing, and community infrastructure.
