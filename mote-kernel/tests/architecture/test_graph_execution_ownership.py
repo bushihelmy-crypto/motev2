@@ -150,6 +150,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
         "execution/engine/session.py": frozenset({"GraphExecutionSession"}),
         "execution/graph_run.py": frozenset({"project_start_graph_command"}),
         "execution/executor.py": frozenset({"GraphExecutor"}),
+        "execution/_graph.py": frozenset({"Graph"}),
     }
     expected = {symbol: (relative,) for relative, symbols in owners_by_module.items() for symbol in symbols}
 
@@ -309,6 +310,47 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
             else ()
         )
     )
+
+
+def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
+    graph = _top_level_definition("execution/_graph.py", "Graph")
+    if not isinstance(graph, ast.ClassDef):
+        raise AssertionError("Graph must remain a class")
+    slots = next(
+        node.value
+        for node in graph.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__slots__" for target in node.targets)
+    )
+    assert isinstance(slots, ast.Tuple)
+    assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
+        "_definition_id",
+        "_edges",
+        "_entries",
+        "_executor",
+        "_nodes",
+        "_resources",
+        "_resume_input",
+        "_version",
+    }
+    assert not {
+        "_state",
+        "_current_state",
+        "_run_state",
+        "_session",
+        "_outputs",
+    } & {node.id for node in ast.walk(graph) if isinstance(node, ast.Name)}
+    assert _call_owner_modules("reduce_graph_run") == ("execution/_graph.py",)
+
+    public_tree = _module("execution/__init__.py")
+    public_exports = next(
+        node.value
+        for node in public_tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
+    )
+    assert isinstance(public_exports, ast.List)
+    assert [element.value for element in public_exports.elts if isinstance(element, ast.Constant)] == ["Graph"]
 
 
 def test_graph_transition_dispatch_is_exhaustive_and_modules_do_not_alias_contracts() -> None:
