@@ -14,7 +14,7 @@ async def normalize(value: str) -> str:
 
 graph = Graph[str, str]("example.normalize")
 graph.add_node("normalize", normalize)
-graph.set_entry("normalize")
+graph.add_edge(Graph.START, "normalize")
 graph.add_edge("normalize", Graph.END)
 
 result = await graph.run("  MOTE  ", run_id="example-run")

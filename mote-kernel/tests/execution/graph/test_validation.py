@@ -14,6 +14,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph import (
     END,
+    START,
     ConditionalEdge,
     DirectEdge,
     GraphDefinition,
@@ -68,6 +69,7 @@ class Codec:
         ),
         (graph(nodes=(node(""),), entries=(GraphNodeId(""),)), InvalidGraphIdentityError),
         (graph(nodes=(node(" a"),), entries=(GraphNodeId(" a"),)), InvalidGraphIdentityError),
+        (graph(nodes=(node(START),), entries=(START,)), InvalidGraphIdentityError),
         (graph(nodes=(node(END),), entries=(END,)), InvalidGraphIdentityError),
         (graph(nodes=(node("a"), node("a"))), DuplicateNodeError),
         (graph(nodes=(node("a"),), entries=(GraphNodeId("a"), GraphNodeId("a"))), DuplicateBoundaryError),

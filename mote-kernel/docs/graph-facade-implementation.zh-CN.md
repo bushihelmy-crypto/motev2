@@ -40,11 +40,12 @@
 - `add_edge()`；
 - `add_conditional_edge()`；
 - `add_join()`；
-- `set_entry()`；
 - `set_resume_codec()`；
 - `success()`、`failure()`、`interrupt()` outcome factories；
 - failure/interrupt/skip resume action factories；
 - 唯一执行方法 `run()`。
+
+图入口与出口使用对称的虚拟边界：`add_edge(Graph.START, node_id)` 声明入口，`add_edge(node_id, Graph.END)` 声明终止路径；多入口通过多条 START edge 表达，不保留独立 `set_entry()` 或第二份入口配置。START edge 只在 builder 内投影为现有 canonical entries，不进入 compiled edge、Frontier 或 runtime task。
 
 资源需求只在 `add_node(..., resources=(...))` 声明。门面按资源首次出现顺序自动生成并去重底层 `ResourceDefinition`，不提供要求调用方重复登记同一事实的独立 `add_resource()`；节点自身重复同一资源仍由现有 compiler fail closed。
 

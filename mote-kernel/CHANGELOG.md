@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Graph.InterruptResult` without importing internal modules.
 - Public execution failures are available through the `Graph` namespace as `Graph.Error`,
   `Graph.ValidationError`, `Graph.SnapshotMismatchError`, and `Graph.ExecutionLimitError`.
+- Graph entries are declared with `add_edge(Graph.START, node_id)`, symmetric with `Graph.END`; the builder no
+  longer maintains a separate `set_entry()` configuration path.
 - **Breaking:** Graph nodes now implement an async `Node` protocol, and callers must `await step_graph()`.
   Graph execution is async-only and does not provide a synchronous compatibility path.
 - Concurrent nodes now share one immutable input snapshot, which node implementations must treat as read-only.

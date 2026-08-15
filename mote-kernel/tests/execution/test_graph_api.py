@@ -54,7 +54,7 @@ async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_o
         return value.upper()
 
     graph = Graph[str, str]("public.graph").add_node("uppercase", uppercase)
-    assert graph.set_entry("uppercase").add_edge("uppercase", Graph.END) is graph
+    assert graph.add_edge(Graph.START, "uppercase").add_edge("uppercase", Graph.END) is graph
     assert public_execution.__all__ == ["Graph"]
     assert public_execution.Graph is Graph
 
@@ -79,7 +79,7 @@ async def test_one_compiled_facade_runs_independent_states_concurrently() -> Non
         await asyncio.sleep(0)
         return value
 
-    graph = Graph[str, str]("public.concurrent").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.concurrent").add_node("node", echo).add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
 
     first, second = await asyncio.gather(
@@ -101,7 +101,8 @@ async def test_run_commits_each_resource_node_transition_and_immediately_admits_
     graph = Graph[str, str]("public.resources")
     graph.add_node("b", complete, resources=("exclusive",))
     graph.add_node("a", complete, resources=("exclusive",))
-    graph.set_entry("b", "a").add_edge("a", Graph.END).add_edge("b", Graph.END)
+    graph.add_edge(Graph.START, "b").add_edge(Graph.START, "a")
+    graph.add_edge("a", Graph.END).add_edge("b", Graph.END)
     commits = CommitLog()
 
     result = await graph.run("value", run_id="resource-run", commit=commits, max_parallel_tasks=2)
@@ -140,7 +141,8 @@ async def test_node_resources_register_once_in_deterministic_first_seen_order() 
     graph = Graph[str, str]("public.resource-order")
     graph.add_node("a", complete, resources=("beta", "alpha"))
     graph.add_node("b", complete, resources=("alpha", "gamma"))
-    graph.set_entry("a", "b").add_edge("a", Graph.END).add_edge("b", Graph.END)
+    graph.add_edge(Graph.START, "a").add_edge(Graph.START, "b")
+    graph.add_edge("a", Graph.END).add_edge("b", Graph.END)
     commits = CommitLog()
 
     result = await graph.run("value", commit=commits, max_parallel_tasks=2)
@@ -167,7 +169,7 @@ async def test_public_builder_supports_conditional_routing_and_joins() -> None:
 
     graph = Graph[str, str]("public.routing")
     graph.add_node("decision", decision).add_node("side", plain).add_node("left", plain).add_node("joined", plain)
-    graph.set_entry("decision", "side")
+    graph.add_edge(Graph.START, "decision").add_edge(Graph.START, "side")
     assert graph.add_conditional_edge("decision", "left", "left") is graph
     assert graph.add_join(("left", "side"), "joined") is graph
     graph.add_edge("joined", Graph.END)
@@ -195,7 +197,8 @@ async def test_failure_resume_actions_are_canonicalized_and_share_run() -> None:
     graph = Graph[str, str]("public.resume")
     graph.set_resume_codec("text", 1, encode_text, decode_text)
     graph.add_node("a", operation("a")).add_node("b", operation("b"))
-    graph.set_entry("a", "b").add_edge("a", Graph.END).add_edge("b", Graph.END)
+    graph.add_edge(Graph.START, "a").add_edge(Graph.START, "b")
+    graph.add_edge("a", Graph.END).add_edge("b", Graph.END)
 
     failed = await graph.run("initial", run_id="resume-run")
 
@@ -234,7 +237,7 @@ async def test_skip_failed_routes_without_reexecuting_the_node() -> None:
         return Graph.failure("declined")
 
     graph = Graph[str, str]("public.skip")
-    graph.add_node("review", fail).set_entry("review")
+    graph.add_node("review", fail).add_edge(Graph.START, "review")
     graph.add_conditional_edge("review", "skip", Graph.END)
     failed = await graph.run("input", run_id="skip-run")
 
@@ -261,7 +264,7 @@ async def test_interrupt_resume_is_an_exact_action_inside_run() -> None:
 
     graph = Graph[str, str]("public.interrupt")
     graph.set_resume_codec("text", 1, encode_text, decode_text)
-    graph.add_node("review", interrupt_once).set_entry("review").add_edge("review", Graph.END)
+    graph.add_node("review", interrupt_once).add_edge(Graph.START, "review").add_edge("review", Graph.END)
 
     interrupted = await graph.run("draft", run_id="interrupt-run")
 
@@ -292,7 +295,7 @@ async def test_run_rejects_resume_without_state_and_unsupported_resume_variants(
     async def fail(value: str) -> Graph.Outcome[str]:
         return Graph.failure("failed")
 
-    graph = Graph[str, str]("public.invalid-resume").add_node("node", fail).set_entry("node")
+    graph = Graph[str, str]("public.invalid-resume").add_node("node", fail).add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
     with pytest.raises(SnapshotMismatchError, match="new graph run"):
         await graph.run("input", resume=(graph.resume_failed("node"),))
@@ -320,7 +323,7 @@ async def test_invalid_limits_reject_a_new_run_before_compilation_or_commit(
         calls += 1
         return value
 
-    graph = Graph[str, str]("public.invalid-limits.new").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.invalid-limits.new").add_node("node", echo).add_edge(Graph.START, "node")
     commits = CommitLog()
 
     with pytest.raises(ExecutionLimitError, match="must be positive"):
@@ -361,7 +364,8 @@ async def test_invalid_limits_reject_active_recovery_before_fence_or_execution(
             raise CommitAcknowledgementLostError
         return transition.next_state
 
-    graph = Graph[str, str]("public.invalid-limits.active").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.invalid-limits.active").add_node("node", echo)
+    graph.add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
     with pytest.raises(CommitAcknowledgementLostError):
         await graph.run("input", run_id="active-run", commit=capture_claim)
@@ -400,7 +404,8 @@ async def test_invalid_limits_reject_resume_before_consuming_the_settlement(
         calls += 1
         return Graph.failure(f"failed:{value}")
 
-    graph = Graph[str, str]("public.invalid-limits.resume").add_node("node", fail).set_entry("node")
+    graph = Graph[str, str]("public.invalid-limits.resume").add_node("node", fail)
+    graph.add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
     failed = await graph.run("first", run_id="resume-run")
     assert failed.awaiting_resume and calls == 1
@@ -428,7 +433,7 @@ async def test_run_requires_exact_authoritative_commit_confirmation(wrong_confir
     async def echo(value: str) -> str:
         return value
 
-    graph = Graph[str, str]("public.commit-mismatch").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.commit-mismatch").add_node("node", echo).add_edge(Graph.START, "node")
 
     async def reject(transition: Graph.Transition[str]) -> Graph.State:
         if wrong_confirmation == "wrong-type":
@@ -460,7 +465,7 @@ async def test_run_fences_an_authoritative_unacknowledged_claim_before_recovery(
             raise CommitAcknowledgementLostError
         return transition.next_state
 
-    graph = Graph[str, str]("public.claim-recovery").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.claim-recovery").add_node("node", echo).add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
     with pytest.raises(CommitAcknowledgementLostError):
         await graph.run("input", run_id="recover-run", commit=lose_claim_ack)
@@ -492,7 +497,8 @@ async def test_cancelled_run_quiesces_workers_retains_the_claim_and_recovers_fro
                 cleaned.set()
         return value
 
-    graph = Graph[str, str]("public.cancel-recovery").add_node("node", operation).set_entry("node")
+    graph = Graph[str, str]("public.cancel-recovery").add_node("node", operation)
+    graph.add_edge(Graph.START, "node")
     graph.add_edge("node", Graph.END)
     commits = CommitLog()
     running = asyncio.create_task(graph.run("first", run_id="cancel-run", commit=commits))
@@ -529,7 +535,7 @@ async def test_node_exception_closes_and_fences_before_propagation() -> None:
             raise ValueError("node failed")
         return value
 
-    graph = Graph[str, str]("public.node-error").add_node("node", operation).set_entry("node")
+    graph = Graph[str, str]("public.node-error").add_node("node", operation).add_edge(Graph.START, "node")
     commits = CommitLog()
     with pytest.raises(ValueError, match="node failed"):
         await graph.run("input", run_id="error-run", commit=commits)
@@ -557,7 +563,7 @@ async def test_session_creation_error_fences_the_committed_claim(
         raise RuntimeError("session creation failed")
 
     monkeypatch.setattr(GraphExecutor, "execute", fail_execute)
-    graph = Graph[str, str]("public.session-error").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.session-error").add_node("node", echo).add_edge(Graph.START, "node")
     commits = CommitLog()
 
     with pytest.raises(RuntimeError, match="session creation"):
@@ -581,7 +587,7 @@ async def test_facade_fails_closed_if_internal_preparation_requests_nested_coord
         return WaitingForChildren(action)
 
     monkeypatch.setattr(GraphExecutor, "prepare", wait_for_child)
-    graph = Graph[str, str]("public.nested-boundary").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("public.nested-boundary").add_node("node", echo).add_edge(Graph.START, "node")
 
     with pytest.raises(GraphValidationError, match="does not compose nested"):
         await graph.run("input")
@@ -592,7 +598,7 @@ async def test_aborted_authoritative_state_is_returned_without_execution() -> No
     async def fail(value: str) -> Graph.Outcome[str]:
         return Graph.failure("failed")
 
-    graph = Graph[str, str]("public.aborted").add_node("node", fail).set_entry("node")
+    graph = Graph[str, str]("public.aborted").add_node("node", fail).add_edge(Graph.START, "node")
     failed = await graph.run("input", run_id="aborted-run")
     aborted_state = reduce_graph_run(
         failed.state,

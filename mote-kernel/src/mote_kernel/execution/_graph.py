@@ -15,6 +15,7 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph import (
     END,
+    START,
     ConditionalEdge,
     DirectEdge,
     GraphDefinition,
@@ -235,6 +236,7 @@ def _canonical_resume_actions(
 class Graph(Generic[InputT, OutputT]):
     """Build one immutable topology and drive it through the sole execution engine."""
 
+    START: ClassVar[str] = START
     END: ClassVar[str] = END
     Outcome = NodeOutcome
     Result = _GraphRunResult
@@ -309,6 +311,9 @@ class Graph(Generic[InputT, OutputT]):
 
     def add_edge(self, source: str, target: str) -> Self:
         self._require_mutable()
+        if source == Graph.START:
+            self._entries = (*self._entries, self._target(target))
+            return self
         self._edges.append(DirectEdge(GraphNodeId(source), self._target(target)))
         return self
 
@@ -320,11 +325,6 @@ class Graph(Generic[InputT, OutputT]):
     def add_join(self, sources: tuple[str, ...], target: str) -> Self:
         self._require_mutable()
         self._edges.append(JoinEdge(tuple(GraphNodeId(source) for source in sources), self._target(target)))
-        return self
-
-    def set_entry(self, *node_ids: str) -> Self:
-        self._require_mutable()
-        self._entries = tuple(GraphNodeId(node_id) for node_id in node_ids)
         return self
 
     def set_resume_codec(

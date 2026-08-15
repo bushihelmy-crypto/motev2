@@ -46,11 +46,11 @@ async def test_graph_namespace_strictly_narrows_every_commit_result_variant() ->
     success_consumer = TypedResultConsumer()
     failure_consumer = TypedResultConsumer()
     interrupt_consumer = TypedResultConsumer()
-    success_graph = Graph[str, str]("typing.success").add_node("node", succeed).set_entry("node")
-    failure_graph = Graph[str, str]("typing.failure").add_node("node", fail).set_entry("node")
+    success_graph = Graph[str, str]("typing.success").add_node("node", succeed).add_edge(Graph.START, "node")
+    failure_graph = Graph[str, str]("typing.failure").add_node("node", fail).add_edge(Graph.START, "node")
     interrupt_graph = Graph[str, str]("typing.interrupt")
     interrupt_graph.set_resume_codec("text", 1, _encode_text, _decode_text)
-    interrupt_graph.add_node("node", interrupt).set_entry("node")
+    interrupt_graph.add_node("node", interrupt).add_edge(Graph.START, "node")
 
     await success_graph.run("success", commit=success_consumer)
     await failure_graph.run("failure", commit=failure_consumer)
@@ -70,7 +70,7 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
     with pytest.raises(Graph.ValidationError):
         await invalid_graph.run("input")
 
-    graph = Graph[str, str]("typing.errors").add_node("node", echo).set_entry("node")
+    graph = Graph[str, str]("typing.errors").add_node("node", echo).add_edge(Graph.START, "node")
     with pytest.raises(Graph.SnapshotMismatchError):
         await graph.run("input", resume=(graph.resume_failed("node"),))
     with pytest.raises(Graph.ExecutionLimitError):

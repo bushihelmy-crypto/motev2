@@ -17,7 +17,7 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
     UnreachableNodeError,
 )
-from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import (
     GraphDefinition,
     NestedGraphNodeDefinition,
@@ -196,8 +196,8 @@ def _validate_graph(
     node_ids = tuple(node.node_id for node in definition.nodes)
     for node_id in node_ids:
         _require_identity(node_id, kind="node")
-        if node_id == END:
-            raise InvalidGraphIdentityError("END is a virtual boundary and cannot be declared as a node")
+        if node_id in (START, END):
+            raise InvalidGraphIdentityError("START and END are virtual boundaries and cannot be declared as nodes")
     if len(frozenset(node_ids)) != len(node_ids):
         raise DuplicateNodeError("graph definition contains duplicate node identities")
     for edge in definition.edges:

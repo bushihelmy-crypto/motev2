@@ -3,7 +3,7 @@
 # pyright: reportUnusedImport=false
 
 from mote_kernel.execution.graph.compiler import compile_graph
-from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import Node, NodeDefinition
@@ -20,6 +20,7 @@ from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRou
 
 __all__ = [
     "END",
+    "START",
     "CompiledGraph",
     "ConditionalEdge",
     "ContinueGraphRouting",
