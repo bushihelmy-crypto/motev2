@@ -3,18 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from mote_kernel.execution import (
-    AbortedGraph,
-    AwaitingResume,
-    ExecutableFrontier,
-    GraphExecutionSession,
-    GraphExecutor,
-    ReadyToResolve,
-    ResumeFailedNodeRequest,
-    SkipFailedNodeRequest,
-    StepRequest,
-    UseRequestInput,
-)
+from mote_kernel.execution.engine.session import GraphExecutionSession
+from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph import (
     END,
     CompiledGraph,
@@ -39,9 +29,14 @@ from mote_kernel.execution.graph import (
 from mote_kernel.execution.identity import ExecutionRequestAttemptId
 from mote_kernel.execution.request import (
     OverrideNodeInput,
+    ResumeFailedNodeRequest,
     ResumeInterruptedNodeRequest,
     ResumeRequest,
+    SkipFailedNodeRequest,
+    StepRequest,
+    UseRequestInput,
 )
+from mote_kernel.execution.result import AbortedGraph, AwaitingResume, ExecutableFrontier, ReadyToResolve
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ContinueGraphRouting,

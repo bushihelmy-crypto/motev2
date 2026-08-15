@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from mote_kernel.execution.errors import ExecutionLimitError
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionLimits:
@@ -9,6 +11,10 @@ class ExecutionLimits:
 
     max_supersteps: int = 1_000
     max_parallel_tasks: int = 64
+
+    def __post_init__(self) -> None:
+        if self.max_supersteps < 1 or self.max_parallel_tasks < 1:
+            raise ExecutionLimitError("execution limits must be positive")
 
 
 __all__ = ["ExecutionLimits"]

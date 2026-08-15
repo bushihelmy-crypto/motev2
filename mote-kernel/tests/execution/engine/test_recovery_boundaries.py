@@ -1,13 +1,7 @@
 import pytest
 
-from mote_kernel.execution import (
-    ExecutableFrontier,
-    GraphExecutionSession,
-    GraphExecutor,
-    ReadyToResolve,
-    StepRequest,
-    TaskSuccess,
-)
+from mote_kernel.execution.engine.session import GraphExecutionSession
+from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph import (
     END,
     CompiledGraph,
@@ -21,6 +15,8 @@ from mote_kernel.execution.graph import (
     compile_graph,
 )
 from mote_kernel.execution.identity import ExecutionRequestAttemptId
+from mote_kernel.execution.request import StepRequest
+from mote_kernel.execution.result import ExecutableFrontier, ReadyToResolve, TaskSuccess
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
     GraphRunId,

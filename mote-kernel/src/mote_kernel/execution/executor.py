@@ -98,6 +98,12 @@ class GraphExecutor(Generic[InputT, OutputT]):
             raise SnapshotMismatchError("nested graph state requires a parent activation")
         return graph
 
+    def validate_state(self, state: GraphRunState) -> None:
+        """Require an authoritative snapshot owned by this assembled executor."""
+
+        graph = self._graph_for_state(state)
+        require_snapshot_matches_graph(graph, state, self._parent_nodes)
+
     async def prepare(self, request: StepRequest[InputT, OutputT]) -> PrepareDisposition[InputT, OutputT]:
         graph = self._graph_for_state(request.state)
         require_snapshot_matches_graph(graph, request.state, self._parent_nodes)

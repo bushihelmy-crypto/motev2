@@ -2,7 +2,29 @@
 
 Mote Kernel is a durable, state-machine-driven agent kernel. Graphs control execution; state machines control truth.
 
-The project is in its initial architecture and implementation phase. Its default public composition entry point has not been designed or implemented yet; graph execution and state primitives are currently internal development surfaces.
+The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution and state primitives remain internal development surfaces.
+
+```python
+from mote_kernel.execution import Graph
+
+
+async def normalize(value: str) -> str:
+    return value.strip().lower()
+
+
+graph = Graph[str, str]("example.normalize")
+graph.add_node("normalize", normalize)
+graph.set_entry("normalize")
+graph.add_edge("normalize", Graph.END)
+
+result = await graph.run("  MOTE  ", run_id="example-run")
+assert result.completed
+assert result.outputs[0].output == "mote"
+```
+
+`Graph.run()` also accepts the authoritative state returned by a prior invocation and selective resume actions created by the same facade. An optional async commit callback receives every reducer candidate—including every individual node settlement—and execution continues only from the exact state it confirms. No concrete store is included.
+
+Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 
 ## Design principles
 

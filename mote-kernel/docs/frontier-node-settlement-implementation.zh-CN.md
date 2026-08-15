@@ -15,6 +15,8 @@
 - 代码复审：`docs/frontier-node-settlement-implementation-code-review.zh-CN.md`
 - 交付方式：一次 coordinated model replacement；最终代码、公开类型、测试和文档只保留一套 authoritative path
 
+> 后续公共组合入口由 `docs/graph-facade-implementation.zh-CN.md` 单独扩展；该扩展只封装本文的 authoritative command/session path，不改变本文的节点结算、资源、Frontier barrier 或恢复边界。
+
 本文完整替代现有实施方案中的 batch settlement、batch result collection、resource wave execution 和 settlement 内联 resolution 模型。
 原方案中与 failure/interrupt resume、input override、identity、routing、join、nested graph、fence 和 abort 有关且不与本文冲突的语义，由本文明确继承。
 发生冲突时，以本文为唯一实施依据。
@@ -34,7 +36,7 @@
 11. nested terminal projection 进入同一个 completion source 和 `SettleGraphNode` path，不启动普通 Port task、不占用并发 slot；
 12. `GraphRunState.resources` 对“无 acquisition”只有 `None` 一种 durable 表达，底层 resource reducer 的临时 replay snapshot 不受此限制；
 13. ordinary error 一旦被 session 观察，停止启动所有尚未启动的 Pending activation，并以不依赖 event-loop race 的规则暴露错误。
-14. `GraphExecutionSession` 的 concrete creation 只能发生在 `GraphExecutor.execute()` 完成 owner-checked linear claim consumption 之后；公开类型不可直接构造；
+14. 内部 `GraphExecutionSession` 的 concrete creation 只能发生在 `GraphExecutor.execute()` 完成 owner-checked linear claim consumption 之后；该类型协议不可直接构造；
 15. 同一 session 是单消费者协议，并发 `next()` 必须在触碰 scheduler 前确定性 fail closed。
 
 ## 2. 需求边界
@@ -109,7 +111,7 @@ select currently executable Pending nodes
 5. 多 worker 对同一 Frontier 的 partial claim 或 node-level distributed lease；
 6. Python coroutine、task handle 或 continuation 的持久化；
 7. 泛型 node output 持久化、result reference store 或 DomainState API；
-8. 新的默认 composition entry point；
+8. 本次 settlement 模型改造自身不设计新的默认 composition entry point（后续由独立门面方案扩展）；
 9. 跨语言 conformance schema，除非最终实现改变已有跨语言 observable contract；
 10. 为证明旧实现已删除而新增 legacy gate tests。
 
@@ -541,7 +543,7 @@ async with await executor.execute(claim, claimed_request) as session:
         state = reduce_graph_run(state, completed.command)
 ```
 
-`GraphExecutor.execute()` 是唯一的 execution entry point，但它返回的是 state-acknowledged session；`session.next(state)` 是唯一的逐节点
+`GraphExecutor.execute()` 是唯一的内部 session creation entry point，但它返回的是 state-acknowledged session；`session.next(state)` 是唯一的逐节点
 completion yield 协议。`execute()` 不等待整个 Frontier，不提供 batch overload，也不在 session 外另设 runner。若调用方不使用 async context
 manager，也必须在 `finally` 中调用同一个幂等 `await session.aclose()`。
 
@@ -562,7 +564,7 @@ authoritative snapshot，不在内部调用 reducer，也不把预测 state 当�
 `GraphExecutionSession` 的生命周期只存在于 execution memory，不进入 `GraphRunState`，也不构成第二份 durable truth。实现必须表达以下
 四个 session-local disposition；它们可以是内部 enum 或等价的私有状态机，不要求成为新的 state command：
 
-Session creation 同样是 linear capability：顶层公开的 `GraphExecutionSession` 只提供不可直接构造的类型协议；唯一 concrete instance 由
+Session creation 同样是 linear capability：内部 `GraphExecutionSession` 只提供不可直接构造的类型协议；唯一 concrete instance 由
 `GraphExecutor.execute()` 在验证 graph/request/task scope、以 executor owner 消费 exact prepared claim 后签发。消费结果是一次性 construction
 receipt，同一 prepared claim 或 receipt 都不能建立第二个 session。Validation 失败必须发生在 node invocation 前，并且 request/task validation
 失败不得提前消费仍可正确使用的 claim。
@@ -1010,7 +1012,7 @@ B raises ordinary exception
 28. GraphRunState 挂载 empty `ResourceSnapshot` 被拒绝，低层 resource reducer 的初始 replay snapshot 仍可用；
 29. ordinary error 后不启动任何未启动 activation，多个 error 按 `GraphTask.sort_key` 选择 deterministic error；
 30. selector slot 竞争按 canonical `GraphTask.sort_key` 选择，不依赖集合迭代顺序。
-31. 公开 `GraphExecutionSession` 协议不可直接实例化；prepared claim 只能经 owner-checked `GraphExecutor.execute()` 建立 session；
+31. 内部 `GraphExecutionSession` 协议不可直接实例化；prepared claim 只能经 owner-checked `GraphExecutor.execute()` 建立 session；
 32. 同一 prepared claim 的并发 `execute()` 只有一个成功；consumed receipt 不能由 snapshot 直接构造，并且只能签发一个 concrete session；
 33. 一个 `next()` 等待 completion 时，并发第二个 `next()` 在 scheduler 前确定性拒绝，且只发生一次 node invocation、只交付一条 command；
 34. active `next()` 与多个 `aclose()` 并发时只清理一次，不泄漏内部 collection race 或 `StopIteration`；
@@ -1215,7 +1217,7 @@ authoritative GraphRunState
    `CompleteGraphFrontier`；
 7. `CompleteGraphFrontier` 保留 non-empty `join_progress` 防护，ordinary error、close/cancel/quiescence 和 exact fence 协议已经闭合；
 8. 已删除 production batch collector、resource wave executor 和独立 resource transition module，没有保留 compatibility wrapper 或第二 runner；
-9. 公开 `GraphExecutionSession` 已收敛为不可直接构造的协议；只有 `GraphExecutor.execute()` 在 owner-checked linear claim consumption 后通过一次性 receipt 签发 concrete session；
+9. 内部 `GraphExecutionSession` 已收敛为不可直接构造的协议；只有 `GraphExecutor.execute()` 在 owner-checked linear claim consumption 后通过一次性 receipt 签发 concrete session；
 10. session 并发 `next()` 在进入 scheduler 前确定性拒绝，并发 `aclose()` 幂等串行清理；`next()` cancellation 的 close task 不会被 cleanup 期间的再次取消中断，也不会从同一 revision 交付第二条 command；
 11. queued typed sibling 不会延迟最新 authoritative state 中刚 admitted 的 waiter；queued ordinary error 则先进入 `ERROR_DRAINING`，不越过错误启动新 activation；
 12. 没有实现 Store、retry、Port idempotency、Graph exactly-once、output persistence 或 multi-worker lease，也没有新增 legacy 门禁测试。

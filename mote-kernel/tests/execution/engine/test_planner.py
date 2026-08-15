@@ -213,12 +213,12 @@ def test_running_frontier_and_join_progress_must_belong_to_compiled_graph() -> N
 
 
 @pytest.mark.parametrize(
-    "limits",
-    [ExecutionLimits(max_supersteps=0), ExecutionLimits(max_parallel_tasks=0)],
+    ("max_supersteps", "max_parallel_tasks"),
+    [(0, 64), (1_000, 0)],
 )
-def test_invalid_limits_fail_closed(limits: ExecutionLimits) -> None:
+def test_invalid_limits_fail_closed(max_supersteps: int, max_parallel_tasks: int) -> None:
     with pytest.raises(ExecutionLimitError):
-        plan_tasks(compiled_graph("a"), running_state(), limits)
+        ExecutionLimits(max_supersteps, max_parallel_tasks)
 
 
 @pytest.mark.parametrize("status", [GraphRunStatus.COMPLETED, GraphRunStatus.ABORTED])

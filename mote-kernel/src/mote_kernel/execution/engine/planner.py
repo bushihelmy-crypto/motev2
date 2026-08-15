@@ -13,15 +13,9 @@ InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 
 
-def _validate_limits(limits: ExecutionLimits) -> None:
-    if limits.max_supersteps < 1 or limits.max_parallel_tasks < 1:
-        raise ExecutionLimitError("execution limits must be positive")
-
-
 def plan_tasks(
     graph: CompiledGraph[InputT, OutputT], state: GraphRunState, limits: ExecutionLimits
 ) -> tuple[GraphTask, ...]:
-    _validate_limits(limits)
     require_snapshot_matches_graph(graph, state)
     if state.status is not GraphRunStatus.RUNNING:
         return ()
