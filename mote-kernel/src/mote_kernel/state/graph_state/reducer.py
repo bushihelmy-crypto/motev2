@@ -5,24 +5,26 @@ from typing import assert_never
 
 from mote_kernel.state.graph_state.command import (
     AbortGraphRun,
+    AdvanceGraphFrontier,
     ClaimGraphExecution,
+    CompleteGraphFrontier,
     FenceGraphExecution,
     GraphRunCommand,
     ResumeGraphNodes,
-    SettleGraphExecution,
+    SettleGraphNode,
     StartGraphRun,
-    UpdateGraphResources,
 )
 from mote_kernel.state.graph_state.execution_transitions import (
+    advance_graph_frontier,
     claim_graph_execution,
+    complete_graph_frontier,
     fence_graph_execution,
-    settle_graph_execution,
+    settle_graph_node,
     start_graph_run,
 )
 from mote_kernel.state.graph_state.lifecycle_transitions import abort_graph_run
 from mote_kernel.state.graph_state.model import GraphRunState
 from mote_kernel.state.graph_state.recovery_transitions import resume_graph_nodes
-from mote_kernel.state.graph_state.resource_transitions import update_graph_resources
 from mote_kernel.state.graph_state.validation import GraphStateTransitionError, validate_graph_run_state
 
 
@@ -36,21 +38,34 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
     if state is None:
         raise GraphStateTransitionError("a graph run must be started before it can transition")
     validate_graph_run_state(state)
+    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+        command,
+        ClaimGraphExecution
+        | FenceGraphExecution
+        | SettleGraphNode
+        | ResumeGraphNodes
+        | AdvanceGraphFrontier
+        | CompleteGraphFrontier
+        | AbortGraphRun,
+    ):
+        raise GraphStateTransitionError("graph command has an unsupported variant")
     if command.expected_revision != state.revision:
         raise GraphStateTransitionError("graph command was based on a stale revision")
     if isinstance(command, ClaimGraphExecution):
         updated = claim_graph_execution(state, command)
     elif isinstance(command, FenceGraphExecution):
         updated = fence_graph_execution(state, command)
-    elif isinstance(command, SettleGraphExecution):
-        updated = settle_graph_execution(state, command)
+    elif isinstance(command, SettleGraphNode):
+        updated = settle_graph_node(state, command)
     elif isinstance(command, ResumeGraphNodes):
         updated = resume_graph_nodes(state, command)
-    elif isinstance(command, UpdateGraphResources):
-        updated = update_graph_resources(state, command)
+    elif isinstance(command, AdvanceGraphFrontier):
+        updated = advance_graph_frontier(state, command)
+    elif isinstance(command, CompleteGraphFrontier):
+        updated = complete_graph_frontier(state, command)
     elif isinstance(command, AbortGraphRun):  # pyright: ignore[reportUnnecessaryIsInstance]
         updated = abort_graph_run(state, command)
-    else:
+    else:  # pragma: no cover - the runtime union guard above makes this statically exhaustive
         assert_never(command)
     return replace(updated, revision=state.revision + 1)
 

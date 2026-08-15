@@ -37,7 +37,6 @@ class GraphExecutionToken:
 @dataclass(frozen=True, slots=True)
 class GraphExecutionLease:
     token: GraphExecutionToken
-    node_ids: tuple[GraphNodeId, ...]
 
 
 @dataclass(frozen=True, slots=True)

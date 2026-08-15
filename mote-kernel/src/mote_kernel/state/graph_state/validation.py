@@ -3,7 +3,6 @@
 from mote_kernel.state.graph_state.frontier_model import (
     FailedGraphNode,
     GraphFrontierState,
-    GraphFrontierStatus,
     GraphNodeInterruptIdentity,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
@@ -147,6 +146,10 @@ def validate_graph_run_state(state: GraphRunState) -> None:
             validate_resource_snapshot(state.resources)
         except ResourceTransitionError as error:
             raise GraphStateTransitionError("graph resources state is invalid") from error
+        if not state.resources.acquisitions:
+            raise GraphStateTransitionError("authoritative graph resources cannot be empty")
+        if state.execution is None:
+            raise GraphStateTransitionError("graph resources require an active execution lease")
         pending = frozenset(pending_node_ids(state.frontier))
         if not pending:
             raise GraphStateTransitionError("resource admission requires current pending nodes")
@@ -160,18 +163,19 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         if execution.token.generation != state.execution_sequence or execution.token.generation < 1:
             raise GraphStateTransitionError("execution lease generation must match the graph sequence")
         _require_identity(execution.token.attempt_id, "execution attempt identity")
-        if execution.node_ids != pending_node_ids(state.frontier):
-            raise GraphStateTransitionError("execution lease must exactly cover all pending nodes")
+        if state.status is GraphRunStatus.RUNNING and not pending_node_ids(state.frontier):
+            raise GraphStateTransitionError("an active execution lease requires pending nodes")
 
     match state.status:
         case GraphRunStatus.RUNNING:
             if not state.frontier.nodes:
                 raise GraphStateTransitionError("a running graph requires a non-empty frontier")
-            status = frontier_status(state.frontier)
-            if status is GraphFrontierStatus.SETTLED:
-                raise GraphStateTransitionError("a running graph cannot retain a settled frontier")
+            frontier_status(state.frontier)
             if state.abort is not None:
                 raise GraphStateTransitionError("a running graph cannot retain an abort")
+            # The resource and execution checks above already require a Pending
+            # node for every non-empty durable lease/snapshot, so AWAITING_RESUME
+            # and SETTLED states are necessarily quiescent here.
         case GraphRunStatus.COMPLETED:
             if state.frontier.nodes or state.join_progress or state.resources is not None:
                 raise GraphStateTransitionError("a completed graph must use the canonical empty position")

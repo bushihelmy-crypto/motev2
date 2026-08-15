@@ -13,4 +13,24 @@ Every node in one concurrent frontier receives the same immutable input snapshot
 
 The default public composition entry point has not been designed or implemented yet. Required ports are validated when an agent flow is assembled. Missing optional ports remove their corresponding nodes when graph definitions are assembled, keeping runtime paths deterministic.
 
+## Graph frontier execution
+
+`GraphRunState` is the sole durable truth for frontier settlement, resource ownership, and the active execution token. One atomic
+`ClaimGraphExecution` transition installs a token-only lease and, when needed, the initial `ResourceSnapshot`.
+
+`GraphExecutor.execute()` is the only supported session creation path. It consumes the prepared claim linearly and issues a
+single-consumer `GraphExecutionSession`; the public session type is a non-constructible protocol. Each `next(authoritative_state)` call
+acknowledges the preceding reducer commit and yields at most one typed node completion with one `SettleGraphNode` command. Concurrent
+`next()` calls fail closed before reaching the scheduler, and `aclose()` is idempotent and waits for live tasks to stop.
+Cancelling `next()` runs close before propagating cancellation; cancelling that same task again during cleanup cannot interrupt the close.
+
+`SettleGraphNode` atomically records that node's settlement, releases its resources, and advances deterministic resource waiters in one
+new `GraphRunState`. Resource requirements only affect which pending nodes the single scheduler may select. Once a caller applies a
+settlement and acknowledges the successor state, a newly admitted waiter is submitted immediately even when another typed sibling
+completion is already queued; an observed ordinary error instead stops all new activations.
+
+The final node settlement persists a stable `RUNNING + SETTLED` frontier first. Routing is resolved only from that persisted barrier and
+then produces a standalone `AdvanceGraphFrontier` or `CompleteGraphFrontier` transition. Session queues and task handles are transient;
+they are not a store, retry policy, exactly-once guarantee, or second durable state model.
+
 This document records the stable architectural direction. Authoritative public contracts will be documented alongside their implementation.

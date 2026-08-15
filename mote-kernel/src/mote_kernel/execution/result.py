@@ -1,4 +1,4 @@
-"""Typed execution results and preparation dispositions."""
+"""Typed execution results and state-driven preparation dispositions."""
 
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
@@ -7,15 +7,16 @@ from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.graph import CompiledGraph
 from mote_kernel.state.graph_state import (
+    AdvanceGraphFrontier,
+    CompleteGraphFrontier,
     GraphFailure,
     GraphInterruptPayload,
     GraphNodeId,
     GraphRoutingContribution,
-    GraphRunCommand,
     GraphRunState,
     ParentGraphActivation,
+    SettleGraphNode,
     StartGraphRun,
-    UpdateGraphResources,
 )
 
 InputT = TypeVar("InputT")
@@ -116,20 +117,13 @@ class WaitingForChildren(Generic[InputT, OutputT]):
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedResourceAdmission:
-    admitted_node_ids: tuple[GraphNodeId, ...]
-    waiting_node_ids: tuple[GraphNodeId, ...]
-    command: UpdateGraphResources
+class ExecutableFrontier:
+    claim: PreparedExecutionClaim
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutableFrontier:
-    admission: PreparedResourceAdmission | None = None
-    claim: PreparedExecutionClaim | None = None
-
-    def __post_init__(self) -> None:
-        if (self.admission is None) == (self.claim is None):
-            raise ValueError("an executable frontier requires exactly one admission or claim")
+class ReadyToResolve:
+    command: AdvanceGraphFrontier | CompleteGraphFrontier
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,14 +143,19 @@ class AbortedGraph:
 
 
 PrepareDisposition: TypeAlias = (
-    ExecutableFrontier | WaitingForChildren[InputT, OutputT] | AwaitingResume | CompletedGraph | AbortedGraph
+    ExecutableFrontier
+    | WaitingForChildren[InputT, OutputT]
+    | ReadyToResolve
+    | AwaitingResume
+    | CompletedGraph
+    | AbortedGraph
 )
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutedFrontierAttempt(Generic[OutputT]):
-    results: tuple[TaskResult[OutputT], ...]
-    command: GraphRunCommand
+class ExecutedGraphNode(Generic[OutputT]):
+    result: TaskResult[OutputT]
+    command: SettleGraphNode
 
 
 __all__ = [
@@ -168,11 +167,11 @@ __all__ = [
     "CompletedChild",
     "CompletedGraph",
     "ExecutableFrontier",
-    "ExecutedFrontierAttempt",
+    "ExecutedGraphNode",
     "MissingChild",
     "PrepareDisposition",
     "PreparedNestedRun",
-    "PreparedResourceAdmission",
+    "ReadyToResolve",
     "StartMissingChildren",
     "TaskFailure",
     "TaskInterrupt",

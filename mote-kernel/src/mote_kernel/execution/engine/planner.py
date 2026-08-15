@@ -28,8 +28,6 @@ def plan_tasks(
     node_ids = pending_node_ids(state.frontier)
     if state.superstep >= limits.max_supersteps:
         raise ExecutionLimitError("graph run reached its superstep limit")
-    if len(node_ids) > limits.max_parallel_tasks:
-        raise ExecutionLimitError("planned frontier exceeds the parallel task limit")
     return tuple(
         GraphTask(task_identity(state.run_id, state.superstep, node_id), state.run_id, state.superstep, node_id)
         for node_id in node_ids

@@ -1,4 +1,4 @@
-"""Preparation and verification of all-pending batch claims."""
+"""Preparation and verification of frontier-wide execution claims."""
 
 from uuid import uuid4
 
@@ -11,6 +11,7 @@ from mote_kernel.state.graph_state import (
     GraphExecutionAttemptId,
     GraphExecutionToken,
     GraphRunState,
+    ResourceSnapshot,
 )
 
 
@@ -19,12 +20,13 @@ def prepare_claim(
     state: GraphRunState,
     request_attempt_id: ExecutionRequestAttemptId,
     tasks: tuple[GraphTask, ...],
+    resources: ResourceSnapshot | None,
 ) -> PreparedExecutionClaim:
     node_ids = tuple(task.node_id for task in tasks)
     task_ids = tuple(task.task_id for task in tasks)
     attempt_id = GraphExecutionAttemptId(str(uuid4()))
     token = GraphExecutionToken(state.execution_sequence + 1, attempt_id)
-    command = ClaimGraphExecution(state.revision, attempt_id, node_ids)
+    command = ClaimGraphExecution(state.revision, attempt_id, resources)
     return prepare_execution_claim(owner, command, token, node_ids, task_ids, request_attempt_id)
 
 

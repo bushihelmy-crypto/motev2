@@ -54,16 +54,14 @@ GraphNodeOutcome: TypeAlias = SucceededGraphNodeOutcome | FailedGraphNodeOutcome
 
 @dataclass(frozen=True, slots=True)
 class AdvanceGraphFrontier:
+    expected_revision: int
     node_ids: tuple[GraphNodeId, ...]
     join_progress: tuple[GraphJoinProgress, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class CompleteGraphFrontier:
-    pass
-
-
-GraphFrontierResolution: TypeAlias = AdvanceGraphFrontier | CompleteGraphFrontier
+    expected_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +101,7 @@ class StartGraphRun:
 class ClaimGraphExecution:
     expected_revision: int
     attempt_id: GraphExecutionAttemptId
-    node_ids: tuple[GraphNodeId, ...]
+    resources: ResourceSnapshot | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,18 +111,16 @@ class FenceGraphExecution:
 
 
 @dataclass(frozen=True, slots=True)
-class SettleGraphExecution:
+class SettleGraphNode:
     expected_revision: int
     execution: GraphExecutionToken
-    outcomes: tuple[GraphNodeOutcome, ...]
-    resolution: GraphFrontierResolution | None
+    outcome: GraphNodeOutcome
 
 
 @dataclass(frozen=True, slots=True)
 class ResumeGraphNodes:
     expected_revision: int
     actions: tuple[GraphNodeResumeAction, ...]
-    resolution: GraphFrontierResolution | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,20 +129,15 @@ class AbortGraphRun:
     reason: GraphAbortReason
 
 
-@dataclass(frozen=True, slots=True)
-class UpdateGraphResources:
-    expected_revision: int
-    resources: ResourceSnapshot
-
-
 GraphRunCommand: TypeAlias = (
     StartGraphRun
     | ClaimGraphExecution
     | FenceGraphExecution
-    | SettleGraphExecution
+    | SettleGraphNode
     | ResumeGraphNodes
+    | AdvanceGraphFrontier
+    | CompleteGraphFrontier
     | AbortGraphRun
-    | UpdateGraphResources
 )
 
 
@@ -157,7 +148,6 @@ __all__ = [
     "CompleteGraphFrontier",
     "FailedGraphNodeOutcome",
     "FenceGraphExecution",
-    "GraphFrontierResolution",
     "GraphNodeOutcome",
     "GraphNodeResumeAction",
     "GraphRunCommand",
@@ -165,9 +155,8 @@ __all__ = [
     "ResumeFailedNode",
     "ResumeGraphNodes",
     "ResumeInterruptedNode",
-    "SettleGraphExecution",
+    "SettleGraphNode",
     "SkipFailedNode",
     "StartGraphRun",
     "SucceededGraphNodeOutcome",
-    "UpdateGraphResources",
 ]

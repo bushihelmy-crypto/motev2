@@ -8,17 +8,14 @@ from mote_kernel.state.graph_state.command import (
     ResumeInterruptedNode,
     SkipFailedNode,
 )
-from mote_kernel.state.graph_state.execution_transitions import apply_frontier_resolution
 from mote_kernel.state.graph_state.frontier_model import (
     FailedGraphNode,
     GraphFrontierNode,
     GraphFrontierState,
-    GraphFrontierStatus,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
     PendingGraphNode,
     SkippedGraphNode,
-    frontier_status,
 )
 from mote_kernel.state.graph_state.identity import graph_interrupt_id
 from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
@@ -73,14 +70,6 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
         raise GraphStateTransitionError("resume action references an unknown frontier node")
     frontier = GraphFrontierState(tuple(updated))
     validate_graph_frontier(state, frontier)
-    if frontier_status(frontier) is GraphFrontierStatus.SETTLED:
-        if command.resolution is None:
-            raise GraphStateTransitionError("a settled resume requires its atomic resolution")
-        return validated_graph_run_state(
-            apply_frontier_resolution(replace(state, frontier=frontier), command.resolution)
-        )
-    if command.resolution is not None:
-        raise GraphStateTransitionError("an unsettled resume cannot apply routing resolution")
     return validated_graph_run_state(replace(state, frontier=frontier))
 
 

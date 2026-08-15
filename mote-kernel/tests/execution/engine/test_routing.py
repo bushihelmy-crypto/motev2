@@ -22,7 +22,18 @@ from mote_kernel.state.graph_state import (
 )
 
 
-def continue_for(*node_ids: str):
+def expected_advance(
+    node_ids: tuple[GraphNodeId, ...],
+    join_progress: tuple[GraphJoinProgress, ...] = (),
+) -> AdvanceGraphFrontier:
+    return AdvanceGraphFrontier(0, node_ids, join_progress)
+
+
+def expected_complete() -> CompleteGraphFrontier:
+    return CompleteGraphFrontier(0)
+
+
+def continue_for(*node_ids: str) -> tuple[tuple[GraphNodeId, GraphRoutingContribution], ...]:
     return tuple((GraphNodeId(node_id), ContinueGraphRouting()) for node_id in node_ids)
 
 
@@ -35,17 +46,15 @@ def test_direct_conditional_and_terminal_routing_use_one_contribution_model() ->
     )
     selected = SelectGraphRoute(GraphRouteId("optional"))
 
-    assert resolve_routing(graph, ((GraphNodeId("a"), selected),), ()) == AdvanceGraphFrontier(
+    assert resolve_routing(graph, ((GraphNodeId("a"), selected),), ()) == expected_advance(
         (GraphNodeId("b"), GraphNodeId("c")), ()
     )
-    assert resolve_routing(topology("a"), continue_for("a"), ()) == CompleteGraphFrontier()
+    assert resolve_routing(topology("a"), continue_for("a"), ()) == expected_complete()
 
 
 def test_direct_fanout_is_sorted_and_deduplicated() -> None:
     graph = topology("a", "b", "c", edges=(direct("a", "c"), direct("a", "b")))
-    assert resolve_routing(graph, continue_for("a"), ()) == AdvanceGraphFrontier(
-        (GraphNodeId("b"), GraphNodeId("c")), ()
-    )
+    assert resolve_routing(graph, continue_for("a"), ()) == expected_advance((GraphNodeId("b"), GraphNodeId("c")), ())
 
 
 def test_conditional_route_selects_exact_target() -> None:
@@ -59,7 +68,7 @@ def test_conditional_route_selects_exact_target() -> None:
         graph,
         ((GraphNodeId("a"), SelectGraphRoute(GraphRouteId("right"))),),
         (),
-    ) == AdvanceGraphFrontier((GraphNodeId("c"),), ())
+    ) == expected_advance((GraphNodeId("c"),), ())
 
 
 def test_routing_validator_rejects_topology_incompatible_contribution() -> None:
@@ -100,8 +109,7 @@ def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
 
     first = resolve_routing(graph, continue_for("a"), ())
     assert isinstance(first, AdvanceGraphFrontier)
-    assert isinstance(first, AdvanceGraphFrontier)
-    assert first == AdvanceGraphFrontier(
+    assert first == expected_advance(
         (GraphNodeId("work"),),
         (
             GraphJoinProgress(
@@ -112,7 +120,7 @@ def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
         ),
     )
     second = resolve_routing(graph, continue_for("b"), first.join_progress)
-    assert second == AdvanceGraphFrontier((GraphNodeId("c"),), ())
+    assert second == expected_advance((GraphNodeId("c"),), ())
 
 
 def test_one_source_can_complete_multiple_joins_in_same_step() -> None:
@@ -125,7 +133,7 @@ def test_one_source_can_complete_multiple_joins_in_same_step() -> None:
         edges=(join(("a", "b"), "d"), join(("a", "c"), "e")),
         entries=("a", "b", "c"),
     )
-    assert resolve_routing(graph, continue_for("a", "b", "c"), ()) == AdvanceGraphFrontier(
+    assert resolve_routing(graph, continue_for("a", "b", "c"), ()) == expected_advance(
         (GraphNodeId("d"), GraphNodeId("e")), ()
     )
 
@@ -139,7 +147,7 @@ def test_completed_joins_and_direct_arrivals_deduplicate_targets() -> None:
         edges=(direct("a", "d"), join(("a", "b"), "d"), join(("a", "c"), "d")),
         entries=("a", "b", "c"),
     )
-    assert resolve_routing(graph, continue_for("a", "b", "c"), ()) == AdvanceGraphFrontier((GraphNodeId("d"),), ())
+    assert resolve_routing(graph, continue_for("a", "b", "c"), ()) == expected_advance((GraphNodeId("d"),), ())
 
 
 def test_direct_target_can_run_before_join_and_again_when_join_completes() -> None:
@@ -152,7 +160,7 @@ def test_direct_target_can_run_before_join_and_again_when_join_completes() -> No
     )
     first = resolve_routing(graph, continue_for("a"), ())
     assert isinstance(first, AdvanceGraphFrontier)
-    assert first == AdvanceGraphFrontier(
+    assert first == expected_advance(
         (GraphNodeId("c"),),
         (
             GraphJoinProgress(
@@ -162,9 +170,7 @@ def test_direct_target_can_run_before_join_and_again_when_join_completes() -> No
             ),
         ),
     )
-    assert resolve_routing(graph, continue_for("b"), first.join_progress) == AdvanceGraphFrontier(
-        (GraphNodeId("c"),), ()
-    )
+    assert resolve_routing(graph, continue_for("b"), first.join_progress) == expected_advance((GraphNodeId("c"),), ())
 
 
 def test_conditional_branch_can_supply_join_source() -> None:
@@ -181,8 +187,8 @@ def test_conditional_branch_can_supply_join_source() -> None:
         ((GraphNodeId("start"), SelectGraphRoute(GraphRouteId("right"))),),
         (),
     )
-    assert first == AdvanceGraphFrontier((GraphNodeId("a"), GraphNodeId("b")), ())
-    assert resolve_routing(graph, continue_for("a", "b"), ()) == AdvanceGraphFrontier((GraphNodeId("end"),), ())
+    assert first == expected_advance((GraphNodeId("a"), GraphNodeId("b")), ())
+    assert resolve_routing(graph, continue_for("a", "b"), ()) == expected_advance((GraphNodeId("end"),), ())
 
 
 def test_chained_joins_advance_across_supersteps() -> None:
@@ -196,10 +202,10 @@ def test_chained_joins_advance_across_supersteps() -> None:
         entries=("a", "b"),
     )
     first = resolve_routing(graph, continue_for("a", "b"), ())
-    assert first == AdvanceGraphFrontier((GraphNodeId("c"),), ())
+    assert first == expected_advance((GraphNodeId("c"),), ())
     second = resolve_routing(graph, continue_for("c"), ())
     assert isinstance(second, AdvanceGraphFrontier)
-    assert second == AdvanceGraphFrontier(
+    assert second == expected_advance(
         (GraphNodeId("d"),),
         (
             GraphJoinProgress(
@@ -209,14 +215,12 @@ def test_chained_joins_advance_across_supersteps() -> None:
             ),
         ),
     )
-    assert resolve_routing(graph, continue_for("d"), second.join_progress) == AdvanceGraphFrontier(
-        (GraphNodeId("e"),), ()
-    )
+    assert resolve_routing(graph, continue_for("d"), second.join_progress) == expected_advance((GraphNodeId("e"),), ())
 
 
 def test_join_can_fire_again_after_prior_progress_was_consumed() -> None:
     graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
-    expected = AdvanceGraphFrontier((GraphNodeId("c"),), ())
+    expected = expected_advance((GraphNodeId("c"),), ())
     assert resolve_routing(graph, continue_for("a", "b"), ()) == expected
     assert resolve_routing(graph, continue_for("a", "b"), ()) == expected
 
@@ -235,7 +239,7 @@ def test_join_progress_survives_unrelated_supersteps() -> None:
     assert isinstance(second, AdvanceGraphFrontier)
     third = resolve_routing(graph, continue_for("c"), second.join_progress)
     assert second.join_progress == first.join_progress
-    assert third == AdvanceGraphFrontier((GraphNodeId("d"),), ())
+    assert third == expected_advance((GraphNodeId("d"),), ())
 
 
 def test_repeated_incomplete_join_arrival_is_idempotent() -> None:
@@ -251,9 +255,7 @@ def test_repeated_incomplete_join_arrival_is_idempotent() -> None:
         GraphNodeId("c"),
         frozenset({GraphNodeId("a")}),
     )
-    assert resolve_routing(graph, continue_for("a"), (progress,)) == AdvanceGraphFrontier(
-        (GraphNodeId("a"),), (progress,)
-    )
+    assert resolve_routing(graph, continue_for("a"), (progress,)) == expected_advance((GraphNodeId("a"),), (progress,))
 
 
 def test_persisted_join_progress_order_does_not_change_decision() -> None:
@@ -275,9 +277,9 @@ def test_persisted_join_progress_order_does_not_change_decision() -> None:
 
 def test_same_step_join_to_end_completes_and_self_loop_reactivates_node() -> None:
     joined = topology("a", "b", edges=(join(("a", "b"), END),), entries=("a", "b"))
-    assert resolve_routing(joined, continue_for("a", "b"), ()) == CompleteGraphFrontier()
+    assert resolve_routing(joined, continue_for("a", "b"), ()) == expected_complete()
     loop = topology("a", edges=(direct("a", "a"),))
-    assert resolve_routing(loop, continue_for("a"), ()) == AdvanceGraphFrontier((GraphNodeId("a"),), ())
+    assert resolve_routing(loop, continue_for("a"), ()) == expected_advance((GraphNodeId("a"),), ())
 
 
 def test_partial_join_without_continuing_work_is_deadlocked() -> None:

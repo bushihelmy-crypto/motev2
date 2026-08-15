@@ -3,8 +3,9 @@ from typing import Generic, TypeVar
 
 from mote_kernel.execution import (
     ExecutableFrontier,
-    ExecutedFrontierAttempt,
+    ExecutedGraphNode,
     ExecutionRequestAttemptId,
+    GraphExecutionSession,
     GraphExecutor,
     StepRequest,
 )
@@ -37,10 +38,11 @@ class DriverRequest(Generic[InputT, OutputT]):
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ClaimedStep(Generic[OutputT]):
+@dataclass(slots=True)
+class ClaimedStep(Generic[InputT, OutputT]):
     state: GraphRunState
-    result: ExecutedFrontierAttempt[OutputT]
+    session: GraphExecutionSession[InputT, OutputT]
+    result: ExecutedGraphNode[OutputT]
 
 
 def step_request(
@@ -59,13 +61,13 @@ def apply_command(state: GraphRunState, command: GraphRunCommand) -> GraphRunSta
 
 async def execute_step(
     request: DriverRequest[InputT, OutputT],
-) -> PrepareDisposition[InputT, OutputT] | ClaimedStep[OutputT]:
+) -> PrepareDisposition[InputT, OutputT] | ClaimedStep[InputT, OutputT]:
     executor = GraphExecutor(request.graph)
     prepared = await executor.prepare(request.execution_request())
-    if not isinstance(prepared, ExecutableFrontier) or prepared.claim is None:
+    if not isinstance(prepared, ExecutableFrontier):
         return prepared
     claimed = apply_command(request.state, prepared.claim.command)
-    result = await executor.execute(
+    session = await executor.execute(
         prepared.claim,
         StepRequest(
             claimed,
@@ -75,11 +77,16 @@ async def execute_step(
             request.limits,
         ),
     )
-    return ClaimedStep(claimed, result)
+    result = await session.next(claimed)
+    return ClaimedStep(claimed, session, result)
 
 
-def apply_claimed(step: ClaimedStep[OutputT]) -> GraphRunState:
+def apply_claimed(step: ClaimedStep[InputT, OutputT]) -> GraphRunState:
     return apply_command(step.state, step.result.command)
+
+
+async def close_claimed(step: ClaimedStep[InputT, OutputT]) -> None:
+    await step.session.aclose()
 
 
 __all__ = [
@@ -88,6 +95,7 @@ __all__ = [
     "DriverRequest",
     "apply_claimed",
     "apply_command",
+    "close_claimed",
     "execute_step",
     "step_request",
 ]

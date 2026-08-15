@@ -35,6 +35,7 @@ from mote_kernel.state.graph_state import (
     InterruptedGraphNodeOutcome,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    ResourceAcquisition,
     ResourceId,
     ResourceLock,
     ResourceSnapshot,
@@ -42,7 +43,7 @@ from mote_kernel.state.graph_state import (
     ResumeGraphNodes,
     ResumeInterruptedNode,
     SelectGraphRoute,
-    SettleGraphExecution,
+    SettleGraphNode,
     SkipFailedNode,
     SkippedGraphNode,
     StartGraphRun,
@@ -73,28 +74,26 @@ def start(*nodes: GraphNodeId, codec: bool = True) -> GraphRunState:
 
 
 def claim(state: GraphRunState) -> GraphRunState:
-    node_ids = tuple(node.node_id for node in state.frontier.nodes if isinstance(node.settlement, PendingGraphNode))
     return reduce_graph_run(
         state,
         ClaimGraphExecution(
             state.revision,
             GraphExecutionAttemptId(f"attempt-{state.execution_sequence + 1}"),
-            node_ids,
+            None,
         ),
     )
 
 
 def settle(state: GraphRunState, outcomes: tuple[GraphNodeOutcome, ...]) -> GraphRunState:
     assert state.execution is not None
-    return reduce_graph_run(
-        state,
-        SettleGraphExecution(
-            state.revision,
-            state.execution.token,
-            outcomes,
-            None,
-        ),
-    )
+    current = state
+    for outcome in outcomes:
+        assert current.execution is not None
+        current = reduce_graph_run(
+            current,
+            SettleGraphNode(current.revision, current.execution.token, outcome),
+        )
+    return current
 
 
 def failed_state() -> GraphRunState:
@@ -135,7 +134,6 @@ def test_selective_failure_resume_preserves_every_unselected_settlement() -> Non
         ResumeGraphNodes(
             state.revision,
             (ResumeFailedNode(B, OverrideGraphNodeInput(GraphResumeInputPayload(b"retry-b"))),),
-            None,
         ),
     )
 
@@ -152,7 +150,7 @@ def test_failure_resume_supports_request_default_binding() -> None:
 
     resumed = reduce_graph_run(
         state,
-        ResumeGraphNodes(state.revision, (ResumeFailedNode(B, UseStepRequestInput()),), None),
+        ResumeGraphNodes(state.revision, (ResumeFailedNode(B, UseStepRequestInput()),)),
     )
 
     assert resumed.frontier.nodes[1].settlement == PendingGraphNode(UseStepRequestInput())
@@ -181,7 +179,6 @@ def test_interrupt_resume_requires_exact_current_projected_id() -> None:
                     OverrideGraphNodeInput(GraphResumeInputPayload(b"answer")),
                 ),
             ),
-            None,
         ),
     )
 
@@ -214,7 +211,6 @@ def test_interrupt_resume_rejects_wrong_or_stale_id(interrupt_id: GraphInterrupt
                         OverrideGraphNodeInput(GraphResumeInputPayload(b"answer")),
                     ),
                 ),
-                None,
             ),
         )
 
@@ -250,7 +246,6 @@ def test_skip_requires_failed_settlement(settlement: str) -> None:
             ResumeGraphNodes(
                 state.revision,
                 (SkipFailedNode(B, GraphSkipReason("skip"), ContinueGraphRouting()),),
-                None,
             ),
         )
 
@@ -270,7 +265,7 @@ def test_resume_action_must_match_current_settlement(action: GraphNodeResumeActi
     state = failed_state()
 
     with pytest.raises(GraphStateTransitionError, match="does not match"):
-        reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,), None))
+        reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,)))
 
 
 @pytest.mark.parametrize(
@@ -289,7 +284,7 @@ def test_resume_action_group_requires_nonempty_distinct_canonical_known_nodes(
     state = failed_state()
 
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(state, ResumeGraphNodes(state.revision, actions, None))
+        reduce_graph_run(state, ResumeGraphNodes(state.revision, actions))
 
 
 def test_any_invalid_action_rejects_entire_resume_group_atomically() -> None:
@@ -304,7 +299,7 @@ def test_any_invalid_action_rejects_entire_resume_group_atomically() -> None:
     )
 
     with pytest.raises(GraphStateTransitionError):
-        reduce_graph_run(state, ResumeGraphNodes(state.revision, actions, None))
+        reduce_graph_run(state, ResumeGraphNodes(state.revision, actions))
     assert isinstance(state.frontier.nodes[1].settlement, FailedGraphNode)
     assert isinstance(state.frontier.nodes[2].settlement, FailedGraphNode)
 
@@ -318,7 +313,6 @@ def test_skip_preserves_failure_reason_and_routing_without_output() -> None:
         ResumeGraphNodes(
             state.revision,
             (SkipFailedNode(B, GraphSkipReason("operator"), routing),),
-            None,
         ),
     )
 
@@ -329,23 +323,18 @@ def test_skip_preserves_failure_reason_and_routing_without_output() -> None:
     )
 
 
-def test_skip_last_failure_requires_atomic_completion() -> None:
+def test_skip_last_failure_requires_a_standalone_completion_revision() -> None:
     leased = claim(start(A))
     state = settle(leased, (FailedGraphNodeOutcome(A, GraphFailure("failed")),))
     action = SkipFailedNode(A, GraphSkipReason("operator"), ContinueGraphRouting())
 
-    with pytest.raises(GraphStateTransitionError, match="settled resume"):
-        reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,), None))
-
-    completed = reduce_graph_run(
-        state,
-        ResumeGraphNodes(state.revision, (action,), CompleteGraphFrontier()),
-    )
+    settled = reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,)))
+    completed = reduce_graph_run(settled, CompleteGraphFrontier(settled.revision))
     assert completed.status is GraphRunStatus.COMPLETED
     assert completed.frontier == GraphFrontierState(())
 
 
-def test_skip_last_failure_can_atomically_advance_with_all_routing_facts() -> None:
+def test_skip_last_failure_can_advance_after_all_routing_facts_are_committed() -> None:
     leased = claim(start(A, B))
     state = settle(
         leased,
@@ -356,13 +345,17 @@ def test_skip_last_failure_can_atomically_advance_with_all_routing_facts() -> No
     )
     progress = GraphJoinProgress((A, B), C, frozenset({A}))
 
-    advanced = reduce_graph_run(
+    settled = reduce_graph_run(
         state,
         ResumeGraphNodes(
             state.revision,
             (SkipFailedNode(B, GraphSkipReason("operator"), ContinueGraphRouting()),),
-            AdvanceGraphFrontier((C,), (progress,)),
         ),
+    )
+
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(settled.revision, (C,), (progress,)),
     )
 
     assert advanced.superstep == 1
@@ -370,34 +363,33 @@ def test_skip_last_failure_can_atomically_advance_with_all_routing_facts() -> No
     assert advanced.join_progress == (progress,)
 
 
-def test_resume_rejects_resolution_until_frontier_is_fully_settled() -> None:
+def test_resume_leaves_a_settled_frontier_for_the_next_resolution_command() -> None:
     state = failed_state()
-
-    with pytest.raises(GraphStateTransitionError, match="unsettled"):
-        reduce_graph_run(
-            state,
-            ResumeGraphNodes(
-                state.revision,
-                (ResumeFailedNode(B, UseStepRequestInput()),),
-                CompleteGraphFrontier(),
-            ),
-        )
+    resumed = reduce_graph_run(state, ResumeGraphNodes(state.revision, (ResumeFailedNode(B, UseStepRequestInput()),)))
+    assert resumed.status is GraphRunStatus.RUNNING
 
 
 def test_resume_rejects_stale_revision_active_lease_and_resources() -> None:
     state = failed_state()
     action = ResumeFailedNode(B, UseStepRequestInput())
     with pytest.raises(GraphStateTransitionError, match="stale revision"):
-        reduce_graph_run(state, ResumeGraphNodes(state.revision + 1, (action,), None))
+        reduce_graph_run(state, ResumeGraphNodes(state.revision + 1, (action,)))
 
-    pending = reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,), None))
+    pending = reduce_graph_run(state, ResumeGraphNodes(state.revision, (action,)))
     leased = claim(pending)
     with pytest.raises(GraphStateTransitionError, match="quiescent"):
-        reduce_graph_run(leased, ResumeGraphNodes(leased.revision, (ResumeFailedNode(C, UseStepRequestInput()),), None))
+        reduce_graph_run(leased, ResumeGraphNodes(leased.revision, (ResumeFailedNode(C, UseStepRequestInput()),)))
 
-    admitted = replace(state, resources=ResourceSnapshot((ResourceLock(ResourceId("file")),)))
-    with pytest.raises(GraphStateTransitionError, match="current pending nodes"):
-        reduce_graph_run(admitted, ResumeGraphNodes(admitted.revision, (action,), None))
+    admitted = replace(
+        state,
+        execution=state.execution,
+        resources=ResourceSnapshot(
+            (ResourceLock(ResourceId("file"), B),),
+            (ResourceAcquisition(B, (ResourceId("file"),), (ResourceId("file"),)),),
+        ),
+    )
+    with pytest.raises(GraphStateTransitionError):
+        reduce_graph_run(admitted, ResumeGraphNodes(admitted.revision, (action,)))
 
 
 def test_failure_override_requires_durable_codec_but_default_does_not() -> None:
@@ -406,7 +398,7 @@ def test_failure_override_requires_durable_codec_but_default_does_not() -> None:
 
     default = reduce_graph_run(
         failed,
-        ResumeGraphNodes(failed.revision, (ResumeFailedNode(A, UseStepRequestInput()),), None),
+        ResumeGraphNodes(failed.revision, (ResumeFailedNode(A, UseStepRequestInput()),)),
     )
     assert isinstance(default.frontier.nodes[0].settlement, PendingGraphNode)
 
@@ -421,7 +413,6 @@ def test_failure_override_requires_durable_codec_but_default_does_not() -> None:
                         OverrideGraphNodeInput(GraphResumeInputPayload(b"override")),
                     ),
                 ),
-                None,
             ),
         )
 
@@ -448,7 +439,6 @@ def test_consumed_interrupt_identity_cannot_be_resumed_again() -> None:
                     OverrideGraphNodeInput(GraphResumeInputPayload(b"answer")),
                 ),
             ),
-            None,
         ),
     )
 
@@ -464,6 +454,5 @@ def test_consumed_interrupt_identity_cannot_be_resumed_again() -> None:
                         OverrideGraphNodeInput(GraphResumeInputPayload(b"again")),
                     ),
                 ),
-                None,
             ),
         )

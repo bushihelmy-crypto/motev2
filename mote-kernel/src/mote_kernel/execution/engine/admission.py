@@ -8,6 +8,7 @@ from mote_kernel.execution.graph import CompiledGraph, NodeDefinition
 from mote_kernel.state.graph_state import (
     AcquireResources,
     GraphNodeId,
+    ResourceLock,
     ResourceSnapshot,
     ResourceTransitionError,
     reduce_resources,
@@ -15,6 +16,12 @@ from mote_kernel.state.graph_state import (
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
+
+
+def initial_resource_snapshot(graph: CompiledGraph[InputT, OutputT]) -> ResourceSnapshot:
+    """Create the replay base used only while projecting one atomic claim."""
+
+    return ResourceSnapshot(tuple(ResourceLock(resource_id) for resource_id in graph.resource_order))
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,4 +70,4 @@ def admit_tasks(
     return TaskAdmission(proposed, tuple(admitted), tuple(waiting))
 
 
-__all__ = ["TaskAdmission", "admit_tasks"]
+__all__ = ["TaskAdmission", "admit_tasks", "initial_resource_snapshot"]

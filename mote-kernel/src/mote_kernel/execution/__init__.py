@@ -3,6 +3,7 @@
 # pyright: reportUnusedImport=false
 
 from mote_kernel.execution.claim import PreparedExecutionClaim
+from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.identity import ExecutionRequestAttemptId
 from mote_kernel.execution.request import (
@@ -22,10 +23,10 @@ from mote_kernel.execution.result import (
     CompletedChild,
     CompletedGraph,
     ExecutableFrontier,
-    ExecutedFrontierAttempt,
+    ExecutedGraphNode,
     MissingChild,
     PreparedNestedRun,
-    PreparedResourceAdmission,
+    ReadyToResolve,
     StartMissingChildren,
     TaskFailure,
     TaskInterrupt,
@@ -42,14 +43,15 @@ __all__ = [
     "CompletedChild",
     "CompletedGraph",
     "ExecutableFrontier",
-    "ExecutedFrontierAttempt",
+    "ExecutedGraphNode",
     "ExecutionRequestAttemptId",
+    "GraphExecutionSession",
     "GraphExecutor",
     "MissingChild",
     "OverrideNodeInput",
     "PreparedExecutionClaim",
     "PreparedNestedRun",
-    "PreparedResourceAdmission",
+    "ReadyToResolve",
     "ResumeFailedNodeRequest",
     "ResumeInterruptedNodeRequest",
     "ResumeRequest",

@@ -374,11 +374,49 @@ def test_resource_membership_and_replay_invariants() -> None:
         (ResourceLock(resource, B),),
         (ResourceAcquisition(B, (resource,), (resource,)),),
     )
-    with pytest.raises(GraphStateTransitionError, match="outside current pending"):
+    with pytest.raises(GraphStateTransitionError, match="active execution"):
         validate_graph_run_state(replace(base, resources=foreign))
 
 
-@pytest.mark.parametrize("case", ["historical-generation", "empty-attempt", "wrong-node"])
+def test_authoritative_resource_shape_guards_are_independently_enforced() -> None:
+    base = running()
+    resource = ResourceId("file")
+    token = GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))
+    execution = GraphExecutionLease(token)
+
+    with pytest.raises(GraphStateTransitionError, match="cannot be empty"):
+        validate_graph_run_state(replace(base, resources=ResourceSnapshot((ResourceLock(resource),))))
+
+    owned_by_a = ResourceSnapshot(
+        (ResourceLock(resource, A),),
+        (ResourceAcquisition(A, (resource,), (resource,)),),
+    )
+    settled = replace(
+        base,
+        execution_sequence=1,
+        execution=execution,
+        resources=owned_by_a,
+        frontier=GraphFrontierState((GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting())),)),
+    )
+    with pytest.raises(GraphStateTransitionError, match="current pending"):
+        validate_graph_run_state(settled)
+
+    owned_by_b = ResourceSnapshot(
+        (ResourceLock(resource, B),),
+        (ResourceAcquisition(B, (resource,), (resource,)),),
+    )
+    with pytest.raises(GraphStateTransitionError, match="outside current pending"):
+        validate_graph_run_state(
+            replace(
+                base,
+                execution_sequence=1,
+                execution=execution,
+                resources=owned_by_b,
+            )
+        )
+
+
+@pytest.mark.parametrize("case", ["historical-generation", "empty-attempt", "no-pending"])
 def test_execution_lease_invariants(case: str) -> None:
     base = running()
     token = GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))
@@ -386,17 +424,18 @@ def test_execution_lease_invariants(case: str) -> None:
         "historical-generation": replace(
             base,
             execution_sequence=2,
-            execution=GraphExecutionLease(token, (A,)),
+            execution=GraphExecutionLease(token),
         ),
         "empty-attempt": replace(
             base,
             execution_sequence=1,
-            execution=GraphExecutionLease(GraphExecutionToken(1, GraphExecutionAttemptId("")), (A,)),
+            execution=GraphExecutionLease(GraphExecutionToken(1, GraphExecutionAttemptId(""))),
         ),
-        "wrong-node": replace(
+        "no-pending": replace(
             base,
             execution_sequence=1,
-            execution=GraphExecutionLease(token, (B,)),
+            frontier=GraphFrontierState(()),
+            execution=GraphExecutionLease(token),
         ),
     }[case]
     with pytest.raises(GraphStateTransitionError):
@@ -410,7 +449,7 @@ def test_completed_lifecycle_rejects_execution_lease() -> None:
     completed_with_execution = replace(
         completed,
         execution_sequence=1,
-        execution=GraphExecutionLease(token, ()),
+        execution=GraphExecutionLease(token),
     )
     with pytest.raises(GraphStateTransitionError, match="only a running graph"):
         validate_graph_run_state(completed_with_execution)
@@ -420,7 +459,6 @@ def test_completed_lifecycle_rejects_execution_lease() -> None:
     "case",
     [
         "running-empty-frontier",
-        "running-settled-frontier",
         "running-abort",
         "completed-frontier",
         "completed-abort",
@@ -433,10 +471,6 @@ def test_lifecycle_invariants_fail_closed(case: str) -> None:
     completed = replace(base, status=GraphRunStatus.COMPLETED, frontier=GraphFrontierState(()))
     invalid = {
         "running-empty-frontier": replace(base, frontier=GraphFrontierState(())),
-        "running-settled-frontier": replace(
-            base,
-            frontier=GraphFrontierState((GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting())),)),
-        ),
         "running-abort": replace(base, abort=GraphAbort(GraphAbortReason("abort"))),
         "completed-frontier": replace(completed, frontier=base.frontier),
         "completed-abort": replace(completed, abort=GraphAbort(GraphAbortReason("abort"))),
@@ -449,6 +483,27 @@ def test_lifecycle_invariants_fail_closed(case: str) -> None:
     }[case]
     with pytest.raises(GraphStateTransitionError):
         validate_graph_run_state(invalid)
+
+
+def test_running_settled_frontier_is_a_valid_quiescent_recovery_boundary() -> None:
+    base = running()
+    settled = replace(
+        base,
+        frontier=GraphFrontierState((GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting())),)),
+    )
+    validate_graph_run_state(settled)
+
+
+def test_running_settled_frontier_rejects_a_retained_execution_lease() -> None:
+    base = running()
+    settled = replace(
+        base,
+        execution_sequence=1,
+        execution=GraphExecutionLease(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+        frontier=GraphFrontierState((GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting())),)),
+    )
+    with pytest.raises(GraphStateTransitionError, match="active execution lease"):
+        validate_graph_run_state(settled)
 
 
 def test_unsupported_lifecycle_variant_fails_closed() -> None:
@@ -471,7 +526,14 @@ def test_reducer_rejects_start_over_existing_and_transition_before_start() -> No
     with pytest.raises(GraphStateTransitionError, match="started again"):
         reduce_graph_run(running(), command)
     with pytest.raises(GraphStateTransitionError, match="must be started"):
-        reduce_graph_run(None, ClaimGraphExecution(0, GraphExecutionAttemptId("attempt"), (A,)))
+        reduce_graph_run(
+            None,
+            ClaimGraphExecution(
+                0,
+                GraphExecutionAttemptId("attempt"),
+                cast(ResourceSnapshot, (A,)),
+            ),
+        )
 
 
 def test_empty_frontier_has_no_derived_status() -> None:

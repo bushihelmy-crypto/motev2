@@ -2,11 +2,16 @@
 
 ## 1. 文档信息
 
-- 状态：Ready for re-review（第三轮评审阻塞项已关闭）
+- 状态：历史需求基线（恢复语义继续有效；执行与结算模型已被替代）
 - 所属项目：Mote Kernel
 - 需求类型：Graph execution / unified node resume and interrupt semantics
 - 基线文档：`docs/frontier-node-resume-requirements.zh-CN.md`
 - 影响文档：`docs/frontier-node-resume-implementation.zh-CN.md`
+
+> 权威关系：本文关于 selective failure resume、skip、node interrupt、input override、identity、routing、join、nested、fence 和 abort
+> 的不冲突语义继续有效；关于 batch execution lease、`GraphExecutionLease.node_ids`、`SettleGraphExecution`、一次收集全部 outcomes，
+> 以及 settlement 内联 routing/advance/complete 的要求，已由
+> `docs/frontier-node-settlement-implementation.zh-CN.md` 的节点级 settlement 模型替代。发生冲突时以后者为唯一实施依据。
 
 本文是在已评审的 Frontier 节点失败恢复需求之上的增量替代需求。它把“恢复全部失败节点”扩展为选择性节点恢复，并将 failure 与
 interrupt 纳入同一套恢复协议，同时增加仅针对 Failed 节点的 skip。

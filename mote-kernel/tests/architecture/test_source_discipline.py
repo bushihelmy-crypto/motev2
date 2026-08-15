@@ -152,8 +152,10 @@ def test_graph_execution_contract_remains_async_only() -> None:
         _class_method("execution/executor.py", "GraphExecutor", "prepare"),
         _class_method("execution/executor.py", "GraphExecutor", "execute"),
         _top_level_function("execution/engine/superstep.py", "prepare_superstep"),
-        _top_level_function("execution/engine/superstep.py", "execute_claimed_frontier"),
-        _top_level_function("execution/engine/scheduler.py", "execute_tasks"),
+        _class_method("execution/engine/session.py", "GraphExecutionSession", "next"),
+        _class_method("execution/engine/session.py", "GraphExecutionSession", "aclose"),
+        _class_method("execution/engine/scheduler.py", "TaskScheduler", "next_completion"),
+        _class_method("execution/engine/scheduler.py", "TaskScheduler", "aclose"),
         _class_method("execution/graph/node.py", "Node", "__call__"),
     )
 

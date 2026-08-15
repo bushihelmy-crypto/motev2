@@ -1,6 +1,6 @@
 """Unique compiled-topology routing validator and frontier resolver."""
 
-from typing import TypeVar
+from typing import TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import (
     InvalidRoutingCommandError,
@@ -14,7 +14,6 @@ from mote_kernel.state.graph_state import (
     AdvanceGraphFrontier,
     CompleteGraphFrontier,
     ContinueGraphRouting,
-    GraphFrontierResolution,
     GraphJoinProgress,
     GraphNodeId,
     GraphRoutingContribution,
@@ -23,6 +22,7 @@ from mote_kernel.state.graph_state import (
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
+ResolutionCommand: TypeAlias = AdvanceGraphFrontier | CompleteGraphFrontier
 
 
 def validate_routing_contribution(
@@ -61,7 +61,9 @@ def resolve_routing(
     graph: CompiledGraph[InputT, OutputT],
     contributions: tuple[tuple[GraphNodeId, GraphRoutingContribution], ...],
     prior_join_progress: tuple[GraphJoinProgress, ...],
-) -> GraphFrontierResolution:
+    *,
+    expected_revision: int = 0,
+) -> ResolutionCommand:
     declared = _declared_joins(graph)
     arrivals: dict[tuple[tuple[GraphNodeId, ...], GraphNodeId], set[GraphNodeId]] = {}
     for progress in prior_join_progress:
@@ -92,8 +94,8 @@ def resolve_routing(
     if not next_nodes:
         if remaining:
             raise RoutingDeadlockError("partial join progress has no next task able to complete it")
-        return CompleteGraphFrontier()
-    return AdvanceGraphFrontier(tuple(sorted(next_nodes)), tuple(remaining))
+        return CompleteGraphFrontier(expected_revision)
+    return AdvanceGraphFrontier(expected_revision, tuple(sorted(next_nodes)), tuple(remaining))
 
 
-__all__ = ["resolve_routing", "validate_routing_contribution"]
+__all__ = ["ResolutionCommand", "resolve_routing", "validate_routing_contribution"]

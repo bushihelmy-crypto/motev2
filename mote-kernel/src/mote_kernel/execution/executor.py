@@ -6,9 +6,10 @@ from typing import Generic, TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
 from mote_kernel.execution.engine.resume_input import encode_resume_input, require_resume_input_binding
-from mote_kernel.execution.engine.routing import resolve_routing, validate_routing_contribution
+from mote_kernel.execution.engine.routing import validate_routing_contribution
+from mote_kernel.execution.engine.session import GraphExecutionSession, issue_execution_session
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
-from mote_kernel.execution.engine.superstep import execute_claimed_frontier, prepare_superstep
+from mote_kernel.execution.engine.superstep import prepare_superstep, validate_execution_session_request
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph import CompiledGraph, NestedGraphNodeDefinition, compile_graph
 from mote_kernel.execution.graph_run import project_start_graph_command
@@ -21,14 +22,13 @@ from mote_kernel.execution.request import (
     StepRequest,
     UseRequestInput,
 )
-from mote_kernel.execution.result import ExecutedFrontierAttempt, PrepareDisposition
+from mote_kernel.execution.result import PrepareDisposition
 from mote_kernel.state.graph_state import (
     FailedGraphNode,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphFrontierNode,
     GraphFrontierState,
-    GraphFrontierStatus,
     GraphNodeId,
     GraphNodeSettlement,
     GraphRunId,
@@ -44,9 +44,7 @@ from mote_kernel.state.graph_state import (
     StartGraphRun,
     UseStepRequestInput,
     frontier_node,
-    frontier_status,
     graph_interrupt_id,
-    routing_contributions,
 )
 from mote_kernel.state.graph_state.validation import validate_graph_frontier
 
@@ -109,11 +107,12 @@ class GraphExecutor(Generic[InputT, OutputT]):
         self,
         claim: PreparedExecutionClaim,
         request: StepRequest[InputT, OutputT],
-    ) -> ExecutedFrontierAttempt[OutputT]:
+    ) -> GraphExecutionSession[InputT, OutputT]:
         graph = self._graph_for_state(request.state)
         require_snapshot_matches_graph(graph, request.state, self._parent_nodes)
-        await claim.consume(self._claim_owner, request.state, request.request_attempt_id)
-        return await execute_claimed_frontier(graph, request, claim)
+        validate_execution_session_request(graph, request, claim)
+        consumed = await claim.consume(self._claim_owner, request.state, request.request_attempt_id)
+        return issue_execution_session(graph, request, consumed, self._parent_nodes)
 
     def resume(self, request: ResumeRequest[InputT]) -> ResumeGraphNodes:
         state = request.state
@@ -193,12 +192,7 @@ class GraphExecutor(Generic[InputT, OutputT]):
             )
         )
         validate_graph_frontier(state, simulated)
-        resolution = (
-            resolve_routing(graph, routing_contributions(simulated), state.join_progress)
-            if frontier_status(simulated) is GraphFrontierStatus.SETTLED
-            else None
-        )
-        return ResumeGraphNodes(state.revision, tuple(actions), resolution)
+        return ResumeGraphNodes(state.revision, tuple(actions))
 
 
 __all__ = ["GraphExecutor"]

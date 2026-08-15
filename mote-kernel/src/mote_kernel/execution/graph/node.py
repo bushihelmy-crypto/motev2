@@ -12,7 +12,7 @@ OutputT_co = TypeVar("OutputT_co", covariant=True)
 
 
 class Node(Protocol[InputT, OutputT_co]):
-    async def __call__(self, node_input: InputT) -> NodeOutcome[OutputT_co]: ...
+    async def __call__(self, node_input: InputT, /) -> NodeOutcome[OutputT_co]: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,8 +1,11 @@
 # Frontier 节点统一恢复实施方案
 
+> 历史状态：本文已由 `docs/frontier-node-settlement-implementation.zh-CN.md` 整体替代。当前实施应以新文档为唯一依据；本文仅保留为已完成的
+> batch settlement 历史基线，不得继续作为 runtime、command、resource scheduling 或测试迁移的 authoritative specification。
+
 ## 1. 文档信息
 
-- 状态：已实施、已验证并完成代码审核闭环
+- 状态：历史实施基线（已由 `docs/frontier-node-settlement-implementation.zh-CN.md` 替代）
 - 需求基线：`docs/frontier-node-recovery-requirements.zh-CN.md`
 - 被替代基线：`docs/frontier-node-resume-requirements.zh-CN.md`
 - 实施范围：Mote Kernel Python `state.graph_state` 与唯一 `execution` graph engine

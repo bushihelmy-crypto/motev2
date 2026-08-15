@@ -227,12 +227,11 @@ def test_invalid_limits_fail_before_terminal_short_circuit(status: GraphRunStatu
         plan_tasks(compiled_graph("a"), terminal_state(status), ExecutionLimits(max_parallel_tasks=0))
 
 
-def test_superstep_and_parallel_limits_are_exact() -> None:
+def test_superstep_limit_is_exact_and_parallel_limit_does_not_reject_frontier() -> None:
     graph = compiled_graph("a", "b", entries=("a", "b"))
     with pytest.raises(ExecutionLimitError, match="superstep"):
         plan_tasks(graph, running_state(superstep=3, frontier=("a", "b")), ExecutionLimits(max_supersteps=3))
-    with pytest.raises(ExecutionLimitError, match="parallel"):
-        plan_tasks(graph, running_state(frontier=("a", "b")), ExecutionLimits(max_parallel_tasks=1))
+    assert len(plan_tasks(graph, running_state(frontier=("a", "b")), ExecutionLimits(max_parallel_tasks=1))) == 2
     assert len(plan_tasks(graph, running_state(frontier=("a", "b")), ExecutionLimits(max_parallel_tasks=2))) == 2
 
 

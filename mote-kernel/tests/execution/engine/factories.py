@@ -28,7 +28,6 @@ from mote_kernel.state.graph_state import (
     GraphRunStatus,
     PendingGraphNode,
     UseStepRequestInput,
-    pending_node_ids,
 )
 
 
@@ -104,12 +103,11 @@ def running_state(
 
 
 def leased_state(state: GraphRunState) -> GraphRunState:
-    node_ids = pending_node_ids(state.frontier)
     token = GraphExecutionToken(state.execution_sequence + 1, GraphExecutionAttemptId("test-attempt"))
     return replace(
         state,
         execution_sequence=token.generation,
-        execution=GraphExecutionLease(token, node_ids),
+        execution=GraphExecutionLease(token),
     )
 
 

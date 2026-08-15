@@ -118,17 +118,21 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "FailedGraphNodeOutcome",
                 "InterruptedGraphNodeOutcome",
                 "GraphNodeOutcome",
+                "StartGraphRun",
+                "ClaimGraphExecution",
+                "FenceGraphExecution",
+                "SettleGraphNode",
                 "AdvanceGraphFrontier",
                 "CompleteGraphFrontier",
-                "GraphFrontierResolution",
                 "ResumeFailedNode",
                 "SkipFailedNode",
                 "ResumeInterruptedNode",
                 "GraphNodeResumeAction",
-                "SettleGraphExecution",
                 "ResumeGraphNodes",
+                "AbortGraphRun",
             }
         ),
+        "state/graph_state/model.py": frozenset({"GraphExecutionToken", "GraphExecutionLease", "GraphRunState"}),
         "state/graph_state/reducer.py": frozenset({"reduce_graph_run"}),
         "execution/graph/resume_input.py": frozenset(
             {"ResumeInputEncoder", "ResumeInputDecoder", "ResumeInputBinding"}
@@ -142,6 +146,8 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
         "execution/claim.py": frozenset(
             {"ExecutionClaimOwner", "ExecutionClaimSnapshot", "PreparedExecutionClaim", "prepare_execution_claim"}
         ),
+        "execution/engine/scheduler.py": frozenset({"TaskRaised", "TaskScheduler"}),
+        "execution/engine/session.py": frozenset({"GraphExecutionSession"}),
         "execution/graph_run.py": frozenset({"project_start_graph_command"}),
         "execution/executor.py": frozenset({"GraphExecutor"}),
     }
@@ -151,7 +157,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
 
 
 def test_static_execution_and_resource_types_reuse_state_owned_identities() -> None:
-    assert _class_fields("state/graph_state/model.py", "GraphExecutionLease")["node_ids"] == "tuple[GraphNodeId, ...]"
+    assert _class_fields("state/graph_state/model.py", "GraphExecutionLease") == {"token": "GraphExecutionToken"}
     assert _class_fields("state/graph_state/model.py", "ParentGraphActivation") == {
         "run_id": "GraphRunId",
         "superstep": "int",
