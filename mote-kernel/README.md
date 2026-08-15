@@ -26,6 +26,8 @@ assert result.outputs[0].output == "mote"
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 
+Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, and `Graph.ExecutionLimitError` for precise handling.
+
 ## Design principles
 
 - One execution engine for every agent flow.

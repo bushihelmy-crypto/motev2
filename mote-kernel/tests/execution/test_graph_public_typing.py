@@ -59,3 +59,23 @@ async def test_graph_namespace_strictly_narrows_every_commit_result_variant() ->
     assert success_consumer.successes == ["success"]
     assert failure_consumer.failures == ["failure"]
     assert interrupt_consumer.interrupts == [b"interrupt"]
+
+
+@pytest.mark.asyncio
+async def test_graph_namespace_exposes_precise_public_execution_errors() -> None:
+    async def echo(value: str) -> str:
+        return value
+
+    invalid_graph = Graph[str, str]("typing.invalid").add_node("node", echo)
+    with pytest.raises(Graph.ValidationError):
+        await invalid_graph.run("input")
+
+    graph = Graph[str, str]("typing.errors").add_node("node", echo).set_entry("node")
+    with pytest.raises(Graph.SnapshotMismatchError):
+        await graph.run("input", resume=(graph.resume_failed("node"),))
+    with pytest.raises(Graph.ExecutionLimitError):
+        await graph.run("input", max_parallel_tasks=0)
+
+    assert issubclass(Graph.ValidationError, Graph.Error)
+    assert issubclass(Graph.SnapshotMismatchError, Graph.Error)
+    assert issubclass(Graph.ExecutionLimitError, Graph.Error)

@@ -6,7 +6,12 @@ from typing import ClassVar, Generic, Protocol, Self, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
 from mote_kernel.execution.engine.session import GraphExecutionSession
-from mote_kernel.execution.errors import GraphValidationError, SnapshotMismatchError
+from mote_kernel.execution.errors import (
+    ExecutionError,
+    ExecutionLimitError,
+    GraphValidationError,
+    SnapshotMismatchError,
+)
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph import (
     END,
@@ -238,6 +243,10 @@ class Graph(Generic[InputT, OutputT]):
     SuccessResult = TaskSuccess
     FailureResult = TaskFailure
     InterruptResult = TaskInterrupt
+    Error = ExecutionError
+    ValidationError = GraphValidationError
+    SnapshotMismatchError = SnapshotMismatchError
+    ExecutionLimitError = ExecutionLimitError
 
     __slots__ = (
         "_definition_id",

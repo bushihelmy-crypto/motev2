@@ -26,6 +26,8 @@ assert result.outputs[0].output == "mote"
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。
 
+公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类，`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 用于精确捕获。
+
 详细设计见 [架构说明](docs/architecture.zh-CN.md)。
 
 ## 开发

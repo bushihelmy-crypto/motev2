@@ -30,7 +30,7 @@
 - `GraphDefinition`、`CompiledGraph`、edge/node/resource definitions；
 - `GraphRunState`、command、reducer 与 settlement 类型。
 
-不保留旧公开 alias、兼容 wrapper 或第二入口。门面所需的 outcome、result、state 与 transition 类型只通过 `Graph.Outcome`、`Graph.Result`、`Graph.State`、`Graph.Transition` 命名空间引用；commit 中的 canonical node-result variants 只通过 `Graph.SuccessResult`、`Graph.FailureResult`、`Graph.InterruptResult` 判型。使用方无需额外 import，底层 `TaskResult` DTO 也不复制为第二份模型。
+不保留旧公开 alias、兼容 wrapper 或第二入口。门面所需的 outcome、result、state 与 transition 类型只通过 `Graph.Outcome`、`Graph.Result`、`Graph.State`、`Graph.Transition` 命名空间引用；commit 中的 canonical node-result variants 只通过 `Graph.SuccessResult`、`Graph.FailureResult`、`Graph.InterruptResult` 判型。公共执行异常以 `Graph.Error` 为统一基类，并通过 `Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 精确捕获。使用方无需额外 import，底层 result 或 error DTO 也不复制为第二份模型。
 
 ## 3. Builder 与 immutable runtime
 
@@ -151,7 +151,7 @@ validate ExecutionLimits
 
 ## 9. 验收
 
-1. 使用方只需导入 `Graph`，并可严格判型 success/failure/interrupt commit result；
+1. 使用方只需导入 `Graph`，并可严格判型 commit result、精确捕获公共 validation/snapshot/limit errors；
 2. 普通 output 与 typed success/failure/interrupt 均走同一 Node adapter 与 scheduler；
 3. direct/conditional/join/resource topology 经现有 compiler 校验；
 4. 每条 start/claim/settle/resume/fence/resolve command 均独立经过 commit 确认；
