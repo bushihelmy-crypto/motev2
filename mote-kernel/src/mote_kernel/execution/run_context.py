@@ -54,15 +54,43 @@ class AdmittedGraphInput(Generic[GraphValueT]):
         raise TypeError("scoped frame records are unhashable")
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionPublicationProvenance:
+    execution_token: GraphExecutionToken
+
+
+@dataclass(frozen=True, slots=True)
+class SkipSubstitutionProvenance:
+    pass
+
+
+PublicationProvenance: TypeAlias = ExecutionPublicationProvenance | SkipSubstitutionProvenance
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class ConfirmedPublication(Generic[GraphValueT]):
     coordinate: PublicationAvailabilityCoordinate[GraphValueT]
     frame: NodeOutputFrame[GraphValueT] = field(compare=False, repr=False, hash=False)
     acknowledged_revision: int
-    execution_token: GraphExecutionToken
+    provenance: PublicationProvenance
 
     def __hash__(self) -> Never:
         raise TypeError("scoped frame records are unhashable")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSubstitution(Generic[GraphValueT]):
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT]
+    frame: NodeOutputFrame[GraphValueT]
+    provenance: SkipSubstitutionProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedSubstitution(Generic[GraphValueT]):
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT]
+    frame: NodeOutputFrame[GraphValueT]
+    provenance: SkipSubstitutionProvenance
+    expected_revision: int
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -117,6 +145,26 @@ class ScopedFrameAvailability(Protocol[GraphValueT]):
         self,
         coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT],
     ) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFrameAvailability(Generic[GraphValueT]):
+    confirmed: "ScopedFrameIndex[GraphValueT]"
+    substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
+
+    def has_graph_input(self, coordinate: GraphInputAvailabilityCoordinate[GraphValueT]) -> bool:
+        return self.confirmed.has_graph_input(coordinate)
+
+    def has_publication(self, coordinate: PublicationAvailabilityCoordinate[GraphValueT]) -> bool:
+        return self.confirmed.has_publication(coordinate) or any(
+            substitution.coordinate == coordinate for substitution in self.substitutions
+        )
+
+    def has_resume_input(self, coordinate: ResumeInputAvailabilityCoordinate[GraphValueT]) -> bool:
+        return self.confirmed.has_resume_input(coordinate)
+
+    def has_child_boundary(self, coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT]) -> bool:
+        return self.confirmed.has_child_boundary(coordinate)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -409,22 +457,24 @@ def _context_from_continuation(
     return continuation.admit(_CONTINUATION_SEAL, family_identity, state)
 
 
-def _continuation(context: GraphRunContext[GraphValueT]) -> _GraphContinuation[GraphValueT]:
+def _snapshot(context: GraphRunContext[GraphValueT]) -> ContinuationSnapshot[GraphValueT]:
     if context.recovered:
-        snapshot: ContinuationSnapshot[GraphValueT] = _RecoveredContinuationSnapshot(
+        return _RecoveredContinuationSnapshot(
             context.family_identity,
             context.root_binding,
             context.child_states,
             context.frames,
         )
-    else:
-        snapshot = _CompleteContinuationSnapshot(
-            context.family_identity,
-            context.root_binding,
-            context.child_states,
-            context.frames,
-        )
-    return _GraphContinuation(_snapshot=snapshot, _seal=_CONTINUATION_SEAL)
+    return _CompleteContinuationSnapshot(
+        context.family_identity,
+        context.root_binding,
+        context.child_states,
+        context.frames,
+    )
+
+
+def _continuation(context: GraphRunContext[GraphValueT]) -> _GraphContinuation[GraphValueT]:
+    return _GraphContinuation(_snapshot=_snapshot(context), _seal=_CONTINUATION_SEAL)
 
 
 __all__ = [

@@ -62,6 +62,7 @@ from mote_kernel.execution.run_context import (
     ChildStateBinding,
     ConfirmedChildBoundary,
     ConfirmedPublication,
+    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     GraphRunContext,
     PublicationAvailabilityCoordinate,
@@ -262,7 +263,7 @@ async def _consume_session(
                         coordinate,
                         completed.result.output,
                         confirmed.revision,
-                        completed.command.execution,
+                        ExecutionPublicationProvenance(completed.command.execution),
                     )
                 )
             state = confirmed

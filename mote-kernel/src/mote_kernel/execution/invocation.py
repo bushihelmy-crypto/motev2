@@ -9,13 +9,16 @@ from mote_kernel.execution.engine.recovery import (
     RecoveryInvocationSeed,
     RecoveryStateBinding,
 )
+from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
 from mote_kernel.execution.engine.resume_input import (
     materialize_node_input,
     pending_node_input_available,
 )
 from mote_kernel.execution.engine.routing import graph_outputs_available
 from mote_kernel.execution.errors import (
+    FrameInstallationInvariantError,
     GraphValueAdmissionError,
+    GraphValuePublicationError,
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
@@ -39,6 +42,7 @@ from mote_kernel.execution.request import (
     ResumeInterruptedNodeRequest,
     ResumeNodeRequest,
     ResumeRequest,
+    SkipFailedNodeRequest,
 )
 from mote_kernel.execution.result import (
     PreparedResume,
@@ -46,14 +50,18 @@ from mote_kernel.execution.result import (
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
+    AdmittedSubstitution,
+    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedChildBoundary,
     ConfirmedPublication,
+    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     GraphRunContext,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    SkipSubstitutionProvenance,
 )
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
@@ -64,6 +72,9 @@ from mote_kernel.state.graph_state import (
     OverrideGraphNodeInput,
     ParentGraphActivation,
     PendingGraphNode,
+    SelectGraphRoute,
+    SkipFailedNode,
+    SkippedGraphNode,
     SucceededGraphNode,
     frontier_node,
     reduce_graph_run,
@@ -89,7 +100,70 @@ class _PlannedFence:
 @dataclass(frozen=True, slots=True)
 class _PlannedResume(Generic[GraphValueT]):
     scope_run: ScopeRunCoordinate
+    successor: GraphRunState
     prepared: PreparedResume[GraphValueT]
+    substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
+
+
+def install_confirmed_resume_frames(
+    frames: ScopedFrameIndex[GraphValueT],
+    planned: _PlannedResume[GraphValueT],
+    confirmed: GraphRunState,
+) -> ScopedFrameIndex[GraphValueT]:
+    if confirmed != planned.successor:
+        raise FrameInstallationInvariantError("confirmed resume state does not match its admitted successor")
+    installed = frames
+    try:
+        for admitted in planned.prepared.inputs:
+            installed = installed.add_resume_input(admitted)
+        for substitution in planned.substitutions:
+            activation = substitution.coordinate.activation
+            node = frontier_node(confirmed.frontier, activation.node_id)
+            route = (
+                node.settlement.routing.route
+                if node is not None
+                and isinstance(node.settlement, SkippedGraphNode)
+                and isinstance(node.settlement.routing, SelectGraphRoute)
+                else None
+            )
+            action = next(
+                (
+                    candidate
+                    for candidate in planned.prepared.command.actions
+                    if candidate.node_id == activation.node_id
+                ),
+                None,
+            )
+            action_route = (
+                action.routing.route
+                if isinstance(action, SkipFailedNode) and isinstance(action.routing, SelectGraphRoute)
+                else None
+            )
+            if (
+                activation.scope_run != planned.scope_run
+                or activation.superstep != confirmed.superstep
+                or substitution.expected_revision != confirmed.revision
+                or type(substitution.provenance) is not SkipSubstitutionProvenance
+                or not isinstance(action, SkipFailedNode)
+                or node is None
+                or not isinstance(node.settlement, SkippedGraphNode)
+                or node.settlement.reason != action.reason
+                or route != action_route
+            ):
+                raise FrameInstallationInvariantError(
+                    "confirmed skip substitution does not match its admitted successor"
+                )
+            installed = installed.add_publication(
+                ConfirmedPublication(
+                    substitution.coordinate,
+                    substitution.frame,
+                    substitution.expected_revision,
+                    substitution.provenance,
+                )
+            )
+    except GraphValuePublicationError as error:
+        raise FrameInstallationInvariantError("pre-admitted resume frames failed post-commit installation") from error
+    return installed
 
 
 def _compiled_at(
@@ -285,21 +359,28 @@ def plan_resumes(
     executors: dict[tuple[GraphNodeId, ...], GraphExecutor[GraphValueT]],
 ) -> tuple[
     tuple[_PlannedState, ...],
-    ScopedFrameIndex[GraphValueT],
+    CandidateFrameAvailability[GraphValueT],
     tuple[_PlannedResume[GraphValueT], ...],
     tuple[AdmittedResumeFact[GraphValueT], ...],
 ]:
     if not resume:
-        return states, frames, (), ()
+        return states, CandidateFrameAvailability(frames, ()), (), ()
     if type(resume) is not tuple:
         raise SnapshotMismatchError("resume actions must be supplied as a tuple")
     canonical = tuple(sorted(resume, key=lambda action: (action.scope, action.node_id)))
     if canonical != resume:
         raise SnapshotMismatchError("resume actions must be supplied in canonical scope/node order")
+    action_coordinates = tuple((action.scope, action.node_id) for action in canonical)
+    if len(action_coordinates) != len(set(action_coordinates)):
+        duplicates = tuple(coordinate for coordinate in action_coordinates if action_coordinates.count(coordinate) > 1)
+        raise GraphValuePublicationError(
+            f"resume action nodes {tuple(dict.fromkeys(duplicates))!r} supplied duplicate candidate coordinates"
+        )
     planned_states = states
     candidate_frames = frames
     plans: list[_PlannedResume[GraphValueT]] = []
     facts: list[AdmittedResumeFact[GraphValueT]] = []
+    candidates: list[ScopedResumeCandidate[GraphValueT]] = []
     scopes = tuple(dict.fromkeys(action.scope for action in canonical))
     for scope in scopes:
         actions = tuple(action for action in canonical if action.scope == scope)
@@ -311,18 +392,40 @@ def plan_resumes(
         action_facts = _resume_facts(scope_run, binding.state.superstep, actions, prepared)
         for admitted in prepared.inputs:
             candidate_frames = candidate_frames.add_resume_input(admitted)
-        plans.append(_PlannedResume(scope_run, prepared))
+        substitutions = tuple(
+            AdmittedSubstitution(
+                prepared_substitution.coordinate,
+                prepared_substitution.frame,
+                prepared_substitution.provenance,
+                candidate.revision,
+            )
+            for prepared_substitution in prepared.substitutions
+        )
+        plans.append(_PlannedResume(scope_run, candidate, prepared, substitutions))
+        candidates.append(
+            ScopedResumeCandidate(
+                executors[scope].graph,
+                scope_run,
+                binding.state,
+                candidate,
+                substitutions,
+                tuple(action for action in prepared.command.actions if isinstance(action, SkipFailedNode)),
+                any(isinstance(action, SkipFailedNodeRequest) and action.output is None for action in actions),
+                prepared.command,
+            )
+        )
         facts.extend(action_facts)
         planned_states = _replace_planned_state(
             planned_states,
             _PlannedState(scope_run, candidate, binding.parent_activation),
         )
-    return planned_states, candidate_frames, tuple(plans), tuple(facts)
+    availability = admit_resume_candidates(tuple(candidates), candidate_frames)
+    return planned_states, availability, tuple(plans), tuple(facts)
 
 
 def recovery_seed(
     states: tuple[_PlannedState, ...],
-    frames: ScopedFrameIndex[GraphValueT],
+    frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT],
     limits: ExecutionLimits,
     facts: tuple[AdmittedResumeFact[GraphValueT], ...],
 ) -> RecoveryInvocationSeed[GraphValueT]:
@@ -423,9 +526,15 @@ def _validate_frame_index(
             or coordinate.descriptor != publication.descriptor.identity
             or coordinate.activation.superstep > binding.state.superstep
             or record.acknowledged_revision < 1
-            or record.execution_token.generation < 1
+            or record.acknowledged_revision > binding.state.revision
+            or type(record.provenance) not in (ExecutionPublicationProvenance, SkipSubstitutionProvenance)
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
+        if (
+            isinstance(record.provenance, ExecutionPublicationProvenance)
+            and record.provenance.execution_token.generation < 1
+        ):
+            raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
         declarations = tuple(
             (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
         )

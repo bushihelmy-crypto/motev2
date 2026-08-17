@@ -220,6 +220,17 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
         "request_attempt_id": "ExecutionRequestAttemptId",
     }
 
+
+def test_production_continuation_has_no_hidden_mutation_path() -> None:
+    source = (PACKAGE_ROOT / "execution" / "run_context.py").read_text()
+
+    assert "object.__setattr__" not in source
+    assert "def checkpoint(" not in source
+    assert "_checkpoint_continuation" not in source
+
+
+def test_resource_state_identities_are_owned_by_the_durable_model() -> None:
+
     resource_tree = _module("state/graph_state/resource_model.py")
     resource_newtypes = {
         target.id
@@ -281,6 +292,7 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": set(),
         "conditional_targets": set(),
         "joins_by_source": set(),
+        "data_triggers": set(),
     }
     for relative, tree in _production_modules():
         for node in ast.walk(tree):
@@ -291,11 +303,31 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": {"execution/engine/routing.py"},
         "conditional_targets": {"execution/engine/routing.py"},
         "joins_by_source": {"execution/engine/routing.py", "execution/engine/snapshot_guard.py"},
+        "data_triggers": {"execution/engine/routing.py"},
     }
+    recovery = _module("execution/engine/recovery.py")
+    forbidden = {"materializations", "graph_outputs", "plan_routing"}
+    assert not {node.attr for node in ast.walk(recovery) if isinstance(node, ast.Attribute) and node.attr in forbidden}
+    assert not {node.id for node in ast.walk(recovery) if isinstance(node, ast.Name) and node.id in forbidden}
 
 
 def test_node_invocation_belongs_to_the_single_execution_scheduler() -> None:
     assert _call_owner_modules("operation") == ("execution/engine/scheduler.py",)
+
+
+def test_resume_substitution_uses_the_single_publication_store_and_presence_only_overlay() -> None:
+    overlay = _top_level_definition("execution/run_context.py", "CandidateFrameAvailability")
+    assert isinstance(overlay, ast.ClassDef)
+    methods = {node.name for node in overlay.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert methods == {"has_graph_input", "has_publication", "has_resume_input", "has_child_boundary"}
+    assert "lookup" not in methods
+    assert _class_fields("execution/run_context.py", "CandidateFrameAvailability") == {
+        "confirmed": "'ScopedFrameIndex[GraphValueT]'",
+        "substitutions": "tuple[AdmittedSubstitution[GraphValueT], ...]",
+    }
+    assert _class_fields("execution/run_context.py", "ScopedFrameIndex")["publications"] == (
+        "tuple[ConfirmedPublication[GraphValueT], ...]"
+    )
 
 
 def test_execution_requests_read_authoritative_graph_state() -> None:
@@ -368,6 +400,7 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
     } & {node.id for node in ast.walk(graph) if isinstance(node, ast.Name)}
     assert _call_owner_modules("reduce_graph_run") == (
         "execution/engine/recovery.py",
+        "execution/engine/resume_admission.py",
         "execution/family_driver.py",
         "execution/invocation.py",
     )

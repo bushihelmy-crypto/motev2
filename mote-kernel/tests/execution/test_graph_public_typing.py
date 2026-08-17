@@ -103,3 +103,12 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
     assert issubclass(Graph.ValidationError, Graph.Error)
     assert issubclass(Graph.SnapshotMismatchError, Graph.Error)
     assert issubclass(Graph.ExecutionLimitError, Graph.Error)
+    assert issubclass(Graph.PartialCommitError, Graph.Error)
+    with pytest.raises(Graph.SnapshotMismatchError, match="Graph owner"):
+        Graph.PartialCommitError(
+            state=completed.state,
+            continuation=completed.continuation,
+            cause=RuntimeError("forged"),
+            failed_scope=(),
+            _seal=object(),  # pyright: ignore[reportArgumentType]
+        )

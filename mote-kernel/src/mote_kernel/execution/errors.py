@@ -65,6 +65,10 @@ class GraphValuePublicationError(ExecutionError):
     """A confirmed value publication violates its stable activation invariant."""
 
 
+class FrameInstallationInvariantError(ExecutionError):
+    """A pre-admitted frame could not be installed after an exact commit."""
+
+
 class DuplicateNodeError(GraphValidationError):
     """A graph definition contains the same node identity more than once."""
 

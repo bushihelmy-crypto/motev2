@@ -9,7 +9,11 @@ from mote_kernel.execution.engine.admission import claim_resource_snapshot, sele
 from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.resume_input import pending_node_input_available
-from mote_kernel.execution.engine.routing import graph_outputs_available, plan_routing
+from mote_kernel.execution.engine.routing import (
+    graph_outputs_available,
+    project_routing_facts,
+    resolve_routing_facts,
+)
 from mote_kernel.execution.engine.settlement import (
     project_failure_settlement,
     project_success_settlement,
@@ -21,12 +25,12 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.ports import GraphInputPort, require_publication_selection
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, child_scope_run_for_activation
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.run_context import (
+    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
@@ -167,13 +171,22 @@ class RecoveryAvailabilityCoordinates(Generic[GraphValueT]):
     @classmethod
     def from_frames(
         cls,
-        frames: ScopedFrameIndex[GraphValueT],
+        frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT],
     ) -> "RecoveryAvailabilityCoordinates[GraphValueT]":
+        if isinstance(frames, CandidateFrameAvailability):
+            confirmed = frames.confirmed
+            candidate_publications = tuple(substitution.coordinate for substitution in frames.substitutions)
+        else:
+            confirmed = frames
+            candidate_publications = ()
+        publications = (*tuple(record.coordinate for record in confirmed.publications), *candidate_publications)
+        if len(publications) != len(set(publications)):
+            raise SnapshotMismatchError("recovery publication availability coordinates must be unique")
         return cls(
-            tuple(sorted(record.coordinate for record in frames.graph_inputs)),
-            tuple(sorted(record.coordinate for record in frames.publications)),
-            tuple(sorted(record.coordinate for record in frames.resume_inputs)),
-            tuple(sorted(record.coordinate for record in frames.child_boundaries)),
+            tuple(sorted(record.coordinate for record in confirmed.graph_inputs)),
+            tuple(sorted(publications)),
+            tuple(sorted(record.coordinate for record in confirmed.resume_inputs)),
+            tuple(sorted(record.coordinate for record in confirmed.child_boundaries)),
         )
 
     def has_graph_input(
@@ -297,7 +310,9 @@ class RecoveryStateBinding:
 class RecoveryInvocationSeed(Generic[GraphValueT]):
     root: RecoveryStateBinding
     children: tuple[RecoveryStateBinding, ...]
-    frames: ScopedFrameIndex[GraphValueT] = field(compare=False, repr=False, hash=False)
+    frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT] = field(
+        compare=False, repr=False, hash=False
+    )
     limits: ExecutionLimits
     admitted_actions: tuple[AdmittedResumeFact[GraphValueT], ...] = ()
 
@@ -345,6 +360,9 @@ class _RecoveryFamily(Generic[GraphValueT]):
 
     def binding(self, coordinate: ScopeRunCoordinate) -> RecoveryStateBinding | None:
         return next((binding for binding in self.bindings if binding.scope_run == coordinate), None)
+
+    def action_node_ids(self) -> tuple[GraphNodeId, ...]:
+        return tuple(sorted({action.target.node_id for action in self.admitted_actions}))
 
 
 def _resource_coordinate(snapshot: ResourceSnapshot | None) -> ResourceControlCoordinate | None:
@@ -576,88 +594,6 @@ def _publication_coordinate(
     )
 
 
-def _target_has_historical_gap(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
-    availability: RecoveryAvailabilityCoordinates[GraphValueT],
-    node_id: GraphNodeId,
-) -> bool:
-    plan = graph.materializations[node_id]
-    for binding in plan.bindings.entries:
-        source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
-            if not availability.has_graph_input(graph_input_coordinate):
-                return True
-            continue
-        selection = require_publication_selection(
-            binding.publication,
-            SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
-        )
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(
-                scope_run,
-                selection.resolve(state.superstep + 1),
-                source.node_id,
-            ),
-            graph.publications[source.node_id].descriptor.identity,
-        )
-        if availability.has_publication(publication_coordinate):
-            continue
-        current = frontier_node(state.frontier, source.node_id)
-        if current is not None and isinstance(
-            current.settlement,
-            FailedGraphNode | InterruptedGraphNode | SkippedGraphNode,
-        ):
-            continue
-        return True
-    return False
-
-
-def _outputs_have_historical_gap(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
-    availability: RecoveryAvailabilityCoordinates[GraphValueT],
-) -> bool:
-    for binding in graph.graph_outputs.entries:
-        source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
-            if not availability.has_graph_input(graph_input_coordinate):
-                return True
-            continue
-        selection = require_publication_selection(
-            binding.publication,
-            SnapshotMismatchError("compiled graph output binding lacks its activation selection"),
-        )
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(
-                scope_run,
-                selection.resolve(state.superstep),
-                source.node_id,
-            ),
-            graph.publications[source.node_id].descriptor.identity,
-        )
-        if availability.has_publication(publication_coordinate):
-            continue
-        current = frontier_node(state.frontier, source.node_id)
-        if current is not None and isinstance(
-            current.settlement,
-            FailedGraphNode | InterruptedGraphNode | SkippedGraphNode,
-        ):
-            continue
-        return True
-    return False
-
-
 def _claim(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -727,7 +663,9 @@ def _initial_children(
         coordinate = child_scope_run_for_activation(scope_run, parent)
         binding = family.binding(coordinate)
         if binding is None and node_id not in invocation_new:
-            raise GraphValueUnavailableError(f"recovered lineage lacks child snapshot at {coordinate!r}")
+            raise GraphValueUnavailableError(
+                f"resume actions {family.action_node_ids()!r} lack child snapshot/nested boundary at {coordinate!r}"
+            )
         child_state = binding.state if binding is not None else None
         dispositions.append(_child_disposition(coordinate, child_state))
     return tuple(sorted(dispositions, key=lambda disposition: disposition.child_scope_run))
@@ -801,7 +739,10 @@ def _child_outcomes(
             child_state.superstep,
             child_availability,
         ):
-            raise GraphValueUnavailableError(f"completed child output history is unavailable at {coordinate!r}")
+            raise GraphValueUnavailableError(
+                f"resume actions {family.action_node_ids()!r} require completed child output history/nested boundary "
+                f"at {coordinate!r}"
+            )
         boundary = _boundary(
             _ScopeBoundaryKind.COMPLETED,
             child_state,
@@ -982,8 +923,9 @@ def _expand_quiescent_executable(
         )
         if unavailable_inputs:
             raise GraphValueUnavailableError(
-                f"recovered pending nodes require unavailable historical values at {scope_run!r}: "
-                f"{unavailable_inputs!r}"
+                f"resume actions {family.action_node_ids()!r} require unavailable historical values "
+                f"for pending nodes {unavailable_inputs!r} at {scope_run!r}; "
+                "node input or nested boundary materialization is unavailable"
             )
         claimed = _claim(graph, state, tasks)
         settled, availability = _settle_nested_outcomes(
@@ -1039,31 +981,25 @@ def _resolve_quiescent(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
     scope_run: ScopeRunCoordinate,
+    family: _RecoveryFamily[GraphValueT],
 ) -> _RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]:
     state = item.state
-    resolution = plan_routing(graph, state, scope_run, item.availability)
+    facts = resolve_routing_facts(graph, state, scope_run, item.availability)
+    resolution = project_routing_facts(state, facts)
     command = resolution.command
     if isinstance(command, AbortGraphRun):
-        if any(
-            _target_has_historical_gap(
-                graph,
-                state,
-                scope_run,
-                item.availability,
-                target,
-            )
-            for target in resolution.unavailable_control_targets
-        ) or (
-            not resolution.completion_outputs_available
-            and _outputs_have_historical_gap(
-                graph,
-                state,
-                scope_run,
-                item.availability,
-            )
+        required = (*facts.control_targets, *facts.completed_join_targets)
+        if any(target.historical_inputs_missing for target in required if not target.inputs_available) or (
+            not resolution.completion_outputs_available and facts.completion_output_history_missing
         ):
+            missing_inputs = tuple(
+                (target.node_id, target.unavailable_inputs) for target in required if not target.inputs_available
+            )
             raise GraphValueUnavailableError(
-                f"recovered routing requires unavailable historical values at {scope_run!r}"
+                f"resume actions {family.action_node_ids()!r} require unavailable historical values "
+                f"at {scope_run!r}; "
+                f"consumer inputs={missing_inputs!r}; "
+                f"graph outputs={facts.unavailable_graph_outputs!r}"
             )
         aborted = reduce_graph_run(state, command)
         return _boundary(_ScopeBoundaryKind.ABORTED, aborted, scope_run, item.availability)
@@ -1127,7 +1063,10 @@ def _prove_scope(
                 current.superstep,
                 item.availability,
             ):
-                raise GraphValueUnavailableError(f"completed recovered graph lacks output history at {scope_run!r}")
+                raise GraphValueUnavailableError(
+                    f"resume actions {family.action_node_ids()!r} require completed graph output history "
+                    f"at {scope_run!r}"
+                )
             boundaries.add(_boundary(_ScopeBoundaryKind.COMPLETED, current, scope_run, item.availability))
             continue
         if current.status is GraphRunStatus.ABORTED:
@@ -1152,7 +1091,7 @@ def _prove_scope(
             enqueue(successors)
             continue
         if status is GraphFrontierStatus.SETTLED:
-            successor = _resolve_quiescent(graph, item, scope_run)
+            successor = _resolve_quiescent(graph, item, scope_run, family)
             family.budget.admit(1)
             if isinstance(successor, _ScopeBoundary):
                 boundaries.add(successor)
@@ -1198,6 +1137,27 @@ def preflight_recovery(
     coordinates = tuple(binding.scope_run for binding in bindings)
     if len(coordinates) != len(set(coordinates)) or coordinates != tuple(sorted(coordinates)):
         raise SnapshotMismatchError("recovery state bindings must be unique and canonical")
+    action_targets = tuple(action.target for action in seed.admitted_actions)
+    if len(action_targets) != len(set(action_targets)) or action_targets != tuple(sorted(action_targets)):
+        raise SnapshotMismatchError("recovery admitted resume actions must be unique and canonical")
+    for action in seed.admitted_actions:
+        binding = next(
+            (candidate for candidate in bindings if candidate.scope_run == action.target.scope_run),
+            None,
+        )
+        if binding is None or binding.state.superstep != action.target.superstep:
+            raise SnapshotMismatchError("recovery admitted resume action does not match a simulated scoped successor")
+        node = frontier_node(binding.state.frontier, action.target.node_id)
+        if node is None:
+            raise SnapshotMismatchError("recovery admitted resume action target is absent from its simulated successor")
+        if action.action is AdmittedActionKind.SKIP_FAILED:
+            if not isinstance(node.settlement, SkippedGraphNode):
+                raise SnapshotMismatchError("recovery skip action does not match its simulated successor settlement")
+            route = node.settlement.routing.route if isinstance(node.settlement.routing, SelectGraphRoute) else None
+            if node.settlement.reason != action.skip_reason or route != action.concrete_route:
+                raise SnapshotMismatchError("recovery skip action facts do not match its simulated successor")
+        elif not isinstance(node.settlement, PendingGraphNode):
+            raise SnapshotMismatchError("recovery resume action does not match its simulated successor settlement")
     family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     availability: RecoveryAvailabilityCoordinates[GraphValueT] = RecoveryAvailabilityCoordinates[
         GraphValueT

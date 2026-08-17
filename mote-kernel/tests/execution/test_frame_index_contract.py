@@ -1,14 +1,27 @@
 import pytest
 from tests.execution.engine.factories import running_state
 
+from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValueUnavailableError, SnapshotMismatchError
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
-from mote_kernel.execution.graph.values import NamedValue, _make_graph_output_view
-from mote_kernel.execution.identity import ScopeRunCoordinate, root_scope_run
+from mote_kernel.execution.graph.values import (
+    NamedValue,
+    _make_graph_input_frame,
+    _make_graph_output_view,
+    _make_node_output_frame,
+)
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
 from mote_kernel.execution.run_context import (
+    AdmittedGraphInput,
+    AdmittedSubstitution,
+    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedChildBoundary,
+    GraphInputAvailabilityCoordinate,
+    PublicationAvailabilityCoordinate,
+    ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    SkipSubstitutionProvenance,
     _new_context,
     _new_family_identity,
 )
@@ -54,3 +67,39 @@ def test_run_context_rejects_access_or_replacement_before_child_start_acknowledg
         context.state_at(missing)
     with pytest.raises(SnapshotMismatchError, match="before its acknowledged start"):
         context.replace_state(missing, root)
+
+
+def test_candidate_availability_delegates_non_publication_segments_and_overlays_publications() -> None:
+    scope_run = root_scope_run(GraphRunId("candidate-run"))
+    descriptor = FrameDescriptorIdentity("candidate.graph", 1, FrameKind.GRAPH_INPUT, 0)
+    graph_input_coordinate: GraphInputAvailabilityCoordinate[str] = GraphInputAvailabilityCoordinate(
+        scope_run, descriptor
+    )
+    frame = _make_graph_input_frame(Graph.values(value="input"), (("value", canonical_nominal_type(str)),))
+    confirmed = ScopedFrameIndex[str]().add_graph_input(AdmittedGraphInput(graph_input_coordinate, frame))
+    publication_coordinate: PublicationAvailabilityCoordinate[str] = PublicationAvailabilityCoordinate(
+        StableActivation(scope_run, 0, GraphNodeId("source")),
+        FrameDescriptorIdentity("candidate.graph", 1, FrameKind.NODE_OUTPUT, 0),
+    )
+    substitution = AdmittedSubstitution(
+        publication_coordinate,
+        _make_node_output_frame(Graph.values(value="replacement"), (("value", canonical_nominal_type(str)),)),
+        SkipSubstitutionProvenance(),
+        2,
+    )
+    availability = CandidateFrameAvailability(confirmed, (substitution,))
+
+    assert availability.has_graph_input(graph_input_coordinate)
+    assert availability.has_publication(publication_coordinate)
+    assert not availability.has_resume_input(
+        ResumeInputAvailabilityCoordinate(
+            publication_coordinate.activation,
+            FrameDescriptorIdentity("candidate.graph", 1, FrameKind.NODE_INPUT, 0),
+        )
+    )
+    assert not availability.has_child_boundary(
+        ChildBoundaryAvailabilityCoordinate(
+            scope_run,
+            FrameDescriptorIdentity("candidate.graph", 1, FrameKind.GRAPH_OUTPUT, 0),
+        )
+    )

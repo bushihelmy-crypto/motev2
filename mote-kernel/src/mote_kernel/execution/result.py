@@ -5,7 +5,7 @@ from typing import Generic, TypeAlias, TypeVar, final
 
 from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.task import GraphTask
-from mote_kernel.execution.errors import NodeExecutionContractError
+from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractError, SnapshotMismatchError
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
@@ -13,7 +13,7 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _public_node_output,
 )
-from mote_kernel.execution.run_context import AdmittedResumeInput, _GraphContinuation
+from mote_kernel.execution.run_context import AdmittedResumeInput, PreparedSubstitution, _GraphContinuation
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
@@ -28,6 +28,52 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
+
+
+class _PartialCommitSeal:
+    __slots__ = ()
+
+
+_PARTIAL_COMMIT_SEAL = _PartialCommitSeal()
+
+
+@final
+class _PartialCommitError(ExecutionError, Generic[GraphValueT]):
+    """Explicit handoff for an invocation that durably confirmed only a prefix."""
+
+    __slots__ = ("cause", "continuation", "failed_scope", "state")
+
+    def __init__(
+        self,
+        *,
+        state: GraphRunState,
+        continuation: _GraphContinuation[GraphValueT],
+        cause: Exception,
+        failed_scope: tuple[str, ...],
+        _seal: _PartialCommitSeal,
+    ) -> None:
+        if _seal is not _PARTIAL_COMMIT_SEAL:
+            raise SnapshotMismatchError("partial commit errors can only be produced by their Graph owner")
+        super().__init__(f"graph commit failed at scope {failed_scope!r} after an exact-confirmed prefix")
+        self.state = state
+        self.continuation = continuation
+        self.cause = cause
+        self.failed_scope = failed_scope
+
+
+def _partial_commit_error(
+    state: GraphRunState,
+    continuation: _GraphContinuation[GraphValueT],
+    cause: Exception,
+    failed_scope: tuple[str, ...],
+) -> _PartialCommitError[GraphValueT]:
+    return _PartialCommitError(
+        state=state,
+        continuation=continuation,
+        cause=cause,
+        failed_scope=failed_scope,
+        _seal=_PARTIAL_COMMIT_SEAL,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +285,7 @@ class ExecutedGraphNode(Generic[GraphValueT]):
 class PreparedResume(Generic[GraphValueT]):
     command: "ResumeGraphNodes"
     inputs: tuple[AdmittedResumeInput[GraphValueT], ...]
+    substitutions: tuple[PreparedSubstitution[GraphValueT], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,8 +409,10 @@ __all__ = [
     "_GraphFailureResult",
     "_GraphInterruptResult",
     "_GraphSuccessResult",
+    "_PartialCommitError",
     "_aborted_result",
     "_awaiting_result",
     "_commit_result",
     "_completed_result",
+    "_partial_commit_error",
 ]

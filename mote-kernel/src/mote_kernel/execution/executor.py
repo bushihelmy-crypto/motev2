@@ -16,6 +16,7 @@ from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches
 from mote_kernel.execution.engine.superstep import prepare_superstep, validate_execution_session_request
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.values import _make_node_output_frame
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.request import (
@@ -26,7 +27,13 @@ from mote_kernel.execution.request import (
     StepRequest,
 )
 from mote_kernel.execution.result import PrepareDisposition, PreparedResume
-from mote_kernel.execution.run_context import AdmittedResumeInput, ResumeInputAvailabilityCoordinate
+from mote_kernel.execution.run_context import (
+    AdmittedResumeInput,
+    PreparedSubstitution,
+    PublicationAvailabilityCoordinate,
+    ResumeInputAvailabilityCoordinate,
+    SkipSubstitutionProvenance,
+)
 from mote_kernel.state.graph_state import (
     ContinueGraphRouting,
     FailedGraphNode,
@@ -121,6 +128,7 @@ class GraphExecutor(Generic[GraphValueT]):
         actions: list[ResumeFailedNode | ResumeInterruptedNode | SkipFailedNode] = []
         replacements: dict[GraphNodeId, GraphNodeSettlement] = {}
         admitted_inputs: list[AdmittedResumeInput[GraphValueT]] = []
+        substitutions: list[PreparedSubstitution[GraphValueT]] = []
         for requested in request.actions:
             current = frontier_node(state.frontier, requested.node_id)
             if current is None:
@@ -200,6 +208,20 @@ class GraphExecutor(Generic[GraphValueT]):
                     reason,
                     routing,
                 )
+                if requested.output is not None:
+                    publication = self._graph.publications[requested.node_id]
+                    declarations = tuple(
+                        (declaration.name, declaration.descriptor)
+                        for declaration in publication.descriptor.declarations.entries
+                    )
+                    frame = _make_node_output_frame(requested.output, declarations)
+                    substitutions.append(
+                        PreparedSubstitution(
+                            PublicationAvailabilityCoordinate(activation, publication.descriptor.identity),
+                            frame,
+                            SkipSubstitutionProvenance(),
+                        )
+                    )
         simulated = GraphFrontierState(
             tuple(
                 GraphFrontierNode(node.node_id, replacements.get(node.node_id, node.settlement))
@@ -210,6 +232,7 @@ class GraphExecutor(Generic[GraphValueT]):
         return PreparedResume(
             ResumeGraphNodes(state.revision, tuple(actions)),
             tuple(admitted_inputs),
+            tuple(substitutions),
         )
 
 

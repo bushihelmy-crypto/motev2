@@ -8,11 +8,13 @@ import pytest
 from tests.execution.driver import step_request
 from tests.execution.engine.factories import compiled_graph, running_state
 
+import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.claim import ConsumedExecutionClaim, ExecutionClaimOwner
 from mote_kernel.execution.engine.claim_stage import prepare_claim, require_claim_tasks
 from mote_kernel.execution.engine.frontier import prepare_frontier
 from mote_kernel.execution.engine.planner import plan_tasks
+from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
 from mote_kernel.execution.engine.resume_input import (
     encode_resume_input,
     materialize_node_input,
@@ -21,10 +23,12 @@ from mote_kernel.execution.engine.resume_input import (
 from mote_kernel.execution.engine.routing import resolve_routing
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
 from mote_kernel.execution.engine.session import issue_execution_session
+from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
 from mote_kernel.execution.engine.superstep import validate_execution_session_request
 from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import (
+    FrameInstallationInvariantError,
     InvalidExecutionSnapshotError,
     InvalidRoutingCommandError,
     JoinProgressError,
@@ -37,7 +41,7 @@ from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, JoinEdge
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
 from mote_kernel.execution.graph.ports import (
     FrameDescriptorIdentity,
@@ -55,13 +59,24 @@ from mote_kernel.execution.graph.values import (
     NamedValue,
     NodeInputFrame,
     NodeOutputFrame,
+    _frame_value,
     _make_graph_input_frame,
     _make_graph_output_view,
     _make_node_input_frame,
     _make_node_output_frame,
 )
 from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.execution.identity import ExecutionRequestAttemptId, StableActivation, root_scope_run
+from mote_kernel.execution.identity import (
+    ExecutionRequestAttemptId,
+    ScopeRunCoordinate,
+    StableActivation,
+    child_scope_run_for_activation,
+    root_scope_run,
+)
+from mote_kernel.execution.invocation import (
+    _PlannedResume,  # pyright: ignore[reportPrivateUsage]
+    install_confirmed_resume_frames,
+)
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
@@ -72,6 +87,7 @@ from mote_kernel.execution.result import (
     CompletedChild,
     MissingChild,
     PreparedNestedRun,
+    PreparedResume,
     StartMissingChildren,
     TaskFailure,
     TaskSuccess,
@@ -81,13 +97,20 @@ from mote_kernel.execution.result import (
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
+    AdmittedSubstitution,
+    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
+    ChildStateBinding,
     ConfirmedChildBoundary,
     ConfirmedPublication,
+    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    SkipSubstitutionProvenance,
+    _new_context,
+    _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -113,6 +136,7 @@ from mote_kernel.state.graph_state import (
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
+    GraphSkipReason,
     GraphStateTransitionError,
     OverrideGraphNodeInput,
     ParentGraphActivation,
@@ -121,8 +145,10 @@ from mote_kernel.state.graph_state import (
     ResourceId,
     ResourceLock,
     ResourceSnapshot,
+    ResumeGraphNodes,
     SelectGraphRoute,
     SettleGraphNode,
+    SkipFailedNode,
     SucceededGraphNode,
     SucceededGraphNodeOutcome,
     UseStepRequestInput,
@@ -202,7 +228,7 @@ def child_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
     return _make_graph_output_view((NamedValue("value", value),), declarations)
 
 
-def nested_graph() -> CompiledGraph[str]:
+def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
     child = GraphDefinition(
         definition_id=GraphDefinitionId("boundary.child"),
         version=GraphDefinitionVersion(1),
@@ -211,19 +237,43 @@ def nested_graph() -> CompiledGraph[str]:
         entries=(),
         outputs=normalize_graph_output_declarations({"value": Graph.node_output("child", "value")}),
     )
+    nodes: list[CallableNodeDefinition[str] | NestedGraphNodeDefinition[str]] = [
+        NestedGraphNodeDefinition(
+            GraphNodeId("nested"),
+            child,
+            normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+        )
+    ]
+    if with_consumer:
+        nodes.append(
+            CallableNodeDefinition(
+                GraphNodeId("consumer"),
+                echo,
+                normalize_input_bindings({"value": Graph.node_output("nested", "value")}),
+                normalize_output_declarations({"value": str}),
+            )
+        )
+        nodes.append(
+            CallableNodeDefinition(
+                GraphNodeId("controller"),
+                echo,
+                normalize_input_bindings({}),
+                normalize_output_declarations({}),
+            )
+        )
     return compile_graph(
         GraphDefinition(
             definition_id=GraphDefinitionId("boundary.parent"),
             version=GraphDefinitionVersion(1),
-            nodes=(
-                NestedGraphNodeDefinition(
-                    GraphNodeId("nested"),
-                    child,
-                    normalize_input_bindings({"value": Graph.graph_input("value", str)}),
-                ),
-            ),
-            edges=(),
-            entries=(),
+            nodes=tuple(nodes),
+            edges=(
+                DirectEdge(GraphNodeId("nested"), GraphNodeId("controller")),
+                ConditionalEdge(GraphNodeId("controller"), GraphRouteId("repeat"), GraphNodeId("nested")),
+                ConditionalEdge(GraphNodeId("controller"), GraphRouteId("done"), END),
+            )
+            if with_consumer
+            else (),
+            entries=(GraphNodeId("nested"),) if with_consumer else (),
             outputs=normalize_graph_output_declarations({}),
         )
     )
@@ -371,7 +421,7 @@ def test_resume_input_narrow_guards() -> None:
         publication_coordinate,
         node_output_frame,
         1,
-        GraphExecutionToken(1, GraphExecutionAttemptId("trap-attempt")),
+        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("trap-attempt"))),
     )
     resume_record = AdmittedResumeInput(resume_coordinate, node_input_frame)
     boundary_record = ConfirmedChildBoundary(boundary_coordinate, graph_output_frame)
@@ -422,7 +472,7 @@ def test_resume_input_narrow_guards() -> None:
                 publication_coordinate,
                 node_output_frame,
                 2,
-                GraphExecutionToken(2, GraphExecutionAttemptId("other-attempt")),
+                ExecutionPublicationProvenance(GraphExecutionToken(2, GraphExecutionAttemptId("other-attempt"))),
             )
         )
     with pytest.raises(Graph.ValuePublicationError, match="more than once"):
@@ -1045,6 +1095,187 @@ def test_terminal_child_projects_its_matching_parent_result_variant(variant: str
     assert isinstance(prepared.nested_results[0], result_type)
 
 
+def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitution_is_admitted() -> None:
+    graph = nested_graph(with_consumer=True)
+    parent = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
+    missing = prepare_frontier(graph, request(graph, parent, (MissingChild(activation),)))
+    child = reduce_graph_run(None, missing.missing_children[0].command)
+    aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
+    prepared = prepare_frontier(graph, request(graph, parent, (AbortedChild(activation, aborted),)))
+    claimed = reduce_graph_run(
+        parent,
+        ClaimGraphExecution(parent.revision, GraphExecutionAttemptId("parent-attempt"), None),
+    )
+    assert claimed.execution is not None
+    failed = reduce_graph_run(claimed, settle_result(graph, claimed, prepared.nested_results[0]))
+    failed = replace(failed, execution=None)
+    scope_run = root_scope_run(parent.run_id)
+    publication = graph.publications[GraphNodeId("nested")]
+    declarations = tuple(
+        (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
+    )
+    command = ResumeGraphNodes(
+        failed.revision,
+        (
+            SkipFailedNode(
+                GraphNodeId("nested"),
+                GraphSkipReason("boundary replacement"),
+                ContinueGraphRouting(),
+            ),
+        ),
+    )
+    successor = reduce_graph_run(failed, command)
+    substitution = AdmittedSubstitution(
+        PublicationAvailabilityCoordinate(
+            StableActivation(scope_run, failed.superstep, GraphNodeId("nested")),
+            publication.descriptor.identity,
+        ),
+        _make_node_output_frame(Graph.values(value="replacement"), declarations),
+        SkipSubstitutionProvenance(),
+        successor.revision,
+    )
+
+    availability = admit_resume_candidates(
+        (
+            ScopedResumeCandidate(
+                graph,
+                scope_run,
+                failed,
+                successor,
+                (substitution,),
+                (
+                    SkipFailedNode(
+                        GraphNodeId("nested"),
+                        GraphSkipReason("boundary replacement"),
+                        ContinueGraphRouting(),
+                    ),
+                ),
+                False,
+                command,
+            ),
+        ),
+        request(graph, parent).frames,
+    )
+
+    assert aborted.status is GraphRunStatus.ABORTED
+    with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
+        install_confirmed_resume_frames(
+            request(graph, parent).frames,
+            _PlannedResume(
+                scope_run,
+                successor,
+                PreparedResume(command, (), ()),
+                (substitution,),
+            ),
+            failed,
+        )
+    assert aborted.abort is not None and aborted.abort.reason == "child aborted"
+    assert availability.has_publication(substitution.coordinate)
+    installed = install_confirmed_resume_frames(
+        request(graph, parent).frames,
+        _PlannedResume(
+            scope_run,
+            successor,
+            PreparedResume(command, (), ()),
+            (substitution,),
+        ),
+        successor,
+    )
+    confirmed = installed.lookup(substitution.coordinate)
+    assert confirmed.coordinate == substitution.coordinate
+    assert confirmed.frame is substitution.frame
+    assert confirmed.provenance is substitution.provenance
+    assert confirmed.acknowledged_revision == substitution.expected_revision == successor.revision
+    assert _frame_value(confirmed.frame, "value") == "replacement"
+    routed = reduce_graph_run(successor, resolve_routing(graph, successor, scope_run, installed))
+    materialized = materialize_node_input(graph, routed, scope_run, installed, GraphNodeId("consumer"))
+    assert _frame_value(materialized, "value") == "replacement"
+    assert substitution.coordinate.activation.scope_run == scope_run
+    assert substitution.coordinate.activation.node_id == GraphNodeId("nested")
+    assert substitution.coordinate.activation.node_id != GraphNodeId("child")
+    assert aborted.status is GraphRunStatus.ABORTED
+
+
+def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> None:
+    graph = nested_graph(with_consumer=True)
+    scope_run = root_scope_run(GraphRunId("repeated-parent"))
+    publication = graph.publications[GraphNodeId("nested")]
+    declarations = tuple(
+        (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
+    )
+    candidates: list[ScopedResumeCandidate[str]] = []
+    substitutions: list[AdmittedSubstitution[str]] = []
+    child_runs: list[ScopeRunCoordinate] = []
+    for superstep, value in ((2, "first"), (5, "second")):
+        state = running_state(
+            definition_id=graph.definition_id,
+            frontier=("nested",),
+            run_id=scope_run.graph_run_id,
+            superstep=superstep,
+            revision=superstep + 1,
+        )
+        state = replace(
+            state,
+            frontier=GraphFrontierState(
+                (GraphFrontierNode(GraphNodeId("nested"), FailedGraphNode(GraphFailure("child aborted"))),)
+            ),
+        )
+        action = SkipFailedNode(
+            GraphNodeId("nested"),
+            GraphSkipReason("boundary replacement"),
+            ContinueGraphRouting(),
+        )
+        command = ResumeGraphNodes(state.revision, (action,))
+        successor = reduce_graph_run(state, command)
+        substitution = AdmittedSubstitution(
+            PublicationAvailabilityCoordinate(
+                StableActivation(scope_run, superstep, GraphNodeId("nested")),
+                publication.descriptor.identity,
+            ),
+            _make_node_output_frame(Graph.values(value=value), declarations),
+            SkipSubstitutionProvenance(),
+            successor.revision,
+        )
+        substitutions.append(substitution)
+        candidates.append(
+            ScopedResumeCandidate(graph, scope_run, state, successor, (substitution,), (action,), False, command)
+        )
+        parent = ParentGraphActivation(state.run_id, superstep, GraphNodeId("nested"))
+        child_runs.append(child_scope_run_for_activation(scope_run, parent))
+
+    availability = CandidateFrameAvailability(ScopedFrameIndex(), ())
+    installed = ScopedFrameIndex()
+    materialized_values: list[str] = []
+    for candidate, substitution in zip(candidates, substitutions, strict=True):
+        availability = admit_resume_candidates(
+            (candidate,),
+            installed,
+        )
+        installed = install_confirmed_resume_frames(
+            installed,
+            _PlannedResume(
+                scope_run,
+                candidate.successor,
+                PreparedResume(candidate.command, (), ()),
+                (substitution,),
+            ),
+            candidate.successor,
+        )
+        routed = reduce_graph_run(
+            candidate.successor,
+            resolve_routing(graph, candidate.successor, scope_run, installed),
+        )
+        frame = materialize_node_input(graph, routed, scope_run, installed, GraphNodeId("consumer"))
+        materialized_values.append(_frame_value(frame, "value"))
+
+    assert child_runs[0] != child_runs[1]
+    assert substitutions[0].coordinate != substitutions[1].coordinate
+    assert installed.has_publication(substitutions[0].coordinate)
+    assert availability.has_publication(substitutions[1].coordinate)
+    assert materialized_values == ["first", "second"]
+
+
 def test_mixed_completed_and_aborted_children_keep_canonical_parent_order() -> None:
     graph = parallel_nested_graph()
     parent = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
@@ -1098,3 +1329,31 @@ def test_planner_claims_only_pending_nodes_from_a_mixed_frontier() -> None:
     tasks = plan_tasks(graph, state, ExecutionLimits())
 
     assert tuple(task.node_id for task in tasks) == (GraphNodeId("c"),)
+
+
+def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
+    graph = nested_graph()
+    parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent-run")
+    scope_run = root_scope_run(parent.run_id)
+    parent_activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
+    child_coordinate = child_scope_run_for_activation(scope_run, parent_activation)
+    child_graph = graph.nested_graphs[GraphNodeId("nested")]
+    child = reduce_graph_run(
+        None,
+        project_start_graph_command(child_graph, child_coordinate.graph_run_id, parent_activation),
+    )
+    aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
+    context = _new_context(_new_family_identity(), parent, ScopedFrameIndex(), recovered=False)
+    context.replace_child(
+        ChildStateBinding(
+            child_coordinate,
+            StableActivation(scope_run, 0, GraphNodeId("nested")),
+            aborted,
+        )
+    )
+
+    projections = family_driver_module._child_projections(graph, parent, scope_run, context)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(projections) == 1
+    assert isinstance(projections[0], AbortedChild)
+    assert projections[0].child_state == aborted

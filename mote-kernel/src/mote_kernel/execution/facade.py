@@ -68,6 +68,7 @@ from mote_kernel.execution.identity import (
 from mote_kernel.execution.invocation import (
     admit_state_owned_overrides,
     executors_for,
+    install_confirmed_resume_frames,
     lineage_states,
     plan_fences,
     plan_resumes,
@@ -92,6 +93,8 @@ from mote_kernel.execution.result import (
     _GraphFailureResult,
     _GraphInterruptResult,
     _GraphSuccessResult,
+    _partial_commit_error,
+    _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
@@ -100,6 +103,7 @@ from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
     _CompiledFamilyIdentity,
     _context_from_continuation,
+    _continuation,
     _GraphContinuation,
     _new_context,
     _new_family_identity,
@@ -196,6 +200,7 @@ class Graph(Generic[GraphValueT]):
     FailureResult = _GraphFailureResult
     InterruptResult = _GraphInterruptResult
     Continuation = _GraphContinuation
+    PartialCommitError = _PartialCommitError
     CompletedResult = _CompletedGraphResult
     AbortedResult = _AbortedGraphResult
     AwaitingResumeResult = _AwaitingResumeGraphResult
@@ -490,6 +495,7 @@ class Graph(Generic[GraphValueT]):
         reason: str,
         *,
         route: str | None = None,
+        output: "Graph.Values[GraphValueT] | None" = None,
         scope: tuple[str, ...] = (),
     ) -> "Graph.ResumeAction[GraphValueT]":
         canonical_reason = canonical_port_name(reason, kind="skip reason")
@@ -499,6 +505,7 @@ class Graph(Generic[GraphValueT]):
             GraphNodeId(canonical_port_name(node_id, kind="resume node")),
             canonical_reason,
             canonical_route,
+            _require_graph_values(output) if output is not None else None,
         )
 
     def _definition(
@@ -635,6 +642,16 @@ class Graph(Generic[GraphValueT]):
             )
             context.frames = context.frames.add_graph_input(AdmittedGraphInput(coordinate, input_candidate))
         else:
+            resumed_scopes = {action.scope for action in resume}
+            substitution_actions = tuple(
+                action for action in resume if isinstance(action, SkipFailedNodeRequest) and action.output is not None
+            )
+            if continuation is None and len(resumed_scopes) > 1 and substitution_actions:
+                identities = tuple((tuple(action.scope), action.node_id) for action in substitution_actions)
+                raise GraphValueUnavailableError(
+                    "state-only multi-scope substitution cannot preserve a partially confirmed "
+                    f"publication checkpoint before commit; actions={identities!r}"
+                )
             if continuation is None:
                 context = _new_context(
                     owner.family_identity,
@@ -654,34 +671,63 @@ class Graph(Generic[GraphValueT]):
                 resume,
                 executors,
             )
-            admit_state_owned_overrides(graph, planned_states, candidate_frames)
-            if context.recovered:
+            admit_state_owned_overrides(graph, planned_states, candidate_frames.confirmed)
+            if context.recovered or any(
+                action.output is None for action in resume if isinstance(action, SkipFailedNodeRequest)
+            ):
                 preflight_recovery(
                     graph,
                     recovery_seed(planned_states, candidate_frames, limits, facts),
                 )
+            confirmed_prefix = False
             for fence in fences:
                 current = context.state_at(fence.scope_run)
-                confirmed = await commit_transition(
-                    fence.scope_run,
-                    current,
-                    fence.command,
-                    None,
-                    commit,
-                )
+                try:
+                    confirmed = await commit_transition(
+                        fence.scope_run,
+                        current,
+                        fence.command,
+                        None,
+                        commit,
+                    )
+                except Exception as cause:
+                    if confirmed_prefix:
+                        raise _partial_commit_error(
+                            context.root_binding.state,
+                            _continuation(context),
+                            cause,
+                            tuple(fence.scope_run.scope),
+                        ) from cause
+                    raise
                 context.replace_state(fence.scope_run, confirmed)
+                confirmed_prefix = True
             for planned_resume in planned_resumes:
                 current = context.state_at(planned_resume.scope_run)
-                confirmed = await commit_transition(
-                    planned_resume.scope_run,
-                    current,
-                    planned_resume.prepared.command,
-                    None,
-                    commit,
-                )
-                context.replace_state(planned_resume.scope_run, confirmed)
-                for admitted in planned_resume.prepared.inputs:
-                    context.frames = context.frames.add_resume_input(admitted)
+                try:
+                    confirmed = await commit_transition(
+                        planned_resume.scope_run,
+                        current,
+                        planned_resume.prepared.command,
+                        None,
+                        commit,
+                    )
+                    installed_frames = install_confirmed_resume_frames(
+                        context.frames,
+                        planned_resume,
+                        confirmed,
+                    )
+                    context.replace_state(planned_resume.scope_run, confirmed)
+                    context.frames = installed_frames
+                except Exception as cause:
+                    if confirmed_prefix:
+                        raise _partial_commit_error(
+                            context.root_binding.state,
+                            _continuation(context),
+                            cause,
+                            tuple(planned_resume.scope_run.scope),
+                        ) from cause
+                    raise
+                confirmed_prefix = True
         disposition = await drive_root(
             graph,
             context,

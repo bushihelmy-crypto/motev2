@@ -95,10 +95,9 @@ async def test_recovered_settled_conditional_uses_only_its_authoritative_route(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("route", "result_type"), [("safe", Graph.CompletedResult), ("missing", Graph.AbortedResult)])
-async def test_recovered_concrete_skip_keeps_its_route_and_dynamic_missing_boundary(
+@pytest.mark.parametrize("route", ["safe", "missing"])
+async def test_recovered_concrete_skip_keeps_its_route_and_rejects_missing_boundary_before_commit(
     route: str,
-    result_type: type[Graph.CompletedResult[str]] | type[Graph.AbortedResult[str]],
 ) -> None:
     calls = {"source": 0, "safe": 0, "consumer": 0}
 
@@ -129,19 +128,29 @@ async def test_recovered_concrete_skip_keeps_its_route_and_dynamic_missing_bound
     failed = await graph.run(Graph.values())
     assert isinstance(failed, Graph.AwaitingResumeResult)
 
-    result = await graph.run(
-        state=failed.state,
-        resume=(graph.skip_failed("source", "operator skip", route=route),),
-    )
-
-    assert isinstance(result, result_type)
+    commits = CommitLog()
+    if route == "missing":
+        with pytest.raises(Graph.ValueUnavailableError, match="required nodes"):
+            await graph.run(
+                state=failed.state,
+                resume=(graph.skip_failed("source", "operator skip", route=route),),
+                commit=commits,
+            )
+        assert commits.transitions == []
+    else:
+        result = await graph.run(
+            state=failed.state,
+            resume=(graph.skip_failed("source", "operator skip", route=route),),
+            commit=commits,
+        )
+        assert isinstance(result, Graph.CompletedResult)
     assert calls["source"] == 1
     assert calls["consumer"] == 0
     assert calls["safe"] == (1 if route == "safe" else 0)
 
 
 @pytest.mark.asyncio
-async def test_recovered_plain_skip_turns_a_missing_graph_output_into_dynamic_abort() -> None:
+async def test_recovered_plain_skip_rejects_a_missing_graph_output_before_commit() -> None:
     calls = 0
 
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -155,13 +164,15 @@ async def test_recovered_plain_skip_turns_a_missing_graph_output_into_dynamic_ab
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
 
-    aborted = await graph.run(
-        state=paused.state,
-        resume=(graph.skip_failed("source", "operator skip"),),
-    )
+    commits = CommitLog()
+    with pytest.raises(Graph.ValueUnavailableError, match="graph outputs"):
+        await graph.run(
+            state=paused.state,
+            resume=(graph.skip_failed("source", "operator skip"),),
+            commit=commits,
+        )
 
-    assert isinstance(aborted, Graph.AbortedResult)
-    assert aborted.abort.reason == "required graph output values are unavailable at completion"
+    assert commits.transitions == []
     assert calls == 1
 
 
@@ -872,13 +883,15 @@ async def test_aborted_child_cannot_restart_and_parent_skip_does_not_rebuild_it(
 
     first = await parent.run(Graph.values())
     assert isinstance(first, Graph.AwaitingResumeResult)
-    after_child_skip = await parent.run(
-        state=first.state,
-        continuation=first.continuation,
-        resume=(parent.skip_failed("source", "abort child", route="continue", scope=("nested",)),),
-    )
-    assert isinstance(after_child_skip, Graph.AwaitingResumeResult)
-    assert tuple(view.node_id for view in after_child_skip.failures) == ("nested",)
+    commits = CommitLog()
+    with pytest.raises(Graph.ValueUnavailableError, match="required nodes"):
+        await parent.run(
+            state=first.state,
+            continuation=first.continuation,
+            resume=(parent.skip_failed("source", "abort child", route="continue", scope=("nested",)),),
+            commit=commits,
+        )
+    assert commits.transitions == []
 
     for restart in (
         parent.resume_failed("nested"),
@@ -887,19 +900,13 @@ async def test_aborted_child_cannot_restart_and_parent_skip_does_not_rebuild_it(
         commits = CommitLog()
         with pytest.raises(Graph.SnapshotMismatchError, match="cannot be restarted"):
             await parent.run(
-                state=after_child_skip.state,
-                continuation=after_child_skip.continuation,
+                state=first.state,
+                continuation=first.continuation,
                 resume=(restart,),
                 commit=commits,
             )
         assert commits.transitions == []
 
-    completed = await parent.run(
-        state=after_child_skip.state,
-        continuation=after_child_skip.continuation,
-        resume=(parent.skip_failed("nested", "accept child abort"),),
-    )
-    assert isinstance(completed, Graph.CompletedResult)
     assert calls == {"source": 1, "consumer": 0}
 
 

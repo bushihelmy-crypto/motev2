@@ -48,6 +48,7 @@ from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedPublication,
+    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
@@ -416,6 +417,112 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     )
     with pytest.raises(SnapshotMismatchError, match="unique and canonical"):
         preflight_recovery(graph, duplicate_bindings)
+
+    duplicate_action: AdmittedResumeFact[str] = AdmittedResumeFact(
+        StableActivation(scope_run, state.superstep, GraphNodeId("node")),
+        AdmittedActionKind.SKIP_FAILED,
+        None,
+        "skip",
+        None,
+        None,
+    )
+    with pytest.raises(SnapshotMismatchError, match="actions must be unique"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (duplicate_action, duplicate_action),
+            ),
+        )
+
+    foreign_action: AdmittedResumeFact[str] = replace(
+        duplicate_action,
+        target=StableActivation(root_scope_run(GraphRunId("foreign")), state.superstep, GraphNodeId("node")),
+    )
+    with pytest.raises(SnapshotMismatchError, match="simulated scoped successor"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (foreign_action,),
+            ),
+        )
+
+    missing_action: AdmittedResumeFact[str] = replace(
+        duplicate_action,
+        target=StableActivation(scope_run, state.superstep, GraphNodeId("missing")),
+    )
+    with pytest.raises(SnapshotMismatchError, match="target is absent"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (missing_action,),
+            ),
+        )
+
+    with pytest.raises(SnapshotMismatchError, match="skip action does not match"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (duplicate_action,),
+            ),
+        )
+
+    skipped_state = replace(
+        state,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("node"),
+                    SkippedGraphNode(GraphFailure("failed"), GraphSkipReason("actual"), ContinueGraphRouting()),
+                ),
+            )
+        ),
+        revision=state.revision + 1,
+    )
+    mismatched_action: AdmittedResumeFact[str] = replace(duplicate_action, skip_reason="different")
+    with pytest.raises(SnapshotMismatchError, match="facts do not match"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, skipped_state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (mismatched_action,),
+            ),
+        )
+
+    resumed_action: AdmittedResumeFact[str] = replace(
+        duplicate_action,
+        action=AdmittedActionKind.RESUME_FAILED,
+        skip_reason=None,
+    )
+    with pytest.raises(SnapshotMismatchError, match="resume action does not match"):
+        preflight_recovery(
+            graph,
+            RecoveryInvocationSeed(
+                RecoveryStateBinding(scope_run, skipped_state),
+                (),
+                ScopedFrameIndex(),
+                limits,
+                (resumed_action,),
+            ),
+        )
 
     active = reduce_graph_run(
         state,
@@ -945,7 +1052,7 @@ def _partial_history_frames(
                 ),
                 output,
                 1,
-                GraphExecutionToken(1, GraphExecutionAttemptId("availability")),
+                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("availability"))),
             ),
         ),
     )

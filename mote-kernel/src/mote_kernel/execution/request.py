@@ -49,15 +49,18 @@ class ResumeInterruptedNodeRequest(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class SkipFailedNodeRequest:
+class SkipFailedNodeRequest(Generic[GraphValueT]):
     scope: tuple[GraphNodeId, ...]
     node_id: GraphNodeId
     reason: str
     route: str | None
+    output: _GraphValues[GraphValueT] | None = None
 
 
 ResumeNodeRequest: TypeAlias = (
-    ResumeFailedNodeRequest[GraphValueT] | ResumeInterruptedNodeRequest[GraphValueT] | SkipFailedNodeRequest
+    ResumeFailedNodeRequest[GraphValueT]
+    | ResumeInterruptedNodeRequest[GraphValueT]
+    | SkipFailedNodeRequest[GraphValueT]
 )
 
 

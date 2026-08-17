@@ -6,7 +6,7 @@ from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.family_driver import project_graph_result
-from mote_kernel.execution.graph.ports import canonical_nominal_type
+from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
     NamedValue,
@@ -24,11 +24,17 @@ from mote_kernel.execution.run_context import (
     ConfirmedChildBoundary,
     ConfirmedPublication,
     ContinuationSnapshot,
+    ExecutionPublicationProvenance,
     ScopedFrameIndex,
+    SkipSubstitutionProvenance,
     _new_context,
     _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    GraphExecutionAttemptId,
+    GraphExecutionToken,
     GraphNodeId,
     GraphRunId,
     GraphRunState,
@@ -90,6 +96,31 @@ async def _completed_empty(definition_id: str) -> tuple[Graph[str], Graph.Comple
     result = await graph.run(Graph.values())
     assert isinstance(result, Graph.CompletedResult)
     return graph, result
+
+
+async def _completed_substitution(
+    definition_id: str,
+) -> tuple[Graph[str], Graph.CompletedResult[str], ConfirmedPublication[str]]:
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.failure("declined")
+
+    graph = Graph[str](definition_id)
+    graph.add_node("source", fail, inputs={}, outputs={"value": str})
+    graph.set_outputs({"value": Graph.node_output("source", "value")})
+    paused = await graph.run(Graph.values())
+    assert isinstance(paused, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=paused.state,
+        continuation=paused.continuation,
+        resume=(graph.skip_failed("source", "replacement", output=Graph.values(value="replacement")),),
+    )
+    assert isinstance(completed, Graph.CompletedResult)
+    publication = next(
+        record
+        for record in _layout(completed.continuation).reveal().frames.publications
+        if isinstance(record.provenance, SkipSubstitutionProvenance)
+    )
+    return graph, completed, publication
 
 
 def _layout(continuation: Graph.Continuation[str]) -> ContinuationEditor:
@@ -368,6 +399,29 @@ async def test_complete_continuation_rejects_an_inconsistent_publication() -> No
 
 
 @pytest.mark.asyncio
+async def test_complete_continuation_rejects_invalid_execution_publication_provenance() -> None:
+    async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value="published")
+
+    graph = Graph[str]("continuation.publication-provenance")
+    graph.add_node("source", publish, inputs={}, outputs={"value": str})
+    graph.set_outputs({})
+    completed = await graph.run(Graph.values())
+    assert isinstance(completed, Graph.CompletedResult)
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    publication = snapshot.frames.publications[0]
+    malformed = replace(
+        publication,
+        provenance=ExecutionPublicationProvenance(GraphExecutionToken(0, GraphExecutionAttemptId("invalid"))),
+    )
+    layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=(malformed,))))
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="execution provenance"):
+        await graph.run(state=completed.state, continuation=completed.continuation)
+
+
+@pytest.mark.asyncio
 async def test_complete_continuation_readmits_publication_frame_content() -> None:
     async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value="published")
@@ -392,6 +446,70 @@ async def test_complete_continuation_readmits_publication_frame_content() -> Non
     )
 
     with pytest.raises(Graph.SnapshotMismatchError, match="publication frame does not match"):
+        await graph.run(state=completed.state, continuation=completed.continuation)
+
+
+@pytest.mark.asyncio
+async def test_valid_historical_substitution_continuation_survives_frontier_advance() -> None:
+    graph, completed, publication = await _completed_substitution("continuation.valid-substitution")
+
+    repeated = await graph.run(state=completed.state, continuation=completed.continuation)
+
+    assert isinstance(repeated, Graph.CompletedResult)
+    assert repeated.outputs["value"] == "replacement"
+    assert publication.coordinate.activation.node_id == GraphNodeId("source")
+    assert all(node.node_id != GraphNodeId("source") for node in completed.state.frontier.nodes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["provenance", "revision", "descriptor", "lineage", "frame"])
+async def test_substitution_continuation_rejects_each_integrity_violation(tamper: str) -> None:
+    graph, completed, publication = await _completed_substitution(f"continuation.substitution-{tamper}")
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    malformed = publication
+    if tamper == "provenance":
+        malformed = replace(
+            malformed,
+            provenance=cast(
+                SkipSubstitutionProvenance,
+                ExecutionPublicationProvenance(GraphExecutionToken(0, GraphExecutionAttemptId("invalid"))),
+            ),
+        )
+    elif tamper == "revision":
+        malformed = replace(malformed, acknowledged_revision=completed.state.revision + 1)
+    elif tamper == "descriptor":
+        malformed = replace(
+            malformed,
+            coordinate=replace(
+                malformed.coordinate,
+                descriptor=FrameDescriptorIdentity(
+                    GraphDefinitionId("foreign"), GraphDefinitionVersion(1), FrameKind.NODE_OUTPUT, 0
+                ),
+            ),
+        )
+    elif tamper == "lineage":
+        malformed = replace(
+            malformed,
+            coordinate=replace(
+                malformed.coordinate,
+                activation=replace(
+                    malformed.coordinate.activation,
+                    scope_run=ScopeRunCoordinate((GraphNodeId("unknown"),), GraphRunId("unknown-run")),
+                ),
+            ),
+        )
+    else:
+        malformed = replace(
+            malformed,
+            frame=_make_node_output_frame(
+                Graph.values(other="replacement"),
+                (("other", canonical_nominal_type(str)),),
+            ),
+        )
+    layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=(malformed,))))
+
+    with pytest.raises(Graph.SnapshotMismatchError):
         await graph.run(state=completed.state, continuation=completed.continuation)
 
 
