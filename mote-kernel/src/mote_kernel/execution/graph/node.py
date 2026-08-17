@@ -1,25 +1,32 @@
-"""Graph node contracts."""
+"""Canonical callable graph-node definitions."""
 
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
-from mote_kernel.execution.graph.outcome import NodeOutcome
+from mote_kernel.execution.graph.outcome import GraphOutcome
+from mote_kernel.execution.graph.ports import InputBindings, OutputDeclarations
+from mote_kernel.execution.graph.values import _GraphValues
 from mote_kernel.execution.resource import ResourceId
-from mote_kernel.state.graph_state.identity import GraphNodeId
+from mote_kernel.state.graph_state import GraphNodeId
 
-InputT = TypeVar("InputT", contravariant=True)
-OutputT_co = TypeVar("OutputT_co", covariant=True)
+GraphValueT = TypeVar("GraphValueT")
 
 
-class Node(Protocol[InputT, OutputT_co]):
-    async def __call__(self, node_input: InputT, /) -> NodeOutcome[OutputT_co]: ...
+class NodeCallable(Protocol[GraphValueT]):
+    async def __call__(
+        self,
+        values: _GraphValues[GraphValueT],
+        /,
+    ) -> _GraphValues[GraphValueT] | GraphOutcome[GraphValueT]: ...
 
 
 @dataclass(frozen=True, slots=True)
-class NodeDefinition(Generic[InputT, OutputT_co]):
+class CallableNodeDefinition(Generic[GraphValueT]):
     node_id: GraphNodeId
-    node: Node[InputT, OutputT_co]
+    operation: NodeCallable[GraphValueT]
+    inputs: InputBindings[GraphValueT]
+    outputs: OutputDeclarations[GraphValueT]
     resources: tuple[ResourceId, ...] = ()
 
 
-__all__ = ["Node", "NodeDefinition"]
+__all__: list[str] = []

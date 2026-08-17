@@ -2,21 +2,32 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId
-from mote_kernel.execution.errors import NodeExecutionContractError
-from mote_kernel.execution.graph import (
-    CompiledGraph,
-    NestedGraphNodeDefinition,
-    NodeFailure,
-    NodeInterrupt,
-    NodeSuccess,
+from mote_kernel.execution.errors import (
+    InvalidRoutingCommandError,
+    NodeExecutionContractError,
+    UnknownRouteError,
+)
+from mote_kernel.execution.graph.definition import NestedGraphNodeDefinition
+from mote_kernel.execution.graph.outcome import (
+    _GraphFailureOutcome,
+    _GraphInterruptOutcome,
+    _GraphSuccessOutcome,
+)
+from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.values import (
+    _GraphValues,
+    _make_node_output_frame,
+    _public_node_input,
 )
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
+NodeReturn: TypeAlias = (
+    _GraphValues[GraphValueT] | _GraphSuccessOutcome[GraphValueT] | _GraphFailureOutcome | _GraphInterruptOutcome
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,58 +36,94 @@ class TaskRaised:
     error: Exception
 
 
+def _project_outcome(
+    graph: CompiledGraph[GraphValueT],
+    executable: ExecutableTask[GraphValueT],
+    outcome: NodeReturn[GraphValueT],
+) -> TaskResult[GraphValueT]:
+    if type(outcome) not in (
+        _GraphValues,
+        _GraphSuccessOutcome,
+        _GraphFailureOutcome,
+        _GraphInterruptOutcome,
+    ):
+        raise NodeExecutionContractError("graph node returned an unsupported outcome")
+    if isinstance(outcome, _GraphValues):
+        output = outcome
+        route = None
+    elif isinstance(outcome, _GraphSuccessOutcome):
+        output = outcome.output
+        route = outcome.route
+    elif isinstance(outcome, _GraphFailureOutcome):
+        return TaskFailure(executable.task, outcome.failure)
+    else:
+        return TaskInterrupt(executable.task, outcome.request_payload)
+    plan = graph.outcomes[executable.task.node_id]
+    if plan.declared_routes:
+        if route is None:
+            raise InvalidRoutingCommandError("a conditional node must select one declared route")
+        if route not in plan.declared_routes:
+            raise UnknownRouteError("node selected an unknown conditional route")
+    elif route is not None:
+        raise InvalidRoutingCommandError("a non-conditional node cannot select a route")
+    declarations = tuple((item.name, item.descriptor) for item in plan.outputs.entries)
+    return TaskSuccess(
+        executable.task,
+        _make_node_output_frame(output, declarations),
+        route,
+    )
+
+
 async def _execute_task(
-    graph: CompiledGraph[InputT, OutputT], executable: ExecutableTask[InputT]
-) -> TaskResult[OutputT]:
+    graph: CompiledGraph[GraphValueT], executable: ExecutableTask[GraphValueT]
+) -> TaskResult[GraphValueT]:
     definition = graph.nodes[executable.task.node_id]
     if isinstance(definition, NestedGraphNodeDefinition):
         raise NodeExecutionContractError("nested task must be projected to a precomputed terminal outcome")
-    outcome = await definition.node(executable.effective_input)
-    if isinstance(outcome, NodeSuccess):
-        return TaskSuccess(executable.task, outcome.output, outcome.routing)
-    if isinstance(outcome, NodeFailure):
-        return TaskFailure(executable.task, outcome.failure)
-    if isinstance(outcome, NodeInterrupt):  # pyright: ignore[reportUnnecessaryIsInstance]
-        return TaskInterrupt(executable.task, outcome.request_payload)
-    raise NodeExecutionContractError("graph node returned an unsupported outcome")
+    outcome = await definition.operation(_public_node_input(executable.effective_input))
+    return _project_outcome(graph, executable, outcome)
 
 
 async def _capture(
-    graph: CompiledGraph[InputT, OutputT], executable: ExecutableTask[InputT]
-) -> TaskResult[OutputT] | TaskRaised:
+    graph: CompiledGraph[GraphValueT], executable: ExecutableTask[GraphValueT]
+) -> TaskResult[GraphValueT] | TaskRaised:
     try:
         return await _execute_task(graph, executable)
     except Exception as error:
         return TaskRaised(executable.task, error)
 
 
-class TaskScheduler(Generic[InputT, OutputT]):
+class TaskScheduler(Generic[GraphValueT]):
     """Submit ordinary node tasks and yield one completion at a time."""
 
     __slots__ = ("_events", "_graph", "_live")
 
-    def __init__(self, graph: CompiledGraph[InputT, OutputT]) -> None:
+    def __init__(self, graph: CompiledGraph[GraphValueT]) -> None:
         self._graph = graph
-        self._live: dict[TaskId, tuple[ExecutableTask[InputT], asyncio.Task[TaskResult[OutputT] | TaskRaised]]] = {}
-        self._events: list[TaskResult[OutputT] | TaskRaised] = []
+        self._live: dict[
+            TaskId,
+            tuple[
+                ExecutableTask[GraphValueT],
+                asyncio.Task[TaskResult[GraphValueT] | TaskRaised],
+            ],
+        ] = {}
+        self._events: list[TaskResult[GraphValueT] | TaskRaised] = []
 
     @property
     def live_count(self) -> int:
         return len(self._live)
 
-    @property
-    def has_pending_events(self) -> bool:
-        return bool(self._events)
-
-    def take_pending_errors(self) -> tuple[TaskRaised, ...]:
-        """Remove ready ordinary errors while preserving typed completion order."""
+    def drain_pending_events(
+        self,
+    ) -> tuple[tuple[TaskRaised, ...], tuple[TaskResult[GraphValueT], ...]]:
+        """Split buffered events once while preserving each canonical order."""
 
         errors = tuple(event for event in self._events if isinstance(event, TaskRaised))
-        if errors:
-            self._events = [event for event in self._events if not isinstance(event, TaskRaised)]
-        return errors
+        completions = tuple(event for event in self._events if not isinstance(event, TaskRaised))
+        self._events.clear()
+        return errors, completions
 
-    def submit(self, executables: tuple[ExecutableTask[InputT], ...]) -> None:
+    def submit(self, executables: tuple[ExecutableTask[GraphValueT], ...]) -> None:
         task_ids = tuple(executable.task.task_id for executable in executables)
         existing = set(self._live)
         existing.update(event.task.task_id for event in self._events)
@@ -87,7 +134,7 @@ class TaskScheduler(Generic[InputT, OutputT]):
             handle = asyncio.create_task(_capture(self._graph, executable), name=f"mote-graph:{task_id}")
             self._live[task_id] = (executable, handle)
 
-    async def next_completion(self) -> TaskResult[OutputT] | TaskRaised:
+    async def next_completion(self) -> TaskResult[GraphValueT] | TaskRaised:
         if self._events:
             return self._events.pop(0)
         if not self._live:
@@ -97,7 +144,7 @@ class TaskScheduler(Generic[InputT, OutputT]):
             tuple(by_handle),
             return_when=asyncio.FIRST_COMPLETED,
         )
-        events: list[tuple[tuple[int, str, TaskId], TaskResult[OutputT] | TaskRaised]] = []
+        events: list[tuple[tuple[int, str, TaskId], TaskResult[GraphValueT] | TaskRaised]] = []
         for handle in done:
             executable = by_handle[handle]
             self._live.pop(executable.task.task_id, None)

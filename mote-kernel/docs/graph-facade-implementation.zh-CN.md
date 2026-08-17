@@ -1,10 +1,12 @@
 # Graph 唯一公共门面实施方案
 
+> **历史归档 / Superseded（非规范事实源）。** 本文保留最初 facade 决策过程，其中 `Graph[InputT, OutputT]`、混合 `run(node_input, state=...)`、非公开 nested 等描述均已失效，不得用于实现或验收。当前唯一规范是 [`graph-node-input-output-contract-implementation.zh-CN.md`](graph-node-input-output-contract-implementation.zh-CN.md)：单一 `Graph[GraphValueT]` universe、`Graph.values()` canonical frames、三个 closed `run()` overload、public nested family driving 与 bounded shared-plan recovery。
+
 > 核心原则：对外只暴露一个 `Graph` 门面；使用方只通过它构建图并调用同一个 `run()`，resume 合入 `run()`，其余 execution/state 基础设施均不形成并列公共入口。
 
 ## 1. 文档信息
 
-- 状态：Implemented
+- 状态：Historical / Superseded
 - 日期：2026-08-15
 - 所属项目：Mote Kernel
 - 公共入口：`from mote_kernel.execution import Graph`

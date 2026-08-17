@@ -1,81 +1,72 @@
-"""Typed requests for graph execution and selective node recovery."""
+"""Typed requests for scoped graph execution and selective recovery."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
-from mote_kernel.execution.identity import ExecutionRequestAttemptId
+from mote_kernel.execution.graph.values import _GraphValues
+from mote_kernel.execution.identity import ExecutionRequestAttemptId, ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import ChildProjection
-from mote_kernel.state.graph_state import (
-    GraphInterruptId,
-    GraphNodeId,
-    GraphRoutingContribution,
-    GraphRunState,
-    GraphSkipReason,
-)
+from mote_kernel.execution.run_context import ScopedFrameIndex
+from mote_kernel.state.graph_state import GraphInterruptId, GraphNodeId, GraphRunState
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
 
 
 @dataclass(frozen=True, slots=True)
-class StepRequest(Generic[InputT, OutputT]):
+class StepRequest(Generic[GraphValueT]):
     state: GraphRunState
-    node_input: InputT
+    scope_run: ScopeRunCoordinate
+    frames: ScopedFrameIndex[GraphValueT]
     request_attempt_id: ExecutionRequestAttemptId
-    child_projections: tuple[ChildProjection[OutputT], ...]
-    limits: ExecutionLimits = field(default_factory=ExecutionLimits)
+    child_projections: tuple[ChildProjection[GraphValueT], ...]
+    limits: ExecutionLimits
 
 
 @dataclass(frozen=True, slots=True)
-class UseRequestInput:
+class UseMaterializedInput:
     pass
 
 
 @dataclass(frozen=True, slots=True)
-class OverrideNodeInput(Generic[InputT]):
-    value: InputT
+class OverrideNodeInput(Generic[GraphValueT]):
+    values: _GraphValues[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
-class ResumeFailedNodeRequest(Generic[InputT]):
+class ResumeFailedNodeRequest(Generic[GraphValueT]):
+    scope: tuple[GraphNodeId, ...]
     node_id: GraphNodeId
-    input: UseRequestInput | OverrideNodeInput[InputT]
+    input: UseMaterializedInput | OverrideNodeInput[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
-class ResumeInterruptedNodeRequest(Generic[InputT]):
+class ResumeInterruptedNodeRequest(Generic[GraphValueT]):
+    scope: tuple[GraphNodeId, ...]
     node_id: GraphNodeId
     interrupt_id: GraphInterruptId
-    input: OverrideNodeInput[InputT]
+    input: OverrideNodeInput[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
 class SkipFailedNodeRequest:
+    scope: tuple[GraphNodeId, ...]
     node_id: GraphNodeId
-    reason: GraphSkipReason
-    routing: GraphRoutingContribution
+    reason: str
+    route: str | None
 
 
 ResumeNodeRequest: TypeAlias = (
-    ResumeFailedNodeRequest[InputT] | ResumeInterruptedNodeRequest[InputT] | SkipFailedNodeRequest
+    ResumeFailedNodeRequest[GraphValueT] | ResumeInterruptedNodeRequest[GraphValueT] | SkipFailedNodeRequest
 )
 
 
 @dataclass(frozen=True, slots=True)
-class ResumeRequest(Generic[InputT]):
+class ResumeRequest(Generic[GraphValueT]):
     state: GraphRunState
-    actions: tuple[ResumeNodeRequest[InputT], ...]
+    scope_run: ScopeRunCoordinate
+    frames: ScopedFrameIndex[GraphValueT]
+    actions: tuple[ResumeNodeRequest[GraphValueT], ...]
 
 
-__all__ = [
-    "ExecutionRequestAttemptId",
-    "OverrideNodeInput",
-    "ResumeFailedNodeRequest",
-    "ResumeInterruptedNodeRequest",
-    "ResumeNodeRequest",
-    "ResumeRequest",
-    "SkipFailedNodeRequest",
-    "StepRequest",
-    "UseRequestInput",
-]
+__all__: list[str] = []

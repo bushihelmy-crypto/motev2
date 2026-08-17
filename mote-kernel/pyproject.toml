@@ -100,6 +100,7 @@ quote-style = "double"
 
 [tool.pyright]
 include = ["src", "tests"]
+exclude = ["tests/typing_negative"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = "error"

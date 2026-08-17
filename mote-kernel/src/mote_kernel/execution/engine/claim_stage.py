@@ -26,8 +26,16 @@ def prepare_claim(
     task_ids = tuple(task.task_id for task in tasks)
     attempt_id = GraphExecutionAttemptId(str(uuid4()))
     token = GraphExecutionToken(state.execution_sequence + 1, attempt_id)
-    command = ClaimGraphExecution(state.revision, attempt_id, resources)
+    command = project_claim_command(state, attempt_id, resources)
     return prepare_execution_claim(owner, command, token, node_ids, task_ids, request_attempt_id)
+
+
+def project_claim_command(
+    state: GraphRunState,
+    attempt_id: GraphExecutionAttemptId,
+    resources: ResourceSnapshot | None,
+) -> ClaimGraphExecution:
+    return ClaimGraphExecution(state.revision, attempt_id, resources)
 
 
 def require_claim_tasks(claim: PreparedExecutionClaim, tasks: tuple[GraphTask, ...]) -> None:
@@ -37,4 +45,4 @@ def require_claim_tasks(claim: PreparedExecutionClaim, tasks: tuple[GraphTask, .
         raise ResultCollectionError("execution claim tasks do not match current pending nodes")
 
 
-__all__ = ["prepare_claim", "require_claim_tasks"]
+__all__ = ["prepare_claim", "project_claim_command", "require_claim_tasks"]

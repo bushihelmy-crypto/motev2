@@ -1,6 +1,7 @@
 import ast
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TypeGuard
 
 from tests.architecture.import_rules import import_placement_violations, production_import_placement_violations
 
@@ -42,6 +43,64 @@ def _class_method(relative: str, class_name: str, method_name: str) -> ast.Funct
         for node in class_definition.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == method_name
     )
+
+
+def _typing_module_names(tree: ast.Module) -> frozenset[str]:
+    names = {"typing"}
+    for node in tree.body:
+        if not isinstance(node, ast.Import):
+            continue
+        names.update(alias.asname or alias.name for alias in node.names if alias.name == "typing")
+    return frozenset(names)
+
+
+def _is_typing_any(node: ast.AST, typing_names: frozenset[str]) -> TypeGuard[ast.Attribute]:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in typing_names
+        and node.attr == "Any"
+    )
+
+
+def _allowed_nominal_any_guards(
+    relative: str,
+    tree: ast.Module,
+    typing_names: frozenset[str],
+) -> frozenset[int]:
+    if relative != "execution/graph/ports.py":
+        return frozenset()
+    definition = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "canonical_nominal_type"
+    )
+    return frozenset(
+        id(call.args[1])
+        for call in ast.walk(definition)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "operator"
+        and call.func.attr == "is_"
+        and len(call.args) == 2
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "value_type"
+        and _is_typing_any(call.args[1], typing_names)
+        and not call.keywords
+    )
+
+
+def _internal_any_violations(relative: str, tree: ast.Module) -> tuple[str, ...]:
+    typing_names = _typing_module_names(tree)
+    allowed = _allowed_nominal_any_guards(relative, tree, typing_names)
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            violations.extend(
+                f"{relative}:{node.lineno} imports typing.Any" for alias in node.names if alias.name == "Any"
+            )
+        elif _is_typing_any(node, typing_names) and id(node) not in allowed:
+            violations.append(f"{relative}:{node.lineno} uses typing.Any")
+    return tuple(violations)
 
 
 def test_imports_form_a_contiguous_module_header() -> None:
@@ -103,19 +162,28 @@ def test_dynamic_import_and_reflection_escape_hatches_are_forbidden() -> None:
 def test_internal_any_is_forbidden() -> None:
     violations: list[str] = []
     for path, tree in _production_modules():
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "typing":
-                violations.extend(
-                    f"{_relative(path)}:{node.lineno} imports typing.Any" for alias in node.names if alias.name == "Any"
-                )
-            elif (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "typing"
-                and node.attr == "Any"
-            ):
-                violations.append(f"{_relative(path)}:{node.lineno} uses typing.Any")
+        violations.extend(_internal_any_violations(_relative(path), tree))
     assert not violations, f"internal Any is forbidden; decode dynamic values at adapters: {violations}"
+
+
+def test_internal_any_gate_allows_only_the_nominal_identity_guard() -> None:
+    guard = ast.parse(
+        """import operator
+import typing
+def canonical_nominal_type(value_type: type[int]) -> bool:
+    return operator.is_(value_type, typing.Any)
+"""
+    )
+    erased = ast.parse(
+        """import typing as type_system
+Value = type_system.Any
+"""
+    )
+
+    assert _internal_any_violations("execution/graph/ports.py", guard) == ()
+    assert _internal_any_violations("execution/graph/other.py", erased) == (
+        "execution/graph/other.py:2 uses typing.Any",
+    )
 
 
 def test_execution_is_the_only_generic_executor_owner() -> None:
@@ -144,7 +212,14 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
     }
 
     assert executable_fields == {"task", "effective_input"}
-    assert {"state", "node_input", "request_attempt_id", "child_projections", "limits"} <= request_fields
+    assert request_fields == {
+        "state",
+        "scope_run",
+        "frames",
+        "request_attempt_id",
+        "child_projections",
+        "limits",
+    }
 
 
 def test_graph_execution_contract_remains_async_only() -> None:
@@ -157,7 +232,7 @@ def test_graph_execution_contract_remains_async_only() -> None:
         _class_method("execution/engine/session.py", "GraphExecutionSession", "aclose"),
         _class_method("execution/engine/scheduler.py", "TaskScheduler", "next_completion"),
         _class_method("execution/engine/scheduler.py", "TaskScheduler", "aclose"),
-        _class_method("execution/graph/node.py", "Node", "__call__"),
+        _class_method("execution/graph/node.py", "NodeCallable", "__call__"),
     )
 
     assert all(isinstance(definition, ast.AsyncFunctionDef) for definition in execution_functions)

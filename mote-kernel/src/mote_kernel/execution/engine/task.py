@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from typing import Generic, NewType, TypeVar
 
+from mote_kernel.execution.graph.values import NodeInputFrame
 from mote_kernel.state.graph_state.identity import GraphNodeId, GraphRunId
 
 TaskId = NewType("TaskId", str)
-InputT = TypeVar("InputT")
+GraphValueT = TypeVar("GraphValueT")
 
 
 def task_identity(run_id: GraphRunId, superstep: int, node_id: GraphNodeId) -> TaskId:
@@ -26,9 +27,9 @@ class GraphTask:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutableTask(Generic[InputT]):
+class ExecutableTask(Generic[GraphValueT]):
     task: GraphTask
-    effective_input: InputT
+    effective_input: NodeInputFrame[GraphValueT]
 
 
 __all__ = ["ExecutableTask", "GraphTask", "TaskId", "task_identity"]

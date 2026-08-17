@@ -1,21 +1,26 @@
-import pytest
+from dataclasses import replace
 
-from mote_kernel.execution.engine.admission import admit_tasks
+import pytest
+from tests.execution.engine.factories import callable_node
+
+from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.admission import admit_tasks, select_executable_tasks
 from mote_kernel.execution.engine.task import GraphTask, TaskId
-from mote_kernel.execution.graph import (
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
-    NestedGraphNodeDefinition,
-    NodeDefinition,
-    NodeSuccess,
-    compile_graph,
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.node import CallableNodeDefinition
+from mote_kernel.execution.graph.ports import (
+    normalize_graph_output_declarations,
+    normalize_input_bindings,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
     AcquireResources,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    GraphNodeId,
     GraphRunId,
     ResourceLock,
     ResourceSnapshot,
@@ -26,8 +31,21 @@ from mote_kernel.state.graph_state import (
 FILE = ResourceId("file")
 
 
-async def execute(node_input: str) -> NodeSuccess[str]:
-    return NodeSuccess(node_input)
+def definition(
+    nodes: tuple[CallableNodeDefinition[str] | NestedGraphNodeDefinition[str], ...],
+    *,
+    definition_id: str = "graph",
+    resources: tuple[ResourceDefinition, ...] = (),
+) -> GraphDefinition[str]:
+    return GraphDefinition(
+        GraphDefinitionId(definition_id),
+        GraphDefinitionVersion(1),
+        nodes,
+        (),
+        (),
+        normalize_graph_output_declarations({}),
+        resources,
+    )
 
 
 def task(name: str) -> GraphTask:
@@ -36,17 +54,13 @@ def task(name: str) -> GraphTask:
 
 def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
     graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("graph"),
-            GraphDefinitionVersion(1),
+        definition(
             (
-                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
-                NodeDefinition(GraphNodeId("b"), execute, (FILE,)),
-                NodeDefinition(GraphNodeId("c"), execute),
+                replace(callable_node("a"), resources=(FILE,)),
+                replace(callable_node("b"), resources=(FILE,)),
+                callable_node("c"),
             ),
-            (),
-            (GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c")),
-            (ResourceDefinition(FILE, 10),),
+            resources=(ResourceDefinition(FILE, 0),),
         )
     )
 
@@ -60,13 +74,9 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
 
 def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
     graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), execute, (FILE,)),),
-            (),
-            (GraphNodeId("a"),),
-            (ResourceDefinition(FILE, 10),),
+        definition(
+            (replace(callable_node("a"), resources=(FILE,)),),
+            resources=(ResourceDefinition(FILE, 0),),
         )
     )
     first = admit_tasks(graph, (task("a"),), ResourceSnapshot((ResourceLock(FILE),)))
@@ -83,18 +93,14 @@ def test_admission_rejects_snapshot_with_noncompiled_resource_order() -> None:
         admit_tasks(graph, (task("a"),), ResourceSnapshot(()))
 
 
-def resource_graph() -> CompiledGraph[str, str]:
+def resource_graph() -> CompiledGraph[str]:
     return compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("graph"),
-            GraphDefinitionVersion(1),
+        definition(
             (
-                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
-                NodeDefinition(GraphNodeId("free"), execute),
+                replace(callable_node("a"), resources=(FILE,)),
+                callable_node("free"),
             ),
-            (),
-            (GraphNodeId("a"), GraphNodeId("free")),
-            (ResourceDefinition(FILE, 10),),
+            resources=(ResourceDefinition(FILE, 0),),
         )
     )
 
@@ -134,20 +140,16 @@ def test_admission_rejects_acquisition_for_free_task_and_requirement_drift() -> 
 
 
 def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
-    child = GraphDefinition(
-        GraphDefinitionId("child"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child-step"), execute),),
-        (),
-        (GraphNodeId("child-step"),),
-    )
+    child = definition((callable_node("child-step"),), definition_id="child")
     graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("graph"),
-            GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(GraphNodeId("a"), child),),
-            (),
-            (GraphNodeId("a"),),
+        definition(
+            (
+                NestedGraphNodeDefinition(
+                    GraphNodeId("a"),
+                    child,
+                    normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+                ),
+            ),
         )
     )
 
@@ -157,16 +159,12 @@ def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
 
 def test_admission_is_independent_of_input_task_order() -> None:
     graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("graph"),
-            GraphDefinitionVersion(1),
+        definition(
             (
-                NodeDefinition(GraphNodeId("a"), execute, (FILE,)),
-                NodeDefinition(GraphNodeId("b"), execute, (FILE,)),
+                replace(callable_node("a"), resources=(FILE,)),
+                replace(callable_node("b"), resources=(FILE,)),
             ),
-            (),
-            (GraphNodeId("a"), GraphNodeId("b")),
-            (ResourceDefinition(FILE, 10),),
+            resources=(ResourceDefinition(FILE, 0),),
         )
     )
     snapshot = ResourceSnapshot((ResourceLock(FILE),))
@@ -175,3 +173,97 @@ def test_admission_is_independent_of_input_task_order() -> None:
     reverse = admit_tasks(graph, (task("b"), task("a")), snapshot)
 
     assert reverse == forward
+
+
+def test_shared_selector_applies_slots_started_nodes_and_canonical_order() -> None:
+    graph = resource_graph()
+    snapshot = admit_tasks(
+        graph,
+        (task("a"),),
+        ResourceSnapshot((ResourceLock(FILE),)),
+    ).snapshot
+    tasks = (task("free"), task("a"))
+
+    selected = select_executable_tasks(
+        graph,
+        tasks,
+        snapshot,
+        ExecutionLimits(max_parallel_tasks=1),
+        active_count=0,
+        started_node_ids=frozenset(),
+    )
+    no_slot = select_executable_tasks(
+        graph,
+        tasks,
+        snapshot,
+        ExecutionLimits(max_parallel_tasks=1),
+        active_count=1,
+        started_node_ids=frozenset(),
+    )
+    after_a = select_executable_tasks(
+        graph,
+        tasks,
+        snapshot,
+        ExecutionLimits(max_parallel_tasks=1),
+        active_count=0,
+        started_node_ids=frozenset((GraphNodeId("a"),)),
+    )
+
+    assert selected == (task("a"),)
+    assert no_slot == ()
+    assert after_a == (task("free"),)
+
+
+def test_shared_selector_skips_waiting_resource_and_nested_tasks() -> None:
+    child = definition((callable_node("child-step"),), definition_id="child")
+    graph = compile_graph(
+        definition(
+            (
+                replace(callable_node("a"), resources=(FILE,)),
+                replace(callable_node("b"), resources=(FILE,)),
+                NestedGraphNodeDefinition(
+                    GraphNodeId("nested"),
+                    child,
+                    normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+                ),
+            ),
+            resources=(ResourceDefinition(FILE, 0),),
+        )
+    )
+    snapshot = admit_tasks(
+        graph,
+        (task("a"), task("b")),
+        ResourceSnapshot((ResourceLock(FILE),)),
+    ).snapshot
+
+    selected = select_executable_tasks(
+        graph,
+        (task("nested"), task("b"), task("a")),
+        snapshot,
+        ExecutionLimits(max_parallel_tasks=3),
+        active_count=0,
+        started_node_ids=frozenset(),
+    )
+
+    assert selected == (task("a"),)
+
+
+def test_shared_selector_requires_exact_committed_resource_requirement() -> None:
+    graph = resource_graph()
+    snapshot = admit_tasks(
+        graph,
+        (task("a"),),
+        ResourceSnapshot((ResourceLock(FILE),)),
+    ).snapshot
+    object.__setattr__(snapshot.acquisitions[0], "required", ())
+
+    selected = select_executable_tasks(
+        graph,
+        (task("a"),),
+        snapshot,
+        ExecutionLimits(),
+        active_count=0,
+        started_node_ids=frozenset(),
+    )
+
+    assert selected == ()

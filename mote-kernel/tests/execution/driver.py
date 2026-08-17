@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph import CompiledGraph
-from mote_kernel.execution.identity import ExecutionRequestAttemptId
+from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.identity import ExecutionRequestAttemptId, root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
@@ -13,26 +15,40 @@ from mote_kernel.execution.result import (
     ExecutedGraphNode,
     PrepareDisposition,
 )
+from mote_kernel.execution.run_context import (
+    AdmittedGraphInput,
+    GraphInputAvailabilityCoordinate,
+    ScopedFrameIndex,
+)
 from mote_kernel.state.graph_state import GraphRunCommand, GraphRunState, reduce_graph_run
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
 ATTEMPT_ID = ExecutionRequestAttemptId("test-request")
 DEFAULT_LIMITS = ExecutionLimits()
 
 
 @dataclass(frozen=True, slots=True)
-class DriverRequest(Generic[InputT, OutputT]):
-    graph: CompiledGraph[InputT, OutputT]
+class DriverRequest(Generic[GraphValueT]):
+    graph: CompiledGraph[GraphValueT]
     state: GraphRunState
-    node_input: InputT
-    child_projections: tuple[ChildProjection[OutputT], ...]
+    values: Graph.Values[GraphValueT]
+    child_projections: tuple[ChildProjection[GraphValueT], ...]
     limits: ExecutionLimits
 
-    def execution_request(self) -> StepRequest[InputT, OutputT]:
+    def execution_request(self) -> StepRequest[GraphValueT]:
+        scope_run = root_scope_run(self.state.run_id)
+        input_frame = admit_graph_input(self.graph, self.values)
+        frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
+        frames = frames.add_graph_input(
+            AdmittedGraphInput(
+                GraphInputAvailabilityCoordinate(scope_run, self.graph.graph_input_descriptor.identity),
+                input_frame,
+            )
+        )
         return StepRequest(
             self.state,
-            self.node_input,
+            scope_run,
+            frames,
             ATTEMPT_ID,
             self.child_projections,
             self.limits,
@@ -40,20 +56,20 @@ class DriverRequest(Generic[InputT, OutputT]):
 
 
 @dataclass(slots=True)
-class ClaimedStep(Generic[InputT, OutputT]):
+class ClaimedStep(Generic[GraphValueT]):
     state: GraphRunState
-    session: GraphExecutionSession[InputT, OutputT]
-    result: ExecutedGraphNode[OutputT]
+    session: GraphExecutionSession[GraphValueT]
+    result: ExecutedGraphNode[GraphValueT]
 
 
 def step_request(
-    graph: CompiledGraph[InputT, OutputT],
+    graph: CompiledGraph[str],
     state: GraphRunState,
-    node_input: InputT,
-    child_projections: tuple[ChildProjection[OutputT], ...] = (),
+    node_input: str,
+    child_projections: tuple[ChildProjection[str], ...] = (),
     limits: ExecutionLimits = DEFAULT_LIMITS,
-) -> DriverRequest[InputT, OutputT]:
-    return DriverRequest(graph, state, node_input, child_projections, limits)
+) -> DriverRequest[str]:
+    return DriverRequest(graph, state, Graph.values(value=node_input), child_projections, limits)
 
 
 def apply_command(state: GraphRunState, command: GraphRunCommand) -> GraphRunState:
@@ -61,10 +77,11 @@ def apply_command(state: GraphRunState, command: GraphRunCommand) -> GraphRunSta
 
 
 async def execute_step(
-    request: DriverRequest[InputT, OutputT],
-) -> PrepareDisposition[InputT, OutputT] | ClaimedStep[InputT, OutputT]:
+    request: DriverRequest[GraphValueT],
+) -> PrepareDisposition[GraphValueT] | ClaimedStep[GraphValueT]:
     executor = GraphExecutor(request.graph)
-    prepared = await executor.prepare(request.execution_request())
+    execution_request = request.execution_request()
+    prepared = await executor.prepare(execution_request)
     if not isinstance(prepared, ExecutableFrontier):
         return prepared
     claimed = apply_command(request.state, prepared.claim.command)
@@ -72,7 +89,8 @@ async def execute_step(
         prepared.claim,
         StepRequest(
             claimed,
-            request.node_input,
+            execution_request.scope_run,
+            execution_request.frames,
             ATTEMPT_ID,
             request.child_projections,
             request.limits,
@@ -82,11 +100,11 @@ async def execute_step(
     return ClaimedStep(claimed, session, result)
 
 
-def apply_claimed(step: ClaimedStep[InputT, OutputT]) -> GraphRunState:
+def apply_claimed(step: ClaimedStep[GraphValueT]) -> GraphRunState:
     return apply_command(step.state, step.result.command)
 
 
-async def close_claimed(step: ClaimedStep[InputT, OutputT]) -> None:
+async def close_claimed(step: ClaimedStep[GraphValueT]) -> None:
     await step.session.aclose()
 
 

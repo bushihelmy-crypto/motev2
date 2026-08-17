@@ -8,25 +8,31 @@ Mote Kernel 是一个以状态机为核心、支持持久恢复的 Agent Kernel�
 from mote_kernel.execution import Graph
 
 
-async def normalize(value: str) -> str:
-    return value.strip().lower()
+async def normalize(values: Graph.Values[str]) -> Graph.Values[str]:
+    return Graph.values(text=values["raw"].strip().lower())
 
 
-graph = Graph[str, str]("example.normalize")
-graph.add_node("normalize", normalize)
-graph.add_edge(Graph.START, "normalize")
-graph.add_edge("normalize", Graph.END)
+graph = Graph[str]("example.normalize")
+graph.add_node(
+    "normalize",
+    normalize,
+    inputs={"raw": Graph.graph_input("raw", str)},
+    outputs={"text": str},
+)
+graph.set_outputs({"text": Graph.node_output("normalize", "text")})
 
-result = await graph.run("  MOTE  ", run_id="example-run")
-assert result.completed
-assert result.outputs[0].output == "mote"
+result = await graph.run(Graph.values(raw="  MOTE  "), run_id="example-run")
+assert isinstance(result, Graph.CompletedResult)
+assert result.outputs["text"] == "mote"
 ```
 
-`Graph.run()` 同时接收上一次调用返回的 authoritative state，以及由同一门面创建的选择性恢复动作。可选的异步 commit 回调会逐条收到 reducer candidate，包括每一个节点 settlement；只有回调精确确认的 state 才能继续执行。本项目不内置具体 Store。
+Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名输出类型。输入绑定是 data dependency 的唯一事实源；edge 与 join 只声明 control flow。`Graph.values()` 构造 immutable concrete frame，`set_outputs()` 将图结果边界绑定到已 admission 的 graph input 或已确认的 node publication。
+
+`Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。
 
-公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类，`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 用于精确捕获。
+公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类；`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 以及 value admission/unavailability/publication errors 用于精确捕获。
 
 详细设计见 [架构说明](docs/architecture.zh-CN.md)。
 

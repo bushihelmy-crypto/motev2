@@ -1,63 +1,19 @@
 import asyncio
-from dataclasses import replace
 
 import pytest
 
-from mote_kernel.execution.engine.session import GraphExecutionSession
-from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph import (
-    END,
-    CompiledGraph,
-    ConditionalEdge,
-    DirectEdge,
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
-    GraphRouteId,
-    JoinEdge,
-    Node,
-    NodeDefinition,
-    NodeFailure,
-    NodeInterrupt,
-    NodeOutcome,
-    NodeSuccess,
-    ResumeInputBinding,
-    SelectGraphRoute,
-    compile_graph,
-)
-from mote_kernel.execution.identity import ExecutionRequestAttemptId
-from mote_kernel.execution.request import (
-    OverrideNodeInput,
-    ResumeFailedNodeRequest,
-    ResumeInterruptedNodeRequest,
-    ResumeRequest,
-    SkipFailedNodeRequest,
-    StepRequest,
-    UseRequestInput,
-)
-from mote_kernel.execution.result import AbortedGraph, AwaitingResume, ExecutableFrontier, ReadyToResolve
+from mote_kernel.execution import Graph
+from mote_kernel.execution.graph.node import NodeCallable
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
-    ContinueGraphRouting,
-    FenceGraphExecution,
     GraphAbortReason,
-    GraphFailure,
-    GraphFrontierNode,
-    GraphFrontierState,
-    GraphInterruptPayload,
-    GraphResumeInputCodecId,
+    GraphNodeId,
     GraphResumeInputPayload,
-    GraphRunId,
-    GraphRunState,
-    GraphRunStatus,
-    GraphSkipReason,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
-    PendingGraphNode,
-    UseStepRequestInput,
+    ResumeGraphNodes,
+    ResumeInterruptedNode,
     frontier_node,
-    graph_interrupt_id,
     reduce_graph_run,
 )
 
@@ -65,880 +21,777 @@ pytestmark = pytest.mark.asyncio
 
 
 class Codec:
-    def encode(self, value: str) -> bytes:
-        return value.encode()
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        return value["value"].encode()
 
-    def decode(self, payload: bytes) -> str:
-        return payload.decode()
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        return Graph.values(value=payload.decode())
 
 
 class ValidatingCodec(Codec):
-    def encode(self, value: str) -> bytes:
-        if value.startswith("invalid"):
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        if value["value"].startswith("invalid"):
             raise ValueError("invalid resume input")
         return super().encode(value)
 
-    def decode(self, payload: bytes) -> str:
+    def decode(self, payload: bytes) -> Graph.Values[str]:
         value = super().decode(payload)
-        if value.startswith("invalid"):
+        if value["value"].startswith("invalid"):
             raise ValueError("invalid resume payload")
         return value
 
 
-def interrupt_graph(node: Node[str, str], *, codec: Codec | None = None) -> CompiledGraph[str, str]:
+class CountingCodec(Codec):
+    def __init__(self) -> None:
+        self.decode_calls = 0
+
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        self.decode_calls += 1
+        return super().decode(payload)
+
+
+class CommitLog:
+    def __init__(self) -> None:
+        self.transitions: list[Graph.Transition[str]] = []
+
+    async def __call__(self, transition: Graph.Transition[str], /) -> Graph.State:
+        self.transitions.append(transition)
+        return transition.candidate_state
+
+
+def interrupt_graph(
+    operation: NodeCallable[str],
+    *,
+    codec: Codec | None = None,
+    publish_output: bool = False,
+) -> Graph[str]:
     effective_codec = Codec() if codec is None else codec
-    return compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), node),),
-            (DirectEdge(GraphNodeId("a"), END),),
-            (GraphNodeId("a"),),
-            resume_input=ResumeInputBinding(
-                GraphResumeInputCodecId("input.v1"),
-                1,
-                effective_codec,
-                effective_codec,
-            ),
-        )
+    graph = Graph[str]("interrupt.graph")
+    graph.set_resume_codec(
+        "input.v1",
+        1,
+        effective_codec.encode,
+        effective_codec.decode,
     )
+    graph.add_node(
+        "a",
+        operation,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    graph.set_outputs({"value": Graph.node_output("a", "value")} if publish_output else {})
+    return graph
 
 
-def interrupt_pair_graph(
-    first: Node[str, str], second: Node[str, str], *, codec: Codec | None = None
-) -> CompiledGraph[str, str]:
+def pair_graph(
+    first: NodeCallable[str],
+    second: NodeCallable[str],
+    *,
+    codec: Codec | None = None,
+) -> Graph[str]:
     effective_codec = Codec() if codec is None else codec
-    return compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt.pair"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), first), NodeDefinition(GraphNodeId("b"), second)),
-            (DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
-            (GraphNodeId("a"), GraphNodeId("b")),
-            resume_input=ResumeInputBinding(
-                GraphResumeInputCodecId("input.v1"),
-                1,
-                effective_codec,
-                effective_codec,
-            ),
+    graph = Graph[str]("interrupt.pair")
+    graph.set_resume_codec(
+        "input.v1",
+        1,
+        effective_codec.encode,
+        effective_codec.decode,
+    )
+    for node_id, operation in (("a", first), ("b", second)):
+        graph.add_node(
+            node_id,
+            operation,
+            inputs={"value": Graph.graph_input("value", str)},
+            outputs={"value": str},
         )
-    )
-
-
-def started(executor: GraphExecutor[str, str]) -> GraphRunState:
-    return reduce_graph_run(None, executor.start_command(GraphRunId("run")))
-
-
-async def claim_and_session(
-    executor: GraphExecutor[str, str], state: GraphRunState
-) -> tuple[GraphRunState, GraphExecutionSession[str, str]]:
-    request = StepRequest(state, "input", ExecutionRequestAttemptId("request"), ())
-    prepared = await executor.prepare(request)
-    assert isinstance(prepared, ExecutableFrontier)
-    claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        StepRequest(claimed, "input", ExecutionRequestAttemptId("request"), ()),
-    )
-    return claimed, session
-
-
-async def settle_pending(executor: GraphExecutor[str, str], state: GraphRunState, node_input: str) -> GraphRunState:
-    request_id = ExecutionRequestAttemptId("settle-request")
-    prepared = await executor.prepare(StepRequest(state, node_input, request_id, ()))
-    assert isinstance(prepared, ExecutableFrontier)
-    current = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(current, node_input, request_id, ()))
-    try:
-        while current.execution is not None:
-            completed = await session.next(current)
-            current = reduce_graph_run(current, completed.command)
-    finally:
-        await session.aclose()
-    return current
-
-
-async def resolve_ready(executor: GraphExecutor[str, str], state: GraphRunState) -> GraphRunState:
-    disposition = await executor.prepare(
-        StepRequest(state, "resolution-input", ExecutionRequestAttemptId("resolve-request"), ())
-    )
-    assert isinstance(disposition, ReadyToResolve)
-    return reduce_graph_run(state, disposition.command)
+    graph.set_outputs({})
+    return graph
 
 
 async def test_interrupt_is_a_node_completion_and_creates_awaiting_resume_state() -> None:
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(b"question"))
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"question")
 
     graph = interrupt_graph(interrupt)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        result = await session.next(claimed)
-        interrupted = reduce_graph_run(claimed, result.command)
-    finally:
-        await session.aclose()
-    assert isinstance(interrupted.frontier.nodes[0].settlement, InterruptedGraphNode)
-    disposition = await executor.prepare(StepRequest(interrupted, "input", ExecutionRequestAttemptId("request"), ()))
-    assert isinstance(disposition, AwaitingResume)
+    result = await graph.run(Graph.values(value="input"), run_id="run")
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert result.failures == ()
+    assert len(result.interrupts) == 1
+    assert result.interrupts[0].node_id == "a"
+    assert result.interrupts[0].request_payload == b"question"
 
 
 async def test_interrupt_identity_is_coordinate_scoped_and_stale_ids_fail_closed() -> None:
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(b"question"))
+    calls = 0
 
-    graph = interrupt_graph(interrupt)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        result = await session.next(claimed)
-        interrupted = reduce_graph_run(claimed, result.command)
-    finally:
-        await session.aclose()
-    settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(settlement, InterruptedGraphNode)
-    identity = settlement.interrupt.identity
-    exact = graph_interrupt_id(identity.run_id, identity.superstep, identity.node_id, identity.execution_generation)
-    with pytest.raises(Exception, match="does not match"):
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        graph_interrupt_id(GraphRunId("wrong"), 0, GraphNodeId("a"), 1),
-                        OverrideNodeInput("answer"),
-                    ),
-                ),
-            )
-        )
-    command = executor.resume(
-        ResumeRequest(
-            interrupted,
-            (ResumeInterruptedNodeRequest(GraphNodeId("a"), exact, OverrideNodeInput("answer")),),
-        )
+    async def interrupt_twice(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return Graph.interrupt(f"question-{calls}".encode())
+        return values
+
+    graph = interrupt_graph(interrupt_twice)
+    first = await graph.run(Graph.values(value="input"), run_id="run")
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    first_id = first.interrupts[0].interrupt_id
+    second = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first_id,
+                Graph.values(value="first-answer"),
+            ),
+        ),
     )
-    resumed = reduce_graph_run(interrupted, command)
-    assert isinstance(resumed.frontier.nodes[0].settlement, PendingGraphNode)
+    assert isinstance(second, Graph.AwaitingResumeResult)
+    second_id = second.interrupts[0].interrupt_id
+    assert second_id != first_id
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="does not match"):
+        await graph.run(
+            state=second.state,
+            continuation=second.continuation,
+            resume=(
+                graph.resume_interrupted(
+                    "a",
+                    first_id,
+                    Graph.values(value="stale"),
+                ),
+            ),
+        )
 
 
 async def test_resume_reuses_same_activation_coordinates_with_new_execution_generation() -> None:
     calls = 0
 
-    async def node(value: str) -> NodeOutcome[str]:
+    async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"question"))
-        return NodeSuccess(value)
+            return Graph.interrupt(b"question")
+        return values
 
-    graph = interrupt_graph(node)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        first = await session.next(claimed)
-        interrupted = reduce_graph_run(claimed, first.command)
-    finally:
-        await session.aclose()
-    settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(settlement, InterruptedGraphNode)
-    identity = settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        interrupted,
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        graph_interrupt_id(
-                            identity.run_id, identity.superstep, identity.node_id, identity.execution_generation
-                        ),
-                        OverrideNodeInput("answer"),
-                    ),
-                ),
-            )
+    graph = interrupt_graph(interrupt_once, publish_output=True)
+    first = await graph.run(Graph.values(value="input"), run_id="same-run")
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    resumed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="answer"),
+            ),
         ),
     )
-    claimed_again, session_again = await claim_and_session(executor, resumed)
-    try:
-        result = await session_again.next(claimed_again)
-        completed = reduce_graph_run(claimed_again, result.command)
-    finally:
-        await session_again.aclose()
-    assert completed.frontier.nodes[0].settlement.__class__.__name__ == "SucceededGraphNode"
-    assert completed.execution_sequence == identity.execution_generation + 1
+
+    assert isinstance(resumed, Graph.CompletedResult)
+    assert resumed.state.run_id == first.state.run_id
+    assert resumed.outputs["value"] == "answer"
+    assert calls == 2
 
 
 async def test_interrupt_result_payload_remains_opaque_bytes() -> None:
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(b"\x00question"))
+    payload = b"\x00\xffopaque\x00"
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(payload)
 
     graph = interrupt_graph(interrupt)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        result = await session.next(claimed)
-        interrupted = reduce_graph_run(claimed, result.command)
-    finally:
-        await session.aclose()
-    settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(settlement, InterruptedGraphNode)
-    assert settlement.interrupt.request_payload == b"\x00question"
+    result = await graph.run(Graph.values(value="input"))
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert result.interrupts[0].request_payload == payload
+    assert type(result.interrupts[0].request_payload) is bytes
+
+
+async def test_interrupt_waits_for_a_started_sibling_to_reach_quiescence() -> None:
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"question")
+
+    async def sibling(values: Graph.Values[str]) -> Graph.Values[str]:
+        sibling_started.set()
+        await release_sibling.wait()
+        return values
+
+    graph = pair_graph(interrupt, sibling)
+    running = asyncio.create_task(graph.run(Graph.values(value="input")))
+    await sibling_started.wait()
+    await asyncio.sleep(0)
+    assert not running.done()
+    release_sibling.set()
+    result = await running
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert tuple(view.node_id for view in result.interrupts) == ("a",)
 
 
 async def test_interrupt_completion_does_not_wait_for_a_slow_sibling() -> None:
-    release = asyncio.Event()
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    interrupt_committed = asyncio.Event()
 
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(b"question"))
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"question")
 
-    async def slow(value: str) -> NodeSuccess[str]:
-        await release.wait()
-        return NodeSuccess(value)
+    async def sibling(values: Graph.Values[str]) -> Graph.Values[str]:
+        sibling_started.set()
+        await release_sibling.wait()
+        return values
 
-    graph = interrupt_pair_graph(interrupt, slow)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        first = await asyncio.wait_for(session.next(claimed), timeout=1)
-        assert first.result.task.node_id == GraphNodeId("a")
-        after = reduce_graph_run(claimed, first.command)
-        assert isinstance(after.frontier.nodes[0].settlement, InterruptedGraphNode)
-        assert isinstance(after.frontier.nodes[1].settlement, PendingGraphNode)
-        release.set()
-        second = await asyncio.wait_for(session.next(after), timeout=1)
-        assert second.result.task.node_id == GraphNodeId("b")
-    finally:
-        await session.aclose()
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        if isinstance(transition.result, Graph.InterruptResult):
+            interrupt_committed.set()
+        return transition.candidate_state
+
+    graph = pair_graph(interrupt, sibling)
+    running = asyncio.create_task(graph.run(Graph.values(value="input"), commit=commit))
+    await sibling_started.wait()
+    await asyncio.wait_for(interrupt_committed.wait(), timeout=1)
+    assert not running.done()
+    release_sibling.set()
+    result = await running
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert tuple(view.node_id for view in result.interrupts) == ("a",)
 
 
 async def test_multiple_interrupts_can_be_resumed_one_at_a_time_by_exact_identity() -> None:
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(value.encode()))
+    calls = {"a": 0, "b": 0}
 
-    graph = interrupt_pair_graph(interrupt, interrupt)
-    executor = GraphExecutor(graph)
-    state = started(executor)
-    claimed, session = await claim_and_session(executor, state)
-    try:
-        first = await session.next(claimed)
-        after_first = reduce_graph_run(claimed, first.command)
-        second = await session.next(after_first)
-        interrupted = reduce_graph_run(after_first, second.command)
-    finally:
-        await session.aclose()
-    first_settlement = interrupted.frontier.nodes[0].settlement
-    second_settlement = interrupted.frontier.nodes[1].settlement
-    assert isinstance(first_settlement, InterruptedGraphNode)
-    assert isinstance(second_settlement, InterruptedGraphNode)
-    first_id = graph_interrupt_id(
-        first_settlement.interrupt.identity.run_id,
-        first_settlement.interrupt.identity.superstep,
-        first_settlement.interrupt.identity.node_id,
-        first_settlement.interrupt.identity.execution_generation,
+    def operation(node_id: str):
+        async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+            calls[node_id] += 1
+            if calls[node_id] == 1:
+                return Graph.interrupt(f"question-{node_id}".encode())
+            return values
+
+        return interrupt_once
+
+    graph = pair_graph(operation("a"), operation("b"))
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    by_node = {view.node_id: view for view in first.interrupts}
+
+    after_a = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                by_node["a"].interrupt_id,
+                Graph.values(value="answer-a"),
+            ),
+        ),
     )
-    resumed_command = executor.resume(
-        ResumeRequest(
-            interrupted,
-            (ResumeInterruptedNodeRequest(GraphNodeId("a"), first_id, OverrideNodeInput("answer-a")),),
-        )
+    assert isinstance(after_a, Graph.AwaitingResumeResult)
+    assert tuple(view.node_id for view in after_a.interrupts) == ("b",)
+    completed = await graph.run(
+        state=after_a.state,
+        continuation=after_a.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "b",
+                after_a.interrupts[0].interrupt_id,
+                Graph.values(value="answer-b"),
+            ),
+        ),
     )
-    resumed = reduce_graph_run(interrupted, resumed_command)
-    assert isinstance(resumed.frontier.nodes[0].settlement, PendingGraphNode)
-    assert isinstance(resumed.frontier.nodes[1].settlement, InterruptedGraphNode)
-    with pytest.raises(Exception, match="does not match"):
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        graph_interrupt_id(GraphRunId("wrong"), 0, GraphNodeId("a"), 1),
-                        OverrideNodeInput("x"),
-                    ),
-                ),
-            )
-        )
+    assert isinstance(completed, Graph.CompletedResult)
+    assert calls == {"a": 2, "b": 2}
 
 
 async def test_interrupt_round_trip_keeps_request_and_resume_payloads_distinct() -> None:
     received: list[str] = []
 
-    async def node(node_input: str) -> NodeOutcome[str]:
-        received.append(node_input)
+    async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        received.append(values["value"])
         if len(received) == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"request-question"))
-        return NodeSuccess(node_input)
+            return Graph.interrupt(b"request-payload")
+        return values
 
-    graph = interrupt_graph(node)
-    executor = GraphExecutor(graph)
-    interrupted = await settle_pending(executor, started(executor), "ordinary")
-    settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(settlement, InterruptedGraphNode)
-    identity = settlement.interrupt.identity
-    interrupt_id = graph_interrupt_id(
-        identity.run_id,
-        identity.superstep,
-        identity.node_id,
-        identity.execution_generation,
-    )
-    resumed = reduce_graph_run(
-        interrupted,
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        interrupt_id,
-                        OverrideNodeInput("resume-answer"),
-                    ),
-                ),
-            )
+    graph = interrupt_graph(interrupt_once, publish_output=True)
+    first = await graph.run(Graph.values(value="initial"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    assert first.interrupts[0].request_payload == b"request-payload"
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="resume-value"),
+            ),
         ),
     )
-    pending = resumed.frontier.nodes[0].settlement
-    assert isinstance(pending, PendingGraphNode)
-    assert isinstance(pending.input, OverrideGraphNodeInput)
-    assert settlement.interrupt.request_payload == GraphInterruptPayload(b"request-question")
-    assert pending.input.payload == GraphResumeInputPayload(b"resume-answer")
 
-    settled = await settle_pending(executor, resumed, "ignored")
-    assert settled.status is GraphRunStatus.RUNNING
-    assert received == ["ordinary", "resume-answer"]
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs["value"] == "resume-value"
+    assert received == ["initial", "resume-value"]
 
 
 async def test_failure_resume_delivers_default_and_override_inputs_per_node() -> None:
     received: dict[str, list[str]] = {"a": [], "b": []}
 
-    def fail_once(name: str) -> Node[str, str]:
-        async def node(node_input: str) -> NodeOutcome[str]:
-            received[name].append(node_input)
-            if len(received[name]) == 1:
-                return NodeFailure(GraphFailure(f"{name} failed"))
-            return NodeSuccess(node_input)
+    def operation(node_id: str):
+        async def fail_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+            received[node_id].append(values["value"])
+            if len(received[node_id]) == 1:
+                return Graph.failure(f"failed-{node_id}")
+            return values
 
-        return node
+        return fail_once
 
-    graph = interrupt_pair_graph(fail_once("a"), fail_once("b"))
-    executor = GraphExecutor(graph)
-    failed = await settle_pending(executor, started(executor), "initial")
-    resumed = reduce_graph_run(
-        failed,
-        executor.resume(
-            ResumeRequest(
-                failed,
-                (
-                    ResumeFailedNodeRequest(GraphNodeId("a"), UseRequestInput()),
-                    ResumeFailedNodeRequest(GraphNodeId("b"), OverrideNodeInput("override-b")),
-                ),
-            )
+    graph = pair_graph(operation("a"), operation("b"))
+    first = await graph.run(Graph.values(value="initial"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_failed("a"),
+            graph.resume_failed_with("b", Graph.values(value="override")),
         ),
     )
-    settled = await settle_pending(executor, resumed, "request-default")
-    assert settled.execution is None
-    assert received == {
-        "a": ["initial", "request-default"],
-        "b": ["initial", "override-b"],
-    }
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert received == {"a": ["initial", "initial"], "b": ["initial", "override"]}
 
 
 async def test_resume_codec_errors_before_claim_leave_state_quiescent() -> None:
-    async def fail(node_input: str) -> NodeFailure:
-        return NodeFailure(GraphFailure(node_input))
+    calls = 0
 
-    graph = interrupt_graph(fail, codec=ValidatingCodec())
-    executor = GraphExecutor(graph)
-    failed = await settle_pending(executor, started(executor), "initial")
-    with pytest.raises(ValueError, match="invalid resume input"):
-        executor.resume(
-            ResumeRequest(
-                failed,
-                (ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("invalid-value")),),
-            )
-        )
-    assert failed.execution is None
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        nonlocal calls
+        calls += 1
+        return Graph.interrupt(b"question")
 
-    malformed = replace(
-        failed,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("a"),
-                    PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"invalid-payload"))),
+    graph = interrupt_graph(interrupt, codec=ValidatingCodec())
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    commits = CommitLog()
+
+    with pytest.raises(Graph.ValueAdmissionError, match="encoder rejected"):
+        await graph.run(
+            state=first.state,
+            continuation=first.continuation,
+            resume=(
+                graph.resume_interrupted(
+                    "a",
+                    first.interrupts[0].interrupt_id,
+                    Graph.values(value="invalid-answer"),
                 ),
-            )
-        ),
-    )
-    with pytest.raises(ValueError, match="invalid resume payload"):
-        await executor.prepare(
-            StepRequest(
-                malformed,
-                "ordinary",
-                ExecutionRequestAttemptId("decode-request"),
-                (),
-            )
+            ),
+            commit=commits,
         )
-    assert malformed.execution is None
+
+    assert commits.transitions == []
+    assert calls == 1
 
 
 async def test_interrupt_override_is_redelivered_after_error_and_exact_fence() -> None:
-    received: list[str] = []
+    calls: list[str] = []
+    should_error = True
 
-    async def node(node_input: str) -> NodeOutcome[str]:
-        received.append(node_input)
-        if len(received) == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"question"))
-        if len(received) == 2:
-            raise RuntimeError("worker stopped before settlement")
-        return NodeSuccess(node_input)
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        nonlocal should_error
+        calls.append(values["value"])
+        if len(calls) == 1:
+            return Graph.interrupt(b"question")
+        if should_error:
+            raise RuntimeError("transient error")
+        return values
 
-    graph = interrupt_graph(node)
-    executor = GraphExecutor(graph)
-    interrupted = await settle_pending(executor, started(executor), "initial")
-    settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(settlement, InterruptedGraphNode)
-    identity = settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        interrupted,
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        graph_interrupt_id(
-                            identity.run_id,
-                            identity.superstep,
-                            identity.node_id,
-                            identity.execution_generation,
-                        ),
-                        OverrideNodeInput("approved"),
-                    ),
+    graph = interrupt_graph(operation, publish_output=True)
+    first = await graph.run(Graph.values(value="initial"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    commits = CommitLog()
+    with pytest.raises(RuntimeError, match="transient error"):
+        await graph.run(
+            state=first.state,
+            continuation=first.continuation,
+            resume=(
+                graph.resume_interrupted(
+                    "a",
+                    first.interrupts[0].interrupt_id,
+                    Graph.values(value="override"),
                 ),
-            )
+            ),
+            commit=commits,
+        )
+    fenced = commits.transitions[-1].candidate_state
+    assert fenced.execution is None
+
+    should_error = False
+    recovered = await graph.run(state=fenced)
+
+    assert isinstance(recovered, Graph.CompletedResult)
+    assert recovered.outputs["value"] == "override"
+    assert calls == ["initial", "override", "override"]
+
+
+async def test_repeated_interrupt_rejects_a_second_input_at_the_same_stable_activation() -> None:
+    calls = 0
+
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return Graph.interrupt(f"question-{calls}".encode())
+        return values
+
+    graph = interrupt_graph(operation, publish_output=True)
+    first = await graph.run(Graph.values(value="initial"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    second = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="first-answer"),
+            ),
         ),
     )
-
-    request_id = ExecutionRequestAttemptId("failing-request")
-    prepared = await executor.prepare(StepRequest(resumed, "ordinary", request_id, ()))
-    assert isinstance(prepared, ExecutableFrontier)
-    claimed = reduce_graph_run(resumed, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "ordinary", request_id, ()))
-    try:
-        with pytest.raises(RuntimeError, match="before settlement"):
-            await session.next(claimed)
-    finally:
-        await session.aclose()
-    assert claimed.execution is not None
-    fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
-    pending = frontier_node(fenced.frontier, GraphNodeId("a"))
-    assert pending is not None
-    assert pending.settlement == PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"approved")))
-
-    settled = await settle_pending(executor, fenced, "different")
-    assert settled.execution is None
-    assert received == ["initial", "approved", "approved"]
+    assert isinstance(second, Graph.AwaitingResumeResult)
+    assert second.interrupts[0].interrupt_id != first.interrupts[0].interrupt_id
+    with pytest.raises(Graph.ValuePublicationError, match="admitted more than once"):
+        await graph.run(
+            state=second.state,
+            continuation=second.continuation,
+            resume=(
+                graph.resume_interrupted(
+                    "a",
+                    second.interrupts[0].interrupt_id,
+                    Graph.values(value="second-answer"),
+                ),
+            ),
+        )
 
 
 async def test_repeated_interrupt_uses_new_generation_and_consumes_old_identity() -> None:
-    async def interrupt(node_input: str) -> NodeInterrupt:
-        del node_input
-        return NodeInterrupt(GraphInterruptPayload(b"again"))
+    calls = 0
 
-    graph = interrupt_graph(interrupt)
-    executor = GraphExecutor(graph)
-    first = await settle_pending(executor, started(executor), "ordinary")
-    first_node = frontier_node(first.frontier, GraphNodeId("a"))
-    assert first_node is not None and isinstance(first_node.settlement, InterruptedGraphNode)
-    first_identity = first_node.settlement.interrupt.identity
-    first_id = graph_interrupt_id(
-        first_identity.run_id,
-        first_identity.superstep,
-        first_identity.node_id,
-        first_identity.execution_generation,
-    )
-    resumed = reduce_graph_run(
-        first,
-        executor.resume(
-            ResumeRequest(
-                first,
-                (ResumeInterruptedNodeRequest(GraphNodeId("a"), first_id, OverrideNodeInput("answer-one")),),
-            )
+    async def operation(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        nonlocal calls
+        calls += 1
+        return Graph.interrupt(f"question-{calls}".encode())
+
+    graph = interrupt_graph(operation)
+    first = await graph.run(Graph.values(value="initial"), run_id="repeated-run")
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    first_node = frontier_node(first.state.frontier, GraphNodeId("a"))
+    assert first_node is not None
+    assert isinstance(first_node.settlement, InterruptedGraphNode)
+
+    second = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="first-answer"),
+            ),
         ),
     )
+    assert isinstance(second, Graph.AwaitingResumeResult)
+    second_node = frontier_node(second.state.frontier, GraphNodeId("a"))
+    assert second_node is not None
+    assert isinstance(second_node.settlement, InterruptedGraphNode)
+    assert (
+        second_node.settlement.interrupt.identity.execution_generation
+        == first_node.settlement.interrupt.identity.execution_generation + 1
+    )
+    assert second.interrupts[0].interrupt_id != first.interrupts[0].interrupt_id
 
-    second = await settle_pending(executor, resumed, "ignored")
-    second_node = frontier_node(second.frontier, GraphNodeId("a"))
-    assert second_node is not None and isinstance(second_node.settlement, InterruptedGraphNode)
-    second_identity = second_node.settlement.interrupt.identity
-    assert second_identity.execution_generation == first_identity.execution_generation + 1
-    assert second_identity.superstep == first_identity.superstep
-    with pytest.raises(Exception, match="does not match"):
-        executor.resume(
-            ResumeRequest(
-                second,
-                (ResumeInterruptedNodeRequest(GraphNodeId("a"), first_id, OverrideNodeInput("stale")),),
-            )
+    with pytest.raises(Graph.SnapshotMismatchError, match="does not match"):
+        await graph.run(
+            state=second.state,
+            continuation=second.continuation,
+            resume=(
+                graph.resume_interrupted(
+                    "a",
+                    first.interrupts[0].interrupt_id,
+                    Graph.values(value="stale"),
+                ),
+            ),
         )
 
 
 async def test_interrupt_resume_then_self_loop_starts_a_clean_activation() -> None:
     received: list[str] = []
 
-    async def cycle(node_input: str) -> NodeOutcome[str]:
-        received.append(node_input)
+    async def operation(values: Graph.Values[str]) -> Graph.Outcome[str]:
+        received.append(values["value"])
         if len(received) == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"question"))
-        route = "again" if len(received) == 2 else "done"
-        return NodeSuccess(node_input, SelectGraphRoute(GraphRouteId(route)))
+            return Graph.interrupt(b"question")
+        if len(received) == 2:
+            return Graph.success(values, route="again")
+        return Graph.success(values, route="done")
 
-    codec = Codec()
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt-loop.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), cycle),),
-            (
-                ConditionalEdge(GraphNodeId("a"), GraphRouteId("again"), GraphNodeId("a")),
-                ConditionalEdge(GraphNodeId("a"), GraphRouteId("done"), END),
+    graph = interrupt_graph(operation)
+    graph.add_edge(Graph.START, "a")
+    graph.add_conditional_edge("a", "again", "a")
+    graph.add_conditional_edge("a", "done", Graph.END)
+    first = await graph.run(Graph.values(value="initial"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="answer"),
             ),
-            (GraphNodeId("a"),),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
-        )
-    )
-    executor = GraphExecutor(graph)
-    interrupted = await settle_pending(executor, started(executor), "initial")
-    interrupted_node = frontier_node(interrupted.frontier, GraphNodeId("a"))
-    assert interrupted_node is not None and isinstance(interrupted_node.settlement, InterruptedGraphNode)
-    identity = interrupted_node.settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        interrupted,
-        executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        graph_interrupt_id(
-                            identity.run_id,
-                            identity.superstep,
-                            identity.node_id,
-                            identity.execution_generation,
-                        ),
-                        OverrideNodeInput("answer"),
-                    ),
-                ),
-            )
         ),
     )
 
-    loop_settled = await settle_pending(executor, resumed, "ignored")
-    looped = await resolve_ready(executor, loop_settled)
-    assert looped.superstep == 1
-    assert looped.frontier.nodes[0].settlement == PendingGraphNode(UseStepRequestInput())
-    final_settled = await settle_pending(executor, looped, "fresh")
-    completed = await resolve_ready(executor, final_settled)
-    assert completed.status is GraphRunStatus.COMPLETED
-    assert received == ["initial", "answer", "fresh"]
+    assert isinstance(completed, Graph.CompletedResult)
+    assert received == ["initial", "answer", "initial"]
 
 
 async def test_mixed_frontier_selectively_resumes_without_rerunning_success() -> None:
-    calls = {"a": 0, "b": 0, "c": 0}
+    calls = {"a": 0, "b": 0}
 
-    async def success(node_input: str) -> NodeSuccess[str]:
+    async def fail_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["a"] += 1
-        return NodeSuccess(node_input)
+        if calls["a"] == 1:
+            return Graph.failure("failed")
+        return values
 
-    async def fail(node_input: str) -> NodeFailure:
+    async def succeed(values: Graph.Values[str]) -> Graph.Values[str]:
         calls["b"] += 1
-        return NodeFailure(GraphFailure(f"b failed:{node_input}"))
+        return values
 
-    async def interrupt_once(node_input: str) -> NodeOutcome[str]:
-        calls["c"] += 1
-        if calls["c"] == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"c question"))
-        return NodeSuccess(node_input)
+    async def finish(values: Graph.Values[str]) -> Graph.Values[str]:
+        return values
 
-    codec = Codec()
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt.mixed"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(GraphNodeId("a"), success),
-                NodeDefinition(GraphNodeId("b"), fail),
-                NodeDefinition(GraphNodeId("c"), interrupt_once),
-            ),
-            tuple(DirectEdge(GraphNodeId(node), END) for node in ("a", "b", "c")),
-            tuple(GraphNodeId(node) for node in ("a", "b", "c")),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
-        )
+    graph = Graph[str]("interrupt.mixed")
+    graph.add_node(
+        "a",
+        fail_once,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
     )
-    executor = GraphExecutor(graph)
-    awaiting = await settle_pending(executor, started(executor), "ordinary")
-    interrupted = frontier_node(awaiting.frontier, GraphNodeId("c"))
-    assert interrupted is not None and isinstance(interrupted.settlement, InterruptedGraphNode)
-    identity = interrupted.settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        awaiting,
-        executor.resume(
-            ResumeRequest(
-                awaiting,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("c"),
-                        graph_interrupt_id(
-                            identity.run_id,
-                            identity.superstep,
-                            identity.node_id,
-                            identity.execution_generation,
-                        ),
-                        OverrideNodeInput("c answer"),
-                    ),
-                ),
-            )
-        ),
+    graph.add_node(
+        "b",
+        succeed,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
     )
-    still_failed = await settle_pending(executor, resumed, "ordinary")
-    assert calls == {"a": 1, "b": 1, "c": 2}
-    skipped = reduce_graph_run(
-        still_failed,
-        executor.resume(
-            ResumeRequest(
-                still_failed,
-                (SkipFailedNodeRequest(GraphNodeId("b"), GraphSkipReason("operator skip"), ContinueGraphRouting()),),
-            )
-        ),
+    graph.add_node(
+        "final",
+        finish,
+        inputs={"value": Graph.node_output("b", "value")},
+        outputs={"value": str},
     )
-    completed = await resolve_ready(executor, skipped)
-    assert completed.status is GraphRunStatus.COMPLETED
-    assert calls == {"a": 1, "b": 1, "c": 2}
+    graph.add_join(("a", "b"), "final")
+    graph.set_outputs({"value": Graph.node_output("final", "value")})
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(graph.resume_failed("a"),),
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs["value"] == "input"
+    assert calls == {"a": 2, "b": 1}
 
 
 async def test_interrupt_resume_applies_retained_sibling_join_arrival_once() -> None:
-    calls = {"a": 0, "b": 0, "joined": 0}
+    a_calls = 0
 
-    async def source_a(node_input: str) -> NodeSuccess[str]:
-        calls["a"] += 1
-        return NodeSuccess(node_input)
+    async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        nonlocal a_calls
+        a_calls += 1
+        if a_calls == 1:
+            return Graph.interrupt(b"question")
+        return values
 
-    async def source_b(node_input: str) -> NodeOutcome[str]:
-        calls["b"] += 1
-        if calls["b"] == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"question"))
-        return NodeSuccess(node_input)
+    async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
+        return values
 
-    async def joined(node_input: str) -> NodeSuccess[str]:
-        calls["joined"] += 1
-        return NodeSuccess(node_input)
+    async def joined(values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value=f"{values['a']}|{values['b']}")
 
+    graph = Graph[str]("interrupt.join")
     codec = Codec()
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt-join.graph"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(GraphNodeId("a"), source_a),
-                NodeDefinition(GraphNodeId("b"), source_b),
-                NodeDefinition(GraphNodeId("joined"), joined),
-            ),
-            (
-                JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("joined")),
-                DirectEdge(GraphNodeId("joined"), END),
-            ),
-            (GraphNodeId("a"), GraphNodeId("b")),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
-        )
+    graph.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
+    graph.add_node(
+        "a",
+        interrupt_once,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
     )
-    executor = GraphExecutor(graph)
-    awaiting = await settle_pending(executor, started(executor), "initial")
-    interrupted = frontier_node(awaiting.frontier, GraphNodeId("b"))
-    assert interrupted is not None and isinstance(interrupted.settlement, InterruptedGraphNode)
-    identity = interrupted.settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        awaiting,
-        executor.resume(
-            ResumeRequest(
-                awaiting,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("b"),
-                        graph_interrupt_id(
-                            identity.run_id,
-                            identity.superstep,
-                            identity.node_id,
-                            identity.execution_generation,
-                        ),
-                        OverrideNodeInput("answer"),
-                    ),
-                ),
-            )
+    graph.add_node(
+        "b",
+        echo,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "joined",
+        joined,
+        inputs={
+            "a": Graph.node_output("a", "value"),
+            "b": Graph.node_output("b", "value"),
+        },
+        outputs={"value": str},
+    )
+    graph.add_join(("a", "b"), "joined")
+    graph.set_outputs({"value": Graph.node_output("joined", "value")})
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="answer"),
+            ),
         ),
     )
-    settled = await settle_pending(executor, resumed, "ignored")
-    joined_frontier = await resolve_ready(executor, settled)
-    assert tuple(node.node_id for node in joined_frontier.frontier.nodes) == (GraphNodeId("joined"),)
-    assert joined_frontier.join_progress == ()
-    joined_settled = await settle_pending(executor, joined_frontier, "joined-input")
-    completed = await resolve_ready(executor, joined_settled)
-    assert completed.status is GraphRunStatus.COMPLETED
-    assert calls == {"a": 1, "b": 2, "joined": 1}
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs["value"] == "answer|input"
+    assert a_calls == 2
 
 
 async def test_multiple_interrupts_can_be_resumed_together_by_exact_ids() -> None:
     calls = {"a": 0, "b": 0}
-    received: dict[str, list[str]] = {"a": [], "b": []}
 
-    def interrupt_once(name: str) -> Node[str, str]:
-        async def node(node_input: str) -> NodeOutcome[str]:
-            calls[name] += 1
-            received[name].append(node_input)
-            if calls[name] == 1:
-                return NodeInterrupt(GraphInterruptPayload(f"{name}-question".encode()))
-            return NodeSuccess(node_input)
+    def operation(node_id: str):
+        async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+            calls[node_id] += 1
+            if calls[node_id] == 1:
+                return Graph.interrupt(node_id.encode())
+            return values
 
-        return node
+        return interrupt_once
 
-    graph = interrupt_pair_graph(interrupt_once("a"), interrupt_once("b"))
-    executor = GraphExecutor(graph)
-    awaiting = await settle_pending(executor, started(executor), "ordinary")
-    actions: list[ResumeInterruptedNodeRequest[str]] = []
-    for node_id, answer in ((GraphNodeId("a"), "a-answer"), (GraphNodeId("b"), "b-answer")):
-        node = frontier_node(awaiting.frontier, node_id)
-        assert node is not None and isinstance(node.settlement, InterruptedGraphNode)
-        identity = node.settlement.interrupt.identity
-        actions.append(
-            ResumeInterruptedNodeRequest(
-                node_id,
-                graph_interrupt_id(
-                    identity.run_id,
-                    identity.superstep,
-                    identity.node_id,
-                    identity.execution_generation,
-                ),
-                OverrideNodeInput(answer),
-            )
-        )
-    resumed = reduce_graph_run(awaiting, executor.resume(ResumeRequest(awaiting, tuple(actions))))
+    graph = pair_graph(operation("a"), operation("b"))
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    by_node = {view.node_id: view for view in first.interrupts}
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                by_node["a"].interrupt_id,
+                Graph.values(value="answer-a"),
+            ),
+            graph.resume_interrupted(
+                "b",
+                by_node["b"].interrupt_id,
+                Graph.values(value="answer-b"),
+            ),
+        ),
+    )
 
-    settled = await settle_pending(executor, resumed, "ignored")
-
+    assert isinstance(completed, Graph.CompletedResult)
     assert calls == {"a": 2, "b": 2}
-    assert received == {"a": ["ordinary", "a-answer"], "b": ["ordinary", "b-answer"]}
-    assert (await resolve_ready(executor, settled)).status is GraphRunStatus.COMPLETED
 
 
 async def test_one_resume_request_atomically_resumes_skips_and_answers_nodes() -> None:
     calls = {"a": 0, "b": 0, "c": 0}
 
-    async def resume_failure(node_input: str) -> NodeOutcome[str]:
+    async def fail_a(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["a"] += 1
         if calls["a"] == 1:
-            return NodeFailure(GraphFailure("a failed"))
-        return NodeSuccess(node_input)
+            return Graph.failure("failed-a")
+        return values
 
-    async def skip_failure(node_input: str) -> NodeFailure:
+    async def fail_b(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         calls["b"] += 1
-        return NodeFailure(GraphFailure(f"b failed:{node_input}"))
+        return Graph.failure("failed-b")
 
-    async def answer_interrupt(node_input: str) -> NodeOutcome[str]:
+    async def interrupt_c(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["c"] += 1
         if calls["c"] == 1:
-            return NodeInterrupt(GraphInterruptPayload(b"c question"))
-        return NodeSuccess(node_input)
+            return Graph.interrupt(b"question-c")
+        return values
 
+    graph = Graph[str]("interrupt.atomic")
     codec = Codec()
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("interrupt.atomic-resume"),
-            GraphDefinitionVersion(1),
-            (
-                NodeDefinition(GraphNodeId("a"), resume_failure),
-                NodeDefinition(GraphNodeId("b"), skip_failure),
-                NodeDefinition(GraphNodeId("c"), answer_interrupt),
-            ),
-            tuple(DirectEdge(GraphNodeId(node), END) for node in ("a", "b", "c")),
-            tuple(GraphNodeId(node) for node in ("a", "b", "c")),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
+    graph.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
+    for node_id, operation in (("a", fail_a), ("b", fail_b), ("c", interrupt_c)):
+        graph.add_node(
+            node_id,
+            operation,
+            inputs={"value": Graph.graph_input("value", str)},
+            outputs={"value": str},
         )
-    )
-    executor = GraphExecutor(graph)
-    awaiting = await settle_pending(executor, started(executor), "initial")
-    interrupted = frontier_node(awaiting.frontier, GraphNodeId("c"))
-    assert interrupted is not None and isinstance(interrupted.settlement, InterruptedGraphNode)
-    identity = interrupted.settlement.interrupt.identity
-    resumed = reduce_graph_run(
-        awaiting,
-        executor.resume(
-            ResumeRequest(
-                awaiting,
-                (
-                    ResumeFailedNodeRequest(GraphNodeId("a"), UseRequestInput()),
-                    SkipFailedNodeRequest(GraphNodeId("b"), GraphSkipReason("operator skip"), ContinueGraphRouting()),
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("c"),
-                        graph_interrupt_id(
-                            identity.run_id,
-                            identity.superstep,
-                            identity.node_id,
-                            identity.execution_generation,
-                        ),
-                        OverrideNodeInput("c answer"),
-                    ),
-                ),
-            )
+    graph.set_outputs({})
+    first = await graph.run(Graph.values(value="input"))
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    completed = await graph.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            graph.resume_failed("a"),
+            graph.skip_failed("b", "operator skip"),
+            graph.resume_interrupted(
+                "c",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="answer-c"),
+            ),
         ),
     )
-    resumed_a = frontier_node(resumed.frontier, GraphNodeId("a"))
-    resumed_b = frontier_node(resumed.frontier, GraphNodeId("b"))
-    resumed_c = frontier_node(resumed.frontier, GraphNodeId("c"))
-    assert resumed_a is not None and isinstance(resumed_a.settlement, PendingGraphNode)
-    assert resumed_b is not None
-    assert resumed_c is not None and isinstance(resumed_c.settlement, PendingGraphNode)
 
-    settled = await settle_pending(executor, resumed, "request-default")
+    assert isinstance(completed, Graph.CompletedResult)
     assert calls == {"a": 2, "b": 1, "c": 2}
-    assert (await resolve_ready(executor, settled)).status is GraphRunStatus.COMPLETED
 
 
 async def test_aborted_override_is_neither_decoded_nor_scheduled() -> None:
+    codec = CountingCodec()
     calls = 0
 
-    class ExplodingDecoder(Codec):
-        def decode(self, payload: bytes) -> str:
-            raise AssertionError(payload)
-
-    async def node(node_input: str) -> NodeSuccess[str]:
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
-        return NodeSuccess(node_input)
+        return Graph.interrupt(b"question")
 
-    graph = interrupt_graph(node, codec=ExplodingDecoder())
-    executor = GraphExecutor(graph)
-    initial = started(executor)
-    diagnostic = replace(
-        initial,
-        frontier=GraphFrontierState(
+    graph = interrupt_graph(interrupt, codec=codec)
+    first = await graph.run(Graph.values(value="input"), run_id="aborted-run")
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    resumed_state = reduce_graph_run(
+        first.state,
+        ResumeGraphNodes(
+            first.state.revision,
             (
-                GraphFrontierNode(
+                ResumeInterruptedNode(
                     GraphNodeId("a"),
-                    PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"opaque"))),
+                    first.interrupts[0].interrupt_id,
+                    OverrideGraphNodeInput(GraphResumeInputPayload(b"opaque-answer")),
                 ),
-            )
+            ),
         ),
     )
-    aborted = reduce_graph_run(diagnostic, AbortGraphRun(0, GraphAbortReason("stop")))
-
-    disposition = await executor.prepare(
-        StepRequest(aborted, "ordinary", ExecutionRequestAttemptId("aborted-request"), ())
+    aborted_state = reduce_graph_run(
+        resumed_state,
+        AbortGraphRun(resumed_state.revision, GraphAbortReason("operator abort")),
     )
 
-    assert isinstance(disposition, AbortedGraph)
-    assert calls == 0
+    aborted = await graph.run(state=aborted_state)
+
+    assert isinstance(aborted, Graph.AbortedResult)
+    assert codec.decode_calls == 0
+    assert calls == 1

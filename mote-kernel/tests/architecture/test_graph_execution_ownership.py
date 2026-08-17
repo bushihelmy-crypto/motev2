@@ -138,11 +138,39 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
             {"ResumeInputEncoder", "ResumeInputDecoder", "ResumeInputBinding"}
         ),
         "execution/engine/resume_input.py": frozenset(
-            {"require_resume_input_binding", "encode_resume_input", "effective_node_input"}
+            {
+                "require_resume_input_binding",
+                "encode_resume_input",
+                "decode_resume_input",
+                "materialize_node_input",
+            }
+        ),
+        "execution/graph/values.py": frozenset(
+            {
+                "NamedValue",
+                "_ValuesSeal",
+                "_ValuesConstruction",
+                "_GraphValues",
+                "GraphInputFrame",
+                "NodeInputFrame",
+                "NodeOutputFrame",
+                "GraphOutputView",
+                "_make_graph_values",
+            }
+        ),
+        "execution/run_context.py": frozenset(
+            {
+                "GraphInputAvailabilityCoordinate",
+                "PublicationAvailabilityCoordinate",
+                "ResumeInputAvailabilityCoordinate",
+                "ChildBoundaryAvailabilityCoordinate",
+                "ScopedFrameIndex",
+                "_GraphContinuation",
+            }
         ),
         "execution/engine/routing.py": frozenset({"validate_routing_contribution", "resolve_routing"}),
         "execution/engine/task.py": frozenset({"TaskId", "task_identity", "GraphTask", "ExecutableTask"}),
-        "execution/identity.py": frozenset({"ExecutionRequestAttemptId"}),
+        "execution/identity.py": frozenset({"ExecutionRequestAttemptId", "ScopeRunCoordinate", "StableActivation"}),
         "execution/claim.py": frozenset(
             {"ExecutionClaimOwner", "ExecutionClaimSnapshot", "PreparedExecutionClaim", "prepare_execution_claim"}
         ),
@@ -179,7 +207,11 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
         "route": "GraphRouteId",
         "target": "GraphNodeId",
     }
-    assert _class_fields("execution/graph/outcome.py", "NodeSuccess")["routing"] == "GraphRoutingContribution"
+    assert _class_fields("execution/graph/outcome.py", "_GraphSuccessOutcome") == {
+        "output": "_GraphValues[GraphValueT]",
+        "route": "str | None",
+        "_seal": "InitVar[_OutcomeSeal]",
+    }
     assert _class_fields("execution/claim.py", "ExecutionClaimSnapshot") == {
         "command": "ClaimGraphExecution",
         "token": "GraphExecutionToken",
@@ -263,7 +295,7 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
 
 
 def test_node_invocation_belongs_to_the_single_execution_scheduler() -> None:
-    assert _call_owner_modules("node") == ("execution/engine/scheduler.py",)
+    assert _call_owner_modules("operation") == ("execution/engine/scheduler.py",)
 
 
 def test_execution_requests_read_authoritative_graph_state() -> None:
@@ -285,12 +317,10 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
     assert isinstance(slots, ast.Tuple)
     assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
         "_claim_owner",
-        "_graphs",
-        "_parent_nodes",
-        "_root_key",
+        "_graph",
     }
 
-    forbidden_names = {"reduce_graph_run", "replace", "store", "state_store"}
+    forbidden_names = {"reduce_graph_run", "store", "state_store"}
     assert not {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id in forbidden_names}
     assert not {
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in forbidden_names
@@ -324,13 +354,9 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
     )
     assert isinstance(slots, ast.Tuple)
     assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
+        "_builder_state",
+        "_compiled_owner",
         "_definition_id",
-        "_edges",
-        "_entries",
-        "_executor",
-        "_nodes",
-        "_resources",
-        "_resume_input",
         "_version",
     }
     assert not {
@@ -340,7 +366,10 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
         "_session",
         "_outputs",
     } & {node.id for node in ast.walk(graph) if isinstance(node, ast.Name)}
-    assert _call_owner_modules("reduce_graph_run") == ("execution/_graph.py",)
+    assert _call_owner_modules("reduce_graph_run") == (
+        "execution/_graph.py",
+        "execution/engine/recovery.py",
+    )
 
     public_tree = _module("execution/__init__.py")
     public_exports = next(
@@ -405,3 +434,40 @@ def test_graph_run_lifecycle_has_exactly_three_current_states() -> None:
         if isinstance(target, ast.Name)
     }
     assert members == {"RUNNING", "COMPLETED", "ABORTED"}
+
+
+def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() -> None:
+    assert _class_fields("execution/graph/topology.py", "FrontierTransitionPlan") == {
+        "entries": "tuple[GraphNodeId, ...]",
+        "callable_node_ids": "tuple[GraphNodeId, ...]",
+        "nested_node_ids": "tuple[GraphNodeId, ...]",
+        "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
+        "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
+        "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
+        "data_triggers": "FrozenMap[GraphNodeId, DataTriggerPlan]",
+        "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
+        "outcomes": "FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]",
+        "publications": "FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]",
+        "graph_outputs": "GraphOutputBindings[GraphValueT]",
+        "resource_order": "tuple[ResourceId, ...]",
+    }
+    assert _class_fields("execution/graph/topology.py", "RecoveryAvailabilityPlan") == {
+        "transition": "FrontierTransitionPlan[GraphValueT]"
+    }
+
+
+def test_recovery_consumes_shared_claim_and_settlement_lowering() -> None:
+    recovery = _module("execution/engine/recovery.py")
+    forbidden = {
+        "ClaimGraphExecution",
+        "SettleGraphNode",
+        "SucceededGraphNodeOutcome",
+        "FailedGraphNodeOutcome",
+        "InterruptedGraphNodeOutcome",
+        "admit_tasks",
+        "initial_resource_snapshot",
+    }
+    names = {node.id for node in ast.walk(recovery) if isinstance(node, ast.Name)}
+
+    assert not forbidden & names
+    assert {"claim_resource_snapshot", "project_claim_command", "project_success_settlement"} <= names

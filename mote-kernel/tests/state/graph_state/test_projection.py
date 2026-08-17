@@ -1,21 +1,19 @@
 import pytest
+from tests.execution.engine.factories import callable_node
 
+from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.execution.graph import (
-    END,
-    DirectEdge,
-    GraphDefinition,
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.edge import DirectEdge
+from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
+from mote_kernel.execution.graph.resume_input import ResumeInputBinding
+from mote_kernel.execution.graph_run import project_start_graph_command
+from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphNodeId,
-    NodeDefinition,
-    NodeSuccess,
-    ResumeInputBinding,
-    compile_graph,
-)
-from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.state.graph_state import (
-    ContinueGraphRouting,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphRunId,
@@ -26,15 +24,11 @@ from mote_kernel.state.graph_state import (
 
 
 class StringCodec:
-    def encode(self, value: str) -> bytes:
-        return value.encode()
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        return value["value"].encode()
 
-    def decode(self, payload: bytes) -> str:
-        return payload.decode()
-
-
-async def identity(node_input: str) -> NodeSuccess[str]:
-    return NodeSuccess(node_input, ContinueGraphRouting())
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        return Graph.values(value=payload.decode())
 
 
 def compiled(*, with_codec: bool = True):
@@ -43,9 +37,10 @@ def compiled(*, with_codec: bool = True):
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(5),
-            (NodeDefinition(GraphNodeId("a"), identity),),
+            (callable_node("a"),),
             (DirectEdge(GraphNodeId("a"), END),),
-            (GraphNodeId("a"),),
+            (),
+            normalize_graph_output_declarations({}),
             resume_input=(
                 ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 2, codec, codec) if with_codec else None
             ),
