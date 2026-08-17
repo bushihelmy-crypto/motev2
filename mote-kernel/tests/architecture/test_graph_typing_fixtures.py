@@ -58,8 +58,8 @@ CASES = (
     NegativeTypingCase(
         "invariant_transition.py",
         (
-            '"_GraphTransition[UniverseA]"',
-            '"_GraphTransition[UniverseB]"',
+            '"GraphTransition[UniverseA]"',
+            '"GraphTransition[UniverseB]"',
             "is invariant",
             "reportReturnType",
         ),
@@ -68,8 +68,8 @@ CASES = (
         "cross_universe_commit.py",
         (
             'parameter "commit"',
-            '"_GraphTransition[UniverseB]"',
-            '"_GraphTransition[UniverseA]"',
+            '"GraphTransition[UniverseB]"',
+            '"GraphTransition[UniverseA]"',
             "is invariant",
             "reportArgumentType",
         ),

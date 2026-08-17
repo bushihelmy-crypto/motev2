@@ -5,7 +5,7 @@ import pytest
 from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution._graph import project_graph_result
+from mote_kernel.execution.family_driver import project_graph_result
 from mote_kernel.execution.graph.ports import canonical_nominal_type
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,

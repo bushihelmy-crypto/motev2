@@ -2,6 +2,6 @@
 
 # pyright: reportUnusedImport=false
 
-from mote_kernel.execution._graph import Graph
+from mote_kernel.execution.facade import Graph
 
 __all__ = ["Graph"]

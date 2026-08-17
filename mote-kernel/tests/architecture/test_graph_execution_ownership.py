@@ -178,7 +178,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
         "execution/engine/session.py": frozenset({"GraphExecutionSession"}),
         "execution/graph_run.py": frozenset({"project_start_graph_command"}),
         "execution/executor.py": frozenset({"GraphExecutor"}),
-        "execution/_graph.py": frozenset({"Graph"}),
+        "execution/facade.py": frozenset({"Graph"}),
     }
     expected = {symbol: (relative,) for relative, symbols in owners_by_module.items() for symbol in symbols}
 
@@ -343,7 +343,7 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
-    graph = _top_level_definition("execution/_graph.py", "Graph")
+    graph = _top_level_definition("execution/facade.py", "Graph")
     if not isinstance(graph, ast.ClassDef):
         raise AssertionError("Graph must remain a class")
     slots = next(
@@ -367,8 +367,9 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
         "_outputs",
     } & {node.id for node in ast.walk(graph) if isinstance(node, ast.Name)}
     assert _call_owner_modules("reduce_graph_run") == (
-        "execution/_graph.py",
         "execution/engine/recovery.py",
+        "execution/family_driver.py",
+        "execution/invocation.py",
     )
 
     public_tree = _module("execution/__init__.py")
@@ -380,6 +381,42 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
     )
     assert isinstance(public_exports, ast.List)
     assert [element.value for element in public_exports.elts if isinstance(element, ast.Constant)] == ["Graph"]
+
+
+def test_graph_facade_delegates_private_runtime_orchestration() -> None:
+    facade = _module("execution/facade.py")
+    facade_names = _defined_names(facade)
+
+    assert (
+        not {
+            "_PlannedState",
+            "_PlannedFence",
+            "_PlannedResume",
+            "drive_root",
+            "project_graph_result",
+            "validate_context",
+        }
+        & facade_names
+    )
+    assert _symbol_owners(
+        frozenset(
+            {
+                "_PlannedState",
+                "_PlannedFence",
+                "_PlannedResume",
+                "GraphTransition",
+                "drive_root",
+                "project_graph_result",
+            }
+        )
+    ) == {
+        "_PlannedState": ("execution/invocation.py",),
+        "_PlannedFence": ("execution/invocation.py",),
+        "_PlannedResume": ("execution/invocation.py",),
+        "GraphTransition": ("execution/family_driver.py",),
+        "drive_root": ("execution/family_driver.py",),
+        "project_graph_result": ("execution/family_driver.py",),
+    }
 
 
 def test_graph_transition_dispatch_is_exhaustive_and_modules_do_not_alias_contracts() -> None:
