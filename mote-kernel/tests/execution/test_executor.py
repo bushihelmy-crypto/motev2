@@ -1,48 +1,58 @@
 import asyncio
 from contextvars import ContextVar
-from dataclasses import FrozenInstanceError, dataclass, replace
-from typing import cast
+from dataclasses import dataclass, replace
+from typing import TypeAlias, TypeVar, cast
 
 import pytest
 
+import mote_kernel.execution.engine.admission as admission_module
+from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_input
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
-    InvalidRoutingCommandError,
+    GraphValidationError,
+    GraphValueAdmissionError,
     NodeExecutionContractError,
     ResultCollectionError,
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph import (
-    END,
-    CompiledGraph,
-    ConditionalEdge,
-    DirectEdge,
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
-    GraphRouteId,
-    JoinEdge,
-    NestedGraphNodeDefinition,
-    NodeDefinition,
-    NodeFailure,
-    NodeInterrupt,
-    NodeSuccess,
-    ResumeInputBinding,
-    compile_graph,
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
+from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
+from mote_kernel.execution.graph.ports import (
+    GraphInputRef,
+    NodeOutputRef,
+    normalize_graph_output_declarations,
+    normalize_input_bindings,
+    normalize_output_declarations,
 )
-from mote_kernel.execution.identity import ExecutionRequestAttemptId
+from mote_kernel.execution.graph.resume_input import ResumeInputBinding
+from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.values import (
+    GraphOutputView,
+    NamedValue,
+    _frame_value,
+    _make_graph_output_view,
+)
+from mote_kernel.execution.identity import (
+    ExecutionRequestAttemptId,
+    ScopeRunCoordinate,
+    child_scope_run_for_activation,
+    root_scope_run,
+)
+from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeFailedNodeRequest,
     ResumeInterruptedNodeRequest,
-    ResumeNodeRequest,
     ResumeRequest,
     SkipFailedNodeRequest,
     StepRequest,
-    UseRequestInput,
+    UseMaterializedInput,
 )
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import (
@@ -63,27 +73,37 @@ from mote_kernel.execution.result import (
     WaitForActiveChildren,
     WaitingForChildren,
 )
+from mote_kernel.execution.run_context import (
+    AdmittedGraphInput,
+    GraphInputAvailabilityCoordinate,
+    ScopedFrameIndex,
+)
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
+    ClaimGraphExecution,
+    CompleteGraphFrontier,
     ContinueGraphRouting,
     FenceGraphExecution,
     GraphAbortReason,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphFailure,
     GraphInterruptId,
-    GraphInterruptPayload,
     GraphJoinProgress,
+    GraphNodeId,
     GraphResumeInputCodecId,
+    GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
-    GraphSkipReason,
     GraphStateTransitionError,
     InterruptedGraphNode,
     ParentGraphActivation,
     PendingGraphNode,
     ResourceId,
     ResourceSnapshot,
+    SettleGraphNode,
+    SucceededGraphNodeOutcome,
     child_graph_run_id,
     graph_interrupt_id,
     reduce_graph_run,
@@ -91,60 +111,139 @@ from mote_kernel.state.graph_state import (
 
 pytestmark = pytest.mark.asyncio
 
+GraphValueT = TypeVar("GraphValueT")
 REQUEST_ID = ExecutionRequestAttemptId("request")
-CHILD_REQUEST_ID = ExecutionRequestAttemptId("child-request")
-CHILD_RESOLUTION_REQUEST_ID = ExecutionRequestAttemptId("child-request-2")
+OTHER_REQUEST_ID = ExecutionRequestAttemptId("other-request")
+DEFAULT_LIMITS = ExecutionLimits()
 
 
-async def echo(node_input: str) -> NodeSuccess[str]:
-    return NodeSuccess(node_input)
+async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
+    return values
 
 
 class _Codec:
-    def encode(self, value: str) -> bytes:
-        return value.encode()
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        return value["value"].encode()
 
-    def decode(self, payload: bytes) -> str:
-        return payload.decode()
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        return Graph.values(value=payload.decode())
+
+
+def node(
+    node_id: str,
+    operation: NodeCallable[str] = echo,
+    *,
+    inputs: dict[str, GraphInputRef[str] | NodeOutputRef] | None = None,
+    resources: tuple[ResourceId, ...] = (),
+) -> CallableNodeDefinition[str]:
+    bindings = {"value": Graph.graph_input("value", str)} if inputs is None else inputs
+    return CallableNodeDefinition(
+        GraphNodeId(node_id),
+        operation,
+        normalize_input_bindings(bindings),
+        normalize_output_declarations({"value": str}),
+        resources,
+    )
 
 
 def graph_with_nodes(
-    *nodes: NodeDefinition[str, str] | NestedGraphNodeDefinition[str, str],
-    edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
-    entries: tuple[str, ...] = ("a",),
+    *nodes: CallableNodeDefinition[str] | NestedGraphNodeDefinition[str],
+    edges: tuple[ConditionalEdge | DirectEdge | JoinEdge, ...] = (),
+    entries: tuple[str, ...] = (),
     resources: tuple[ResourceDefinition, ...] = (),
-) -> CompiledGraph[str, str]:
+    definition_id: str = "test.graph",
+    resume_input: ResumeInputBinding[str] | None = None,
+) -> CompiledGraph[str]:
     return compile_graph(
         GraphDefinition(
-            GraphDefinitionId("test.graph"),
-            GraphDefinitionVersion(1),
-            nodes,
-            edges,
-            tuple(GraphNodeId(node_id) for node_id in entries),
-            resources,
+            definition_id=GraphDefinitionId(definition_id),
+            version=GraphDefinitionVersion(1),
+            nodes=nodes,
+            edges=edges,
+            entries=tuple(GraphNodeId(node_id) for node_id in entries),
+            outputs=normalize_graph_output_declarations({}),
+            resources=resources,
+            resume_input=resume_input,
         )
     )
 
 
-def started(executor: GraphExecutor[str, str], run_id: str = "run") -> GraphRunState:
+def request_with_values(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+    scope_run: ScopeRunCoordinate,
+    values: Graph.Values[GraphValueT],
+    projections: tuple[ChildProjection[GraphValueT], ...] = (),
+    *,
+    request_id: ExecutionRequestAttemptId = REQUEST_ID,
+    limits: ExecutionLimits = DEFAULT_LIMITS,
+) -> StepRequest[GraphValueT]:
+    frame = admit_graph_input(graph, values)
+    frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
+    frames = frames.add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            frame,
+        )
+    )
+    return StepRequest(state, scope_run, frames, request_id, projections, limits)
+
+
+def string_request(
+    graph: CompiledGraph[str],
+    state: GraphRunState,
+    value: str,
+    projections: tuple[ChildProjection[str], ...] = (),
+    *,
+    scope_run: ScopeRunCoordinate | None = None,
+    request_id: ExecutionRequestAttemptId = REQUEST_ID,
+    limits: ExecutionLimits = DEFAULT_LIMITS,
+) -> StepRequest[str]:
+    coordinate = root_scope_run(state.run_id) if scope_run is None else scope_run
+    return request_with_values(
+        graph,
+        state,
+        coordinate,
+        Graph.values(value=value),
+        projections,
+        request_id=request_id,
+        limits=limits,
+    )
+
+
+def started(executor: GraphExecutor[str], run_id: str = "run") -> GraphRunState:
     return reduce_graph_run(None, executor.start_command(GraphRunId(run_id)))
 
 
+def output_value(result: TaskSuccess[str]) -> str:
+    return _frame_value(result.output, "value")
+
+
+def child_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
+    declarations = tuple((item.name, item.descriptor) for item in graph.graph_output_descriptor.declarations.entries)
+    return _make_graph_output_view((NamedValue("value", value),), declarations)
+
+
 async def run_frontier(
-    executor: GraphExecutor[str, str],
-    graph: CompiledGraph[str, str],
+    executor: GraphExecutor[str],
+    graph: CompiledGraph[str],
     state: GraphRunState,
     node_input: str,
     projections: tuple[ChildProjection[str], ...] = (),
+    *,
+    scope_run: ScopeRunCoordinate | None = None,
 ) -> tuple[GraphRunState, tuple[TaskResult[str], ...]]:
-    request = StepRequest(state, node_input, ExecutionRequestAttemptId("request"), projections)
-    prepared = await executor.prepare(request)
+    execution_request = string_request(
+        graph,
+        state,
+        node_input,
+        projections,
+        scope_run=scope_run,
+    )
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     current = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        StepRequest(current, node_input, ExecutionRequestAttemptId("request"), projections),
-    )
+    session = await executor.execute(prepared.claim, replace(execution_request, state=current))
     results: list[TaskResult[str]] = []
     try:
         while current.execution is not None:
@@ -157,59 +256,99 @@ async def run_frontier(
 
 
 async def run_and_resolve(
-    executor: GraphExecutor[str, str],
-    graph: CompiledGraph[str, str],
+    executor: GraphExecutor[str],
+    graph: CompiledGraph[str],
     state: GraphRunState,
     node_input: str,
     projections: tuple[ChildProjection[str], ...] = (),
+    *,
+    scope_run: ScopeRunCoordinate | None = None,
 ) -> GraphRunState:
-    settled, _results = await run_frontier(executor, graph, state, node_input, projections)
-    ready = await executor.prepare(StepRequest(settled, node_input, REQUEST_ID, projections))
+    settled, _results = await run_frontier(
+        executor,
+        graph,
+        state,
+        node_input,
+        projections,
+        scope_run=scope_run,
+    )
+    ready = await executor.prepare(
+        string_request(
+            graph,
+            settled,
+            node_input,
+            projections,
+            scope_run=scope_run,
+        )
+    )
     assert isinstance(ready, ReadyToResolve)
     return reduce_graph_run(settled, ready.command)
 
 
-def nested_graph() -> CompiledGraph[str, str]:
-    resource = ResourceId("nested-file")
-    child = GraphDefinition(
-        GraphDefinitionId("child.graph"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child"), echo),),
-        (DirectEdge(GraphNodeId("child"), END),),
-        (GraphNodeId("child"),),
+def child_definition(definition_id: str = "child.graph") -> GraphDefinition[str]:
+    return GraphDefinition(
+        definition_id=GraphDefinitionId(definition_id),
+        version=GraphDefinitionVersion(1),
+        nodes=(node("child"),),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({"value": Graph.node_output("child", "value")}),
     )
+
+
+def nested_node(node_id: str, child: GraphDefinition[str]) -> NestedGraphNodeDefinition[str]:
+    return NestedGraphNodeDefinition(
+        GraphNodeId(node_id),
+        child,
+        normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+    )
+
+
+def nested_graph() -> CompiledGraph[str]:
+    resource = ResourceId("nested-file")
     return graph_with_nodes(
-        NodeDefinition(GraphNodeId("ordinary"), echo, (resource,)),
-        NestedGraphNodeDefinition(GraphNodeId("nested"), child),
-        edges=(DirectEdge(GraphNodeId("nested"), END), DirectEdge(GraphNodeId("ordinary"), END)),
-        entries=("nested", "ordinary"),
+        node("ordinary", resources=(resource,)),
+        nested_node("nested", child_definition()),
         resources=(ResourceDefinition(resource, 0),),
     )
+
+
+def completed_child(state: GraphRunState) -> GraphRunState:
+    claimed = reduce_graph_run(
+        state,
+        ClaimGraphExecution(state.revision, GraphExecutionAttemptId("child-attempt"), None),
+    )
+    assert claimed.execution is not None
+    settled = reduce_graph_run(
+        claimed,
+        SettleGraphNode(
+            claimed.revision,
+            claimed.execution.token,
+            SucceededGraphNodeOutcome(GraphNodeId("child"), ContinueGraphRouting()),
+        ),
+    )
+    return reduce_graph_run(settled, CompleteGraphFrontier(settled.revision))
 
 
 async def test_executor_exposes_state_acknowledged_node_stream() -> None:
     calls: list[str] = []
 
-    async def execute(value: str) -> NodeSuccess[str]:
-        calls.append(value)
-        return NodeSuccess(value.upper())
+    async def execute(values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append(values["value"])
+        return Graph.values(value=values["value"].upper())
 
-    graph = graph_with_nodes(
-        NodeDefinition(GraphNodeId("a"), execute),
-        NodeDefinition(GraphNodeId("b"), execute),
-        edges=(DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
-        entries=("a", "b"),
-    )
+    graph = graph_with_nodes(node("a", execute), node("b", execute))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         first = await session.next(claimed)
         assert isinstance(first.result, TaskSuccess)
-        assert first.result.output == "INPUT"
+        assert output_value(first.result) == "INPUT"
         after_a = reduce_graph_run(claimed, first.command)
         assert after_a.execution is not None
         second = await session.next(after_a)
@@ -220,34 +359,69 @@ async def test_executor_exposes_state_acknowledged_node_stream() -> None:
         await session.aclose()
 
 
+async def test_prepare_rejects_wrong_scope_or_graph_run_identity() -> None:
+    graph = graph_with_nodes(node("a"))
+    executor = GraphExecutor(graph)
+    state = started(executor)
+    wrong_scope = ScopeRunCoordinate((GraphNodeId("nested"),), state.run_id)
+    wrong_run = root_scope_run(GraphRunId("other-run"))
+
+    with pytest.raises(SnapshotMismatchError, match="request scope"):
+        await executor.prepare(string_request(graph, state, "input", scope_run=wrong_scope))
+    with pytest.raises(SnapshotMismatchError, match="request scope"):
+        await executor.prepare(string_request(graph, state, "input", scope_run=wrong_run))
+
+
+async def test_execute_scope_rejection_does_not_consume_prepared_claim() -> None:
+    graph = graph_with_nodes(node("a"))
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(request)
+    assert isinstance(prepared, ExecutableFrontier)
+    claimed = reduce_graph_run(initial, prepared.claim.command)
+    claimed_request = replace(request, state=claimed)
+    wrong_run = replace(
+        claimed_request,
+        scope_run=root_scope_run(GraphRunId("other-run")),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="request scope"):
+        await executor.execute(prepared.claim, wrong_run)
+
+    session = await executor.execute(prepared.claim, claimed_request)
+    await session.aclose()
+
+
 async def test_typed_failure_returns_awaiting_resume_without_retry() -> None:
     calls = 0
 
-    async def fail(value: str) -> NodeFailure:
+    async def fail(values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
-        return NodeFailure(GraphFailure(f"failed:{value}"))
+        return Graph.failure(f"failed:{values['value']}")
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), fail))
+    graph = graph_with_nodes(node("a", fail))
     executor = GraphExecutor(graph)
     state, results = await run_frontier(executor, graph, started(executor), "input")
     assert isinstance(results[0], TaskFailure)
-    disposition = await executor.prepare(StepRequest(state, "input", REQUEST_ID, ()))
+    disposition = await executor.prepare(string_request(graph, state, "input"))
     assert disposition == AwaitingResume((GraphNodeId("a"),), ())
     assert calls == 1
 
 
 async def test_ordinary_exception_leaves_pending_node_for_exact_fence() -> None:
-    async def explode(value: str) -> NodeSuccess[str]:
-        raise RuntimeError(value)
+    async def explode(values: Graph.Values[str]) -> Graph.Values[str]:
+        raise RuntimeError(values["value"])
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), explode))
+    graph = graph_with_nodes(node("a", explode))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "boom", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "boom")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "boom", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     with pytest.raises(RuntimeError, match="boom"):
         await session.next(claimed)
     await session.aclose()
@@ -259,31 +433,35 @@ async def test_ordinary_exception_leaves_pending_node_for_exact_fence() -> None:
 
 
 async def test_claim_is_one_shot_and_bound_to_committed_state() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     with pytest.raises(ResultCollectionError, match="committed"):
-        await executor.execute(prepared.claim, StepRequest(initial, "input", REQUEST_ID, ()))
+        await executor.execute(prepared.claim, execution_request)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    claimed_request = replace(execution_request, state=claimed)
+    session = await executor.execute(prepared.claim, claimed_request)
+    await session.aclose()
     with pytest.raises(ResultCollectionError, match="already"):
-        await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+        await executor.execute(prepared.claim, claimed_request)
 
 
 async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winner() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    request = StepRequest(claimed, "input", REQUEST_ID, ())
+    claimed_request = replace(execution_request, state=claimed)
 
     outcomes = await asyncio.gather(
-        executor.execute(prepared.claim, request),
-        executor.execute(prepared.claim, request),
+        executor.execute(prepared.claim, claimed_request),
+        executor.execute(prepared.claim, claimed_request),
         return_exceptions=True,
     )
     sessions = tuple(outcome for outcome in outcomes if isinstance(outcome, GraphExecutionSession))
@@ -299,10 +477,10 @@ async def test_missing_and_active_nested_children_block_parent_claim() -> None:
     executor = GraphExecutor(graph)
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     child = reduce_graph_run(None, missing.action.children[0].command)
-    active = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (ActiveChild(activation, child),)))
+    active = await executor.prepare(string_request(graph, parent, "input", (ActiveChild(activation, child),)))
     assert isinstance(active, WaitingForChildren) and isinstance(active.action, WaitForActiveChildren)
 
 
@@ -311,26 +489,27 @@ async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_pa
     executor = GraphExecutor(graph)
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     child = reduce_graph_run(None, missing.action.children[0].command)
-    child_graph = missing.action.children[0].graph
-    completed, _ = await run_frontier(executor, child_graph, child, "child")
-    child_resolution = await executor.prepare(StepRequest(completed, "child", ExecutionRequestAttemptId("request"), ()))
-    assert isinstance(child_resolution, ReadyToResolve)
-    completed = reduce_graph_run(completed, child_resolution.command)
-    projection = CompletedChild(activation, completed, "child-output", ContinueGraphRouting())
-    prepared = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (projection,)))
+    terminal = completed_child(child)
+    projection = CompletedChild(
+        activation,
+        terminal,
+        child_output(missing.action.children[0].graph, "child-output"),
+    )
+    execution_request = string_request(graph, parent, "input", (projection,))
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     resources = prepared.claim.command.resources
     assert resources is not None
     assert tuple(item.node_id for item in resources.acquisitions) == (GraphNodeId("ordinary"),)
     claimed = reduce_graph_run(parent, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, (projection,)))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         result = await session.next(claimed)
         assert isinstance(result.result, TaskSuccess)
-        assert result.result.output == "child-output"
+        assert output_value(result.result) == "child-output"
         after = reduce_graph_run(claimed, result.command)
         assert after.resources is not None
         assert after.resources.acquisitions[0].node_id == GraphNodeId("ordinary")
@@ -347,21 +526,20 @@ async def test_aborted_nested_child_projects_a_typed_failure() -> None:
     executor = GraphExecutor(graph)
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     child = reduce_graph_run(None, missing.action.children[0].command)
     aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-    prepared = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (AbortedChild(activation, aborted),)))
+    projection = AbortedChild(activation, aborted)
+    execution_request = string_request(graph, parent, "input", (projection,))
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(parent, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        StepRequest(claimed, "input", REQUEST_ID, (AbortedChild(activation, aborted),)),
-    )
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         result = await session.next(claimed)
         assert isinstance(result.result, TaskFailure)
-        assert result.result.failure == GraphFailure("child aborted")
+        assert result.result.failure == "child aborted"
     finally:
         await session.aclose()
 
@@ -371,44 +549,50 @@ async def test_nested_projection_requires_terminal_child_state() -> None:
     executor = GraphExecutor(graph)
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     active = reduce_graph_run(None, missing.action.children[0].command)
+    projection = CompletedChild(
+        activation,
+        active,
+        child_output(missing.action.children[0].graph, "forged"),
+    )
     with pytest.raises(ResultCollectionError, match="completed child"):
-        await executor.prepare(
-            StepRequest(
-                parent, "input", REQUEST_ID, (CompletedChild(activation, active, "forged", ContinueGraphRouting()),)
-            )
-        )
+        await executor.prepare(string_request(graph, parent, "input", (projection,)))
 
 
 async def test_concurrent_runs_share_executor_without_cross_run_state() -> None:
     barrier = asyncio.Barrier(2)
 
-    async def execute(value: str) -> NodeSuccess[str]:
+    async def execute(values: Graph.Values[str]) -> Graph.Values[str]:
         await barrier.wait()
-        return NodeSuccess(value)
+        return values
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), execute))
+    graph = graph_with_nodes(node("a", execute))
     executor = GraphExecutor(graph)
     first, second = started(executor, "first"), started(executor, "second")
+    first_request = string_request(graph, first, "first")
+    second_request = string_request(graph, second, "second")
     first_p, second_p = await asyncio.gather(
-        executor.prepare(StepRequest(first, "first", REQUEST_ID, ())),
-        executor.prepare(StepRequest(second, "second", REQUEST_ID, ())),
+        executor.prepare(first_request),
+        executor.prepare(second_request),
     )
     assert isinstance(first_p, ExecutableFrontier) and isinstance(second_p, ExecutableFrontier)
     first_claimed = reduce_graph_run(first, first_p.claim.command)
     second_claimed = reduce_graph_run(second, second_p.claim.command)
     first_session, second_session = await asyncio.gather(
-        executor.execute(first_p.claim, StepRequest(first_claimed, "first", REQUEST_ID, ())),
-        executor.execute(second_p.claim, StepRequest(second_claimed, "second", REQUEST_ID, ())),
+        executor.execute(first_p.claim, replace(first_request, state=first_claimed)),
+        executor.execute(second_p.claim, replace(second_request, state=second_claimed)),
     )
     try:
-        one, two = await asyncio.gather(first_session.next(first_claimed), second_session.next(second_claimed))
+        one, two = await asyncio.gather(
+            first_session.next(first_claimed),
+            second_session.next(second_claimed),
+        )
         assert isinstance(one.result, TaskSuccess)
         assert isinstance(two.result, TaskSuccess)
-        assert one.result.output == "first"
-        assert two.result.output == "second"
+        assert output_value(one.result) == "first"
+        assert output_value(two.result) == "second"
         assert one.result.task.task_id != two.result.task.task_id
     finally:
         await asyncio.gather(first_session.aclose(), second_session.aclose())
@@ -417,26 +601,23 @@ async def test_concurrent_runs_share_executor_without_cross_run_state() -> None:
 async def test_context_and_input_identity_are_isolated_per_task() -> None:
     trace = ContextVar("trace", default="missing")
 
-    async def read(value: str) -> NodeSuccess[str]:
-        return NodeSuccess(f"{trace.get()}:{value}")
+    async def read(values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value=f"{trace.get()}:{values['value']}")
 
-    graph = graph_with_nodes(
-        NodeDefinition(GraphNodeId("a"), read),
-        NodeDefinition(GraphNodeId("b"), read),
-        entries=("a", "b"),
-    )
+    graph = graph_with_nodes(node("a", read), node("b", read))
     token = trace.set("caller")
     try:
         executor = GraphExecutor(graph)
         state = started(executor)
-        prepared = await executor.prepare(StepRequest(state, "input", REQUEST_ID, ()))
+        execution_request = string_request(graph, state, "input")
+        prepared = await executor.prepare(execution_request)
         assert isinstance(prepared, ExecutableFrontier)
         claimed = reduce_graph_run(state, prepared.claim.command)
-        session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+        session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
         try:
             first = await session.next(claimed)
             assert isinstance(first.result, TaskSuccess)
-            assert first.result.output == "caller:input"
+            assert output_value(first.result) == "caller:input"
         finally:
             await session.aclose()
         assert trace.get() == "caller"
@@ -444,147 +625,223 @@ async def test_context_and_input_identity_are_isolated_per_task() -> None:
         trace.reset(token)
 
 
-async def test_node_contract_error_is_not_forged_into_settlement() -> None:
-    async def invalid(value: str):
-        return cast(object, value)
+async def test_node_output_contract_error_is_not_forged_into_settlement() -> None:
+    async def invalid(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(other="wrong-port")
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), invalid))  # type: ignore[arg-type]
+    graph = graph_with_nodes(node("a", invalid))
     executor = GraphExecutor(graph)
     state = started(executor)
-    prepared = await executor.prepare(StepRequest(state, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, state, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
-        with pytest.raises(NodeExecutionContractError):
+        with pytest.raises(GraphValueAdmissionError, match="names do not match"):
             await session.next(claimed)
     finally:
         await session.aclose()
 
 
+async def test_node_contract_error_is_not_forged_into_settlement() -> None:
+    async def invalid(_values: Graph.Values[str]) -> bytes:
+        return b"unsupported"
+
+    graph = graph_with_nodes(node("a", cast(NodeCallable[str], invalid)))
+    executor = GraphExecutor(graph)
+    state = started(executor)
+    execution_request = string_request(graph, state, "input")
+    prepared = await executor.prepare(execution_request)
+    assert isinstance(prepared, ExecutableFrontier)
+    claimed = reduce_graph_run(state, prepared.claim.command)
+    session = await executor.execute(
+        prepared.claim,
+        replace(execution_request, state=claimed),
+    )
+    try:
+        with pytest.raises(NodeExecutionContractError, match="unsupported outcome"):
+            await session.next(claimed)
+    finally:
+        await session.aclose()
+
+    assert isinstance(claimed.frontier.nodes[0].settlement, PendingGraphNode)
+    assert claimed.execution is not None
+
+
 async def test_prepare_reports_terminal_and_settled_dispositions_without_claiming() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         result = await session.next(claimed)
         settled = reduce_graph_run(claimed, result.command)
     finally:
         await session.aclose()
-    ready = await executor.prepare(StepRequest(settled, "input", REQUEST_ID, ()))
+    ready = await executor.prepare(replace(execution_request, state=settled))
     assert isinstance(ready, ReadyToResolve)
     completed = reduce_graph_run(settled, ready.command)
     assert completed.status is GraphRunStatus.COMPLETED
-    terminal = await executor.prepare(StepRequest(completed, "input", REQUEST_ID, ()))
+    terminal = await executor.prepare(replace(execution_request, state=completed))
     assert isinstance(terminal, CompletedGraph)
 
     aborted = reduce_graph_run(initial, AbortGraphRun(initial.revision, GraphAbortReason("operator")))
-    aborted_disposition = await executor.prepare(StepRequest(aborted, "input", REQUEST_ID, ()))
+    aborted_disposition = await executor.prepare(replace(execution_request, state=aborted))
     assert isinstance(aborted_disposition, AbortedGraph)
 
 
 async def test_prepare_rejects_reentry_into_an_active_execution() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
     with pytest.raises(ResultCollectionError, match="original execution session"):
-        await executor.prepare(StepRequest(claimed, "input", REQUEST_ID, ()))
+        await executor.prepare(replace(execution_request, state=claimed))
 
 
 async def test_resume_projection_validates_each_action_variant_and_lifecycle() -> None:
-    async def fail(value: str) -> NodeFailure:
-        return NodeFailure(GraphFailure("failed"))
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.failure("failed")
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), fail))
+    graph = graph_with_nodes(node("a", fail))
     executor = GraphExecutor(graph)
-    initial = started(executor)
-    state, _results = await run_frontier(executor, graph, initial, "input")
+    state, _results = await run_frontier(executor, graph, started(executor), "input")
+    execution_request = string_request(graph, state, "input")
     with pytest.raises(SnapshotMismatchError, match="non-empty"):
-        executor.resume(ResumeRequest(state, ()))
-    with pytest.raises(SnapshotMismatchError, match="unsupported action"):
-        executor.resume(ResumeRequest(state, (cast(ResumeNodeRequest[str], object()),)))
+        executor.resume(ResumeRequest(state, execution_request.scope_run, execution_request.frames, ()))
+    duplicate = ResumeFailedNodeRequest(
+        (),
+        GraphNodeId("a"),
+        OverrideNodeInput(Graph.values(value="one")),
+    )
     with pytest.raises(SnapshotMismatchError, match="distinct"):
         executor.resume(
             ResumeRequest(
                 state,
-                (
-                    ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("one")),
-                    ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("two")),
-                ),
+                execution_request.scope_run,
+                execution_request.frames,
+                (duplicate, duplicate),
             )
         )
     with pytest.raises(SnapshotMismatchError, match="unknown frontier"):
         executor.resume(
-            ResumeRequest(state, (ResumeFailedNodeRequest(GraphNodeId("missing"), OverrideNodeInput("retry")),))
+            ResumeRequest(
+                state,
+                execution_request.scope_run,
+                execution_request.frames,
+                (
+                    ResumeFailedNodeRequest(
+                        (),
+                        GraphNodeId("missing"),
+                        OverrideNodeInput(Graph.values(value="retry")),
+                    ),
+                ),
+            )
+        )
+    with pytest.raises(SnapshotMismatchError, match="scoped"):
+        executor.resume(
+            ResumeRequest(
+                state,
+                execution_request.scope_run,
+                execution_request.frames,
+                (
+                    ResumeFailedNodeRequest(
+                        (GraphNodeId("foreign"),),
+                        GraphNodeId("a"),
+                        OverrideNodeInput(Graph.values(value="retry")),
+                    ),
+                ),
+            )
         )
 
 
 async def test_executor_rejects_graph_ownership_and_parent_shape_mismatches() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
     foreign = replace(initial, definition_id=GraphDefinitionId("foreign.graph"))
-    with pytest.raises(SnapshotMismatchError, match="owned"):
-        await executor.prepare(StepRequest(foreign, "input", REQUEST_ID, ()))
+    with pytest.raises(SnapshotMismatchError, match="compiled graph identity"):
+        await executor.prepare(string_request(graph, foreign, "input"))
 
+    parent = ParentGraphActivation(GraphRunId("parent"), 0, GraphNodeId("nested"))
     root_with_parent = replace(
         initial,
-        parent=ParentGraphActivation(GraphRunId("parent"), 0, GraphNodeId("nested")),
+        run_id=child_graph_run_id(parent.run_id, parent.superstep, parent.node_id),
+        parent=parent,
     )
     with pytest.raises(SnapshotMismatchError, match="root graph"):
-        await executor.prepare(StepRequest(root_with_parent, "input", REQUEST_ID, ()))
+        await executor.prepare(string_request(graph, root_with_parent, "input"))
 
-    nested_executor = GraphExecutor(nested_graph())
-    nested_root = started(nested_executor)
-    child_without_parent = replace(nested_root, definition_id=GraphDefinitionId("child.graph"))
-    with pytest.raises(SnapshotMismatchError, match="nested graph"):
-        await nested_executor.prepare(StepRequest(child_without_parent, "input", REQUEST_ID, ()))
-
-    shared_child = GraphDefinition(
-        GraphDefinitionId("shared.child"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child"), echo),),
-        (),
-        (GraphNodeId("child"),),
+    parent_graph = nested_graph()
+    child_graph = parent_graph.nested_graphs[GraphNodeId("nested")]
+    child_executor = GraphExecutor(child_graph)
+    child_without_parent = reduce_graph_run(
+        None,
+        child_executor.start_command(GraphRunId("child-run")),
     )
+    child_scope = ScopeRunCoordinate((GraphNodeId("nested"),), child_without_parent.run_id)
+    with pytest.raises(SnapshotMismatchError, match="nested graph"):
+        await child_executor.prepare(
+            string_request(
+                child_graph,
+                child_without_parent,
+                "input",
+                scope_run=child_scope,
+            )
+        )
+
+    shared_child = child_definition("shared.child")
     shared_parent = GraphDefinition(
-        GraphDefinitionId("shared.parent"),
-        GraphDefinitionVersion(1),
-        (
-            NestedGraphNodeDefinition(GraphNodeId("first"), shared_child),
-            NestedGraphNodeDefinition(GraphNodeId("second"), shared_child),
-        ),
-        (),
-        (GraphNodeId("first"), GraphNodeId("second")),
+        definition_id=GraphDefinitionId("shared.parent"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested_node("first", shared_child), nested_node("second", shared_child)),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
     )
     GraphExecutor(compile_graph(shared_parent))
 
 
 async def test_resume_rejects_non_failed_and_invalid_input_variants() -> None:
-    async def node(value: str) -> NodeSuccess[str]:
-        return NodeSuccess(value)
-
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), node))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
+    execution_request = string_request(graph, initial, "input")
     with pytest.raises(SnapshotMismatchError, match="failure resume"):
-        executor.resume(ResumeRequest(initial, (ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("x")),)))
+        executor.resume(
+            ResumeRequest(
+                initial,
+                execution_request.scope_run,
+                execution_request.frames,
+                (
+                    ResumeFailedNodeRequest(
+                        (),
+                        GraphNodeId("a"),
+                        OverrideNodeInput(Graph.values(value="x")),
+                    ),
+                ),
+            )
+        )
     with pytest.raises(SnapshotMismatchError, match="interrupt resume"):
         executor.resume(
             ResumeRequest(
                 initial,
+                execution_request.scope_run,
+                execution_request.frames,
                 (
                     ResumeInterruptedNodeRequest(
+                        (),
                         GraphNodeId("a"),
                         GraphInterruptId("interrupt"),
-                        OverrideNodeInput("x"),
+                        OverrideNodeInput(Graph.values(value="x")),
                     ),
                 ),
             )
@@ -593,93 +850,110 @@ async def test_resume_rejects_non_failed_and_invalid_input_variants() -> None:
         executor.resume(
             ResumeRequest(
                 initial,
-                (
-                    SkipFailedNodeRequest(
-                        GraphNodeId("a"),
-                        GraphSkipReason("skip"),
-                        ContinueGraphRouting(),
-                    ),
-                ),
+                execution_request.scope_run,
+                execution_request.frames,
+                (SkipFailedNodeRequest((), GraphNodeId("a"), "skip", None),),
             )
         )
 
 
 async def test_resume_projection_covers_override_default_skip_and_interrupt_input_guards() -> None:
-    async def fail(value: str) -> NodeFailure:
-        return NodeFailure(GraphFailure("failed"))
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.failure("failed")
 
     codec = _Codec()
-    resumable = compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("resumable.graph"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), fail),),
-            (),
-            (GraphNodeId("a"),),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
-        )
+    resumable = graph_with_nodes(
+        node("a", fail),
+        definition_id="resumable.graph",
+        resume_input=ResumeInputBinding(
+            GraphResumeInputCodecId("input.v1"),
+            1,
+            codec,
+            codec,
+        ),
     )
     executor = GraphExecutor(resumable)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(resumable, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
     with pytest.raises(SnapshotMismatchError, match="quiescent"):
-        executor.resume(ResumeRequest(claimed, ()))
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+        executor.resume(
+            ResumeRequest(
+                claimed,
+                execution_request.scope_run,
+                execution_request.frames,
+                (),
+            )
+        )
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         result = await session.next(claimed)
         failed = reduce_graph_run(claimed, result.command)
     finally:
         await session.aclose()
 
+    failed_request = replace(execution_request, state=failed)
     override = executor.resume(
-        ResumeRequest(failed, (ResumeFailedNodeRequest(GraphNodeId("a"), OverrideNodeInput("retry")),))
-    )
-    assert override.actions[0].node_id == GraphNodeId("a")
-    default = executor.resume(ResumeRequest(failed, (ResumeFailedNodeRequest(GraphNodeId("a"), UseRequestInput()),)))
-    assert default.actions[0].node_id == GraphNodeId("a")
-    with pytest.raises(SnapshotMismatchError, match="unsupported variant"):
-        executor.resume(
-            ResumeRequest(
-                failed,
-                (
-                    ResumeFailedNodeRequest(
-                        GraphNodeId("a"),
-                        cast(UseRequestInput | OverrideNodeInput[str], object()),
-                    ),
+        ResumeRequest(
+            failed,
+            failed_request.scope_run,
+            failed_request.frames,
+            (
+                ResumeFailedNodeRequest(
+                    (),
+                    GraphNodeId("a"),
+                    OverrideNodeInput(Graph.values(value="retry")),
                 ),
-            )
+            ),
         )
+    )
+    assert override.command.actions[0].node_id == GraphNodeId("a")
+    assert len(override.inputs) == 1
+    default = executor.resume(
+        ResumeRequest(
+            failed,
+            failed_request.scope_run,
+            failed_request.frames,
+            (ResumeFailedNodeRequest((), GraphNodeId("a"), UseMaterializedInput()),),
+        )
+    )
+    assert default.command.actions[0].node_id == GraphNodeId("a")
+    assert len(default.inputs) == 1
     skip = executor.resume(
         ResumeRequest(
             failed,
-            (SkipFailedNodeRequest(GraphNodeId("a"), GraphSkipReason("operator"), ContinueGraphRouting()),),
+            failed_request.scope_run,
+            failed_request.frames,
+            (SkipFailedNodeRequest((), GraphNodeId("a"), "operator", None),),
         )
     )
-    assert skip.actions[0].node_id == GraphNodeId("a")
+    assert skip.command.actions[0].node_id == GraphNodeId("a")
+    assert skip.inputs == ()
 
-    async def interrupt(value: str) -> NodeInterrupt:
-        return NodeInterrupt(GraphInterruptPayload(b"question"))
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"question")
 
-    interrupted_graph = compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("resumable.interrupt"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), interrupt),),
-            (DirectEdge(GraphNodeId("a"), END),),
-            (GraphNodeId("a"),),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
-        )
+    interrupted_graph = graph_with_nodes(
+        node("a", interrupt),
+        definition_id="resumable.interrupt",
+        resume_input=ResumeInputBinding(
+            GraphResumeInputCodecId("input.v1"),
+            1,
+            codec,
+            codec,
+        ),
     )
     interrupt_executor = GraphExecutor(interrupted_graph)
     interrupt_initial = started(interrupt_executor)
-    interrupt_prepared = await interrupt_executor.prepare(StepRequest(interrupt_initial, "input", REQUEST_ID, ()))
+    interrupt_request = string_request(interrupted_graph, interrupt_initial, "input")
+    interrupt_prepared = await interrupt_executor.prepare(interrupt_request)
     assert isinstance(interrupt_prepared, ExecutableFrontier)
     interrupt_claimed = reduce_graph_run(interrupt_initial, interrupt_prepared.claim.command)
     interrupt_session = await interrupt_executor.execute(
         interrupt_prepared.claim,
-        StepRequest(interrupt_claimed, "input", REQUEST_ID, ()),
+        replace(interrupt_request, state=interrupt_claimed),
     )
     try:
         interrupt_result = await interrupt_session.next(interrupt_claimed)
@@ -695,138 +969,128 @@ async def test_resume_projection_covers_override_default_skip_and_interrupt_inpu
         identity.node_id,
         identity.execution_generation,
     )
-    with pytest.raises(SnapshotMismatchError, match="unsupported variant"):
-        interrupt_executor.resume(
-            ResumeRequest(
-                interrupted,
-                (
-                    ResumeInterruptedNodeRequest(
-                        GraphNodeId("a"),
-                        interrupt_id,
-                        cast(OverrideNodeInput[str], object()),
-                    ),
+    prepared_interrupt = interrupt_executor.resume(
+        ResumeRequest(
+            interrupted,
+            interrupt_request.scope_run,
+            interrupt_request.frames,
+            (
+                ResumeInterruptedNodeRequest(
+                    (),
+                    GraphNodeId("a"),
+                    interrupt_id,
+                    OverrideNodeInput(Graph.values(value="answer")),
                 ),
-            )
-        )
-
-
-async def test_prepare_rejects_an_empty_resource_admission_projection(monkeypatch: pytest.MonkeyPatch) -> None:
-    resource = ResourceId("file")
-
-    async def node(value: str) -> NodeSuccess[str]:
-        return NodeSuccess(value)
-
-    graph = compile_graph(
-        GraphDefinition(
-            GraphDefinitionId("resource.empty-admission"),
-            GraphDefinitionVersion(1),
-            (NodeDefinition(GraphNodeId("a"), node, (resource,)),),
-            (),
-            (GraphNodeId("a"),),
-            (ResourceDefinition(resource, 0),),
+            ),
         )
     )
-    import mote_kernel.execution.engine.superstep as superstep_module
-    from mote_kernel.execution.engine.admission import TaskAdmission
+    assert len(prepared_interrupt.inputs) == 1
+
+
+async def test_prepare_rejects_an_empty_resource_admission_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = ResourceId("file")
+    graph = graph_with_nodes(
+        node("a", resources=(resource,)),
+        resources=(ResourceDefinition(resource, 0),),
+        definition_id="resource.empty-admission",
+    )
 
     def empty_admission(
-        _graph: CompiledGraph[str, str],
+        _graph: CompiledGraph[str],
         _tasks: tuple[GraphTask, ...],
         snapshot: ResourceSnapshot,
     ) -> TaskAdmission:
         return TaskAdmission(snapshot, (), ())
 
-    monkeypatch.setattr(
-        superstep_module,
-        "admit_tasks",
-        empty_admission,
-    )
+    monkeypatch.setattr(admission_module, "admit_tasks", empty_admission)
     executor = GraphExecutor(graph)
     state = started(executor)
     with pytest.raises(ResultCollectionError, match="did not create acquisition"):
-        await executor.prepare(StepRequest(state, "input", REQUEST_ID, ()))
+        await executor.prepare(string_request(graph, state, "input"))
+
+
+async def test_nested_conditional_source_is_rejected_at_compile_time() -> None:
+    child = child_definition("nested.error.child")
+    with pytest.raises(GraphValidationError, match=r"nested.*conditional"):
+        graph_with_nodes(
+            nested_node("nested", child),
+            edges=(ConditionalEdge(GraphNodeId("nested"), GraphRouteId("done"), END),),
+            definition_id="nested.error.parent",
+        )
 
 
 async def test_nested_invalid_completion_enters_error_draining() -> None:
-    child = GraphDefinition(
-        GraphDefinitionId("nested.error.child"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child"), echo),),
-        (DirectEdge(GraphNodeId("child"), END),),
-        (GraphNodeId("child"),),
+    calls = 0
+    commits: list[Graph.Transition[str]] = []
+
+    async def leaf(values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal calls
+        calls += 1
+        return values
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        commits.append(transition)
+        return transition.candidate_state
+
+    child = Graph[str]("nested.invalid-completion.child")
+    child.add_node(
+        "leaf",
+        leaf,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
     )
-    parent_graph = graph_with_nodes(
-        NestedGraphNodeDefinition(GraphNodeId("nested"), child),
-        edges=(ConditionalEdge(GraphNodeId("nested"), GraphRouteId("done"), END),),
-        entries=("nested",),
+    child.set_outputs({"value": Graph.node_output("leaf", "value")})
+    parent = Graph[str]("nested.invalid-completion.parent")
+    parent.add_node(
+        "nested",
+        child,
+        inputs={"value": Graph.graph_input("value", str)},
     )
-    executor = GraphExecutor(parent_graph)
-    parent = started(executor)
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child_state = reduce_graph_run(None, missing.action.children[0].command)
-    child_prepared = await executor.prepare(StepRequest(child_state, "child", CHILD_REQUEST_ID, ()))
-    assert isinstance(child_prepared, ExecutableFrontier)
-    claimed_child = reduce_graph_run(child_state, child_prepared.claim.command)
-    child_session = await executor.execute(
-        child_prepared.claim,
-        StepRequest(claimed_child, "child", CHILD_REQUEST_ID, ()),
-    )
-    try:
-        child_result = await child_session.next(claimed_child)
-        completed_child = reduce_graph_run(claimed_child, child_result.command)
-    finally:
-        await child_session.aclose()
-    child_ready = await executor.prepare(StepRequest(completed_child, "child", CHILD_RESOLUTION_REQUEST_ID, ()))
-    assert isinstance(child_ready, ReadyToResolve)
-    completed_child = reduce_graph_run(completed_child, child_ready.command)
-    projection = CompletedChild(activation, completed_child, "output", ContinueGraphRouting())
-    prepared = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (projection,)))
-    assert isinstance(prepared, ExecutableFrontier)
-    claimed = reduce_graph_run(parent, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        StepRequest(claimed, "input", REQUEST_ID, (projection,)),
-    )
-    try:
-        with pytest.raises(InvalidRoutingCommandError):
-            await session.next(claimed)
-    finally:
-        await session.aclose()
+    parent.add_conditional_edge("nested", "done", Graph.END)
+    parent.set_outputs({})
+
+    with pytest.raises(GraphValidationError, match=r"nested.*conditional"):
+        await parent.run(Graph.values(value="input"), commit=commit)
+
+    assert calls == 0
+    assert commits == []
 
 
 async def test_prepared_claim_remains_bound_to_executor_and_request_identity() -> None:
     calls = 0
 
-    async def node(node_input: str) -> NodeSuccess[str]:
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
         nonlocal calls
         calls += 1
-        return NodeSuccess(node_input)
+        return values
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), node))
+    graph = graph_with_nodes(node("a", operation))
     owner = GraphExecutor(graph)
     other = GraphExecutor(graph)
     initial = started(owner)
-    prepared = await owner.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await owner.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
+    claimed_request = replace(execution_request, state=claimed)
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await other.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+        await other.execute(prepared.claim, claimed_request)
     with pytest.raises(ResultCollectionError, match="committed graph state"):
         await owner.execute(
             prepared.claim,
-            StepRequest(claimed, "input", ExecutionRequestAttemptId("other-request"), ()),
+            replace(claimed_request, request_attempt_id=OTHER_REQUEST_ID),
         )
     assert not prepared.claim.consumed
     assert calls == 0
 
-    session = await owner.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await owner.execute(prepared.claim, claimed_request)
     try:
         completed = await session.next(claimed)
         assert isinstance(completed.result, TaskSuccess)
-        assert completed.result.output == "input"
+        assert output_value(completed.result) == "input"
     finally:
         await session.aclose()
     assert prepared.claim.consumed
@@ -836,69 +1100,89 @@ async def test_prepared_claim_remains_bound_to_executor_and_request_identity() -
 async def test_fenced_unstarted_claim_cannot_start_or_be_consumed() -> None:
     calls = 0
 
-    async def node(node_input: str) -> NodeSuccess[str]:
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
         nonlocal calls
         calls += 1
-        return NodeSuccess(node_input)
+        return values
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), node))
+    graph = graph_with_nodes(node("a", operation))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
     assert claimed.execution is not None
     fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, StepRequest(fenced, "input", REQUEST_ID, ()))
+        await executor.execute(prepared.claim, replace(execution_request, state=fenced))
     assert not prepared.claim.consumed
     assert calls == 0
 
 
-async def test_parallel_context_mutations_are_isolated_and_request_input_is_frozen() -> None:
-    @dataclass(frozen=True, slots=True)
-    class InputSnapshot:
-        value: str
+@dataclass(frozen=True, slots=True)
+class InputSnapshot:
+    value: str
 
+
+PipelineValue: TypeAlias = InputSnapshot
+
+
+async def test_parallel_context_mutations_are_isolated_and_request_input_is_frozen() -> None:
     trace = ContextVar("parallel-trace", default="missing")
     barrier = asyncio.Barrier(2)
     observed: list[InputSnapshot] = []
 
-    def definition(name: str) -> NodeDefinition[InputSnapshot, str]:
-        async def node(node_input: InputSnapshot) -> NodeSuccess[str]:
+    def definition(name: str) -> CallableNodeDefinition[PipelineValue]:
+        async def operation(
+            values: Graph.Values[PipelineValue],
+        ) -> Graph.Values[PipelineValue]:
+            node_input = values["value"]
             assert trace.get() == "caller"
             observed.append(node_input)
             trace.set(name)
             await asyncio.wait_for(barrier.wait(), timeout=1)
-            return NodeSuccess(f"{trace.get()}:{node_input.value}")
+            return Graph.values(value=InputSnapshot(f"{trace.get()}:{node_input.value}"))
 
-        return NodeDefinition(GraphNodeId(name), node)
+        return CallableNodeDefinition(
+            GraphNodeId(name),
+            operation,
+            normalize_input_bindings({"value": Graph.graph_input("value", InputSnapshot)}),
+            normalize_output_declarations({"value": InputSnapshot}),
+        )
 
     graph = compile_graph(
-        GraphDefinition[InputSnapshot, str](
-            GraphDefinitionId("context.graph"),
-            GraphDefinitionVersion(1),
-            (definition("a"), definition("b")),
-            (DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
-            (GraphNodeId("a"), GraphNodeId("b")),
+        GraphDefinition(
+            definition_id=GraphDefinitionId("context.graph"),
+            version=GraphDefinitionVersion(1),
+            nodes=(definition("a"), definition("b")),
+            edges=(),
+            entries=(),
+            outputs=normalize_graph_output_declarations({}),
         )
     )
     executor = GraphExecutor(graph)
     initial = reduce_graph_run(None, executor.start_command(GraphRunId("context-run")))
     node_input = InputSnapshot("input")
+    execution_request = request_with_values(
+        graph,
+        initial,
+        root_scope_run(initial.run_id),
+        Graph.values(value=node_input),
+    )
     token = trace.set("caller")
     try:
-        prepared = await executor.prepare(StepRequest(initial, node_input, REQUEST_ID, ()))
+        prepared = await executor.prepare(execution_request)
         assert isinstance(prepared, ExecutableFrontier)
         current = reduce_graph_run(initial, prepared.claim.command)
-        session = await executor.execute(prepared.claim, StepRequest(current, node_input, REQUEST_ID, ()))
+        session = await executor.execute(prepared.claim, replace(execution_request, state=current))
         outputs: list[str] = []
         try:
             for _ in range(2):
                 completed = await session.next(current)
                 assert isinstance(completed.result, TaskSuccess)
-                outputs.append(completed.result.output)
+                outputs.append(_frame_value(completed.result.output, "value").value)
                 current = reduce_graph_run(current, completed.command)
         finally:
             await session.aclose()
@@ -908,61 +1192,74 @@ async def test_parallel_context_mutations_are_isolated_and_request_input_is_froz
 
     assert sorted(outputs) == ["a:input", "b:input"]
     assert len(observed) == 2 and all(item is node_input for item in observed)
-    field = "value"
-    with pytest.raises(FrozenInstanceError):
-        setattr(observed[0], field, "changed")
+    assert observed == [node_input, node_input]
 
 
-async def test_node_success_subclass_uses_the_normal_completion_path() -> None:
-    class SpecializedSuccess(NodeSuccess[str]):
-        pass
-
-    async def node(node_input: str) -> NodeSuccess[str]:
-        return SpecializedSuccess(node_input)
-
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), node))
+async def test_plain_values_use_the_normal_completion_path() -> None:
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     current = started(executor)
     settled, results = await run_frontier(executor, graph, current, "input")
     assert len(results) == 1 and isinstance(results[0], TaskSuccess)
-    assert results[0].output == "input"
+    assert output_value(results[0]) == "input"
+    assert settled.execution is None
+
+
+async def test_node_success_subclass_uses_the_normal_completion_path() -> None:
+    async def explicit_success(values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(values)
+
+    graph = graph_with_nodes(node("a", explicit_success))
+    executor = GraphExecutor(graph)
+    settled, results = await run_frontier(executor, graph, started(executor), "input")
+
+    assert len(results) == 1 and isinstance(results[0], TaskSuccess)
+    assert output_value(results[0]) == "input"
     assert settled.execution is None
 
 
 async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinates() -> None:
-    leaf = GraphDefinition[str, str](
-        GraphDefinitionId("leaf.graph"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("leaf"), echo),),
-        (DirectEdge(GraphNodeId("leaf"), END),),
-        (GraphNodeId("leaf"),),
-    )
-    child = GraphDefinition[str, str](
-        GraphDefinitionId("grandchild.parent"),
-        GraphDefinitionVersion(1),
-        (NestedGraphNodeDefinition(GraphNodeId("child"), leaf),),
-        (DirectEdge(GraphNodeId("child"), END),),
-        (GraphNodeId("child"),),
+    leaf = child_definition("leaf.graph")
+    child = GraphDefinition(
+        definition_id=GraphDefinitionId("grandchild.parent"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested_node("child", leaf),),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({"value": Graph.node_output("child", "value")}),
     )
     root = compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("grandchild.root"),
-            GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(GraphNodeId("root"), child),),
-            (DirectEdge(GraphNodeId("root"), END),),
-            (GraphNodeId("root"),),
+        GraphDefinition(
+            definition_id=GraphDefinitionId("grandchild.root"),
+            version=GraphDefinitionVersion(1),
+            nodes=(nested_node("root", child),),
+            edges=(),
+            entries=(),
+            outputs=normalize_graph_output_declarations({}),
         )
     )
-    executor = GraphExecutor(root)
-    root_state = reduce_graph_run(None, executor.start_command(GraphRunId("nested-run")))
+    root_executor = GraphExecutor(root)
+    root_state = reduce_graph_run(None, root_executor.start_command(GraphRunId("nested-run")))
+    root_scope = root_scope_run(root_state.run_id)
     child_activation = ParentGraphActivation(root_state.run_id, 0, GraphNodeId("root"))
-    child_wait = await executor.prepare(StepRequest(root_state, "input", REQUEST_ID, (MissingChild(child_activation),)))
+    child_wait = await root_executor.prepare(
+        string_request(root, root_state, "input", (MissingChild(child_activation),))
+    )
     assert isinstance(child_wait, WaitingForChildren) and isinstance(child_wait.action, StartMissingChildren)
-    child_state = reduce_graph_run(None, child_wait.action.children[0].command)
+    prepared_child = child_wait.action.children[0]
+    child_state = reduce_graph_run(None, prepared_child.command)
+    child_scope = child_scope_run_for_activation(root_scope, child_activation)
+    child_executor = GraphExecutor(prepared_child.graph)
     grandchild_activation = ParentGraphActivation(child_state.run_id, 0, GraphNodeId("child"))
 
-    grandchild_wait = await executor.prepare(
-        StepRequest(child_state, "input", REQUEST_ID, (MissingChild(grandchild_activation),))
+    grandchild_wait = await child_executor.prepare(
+        string_request(
+            prepared_child.graph,
+            child_state,
+            "input",
+            (MissingChild(grandchild_activation),),
+            scope_run=child_scope,
+        )
     )
     assert isinstance(grandchild_wait, WaitingForChildren)
     assert isinstance(grandchild_wait.action, StartMissingChildren)
@@ -976,29 +1273,31 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
 
 
 async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
-    child = GraphDefinition[str, str](
-        GraphDefinitionId("entries.child"),
-        GraphDefinitionVersion(1),
-        tuple(NodeDefinition(GraphNodeId(node_id), echo) for node_id in ("c", "a", "b")),
-        tuple(DirectEdge(GraphNodeId(node_id), END) for node_id in ("a", "b", "c")),
-        tuple(GraphNodeId(node_id) for node_id in ("c", "a", "b")),
+    child = GraphDefinition(
+        definition_id=GraphDefinitionId("entries.child"),
+        version=GraphDefinitionVersion(1),
+        nodes=tuple(node(node_id) for node_id in ("c", "a", "b")),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
     )
     graph = compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("entries.parent"),
-            GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(GraphNodeId("nested"), child),),
-            (DirectEdge(GraphNodeId("nested"), END),),
-            (GraphNodeId("nested"),),
+        GraphDefinition(
+            definition_id=GraphDefinitionId("entries.parent"),
+            version=GraphDefinitionVersion(1),
+            nodes=(nested_node("nested", child),),
+            edges=(),
+            entries=(),
+            outputs=normalize_graph_output_declarations({}),
         )
     )
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, executor.start_command(GraphRunId("entry-run")))
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     child_state = reduce_graph_run(None, missing.action.children[0].command)
-    assert tuple(node.node_id for node in child_state.frontier.nodes) == (
+    assert tuple(item.node_id for item in child_state.frontier.nodes) == (
         GraphNodeId("a"),
         GraphNodeId("b"),
         GraphNodeId("c"),
@@ -1006,46 +1305,35 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
 
 
 async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None:
-    child = GraphDefinition[str, str](
-        GraphDefinitionId("join.child"),
-        GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child"), echo),),
-        (DirectEdge(GraphNodeId("child"), END),),
-        (GraphNodeId("child"),),
-    )
+    child = child_definition("join.child")
     graph = compile_graph(
-        GraphDefinition[str, str](
-            GraphDefinitionId("join.parent"),
-            GraphDefinitionVersion(1),
-            (
-                NestedGraphNodeDefinition(GraphNodeId("a"), child),
-                NodeDefinition(GraphNodeId("b"), echo),
-                NodeDefinition(GraphNodeId("joined"), echo),
-            ),
-            (
+        GraphDefinition(
+            definition_id=GraphDefinitionId("join.parent"),
+            version=GraphDefinitionVersion(1),
+            nodes=(nested_node("a", child), node("b"), node("joined")),
+            edges=(
                 DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
                 JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("joined")),
-                DirectEdge(GraphNodeId("joined"), END),
             ),
-            (GraphNodeId("a"),),
+            entries=(),
+            outputs=normalize_graph_output_declarations({}),
         )
     )
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, executor.start_command(GraphRunId("join-run")))
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("a"))
-    missing = await executor.prepare(StepRequest(parent, "input", REQUEST_ID, (MissingChild(activation),)))
+    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
     child_state = reduce_graph_run(None, missing.action.children[0].command)
-    completed_child = await run_and_resolve(executor, missing.action.children[0].graph, child_state, "child")
-
-    after_child = await run_and_resolve(
-        executor,
-        graph,
-        parent,
-        "input",
-        (CompletedChild(activation, completed_child, "child-output", ContinueGraphRouting()),),
+    terminal_child = completed_child(child_state)
+    projection = CompletedChild(
+        activation,
+        terminal_child,
+        child_output(missing.action.children[0].graph, "child-output"),
     )
-    assert tuple(node.node_id for node in after_child.frontier.nodes) == (GraphNodeId("b"),)
+
+    after_child = await run_and_resolve(executor, graph, parent, "input", (projection,))
+    assert tuple(item.node_id for item in after_child.frontier.nodes) == (GraphNodeId("b"),)
     assert after_child.join_progress == (
         GraphJoinProgress(
             (GraphNodeId("a"), GraphNodeId("b")),
@@ -1055,30 +1343,26 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
     )
 
     after_b = await run_and_resolve(executor, graph, after_child, "input")
-    assert tuple(node.node_id for node in after_b.frontier.nodes) == (GraphNodeId("joined"),)
+    assert tuple(item.node_id for item in after_b.frontier.nodes) == (GraphNodeId("joined"),)
     assert after_b.join_progress == ()
 
 
 async def test_claim_scope_uses_canonical_node_order_for_different_lengths() -> None:
     barrier = asyncio.Barrier(2)
 
-    async def node(value: str) -> NodeSuccess[str]:
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
         await asyncio.wait_for(barrier.wait(), timeout=1)
-        return NodeSuccess(value)
+        return values
 
-    graph = graph_with_nodes(
-        NodeDefinition(GraphNodeId("aa"), node),
-        NodeDefinition(GraphNodeId("z"), node),
-        edges=(DirectEdge(GraphNodeId("aa"), END), DirectEdge(GraphNodeId("z"), END)),
-        entries=("aa", "z"),
-    )
+    graph = graph_with_nodes(node("aa", operation), node("z", operation))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     assert prepared.claim.snapshot.node_ids == (GraphNodeId("aa"), GraphNodeId("z"))
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     try:
         first = await session.next(claimed)
         after_first = reduce_graph_run(claimed, first.command)
@@ -1086,17 +1370,21 @@ async def test_claim_scope_uses_canonical_node_order_for_different_lengths() -> 
     finally:
         await session.aclose()
 
-    assert (first.result.task.node_id, second.result.task.node_id) == (GraphNodeId("aa"), GraphNodeId("z"))
+    assert (first.result.task.node_id, second.result.task.node_id) == (
+        GraphNodeId("aa"),
+        GraphNodeId("z"),
+    )
 
 
 async def test_late_settlement_cannot_overwrite_a_reclaimed_generation() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    first = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    first = await executor.prepare(execution_request)
     assert isinstance(first, ExecutableFrontier)
     first_state = reduce_graph_run(initial, first.claim.command)
-    first_session = await executor.execute(first.claim, StepRequest(first_state, "input", REQUEST_ID, ()))
+    first_session = await executor.execute(first.claim, replace(execution_request, state=first_state))
     late = await first_session.next(first_state)
     await first_session.aclose()
     assert first_state.execution is not None
@@ -1104,7 +1392,8 @@ async def test_late_settlement_cannot_overwrite_a_reclaimed_generation() -> None
         first_state,
         FenceGraphExecution(first_state.revision, first_state.execution.token),
     )
-    second = await executor.prepare(StepRequest(fenced, "input", REQUEST_ID, ()))
+    second_request = replace(execution_request, state=fenced)
+    second = await executor.prepare(second_request)
     assert isinstance(second, ExecutableFrontier)
     second_state = reduce_graph_run(fenced, second.claim.command)
 
@@ -1117,18 +1406,19 @@ async def test_late_settlement_cannot_overwrite_a_reclaimed_generation() -> None
 async def test_cancelled_session_retains_exact_lease_for_fence_and_reclaim() -> None:
     entered = asyncio.Event()
 
-    async def wait(value: str) -> NodeSuccess[str]:
+    async def wait(values: Graph.Values[str]) -> Graph.Values[str]:
         entered.set()
         await asyncio.sleep(10)
-        return NodeSuccess(value)
+        return values
 
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), wait))
+    graph = graph_with_nodes(node("a", wait))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
     running = asyncio.create_task(session.next(claimed))
     await entered.wait()
     running.cancel()
@@ -1137,7 +1427,7 @@ async def test_cancelled_session_retains_exact_lease_for_fence_and_reclaim() -> 
     assert session.quiescent
     assert claimed.execution is not None
     fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
-    retry = await executor.prepare(StepRequest(fenced, "retry", REQUEST_ID, ()))
+    retry = await executor.prepare(string_request(graph, fenced, "retry"))
     assert isinstance(retry, ExecutableFrontier)
     retried = reduce_graph_run(fenced, retry.claim.command)
     assert retried.execution is not None
@@ -1148,30 +1438,26 @@ async def test_node_initiated_cancellation_waits_for_sibling_cleanup() -> None:
     sibling_started = asyncio.Event()
     sibling_cleaned = asyncio.Event()
 
-    async def sibling(value: str) -> NodeSuccess[str]:
+    async def sibling(values: Graph.Values[str]) -> Graph.Values[str]:
         sibling_started.set()
         try:
             await asyncio.sleep(10)
         finally:
             sibling_cleaned.set()
-        return NodeSuccess(value)
+        return values
 
-    async def cancel(value: str) -> NodeSuccess[str]:
-        del value
+    async def cancel(_values: Graph.Values[str]) -> Graph.Values[str]:
         await sibling_started.wait()
         raise asyncio.CancelledError
 
-    graph = graph_with_nodes(
-        NodeDefinition(GraphNodeId("a"), sibling),
-        NodeDefinition(GraphNodeId("b"), cancel),
-        entries=("a", "b"),
-    )
+    graph = graph_with_nodes(node("a", sibling), node("b", cancel))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, StepRequest(claimed, "input", REQUEST_ID, ()))
+    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
 
     with pytest.raises(asyncio.CancelledError):
         await session.next(claimed)
@@ -1182,10 +1468,11 @@ async def test_node_initiated_cancellation_waits_for_sibling_cleanup() -> None:
 
 
 async def test_claim_guard_rejects_a_forged_committed_attempt_token() -> None:
-    graph = graph_with_nodes(NodeDefinition(GraphNodeId("a"), echo))
+    graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
     initial = started(executor)
-    prepared = await executor.prepare(StepRequest(initial, "input", REQUEST_ID, ()))
+    execution_request = string_request(graph, initial, "input")
+    prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
     assert claimed.execution is not None
@@ -1201,5 +1488,5 @@ async def test_claim_guard_rejects_a_forged_committed_attempt_token() -> None:
     )
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, StepRequest(forged, "input", REQUEST_ID, ()))
+        await executor.execute(prepared.claim, replace(execution_request, state=forged))
     assert not prepared.claim.consumed

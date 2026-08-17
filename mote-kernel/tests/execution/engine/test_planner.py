@@ -1,33 +1,33 @@
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
-from tests.execution.engine.factories import compiled_graph, identity, running_state, terminal_state
+from tests.execution.engine.factories import callable_node, compiled_graph, running_state, terminal_state
 
+from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.task import GraphTask, task_identity
 from mote_kernel.execution.errors import ExecutionLimitError, InvalidExecutionSnapshotError, SnapshotMismatchError
-from mote_kernel.execution.graph import (
-    END,
-    DirectEdge,
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
-    NestedGraphNodeDefinition,
-    NodeDefinition,
-    NodeSuccess,
-    ResumeInputBinding,
-    compile_graph,
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.edge import DirectEdge
+from mote_kernel.execution.graph.ports import (
+    normalize_graph_output_declarations,
+    normalize_input_bindings,
 )
+from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.state.graph_state import (
     ContinueGraphRouting,
     FailedGraphNode,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
     GraphFailure,
     GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
     GraphJoinProgress,
+    GraphNodeId,
     GraphNodeInterrupt,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
@@ -68,20 +68,21 @@ def test_planner_materializes_only_pending_nodes_in_canonical_order() -> None:
 
 def test_planner_excludes_every_nonpending_settlement_variant() -> None:
     class Codec:
-        def encode(self, value: str) -> bytes:
-            return value.encode()
+        def encode(self, value: Graph.Values[str]) -> bytes:
+            return value["value"].encode()
 
-        def decode(self, payload: bytes) -> str:
-            return payload.decode()
+        def decode(self, payload: bytes) -> Graph.Values[str]:
+            return Graph.values(value=payload.decode())
 
     codec = Codec()
     graph = compile_graph(
         GraphDefinition(
             GraphDefinitionId("test.graph"),
             GraphDefinitionVersion(1),
-            tuple(NodeDefinition(GraphNodeId(node_id), identity) for node_id in ("a", "b", "c", "d", "e")),
+            tuple(callable_node(node_id) for node_id in ("a", "b", "c", "d", "e")),
             (),
-            tuple(GraphNodeId(node_id) for node_id in ("a", "b", "c", "d", "e")),
+            (),
+            normalize_graph_output_declarations({}),
             resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
         )
     )
@@ -273,25 +274,33 @@ def test_planner_accepts_large_deterministic_frontier_at_exact_limit() -> None:
 def test_nested_definition_is_planned_as_one_parent_activation_without_invocation() -> None:
     calls = 0
 
-    async def child_node(node_input: str) -> NodeSuccess[str]:
+    async def child_node(values: Graph.Values[str]) -> Graph.Values[str]:
         nonlocal calls
         calls += 1
-        return NodeSuccess(node_input)
+        return values
 
-    child = GraphDefinition[str, str](
+    child = GraphDefinition[str](
         GraphDefinitionId("child.graph"),
         GraphDefinitionVersion(1),
-        (NodeDefinition(GraphNodeId("child"), child_node),),
+        (replace(callable_node("child"), operation=child_node),),
         (DirectEdge(GraphNodeId("child"), END),),
-        (GraphNodeId("child"),),
+        (),
+        normalize_graph_output_declarations({}),
     )
     parent = compile_graph(
-        GraphDefinition[str, str](
+        GraphDefinition[str](
             GraphDefinitionId("test.graph"),
             GraphDefinitionVersion(1),
-            (NestedGraphNodeDefinition(GraphNodeId("nested"), child),),
+            (
+                NestedGraphNodeDefinition(
+                    GraphNodeId("nested"),
+                    child,
+                    normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+                ),
+            ),
             (DirectEdge(GraphNodeId("nested"), END),),
-            (GraphNodeId("nested"),),
+            (),
+            normalize_graph_output_declarations({}),
         )
     )
 

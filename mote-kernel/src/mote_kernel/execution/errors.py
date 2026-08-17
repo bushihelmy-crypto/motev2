@@ -53,6 +53,18 @@ class GraphValidationError(ExecutionError):
     """A graph definition violates a static topology invariant."""
 
 
+class GraphValueAdmissionError(ExecutionError):
+    """A concrete value frame does not match its compiled exact descriptor."""
+
+
+class GraphValueUnavailableError(ExecutionError):
+    """A recovered lineage lacks a value required before its next boundary."""
+
+
+class GraphValuePublicationError(ExecutionError):
+    """A confirmed value publication violates its stable activation invariant."""
+
+
 class DuplicateNodeError(GraphValidationError):
     """A graph definition contains the same node identity more than once."""
 
@@ -105,6 +117,9 @@ __all__ = [
     "ExecutionError",
     "ExecutionLimitError",
     "GraphValidationError",
+    "GraphValueAdmissionError",
+    "GraphValuePublicationError",
+    "GraphValueUnavailableError",
     "InvalidExecutionSnapshotError",
     "InvalidGraphIdentityError",
     "InvalidJoinError",

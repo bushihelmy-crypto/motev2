@@ -1,24 +1,55 @@
-"""Node-scoped resume input encoding, guarding, and materialization."""
+"""Scoped node-input materialization and graph-local resume codecs."""
 
 from typing import TypeVar
 
-from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.execution.graph import CompiledGraph
+from mote_kernel.execution.errors import (
+    GraphValueAdmissionError,
+    GraphValueUnavailableError,
+    SnapshotMismatchError,
+)
+from mote_kernel.execution.graph.ports import (
+    GraphInputPort,
+    NodeOutputPort,
+    PublicationSelection,
+    require_publication_selection,
+)
+from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.values import (
+    NamedValue,
+    NodeInputFrame,
+    _frame_value,
+    _GraphValues,
+    _make_node_input_frame,
+)
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.run_context import (
+    GraphInputAvailabilityCoordinate,
+    PublicationAvailabilityCoordinate,
+    ResumeInputAvailabilityCoordinate,
+    ScopedFrameAvailability,
+    ScopedFrameIndex,
+)
 from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphResumeInputPayload,
     GraphRunState,
     OverrideGraphNodeInput,
     PendingGraphNode,
-    UseStepRequestInput,
     frontier_node,
 )
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
 
 
-def require_resume_input_binding(graph: CompiledGraph[InputT, OutputT], state: GraphRunState) -> None:
+def _require_decoded_values(
+    candidate: _GraphValues[GraphValueT] | bytes,
+) -> _GraphValues[GraphValueT]:
+    if not isinstance(candidate, _GraphValues):
+        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
+    return candidate
+
+
+def require_resume_input_binding(graph: CompiledGraph[GraphValueT], state: GraphRunState) -> None:
     binding = graph.resume_input
     codec = state.resume_input_codec
     if binding is None and codec is None:
@@ -27,30 +58,188 @@ def require_resume_input_binding(graph: CompiledGraph[InputT, OutputT], state: G
         raise SnapshotMismatchError("compiled graph resume input codec does not match durable graph state")
 
 
-def encode_resume_input(graph: CompiledGraph[InputT, OutputT], value: InputT) -> OverrideGraphNodeInput:
+def encode_resume_input(
+    graph: CompiledGraph[GraphValueT],
+    values: _GraphValues[GraphValueT],
+) -> OverrideGraphNodeInput:
     binding = graph.resume_input
     if binding is None:
         raise SnapshotMismatchError("graph does not define a resume input codec")
-    return OverrideGraphNodeInput(GraphResumeInputPayload(binding.encoder.encode(value)))
+    try:
+        payload = binding.encoder.encode(values)
+    except Exception as error:
+        raise GraphValueAdmissionError("resume input encoder rejected the value frame") from error
+    if type(payload) is not bytes:
+        raise GraphValueAdmissionError("resume input encoder must return bytes")
+    return OverrideGraphNodeInput(GraphResumeInputPayload(payload))
 
 
-def effective_node_input(
-    graph: CompiledGraph[InputT, OutputT],
-    state: GraphRunState,
+def _admit_override(
+    graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
-    ordinary_input: InputT,
-) -> InputT:
+    values: _GraphValues[GraphValueT],
+) -> NodeInputFrame[GraphValueT]:
+    plan = graph.materializations[node_id]
+    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
+    return _make_node_input_frame(
+        tuple(NamedValue(name, value) for name, value in values.items()),
+        declarations,
+    )
+
+
+def decode_resume_input(
+    graph: CompiledGraph[GraphValueT],
+    node_id: GraphNodeId,
+    payload: bytes,
+) -> NodeInputFrame[GraphValueT]:
+    binding = graph.resume_input
+    if binding is None:
+        raise SnapshotMismatchError("input override is missing its compiled graph decoder")
+    try:
+        candidate = binding.decoder.decode(payload)
+    except Exception as error:
+        raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
+    return _admit_override(graph, node_id, _require_decoded_values(candidate))
+
+
+def _publication_value(
+    graph: CompiledGraph[GraphValueT],
+    frames: ScopedFrameIndex[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    source: NodeOutputPort,
+    output_name: str,
+    anchor_superstep: int,
+    selection: PublicationSelection | None,
+) -> GraphValueT:
+    selection = require_publication_selection(
+        selection,
+        SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
+    )
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
+        StableActivation(scope_run, selection.resolve(anchor_superstep), source.node_id),
+        graph.publications[source.node_id].descriptor.identity,
+    )
+    try:
+        frame = frames.lookup(coordinate).frame
+    except SnapshotMismatchError as error:
+        raise GraphValueUnavailableError(
+            f"node output {source.node_id!r}.{output_name!r} is unavailable at {scope_run!r}"
+        ) from error
+    return _frame_value(frame, output_name)
+
+
+def node_inputs_available(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    activation_superstep: int,
+    frames: ScopedFrameAvailability[GraphValueT],
+    node_id: GraphNodeId,
+) -> bool:
+    for binding in graph.materializations[node_id].bindings.entries:
+        source = binding.source
+        if isinstance(source, GraphInputPort):
+            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
+                scope_run,
+                graph.graph_input_descriptor.identity,
+            )
+            if not frames.has_graph_input(graph_input_coordinate):
+                return False
+        else:
+            selection = require_publication_selection(
+                binding.publication,
+                SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
+            )
+            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
+                StableActivation(
+                    scope_run,
+                    selection.resolve(activation_superstep),
+                    source.node_id,
+                ),
+                graph.publications[source.node_id].descriptor.identity,
+            )
+            if not frames.has_publication(publication_coordinate):
+                return False
+    return True
+
+
+def pending_node_input_available(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+    scope_run: ScopeRunCoordinate,
+    frames: ScopedFrameAvailability[GraphValueT],
+    node_id: GraphNodeId,
+) -> bool:
+    node = frontier_node(state.frontier, node_id)
+    if node is None or not isinstance(node.settlement, PendingGraphNode):
+        raise SnapshotMismatchError("input availability requires a current pending node")
+    if isinstance(node.settlement.input, OverrideGraphNodeInput):
+        return True
+    plan = graph.materializations[node_id]
+    coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
+        StableActivation(scope_run, state.superstep, node_id),
+        plan.descriptor.identity,
+    )
+    return frames.has_resume_input(coordinate) or node_inputs_available(
+        graph,
+        scope_run,
+        state.superstep,
+        frames,
+        node_id,
+    )
+
+
+def materialize_node_input(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+    scope_run: ScopeRunCoordinate,
+    frames: ScopedFrameIndex[GraphValueT],
+    node_id: GraphNodeId,
+) -> NodeInputFrame[GraphValueT]:
     require_resume_input_binding(graph, state)
+    if state.run_id != scope_run.graph_run_id:
+        raise SnapshotMismatchError("node materialization scope does not match authoritative state")
     node = frontier_node(state.frontier, node_id)
     if node is None or not isinstance(node.settlement, PendingGraphNode):
         raise SnapshotMismatchError("effective input requires a current pending node")
-    binding = node.settlement.input
-    if isinstance(binding, UseStepRequestInput):
-        return ordinary_input
-    decoder = graph.resume_input
-    if decoder is None:
-        raise SnapshotMismatchError("input override is missing its compiled graph decoder")
-    return decoder.decoder.decode(bytes(binding.payload))
+    activation = StableActivation(scope_run, state.superstep, node_id)
+    plan = graph.materializations[node_id]
+    if isinstance(node.settlement.input, OverrideGraphNodeInput):
+        return decode_resume_input(graph, node_id, bytes(node.settlement.input.payload))
+    resume_coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
+        activation,
+        plan.descriptor.identity,
+    )
+    try:
+        return frames.lookup(resume_coordinate).frame
+    except SnapshotMismatchError:
+        pass
+    entries: list[NamedValue[GraphValueT]] = []
+    for binding in plan.bindings.entries:
+        source = binding.source
+        if isinstance(source, GraphInputPort):
+            coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
+                scope_run,
+                graph.graph_input_descriptor.identity,
+            )
+            try:
+                value = _frame_value(frames.lookup(coordinate).frame, source.name)
+            except SnapshotMismatchError as error:
+                raise GraphValueUnavailableError(
+                    f"graph input {source.name!r} is unavailable at {scope_run!r}"
+                ) from error
+        else:
+            value = _publication_value(
+                graph,
+                frames,
+                scope_run,
+                source,
+                source.output_name,
+                state.superstep,
+                binding.publication,
+            )
+        entries.append(NamedValue(binding.destination.local_name, value))
+    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
+    return _make_node_input_frame(tuple(entries), declarations)
 
 
-__all__ = ["effective_node_input", "encode_resume_input", "require_resume_input_binding"]
+__all__: list[str] = []

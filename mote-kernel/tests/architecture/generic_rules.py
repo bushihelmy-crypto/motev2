@@ -1,3 +1,9 @@
+"""Syntax-only checks for explicit type erasure in production annotations.
+
+Variance, TypeVar flow, and cross-universe assignability require a type checker
+and are owned by ``test_graph_typing_fixtures.py`` rather than this AST lint.
+"""
+
 import ast
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +40,7 @@ BARE_GENERIC_NAMES = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class GenericViolation:
+class TypeErasureViolation:
     line: int
     message: str
 
@@ -63,8 +69,8 @@ def _annotations(tree: ast.Module) -> list[ast.expr]:
     return annotations
 
 
-def _annotation_violations(annotation: ast.expr) -> list[GenericViolation]:
-    violations: list[GenericViolation] = []
+def _annotation_violations(annotation: ast.expr) -> list[TypeErasureViolation]:
+    violations: list[TypeErasureViolation] = []
 
     def visit(node: ast.expr, *, parameterized_owner: bool = False) -> None:
         if isinstance(node, ast.Subscript):
@@ -85,17 +91,21 @@ def _annotation_violations(annotation: ast.expr) -> list[GenericViolation]:
         if isinstance(node, ast.Name | ast.Attribute):
             name = _qualified_name(node)
             if name == "object":
-                violations.append(GenericViolation(node.lineno, "object erases the boundary type"))
+                violations.append(TypeErasureViolation(node.lineno, "object erases the boundary type"))
             elif name in BARE_GENERIC_NAMES and not parameterized_owner:
-                violations.append(GenericViolation(node.lineno, f"bare generic annotation {name}"))
+                violations.append(TypeErasureViolation(node.lineno, f"bare generic annotation {name}"))
 
     visit(annotation)
     return violations
 
 
-def generic_violations(source: str, *, filename: str = "<unknown>") -> tuple[GenericViolation, ...]:
+def type_erasure_violations(
+    source: str,
+    *,
+    filename: str = "<unknown>",
+) -> tuple[TypeErasureViolation, ...]:
     tree = ast.parse(source, filename=filename)
-    violations: list[GenericViolation] = []
+    violations: list[TypeErasureViolation] = []
 
     for annotation in _annotations(tree):
         violations.extend(_annotation_violations(annotation))
@@ -108,18 +118,18 @@ def generic_violations(source: str, *, filename: str = "<unknown>") -> tuple[Gen
             continue
         target_name = _qualified_name(node.args[0])
         if target_name in {"Any", "object", "typing.Any"}:
-            violations.append(GenericViolation(node.lineno, f"{call_name} cannot restore an erased generic type"))
+            violations.append(TypeErasureViolation(node.lineno, f"{call_name} cannot restore an erased generic type"))
 
     return tuple(violations)
 
 
-def production_generic_violations(package_root: Path) -> tuple[str, ...]:
+def production_type_erasure_violations(package_root: Path) -> tuple[str, ...]:
     violations: list[str] = []
     for path in sorted(package_root.rglob("*.py")):
         relative_path = path.relative_to(package_root).as_posix()
         source = path.read_text(encoding="utf-8")
         violations.extend(
             f"{relative_path}:{violation.line} {violation.message}"
-            for violation in generic_violations(source, filename=str(path))
+            for violation in type_erasure_violations(source, filename=str(path))
         )
     return tuple(violations)

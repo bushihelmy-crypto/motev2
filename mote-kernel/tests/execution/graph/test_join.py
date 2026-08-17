@@ -2,7 +2,9 @@ import pytest
 from tests.execution.graph.factories import graph, node
 
 from mote_kernel.execution.errors import InvalidJoinError, UnreachableNodeError
-from mote_kernel.execution.graph import DirectEdge, GraphNodeId, JoinEdge, compile_graph
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.edge import DirectEdge, JoinEdge
+from mote_kernel.state.graph_state import GraphNodeId
 
 
 @pytest.mark.parametrize(
@@ -43,8 +45,8 @@ def test_direct_edges_and_multiple_joins_coexist_deterministically() -> None:
     )
     compiled = compile_graph(definition)
 
-    assert compiled.direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))
-    assert compiled.joins_by_source[GraphNodeId("a")] == (
+    assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))
+    assert compiled.transition.joins_by_source[GraphNodeId("a")] == (
         JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d")),
         JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("e")),
     )
@@ -57,11 +59,10 @@ def test_distinct_joins_may_share_a_target() -> None:
             JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d")),
             JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("d")),
         ),
-        entries=(GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c")),
     )
     compiled = compile_graph(definition)
 
-    assert compiled.joins_by_source[GraphNodeId("a")] == (
+    assert compiled.transition.joins_by_source[GraphNodeId("a")] == (
         JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d")),
         JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("d")),
     )
@@ -88,9 +89,8 @@ def test_join_reachability_reaches_fixed_point() -> None:
             JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("c")),
             DirectEdge(GraphNodeId("c"), GraphNodeId("d")),
         ),
-        entries=(GraphNodeId("a"), GraphNodeId("b")),
     )
 
-    assert compile_graph(definition).joins_by_source[GraphNodeId("c")] == (
+    assert compile_graph(definition).transition.joins_by_source[GraphNodeId("c")] == (
         JoinEdge((GraphNodeId("c"), GraphNodeId("d")), GraphNodeId("e")),
     )

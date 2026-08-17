@@ -13,8 +13,13 @@ class ExecutionLimits:
     max_parallel_tasks: int = 64
 
     def __post_init__(self) -> None:
-        if self.max_supersteps < 1 or self.max_parallel_tasks < 1:
-            raise ExecutionLimitError("execution limits must be positive")
+        if (
+            type(self.max_supersteps) is not int
+            or type(self.max_parallel_tasks) is not int
+            or self.max_supersteps < 1
+            or self.max_parallel_tasks < 1
+        ):
+            raise ExecutionLimitError("execution limits must be exact positive integers")
 
 
 __all__ = ["ExecutionLimits"]

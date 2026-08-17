@@ -1,0 +1,8 @@
+{
+  "include": ["."],
+  "exclude": ["pyrightconfig.json"],
+  "extraPaths": ["../../src"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "strict",
+  "reportMissingTypeStubs": "error"
+}

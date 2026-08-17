@@ -3,7 +3,7 @@
 from typing import TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.execution.graph import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.state.graph_state import (
     GraphResumeInputCodec,
     GraphRunId,
@@ -12,12 +12,11 @@ from mote_kernel.state.graph_state import (
     child_graph_run_id,
 )
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
 
 
 def project_start_graph_command(
-    graph: CompiledGraph[InputT, OutputT],
+    graph: CompiledGraph[GraphValueT],
     run_id: GraphRunId,
     parent: ParentGraphActivation | None = None,
 ) -> StartGraphRun:

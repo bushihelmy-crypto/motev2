@@ -5,7 +5,8 @@ from typing import TypeVar
 from mote_kernel.execution.engine.resume_input import require_resume_input_binding
 from mote_kernel.execution.engine.routing import validate_routing_contribution
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError, SnapshotMismatchError
-from mote_kernel.execution.graph import CompiledGraph, NodeDefinition
+from mote_kernel.execution.graph.node import CallableNodeDefinition
+from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -17,13 +18,12 @@ from mote_kernel.state.graph_state import (
     validate_graph_run_state,
 )
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
 GraphDefinitionKey = tuple[GraphDefinitionId, GraphDefinitionVersion]
 
 
 def require_snapshot_matches_graph(
-    graph: CompiledGraph[InputT, OutputT],
+    graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
     parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
 ) -> None:
@@ -45,7 +45,9 @@ def require_snapshot_matches_graph(
         not in parent_nodes
     ):
         raise InvalidExecutionSnapshotError("snapshot parent activation does not match a compiled parent node")
-    declared_joins = {(edge.sources, edge.target) for edges in graph.joins_by_source.values() for edge in edges}
+    declared_joins = {
+        (edge.sources, edge.target) for edges in graph.transition.joins_by_source.values() for edge in edges
+    }
     if any((progress.sources, progress.target) not in declared_joins for progress in state.join_progress):
         raise InvalidExecutionSnapshotError("snapshot references unknown join progress")
     require_resume_input_binding(graph, state)
@@ -56,7 +58,7 @@ def require_snapshot_matches_graph(
             node.node_id: definition.resources
             for node in state.frontier.nodes
             if isinstance(node.settlement, PendingGraphNode)
-            and isinstance(definition := graph.nodes[node.node_id], NodeDefinition)
+            and isinstance(definition := graph.nodes[node.node_id], CallableNodeDefinition)
             and definition.resources
         }
         resources = state.resources

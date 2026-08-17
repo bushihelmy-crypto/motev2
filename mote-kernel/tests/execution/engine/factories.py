@@ -1,28 +1,34 @@
 from dataclasses import replace
+from typing import TypeVar
 
-from mote_kernel.execution.graph import (
-    ConditionalEdge,
-    DirectEdge,
-    GraphDefinition,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
-    GraphRouteId,
-    JoinEdge,
-    NodeDefinition,
-    NodeSuccess,
-    compile_graph,
+from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.task import GraphTask
+from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
+from mote_kernel.execution.graph.node import CallableNodeDefinition
+from mote_kernel.execution.graph.ports import (
+    canonical_nominal_type,
+    normalize_graph_output_declarations,
+    normalize_input_bindings,
+    normalize_output_declarations,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.values import NodeOutputFrame, _frame_value, _make_node_output_frame
+from mote_kernel.execution.result import TaskSuccess
 from mote_kernel.state.graph_state import (
     GraphAbort,
     GraphAbortReason,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphFrontierNode,
     GraphFrontierState,
     GraphJoinProgress,
+    GraphNodeId,
+    GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -30,37 +36,66 @@ from mote_kernel.state.graph_state import (
     UseStepRequestInput,
 )
 
-
-async def identity(node_input: str) -> NodeSuccess[str]:
-    return NodeSuccess(node_input)
+ValueT = TypeVar("ValueT")
 
 
-def compiled_graph(*node_ids: str, entries: tuple[str, ...] = ("a",)) -> CompiledGraph[str, str]:
+async def identity(values: Graph.Values[str]) -> Graph.Values[str]:
+    return values
+
+
+def node_output(value: ValueT) -> NodeOutputFrame[ValueT]:
+    return _make_node_output_frame(
+        Graph.values(value=value),
+        (("value", canonical_nominal_type(type(value))),),
+    )
+
+
+def output_value(frame: NodeOutputFrame[ValueT]) -> ValueT:
+    return _frame_value(frame, "value")
+
+
+def task_success(task: GraphTask, value: ValueT, route: str | None = None) -> TaskSuccess[ValueT]:
+    return TaskSuccess(task, node_output(value), route)
+
+
+def callable_node(node_id: str) -> CallableNodeDefinition[str]:
+    return CallableNodeDefinition(
+        GraphNodeId(node_id),
+        identity,
+        normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+        normalize_output_declarations({"value": str}),
+    )
+
+
+def _compile(
+    node_ids: tuple[str, ...],
+    edges: tuple[Edge, ...],
+    entries: tuple[str, ...],
+) -> CompiledGraph[str]:
+    incoming = {edge.target for edge in edges if edge.target != Graph.END}
+    explicit_entries = tuple(GraphNodeId(node_id) for node_id in entries if GraphNodeId(node_id) in incoming)
     return compile_graph(
         GraphDefinition(
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(NodeDefinition(GraphNodeId(node_id), identity) for node_id in node_ids),
-            edges=(),
-            entries=tuple(GraphNodeId(node_id) for node_id in entries),
+            nodes=tuple(callable_node(node_id) for node_id in node_ids),
+            edges=edges,
+            entries=explicit_entries,
+            outputs=normalize_graph_output_declarations({}),
         )
     )
+
+
+def compiled_graph(*node_ids: str, entries: tuple[str, ...] = ("a",)) -> CompiledGraph[str]:
+    return _compile(node_ids, (), entries)
 
 
 def topology(
     *node_ids: str,
-    edges: tuple[DirectEdge | ConditionalEdge | JoinEdge, ...] = (),
+    edges: tuple[Edge, ...] = (),
     entries: tuple[str, ...] = ("a",),
-) -> CompiledGraph[str, str]:
-    return compile_graph(
-        GraphDefinition(
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=tuple(NodeDefinition(GraphNodeId(node_id), identity) for node_id in node_ids),
-            edges=edges,
-            entries=tuple(GraphNodeId(node_id) for node_id in entries),
-        )
-    )
+) -> CompiledGraph[str]:
+    return _compile(node_ids, edges, entries)
 
 
 def direct(source: str, target: str) -> DirectEdge:

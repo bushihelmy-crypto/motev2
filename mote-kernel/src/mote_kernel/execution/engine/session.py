@@ -5,17 +5,18 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
 from types import TracebackType
-from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from mote_kernel.execution.claim import ConsumedExecutionClaim, ExecutionClaimSnapshot
+from mote_kernel.execution.engine.admission import select_executable_tasks
 from mote_kernel.execution.engine.frontier import FrontierPreparation, prepare_frontier
-from mote_kernel.execution.engine.resume_input import effective_node_input
+from mote_kernel.execution.engine.resume_input import materialize_node_input
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import GraphDefinitionKey, require_snapshot_matches_graph
 from mote_kernel.execution.engine.task import ExecutableTask, GraphTask
 from mote_kernel.execution.errors import ResultCollectionError
-from mote_kernel.execution.graph import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import ExecutedGraphNode, TaskResult
 from mote_kernel.state.graph_state import (
@@ -35,9 +36,8 @@ from mote_kernel.state.graph_state import (
     pending_node_ids,
 )
 
-InputT = TypeVar("InputT")
-InputT_co = TypeVar("InputT_co", covariant=True)
-OutputT = TypeVar("OutputT")
+GraphValueT = TypeVar("GraphValueT")
+GraphValueT_co = TypeVar("GraphValueT_co")
 
 
 class _SessionDisposition(Enum):
@@ -48,18 +48,19 @@ class _SessionDisposition(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class _QueuedCompletion(Generic[OutputT]):
-    result: TaskResult[OutputT]
+class _QueuedCompletion(Generic[GraphValueT]):
+    result: TaskResult[GraphValueT]
+    refill_ordinary_slots: bool = False
 
 
 @runtime_checkable
-class GraphExecutionSession(Protocol[InputT_co, OutputT]):
+class GraphExecutionSession(Protocol[GraphValueT_co]):
     """Public single-consumer interface issued only by ``GraphExecutor``."""
 
     @property
     def quiescent(self) -> bool: ...
 
-    async def __aenter__(self) -> "GraphExecutionSession[InputT_co, OutputT]": ...
+    async def __aenter__(self) -> "GraphExecutionSession[GraphValueT_co]": ...
 
     async def __aexit__(
         self,
@@ -68,12 +69,12 @@ class GraphExecutionSession(Protocol[InputT_co, OutputT]):
         _traceback: TracebackType | None,
     ) -> None: ...
 
-    async def next(self, state: GraphRunState) -> ExecutedGraphNode[OutputT]: ...
+    async def next(self, state: GraphRunState) -> ExecutedGraphNode[GraphValueT_co]: ...
 
     async def aclose(self) -> None: ...
 
 
-class _GraphExecutionSession(Generic[InputT, OutputT]):
+class _GraphExecutionSession(Generic[GraphValueT]):
     """Own live task handles while the caller owns state commits."""
 
     __slots__ = (
@@ -83,10 +84,10 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
         "_disposition",
         "_errors",
         "_graph",
-        "_nested",
         "_next_in_progress",
         "_parent_nodes",
         "_preparation",
+        "_queued_results",
         "_request",
         "_scheduler",
         "_started",
@@ -95,8 +96,8 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
 
     def __init__(
         self,
-        graph: CompiledGraph[InputT, OutputT],
-        request: StepRequest[InputT, OutputT],
+        graph: CompiledGraph[GraphValueT],
+        request: StepRequest[GraphValueT],
         claim_snapshot: ExecutionClaimSnapshot,
         parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
     ) -> None:
@@ -105,8 +106,8 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
         self._claim_snapshot = claim_snapshot
         self._state = request.state
         self._parent_nodes = parent_nodes
-        self._preparation: FrontierPreparation[InputT, OutputT] | None = None
-        self._nested: deque[_QueuedCompletion[OutputT]] = deque()
+        self._preparation: FrontierPreparation[GraphValueT] | None = None
+        self._queued_results: deque[_QueuedCompletion[GraphValueT]] = deque()
         self._started: set[GraphNodeId] = set()
         self._scheduler = TaskScheduler(graph)
         self._awaiting_ack: SettleGraphNode | None = None
@@ -122,7 +123,7 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
             and self._scheduler.live_count == 0
         )
 
-    async def __aenter__(self) -> GraphExecutionSession[InputT, OutputT]:
+    async def __aenter__(self) -> GraphExecutionSession[GraphValueT]:
         return self
 
     async def __aexit__(
@@ -194,46 +195,53 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
         self._state = state
         self._awaiting_ack = None
 
-    def _ensure_preparation(self) -> FrontierPreparation[InputT, OutputT]:
+    def _ensure_preparation(self) -> FrontierPreparation[GraphValueT]:
         if self._preparation is None:
             self._preparation = prepare_frontier(self._graph, self._request)
             for result in self._preparation.nested_results:
                 self._started.add(result.task.node_id)
-                self._nested.append(_QueuedCompletion(result))
+                self._queued_results.append(_QueuedCompletion(result))
         return self._preparation
 
-    def _select_ordinary(self) -> tuple[ExecutableTask[InputT], ...]:
+    def _select_ordinary(self) -> tuple[ExecutableTask[GraphValueT], ...]:
         preparation = self._ensure_preparation()
-        available_slots = self._request.limits.max_parallel_tasks - self._scheduler.live_count
-        if available_slots <= 0 or self._disposition is not _SessionDisposition.OPEN:
+        if self._disposition is not _SessionDisposition.OPEN:
             return ()
         pending = frozenset(pending_node_ids(self._state.frontier))
-        selected: list[ExecutableTask[InputT]] = []
-        acquisitions = {
-            item.node_id: item for item in (self._state.resources.acquisitions if self._state.resources else ())
-        }
-        for task, definition in sorted(preparation.executable_definitions, key=lambda item: item[0].sort_key):
-            if len(selected) >= available_slots or task.node_id in self._started or task.node_id not in pending:
-                continue
-            if definition.resources:
-                acquisition = acquisitions.get(task.node_id)
-                if acquisition is None or not acquisition.admitted or acquisition.required != definition.resources:
-                    continue
-            effective = effective_node_input(self._graph, self._state, task.node_id, self._request.node_input)
-            selected.append(ExecutableTask(task, effective))
-        return tuple(selected)
+        tasks = tuple(task for task, _definition in preparation.executable_definitions if task.node_id in pending)
+        selected = select_executable_tasks(
+            self._graph,
+            tasks,
+            self._state.resources,
+            self._request.limits,
+            active_count=self._scheduler.live_count,
+            started_node_ids=frozenset(self._started),
+        )
+        executables: list[ExecutableTask[GraphValueT]] = []
+        for task in selected:
+            effective = materialize_node_input(
+                self._graph,
+                self._state,
+                self._request.scope_run,
+                self._request.frames,
+                task.node_id,
+            )
+            executables.append(ExecutableTask(task, effective))
+        return tuple(executables)
 
     def _record_error(self, task: GraphTask, error: Exception) -> None:
         self._errors.append((task, error))
         self._errors.sort(key=lambda item: item[0].sort_key)
         self._disposition = _SessionDisposition.ERROR_DRAINING
 
-    async def _next_event(self) -> TaskResult[OutputT] | TaskRaised:
+    async def _next_event(self) -> TaskResult[GraphValueT] | TaskRaised:
         return await self._scheduler.next_completion()
 
-    def _drain_pending_errors(self) -> None:
-        for raised in self._scheduler.take_pending_errors():
+    def _drain_scheduler_events(self) -> None:
+        errors, completions = self._scheduler.drain_pending_events()
+        for raised in errors:
             self._record_error(raised.task, raised.error)
+        self._queued_results.extend(_QueuedCompletion(result, True) for result in completions)
 
     def _schedule_ordinary(self) -> bool:
         selected = self._select_ordinary()
@@ -241,7 +249,7 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
         self._started.update(task.task.node_id for task in selected)
         return bool(selected)
 
-    def _project(self, result: TaskResult[OutputT]) -> ExecutedGraphNode[OutputT]:
+    def _project(self, result: TaskResult[GraphValueT]) -> ExecutedGraphNode[GraphValueT]:
         command = settle_result(self._graph, self._state, result)
         self._awaiting_ack = command
         return ExecutedGraphNode(result, command)
@@ -257,7 +265,7 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
                 continue
         close_task.result()
 
-    async def next(self, state: GraphRunState) -> ExecutedGraphNode[OutputT]:
+    async def next(self, state: GraphRunState) -> ExecutedGraphNode[GraphValueT]:
         """Acknowledge the previous command and yield exactly one new completion."""
 
         self._require_open()
@@ -268,29 +276,17 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
             self._acknowledge(state)
             self._ensure_preparation()
             while True:
-                if self._nested:
-                    queued = self._nested.popleft()
-                    try:
-                        return self._project(queued.result)
-                    except Exception as error:
-                        self._record_error(queued.result.task, error)
-                        continue
-
-                self._drain_pending_errors()
-                if self._scheduler.has_pending_events:
-                    event = cast(TaskResult[OutputT], await self._next_event())
-                    try:
-                        projected = self._project(event)
-                    except Exception as error:
-                        self._record_error(event.task, error)
-                        continue
-                    if self._schedule_ordinary():
+                self._drain_scheduler_events()
+                if self._queued_results:
+                    queued = self._queued_results.popleft()
+                    projected = self._project(queued.result)
+                    if queued.refill_ordinary_slots and self._schedule_ordinary():
                         await asyncio.sleep(0)
                         self._require_open()
                     return projected
 
                 self._schedule_ordinary()
-                if self._scheduler.live_count == 0 and not self._scheduler.has_pending_events:
+                if self._scheduler.live_count == 0:
                     if self._errors:
                         self._disposition = _SessionDisposition.QUIESCENT
                         raise self._errors[0][1]
@@ -303,12 +299,7 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
                 if isinstance(event, TaskRaised):
                     self._record_error(event.task, event.error)
                     continue
-                try:
-                    return self._project(event)
-                except Exception as error:
-                    # A malformed typed result is an ordinary execution error; drain siblings first.
-                    self._record_error(event.task, error)
-                    continue
+                return self._project(event)
         except asyncio.CancelledError:
             await self._close_after_cancellation()
             raise
@@ -323,17 +314,17 @@ class _GraphExecutionSession(Generic[InputT, OutputT]):
                 return
             self._disposition = _SessionDisposition.QUIESCENT
             await self._scheduler.aclose()
-            self._nested.clear()
+            self._queued_results.clear()
             self._awaiting_ack = None
             self._disposition = _SessionDisposition.CLOSED
 
 
 def issue_execution_session(
-    graph: CompiledGraph[InputT, OutputT],
-    request: StepRequest[InputT, OutputT],
+    graph: CompiledGraph[GraphValueT],
+    request: StepRequest[GraphValueT],
     claim: ConsumedExecutionClaim,
     parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
-) -> GraphExecutionSession[InputT, OutputT]:
+) -> GraphExecutionSession[GraphValueT]:
     """Issue the sole concrete session authorized by a consumed claim receipt."""
 
     return _GraphExecutionSession(

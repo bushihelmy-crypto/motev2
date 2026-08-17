@@ -8,32 +8,38 @@ The project is in its initial architecture and implementation phase. `mote_kerne
 from mote_kernel.execution import Graph
 
 
-async def normalize(value: str) -> str:
-    return value.strip().lower()
+async def normalize(values: Graph.Values[str]) -> Graph.Values[str]:
+    return Graph.values(text=values["raw"].strip().lower())
 
 
-graph = Graph[str, str]("example.normalize")
-graph.add_node("normalize", normalize)
-graph.add_edge(Graph.START, "normalize")
-graph.add_edge("normalize", Graph.END)
+graph = Graph[str]("example.normalize")
+graph.add_node(
+    "normalize",
+    normalize,
+    inputs={"raw": Graph.graph_input("raw", str)},
+    outputs={"text": str},
+)
+graph.set_outputs({"text": Graph.node_output("normalize", "text")})
 
-result = await graph.run("  MOTE  ", run_id="example-run")
-assert result.completed
-assert result.outputs[0].output == "mote"
+result = await graph.run(Graph.values(raw="  MOTE  "), run_id="example-run")
+assert isinstance(result, Graph.CompletedResult)
+assert result.outputs["text"] == "mote"
 ```
 
-`Graph.run()` also accepts the authoritative state returned by a prior invocation and selective resume actions created by the same facade. An optional async commit callback receives every reducer candidate—including every individual node settlement—and execution continues only from the exact state it confirms. No concrete store is included.
+Callable nodes declare named input bindings and exact named output types directly on `add_node()`. Input bindings are the sole data-dependency truth; edges and joins declare control flow only. `Graph.values()` creates immutable concrete frames, and `set_outputs()` binds the graph result boundary to admitted graph inputs or confirmed node publications.
+
+`Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 
-Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, and `Graph.ExecutionLimitError` for precise handling.
+Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, `Graph.ExecutionLimitError`, and the value admission/unavailability/publication errors for precise handling.
 
 ## Design principles
 
 - One execution engine for every agent flow.
 - Graph state and domain state evolve independently and commit atomically.
 - Durable state is committed before the in-memory snapshot advances.
-- Concurrent nodes share one immutable input snapshot and must treat it as read-only.
+- Every node activation receives one immutable, descriptor-checked named input frame.
 - Concrete model, prompt, tool, storage, and extension capabilities enter through narrow typed ports.
 - Optional capabilities are selected when an agent flow is assembled, not checked repeatedly during execution.
 
