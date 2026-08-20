@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；Phase 1 尚未开始
-- 日期：2026-08-20（本轮完成 Phase 0 终局文档裁决，未修改 production/tests）
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S08 production/owner gate 已完成，工作树交付待独立 complexity unit 分离
+- 日期：2026-08-21（本轮独立回写 S08；不把混合工作树冒记为零负债交付）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
 - 唯一公共门面：`mote_kernel.execution.Graph`
@@ -644,21 +644,24 @@ python -B -m pytest -q \
 #### 7.2.1 P1 requirement/characterization 映射
 
 本节现在固定全部 15 个 P1 的 case-level evidence。`baseline` 是当前 production shape 在代码基线
-`7944159` 上的 characterization；`target gate` 是对应 production 原子变更必须新增或更新的 exact
-shape/tamper 断言；尚未落地的 gate 保持 `DESIGNED / PENDING IMPLEMENTATION`，已完成 production-only 的
-S13、S18、S23A 保持 `PRODUCTION IMPLEMENTED / T0 DEFERRED`，不能把尚不存在的未来测试写成已通过。
+`7944159` 上的 characterization；`target gate` 是对应 production 原子变更必须新增或更新的 owner/shape/tamper
+断言。S08 已通过更新既有 owner 集合断言闭合，不新增 private helper/import/comprehension 的 legacy AST 断言；
+尚未落地的 gate 保持 `DESIGNED / PENDING IMPLEMENTATION`，已完成 production-only 的 S13、S18、S23A 保持
+`PRODUCTION IMPLEMENTED / T0 DEFERRED`，不能把尚不存在的未来测试写成已通过。
 每个 baseline case 均须有
 可核对的成功与失败/边界路径；target gate 还须写明断言对象和失败条件。下表中的 `PASS` 只表示本轮
 `make check` 覆盖的当前测试已经通过，不表示未来 target 已获准。
 
 本轮按表中当前 baseline nodeids 复跑 31 个 case（含参数化展开），第九次复审替换 S23B interrupt nodeid 后
 结果为 `31 passed in 0.29s`
-（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成，后续仅部分 production 已落地，未新增
-exact-shape tests。
+（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成。随后 S08 复用并收窄既有 architecture
+owner case，没有新增 exact-shape test；其他 target 仍按各自当前状态处理。
 
 矩阵各行的 evidence profile 固定如下：`B0` 是当前 baseline case 命令；`T0` 在 Phase 0 是已固定的 target
-path、断言、失败条件和预期 manifest 类别；尚未落地的 T0 状态为 `DESIGNED / PENDING IMPLEMENTATION`，已落地
-production-only 的 S13、S18、S23A 状态为 `PRODUCTION IMPLEMENTED / T0 DEFERRED`。`GSP-A05` 后，T0
+path、断言、失败条件和预期 manifest 类别；S08 的既有 owner gate 已通过单一集合收窄，但完整 change unit
+交付仍被工作树中的独立 complexity unit 阻断；尚未
+落地的 T0 状态为 `DESIGNED / PENDING IMPLEMENTATION`，已落地 production-only 的 S13、S18、S23A 状态为
+`PRODUCTION IMPLEMENTED / T0 DEFERRED`。`GSP-A05` 后，T0
 才随对应 production 生成 actual changed-file manifest，并按 7.3 的 `pre-commit run --files`、scoped
 whitespace、完整 `make check` 和 architecture exact-shape gate 执行。`B0` 已通过；T0 不得用未来文件名、
 固定历史清单或未运行的测试冒充 `PASS`。
@@ -736,7 +739,7 @@ S23A 删除的是 private `_AdvancedFrontier` marker；Phase 0 需要冻结的�
 | S04 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_skip_failed_substitution_publishes_exact_output_for_downstream_materialization`；replacement publication 被下游消费并得到 `accepted:replacement` | `tests/execution/engine/test_output_projection.py::test_output_projection_reports_a_missing_confirmed_publication`；缺失 confirmed publication 抛 `GraphValueAdmissionError` | PASS（31-case run） |
 | S05 | `GSP-P01`、`GSP-P03`、`GSP-P04`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_graph_output_can_project_and_rename_an_admitted_graph_input`；admitted graph input 按声明投影为 renamed output | `tests/execution/graph/test_compiler_contract.py::test_compiler_requires_nested_inputs_to_match_child_boundary_exactly`；nested boundary mismatch 保持 compile-time rejection | PASS（31-case run） |
 | S06 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/graph/test_compiler.py::test_compilation_normalizes_node_requirements_by_graph_resource_order`；graph、node、resource tuple 均保持 canonical FIFO 顺序 | `tests/execution/engine/test_admission.py::test_admission_rejects_snapshot_with_noncompiled_resource_order`；顺序 tamper 在 admission 前抛 `ResourceTransitionError` | PASS（31-case run） |
-| S08 | `GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_routing.py::test_join_fires_only_after_all_sources_arrive_across_supersteps`；首步保留 join progress，全部 source 到达后才 advance target | `tests/execution/engine/test_routing.py::test_duplicate_recovered_join_progress_fails_closed`；重复 recovered progress 抛 `JoinProgressError` | PASS（31-case run） |
+| S08 | `GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_routing.py::test_join_fires_only_after_all_sources_arrive_across_supersteps`；首步保留 join progress，全部 source 到达后才 advance target | `tests/execution/engine/test_routing.py::test_duplicate_recovered_join_progress_fails_closed`；重复 recovered progress 抛 `JoinProgressError` | B0 PASS / PRODUCTION IMPLEMENTED / OWNER GATE PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT |
 | S09 | `GSP-P02`、`GSP-P05`、`GSP-P06`、`GSP-P08` | `tests/execution/engine/test_routing.py::test_direct_conditional_and_terminal_routing_use_one_contribution_model`；direct/conditional/terminal 产生既有 `AdvanceGraphFrontier`/`CompleteGraphFrontier` | `tests/execution/engine/test_routing.py::test_selected_control_target_with_missing_input_aborts_before_advance`；缺失 control input 先产生 `AbortGraphRun`，不 advance | PASS（31-case run） |
 | S10 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_graph_output_can_project_and_rename_an_admitted_graph_input`；可用 graph output 正常完成并保留投影值；B1 historical-output case 固定 gap 前已见 output 的顺序 | `tests/execution/engine/test_output_projection.py::test_routing_aborts_when_completion_output_is_unavailable`；completion output 不可用时 abort；B1 malformed selection 保持 `InvalidRoutingCommandError` 优先 | B0 PASS / B1 DIRECT PASS / T0 DESIGNED / PENDING IMPLEMENTATION |
 | S11 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_resume_admission.py::test_resume_admission_accepts_triggered_data_target_with_complete_inputs`；完整 input 被 admission；B1 覆盖重叠 target、sibling scope、repeated superstep 与 gap 前 present input | `tests/execution/engine/test_resume_admission.py::test_resume_admission_rejects_triggered_data_target_with_an_unavailable_input`；缺失 input 在 admission 前抛 `GraphValueUnavailableError`，首个 binding/target 顺序由 B1 锁定 | B0 PASS / B1 DIRECT PASS / T0 DESIGNED / PENDING IMPLEMENTATION |
@@ -777,18 +780,18 @@ port 或实现持久化；全部单元仍无条件受第 2.4、7.3 节的 HARD K
 
 #### 7.2.2 P1 target exact-shape/tamper gate
 
-Phase 0 已固定所有 target gate 的 path、子断言和失败条件，但尚未修改 tests；下表统一标为
-`DESIGNED / PENDING IMPLEMENTATION`。获得 `GSP-A05` 后，标为“更新现有 case”或“待新增 case”的 gate 都必须
+Phase 0 已固定所有 target gate 的 path、子断言和失败条件；当前状态按下表逐项记录。获得 `GSP-A05` 后，标为
+“更新现有 case”或“待新增 case”的 gate 都必须
 与对应 production、实际受影响的 normative source 在同一原子变更中落地。不能用文件级测试名或历史 PASS
 代替；失败条件是旧字段/旧 owner/重复扫描仍存在，或 tamper 没有在预期边界 fail closed。
 
-| 单元 | exact-shape/tamper gate（路径、断言目标、失败条件） | Phase 0 设计状态 |
+| 单元 | exact-shape/tamper gate（路径、断言目标、失败条件） | 当前状态 |
 | --- | --- | --- |
 | S03 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S03.a` 子断言：`FrontierTransitionPlan` 无 `callable_node_ids`/`nested_node_ids` field；`S03.b`：compiler 不再构造这两个 tuple；`S03.c`：consumer 只从 `nested_graphs`/`nodes` nominal variant 推导；任一旧 symbol/producer path 即失败。该 grouped owner case 随 S03 原子变更只落地 S03 断言，不提前断言 S04–S06 shape | DESIGNED / PENDING IMPLEMENTATION |
 | S04 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S04.a`：`outcomes`/`publications` DTO 与 `CompiledGraph` projection 不存在；`S04.b`：`MaterializationPlan` 无重复 `node_id`；`S04.c`：publication map value exact 为 `FrameDescriptor[...]` 且 consumer 访问 `graph.transition.publications[node_id]`；malformed publication 继续由 `tests/execution/test_continuation_integrity.py::test_complete_continuation_rejects_a_malformed_publication_record` fail closed。该 grouped owner case 随 S04 原子变更只落地 S04 断言 | DESIGNED / PENDING IMPLEMENTATION |
 | S05 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S05.a`：`CompiledGraph` 不定义 `graph_inputs` field/property/alias；`S05.b`：compiler/runtime 只读取 `graph_input_descriptor.declarations`；`S05.c`：`tests/execution/graph/test_compiler_contract.py::test_compiler_requires_nested_inputs_to_match_child_boundary_exactly` 仍在 compile 前拒绝 boundary mismatch。该 grouped owner case 随 S05 原子变更只落地 S05 断言 | DESIGNED / PENDING IMPLEMENTATION |
 | S06 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S06.a`：`recovery` wrapper/storage 不存在；`S06.b`：`transition` 是 direct dataclass field，不是 property；`S06.c`：`entries`/`materializations`/`publications`/`graph_outputs`/`resource_order` 不在 `CompiledGraph` 定义；resource-order tamper 仍由 `tests/execution/engine/test_admission.py::test_admission_rejects_snapshot_with_noncompiled_resource_order` 拒绝。该 grouped owner case 随 S06 原子变更只落地 S06 断言 | DESIGNED / PENDING IMPLEMENTATION |
-| S08 | `tests/architecture/test_graph_execution_ownership.py::test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard` 的 `S08.a`：snapshot guard 只有 module-scope import `_declared_joins`；`S08.b`：无 `graph.transition.joins_by_source` 直接读取/重复 comprehension；`S08.c`：recovery 不建立第二 interpretation；重复/malformed progress 仍 fail closed | DESIGNED / PENDING IMPLEMENTATION |
+| S08 | 更新既有 `tests/architecture/test_graph_execution_ownership.py::test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard`，只把 `joins_by_source` 的 production direct-owner 集合从 routing + snapshot guard 收窄为 routing。`_declared_joins` 的 import/call、helper symbol 和 comprehension 形状只作为本次 actual diff/source review，不新增永久 legacy AST 断言；重复/malformed progress 继续由既有行为测试 fail closed | OWNER GATE PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT（2026-08-21） |
 | S09 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_projection_has_one_command_owner`：`RoutingResolution`/`plan_routing` forwarding path 归零，唯一 projection 直接返回 command；missing-input case 必须仍在 advance 前 abort | DESIGNED / PENDING IMPLEMENTATION |
 | S10 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_facts_have_one_canonical_output_diagnostic`：`S10.a` 要求 resolver 内只有一次 full binding scan；`S10.b` 只保留 `unavailable_graph_outputs`，两个镜像 bool 不存在；`S10.c` 独立 `graph_outputs_available` 仍短路并保留首个 missing/error order；completion output 缺失仍 abort/error | DESIGNED / PENDING IMPLEMENTATION |
 | S11 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_target_facts_have_one_typed_scan`：`S11.a` `RequiredTarget` exact 三字段；`S11.b` 每个 unique target 只有一次 binding scan，cache key/value exact 为 `GraphNodeId/RequiredTarget`；`S11.c` source-kind、control→join→data 顺序和 first unavailable identity 固定；unavailable input 仍在 admission 前拒绝 | DESIGNED / PENDING IMPLEMENTATION |
@@ -803,6 +806,12 @@ Phase 0 已固定所有 target gate 的 path、子断言和失败条件，但尚
 上述 target gate 是已完成的 Phase 0 设计，不冒充当前已存在的测试，也不要求在 `GSP-A05` 前落地。
 requirements 已依据 baseline behavior、这张 target 设计表及 `GSP-A01`–`GSP-A04` evidence 完成 `GSP-A05`
 授权；每个 gate 必须与对应 production 原子落地，T0 未通过的单元不得交付或进入下一单元。
+
+S08 已复用既有 architecture owner case，只收窄 `joins_by_source` 的 direct-owner 集合；没有新增针对
+`_declared_joins` 私有 symbol、import/call 或具体 comprehension 的 legacy AST 断言。production actual diff 和
+一次性 source review 已确认 snapshot guard 复用 routing owner，既有 malformed/duplicate join progress 行为用例
+保持 fail closed，因此 S08 的 owner target 已通过；完整 change unit 仍须在独立 complexity framework 与 S08
+manifest 分离后重跑不可替代门禁，当前不记为整体交付 `PASS`。
 
 S13 的 `PRODUCTION IMPLEMENTED / T0 DEFERRED` 不是 `PASS`：production 已完成，但本次明确不新增
 exact-shape architecture test，因此该单元仍不满足 T0 交付条件。其余 target gate 仍保持
@@ -831,7 +840,7 @@ nodeid 单独充当 `GSP-A03` evidence。谓词针对目标提交的最终 sourc
 | S04 | `OutcomeAdmissionPlan`/`PublicationPlan` 不再被 topology/compiler/runtime imports；`MaterializationPlan` 无 `node_id` field；`CompiledGraph` 无 `outcomes`/`publications` attribute；publication consumer 的最终访问形状为 `graph.transition.publications[node_id]`，其 value 不再 `.descriptor` | DTO/import/property/重复 key 残留，或 consumer 继续走旧 projection |
 | S05 | `CompiledGraph.__dataclass_fields__` 不含 `graph_inputs`；`CompiledGraph` `__dict__`/class MRO 无同名 property；nested compiler/admission 只读取 `graph_input_descriptor.declarations` | field、property、alias 或第二 graph-input declaration source |
 | S06 | `CompiledGraph.__dataclass_fields__["transition"]` 存在且不是 property；不含 `recovery`/`entries`/`materializations`/`publications`/`graph_outputs`/`resource_order`；`RecoveryAvailabilityPlan` 无 production import | wrapper/forwarding property/direct-field 反转或 publication projection 回归 |
-| S08 | `snapshot_guard.py` 只有 module-scope `_declared_joins` import/call；不出现 `graph.transition.joins_by_source`、join comprehension 或第二 `_declared_joins` 定义 | snapshot guard 直接解释 compiled field、动态 import、重复 helper 或第二 interpretation |
+| S08 | 既有 owner gate 只允许 routing 直接读取 `joins_by_source`；snapshot guard 对 routing owner 的复用由本次 actual diff/source review 核对，不新增 private helper/import/comprehension AST 断言 | owner gate 仍登记 snapshot guard 或其他 production 模块为 `joins_by_source` direct reader；行为用例不再对 malformed/duplicate progress fail closed |
 | S09 | `RoutingResolution` class 和 `plan_routing` definition/import 数为 0；`project_routing_facts` 与 `resolve_routing` return annotation 均为 `ResolutionCommand`；recovery 只保留同一 local facts | forwarding DTO/wrapper 残留、command projection 分叉或第二 facts scan |
 | S10 | `resolve_routing_facts` 内 `graph_outputs_available` 调用数为 0、`unavailable_graph_outputs` 调用数为 1；`RoutingFacts` 只含 canonical diagnostic tuple，不含两个 completion bool | full diagnostic 重复扫描、短路 helper 被错误删除或 bool mirror 回归 |
 | S11 | `RequiredTarget.__dataclass_fields__` 精确为 `node_id/historical_inputs_missing/unavailable_inputs`；`unavailable_target_inputs` 与 historical-gap scan 不再对同一 target 各调用一次；local cache annotation 为 `dict[GraphNodeId, RequiredTarget]` | field/scan/cache key 漂移、首错顺序改变或新增 display identity |
@@ -1086,6 +1095,43 @@ coverage 100%、Ruff、Pyright、build、Twine 全部通过。
 由于本次明确不新增 S18 exact-shape architecture test，T0 保持 `DEFERRED`，不能将 S18 记为完整 `PASS` 或
 据此自动放行后续单元。本文本节是独立 owner writeback，不计入上述 S18 production manifest。
 
+### 7.12 S08 implementation owner writeback（2026-08-21）
+
+S08 已在 commit `28693d9` 中完成 join interpretation owner 收敛。routing 既有 `_declared_joins()` 继续唯一构造
+`(sources, target) -> JoinEdge`；snapshot guard 删除自己的 join comprehension 和 `joins_by_source` direct read，
+改为消费该 routing owner。严格 Pyright 对跨模块下划线 symbol 的检查通过 routing module-local `__all__`
+显式登记满足；该 symbol 没有从 `mote_kernel.execution` 公共导出，不形成第二公共入口。
+
+本次 S08 implementation change unit 的 exact repo-relative manifest 为：
+
+```text
+mote-kernel/src/mote_kernel/execution/engine/routing.py
+mote-kernel/src/mote_kernel/execution/engine/snapshot_guard.py
+mote-kernel/tests/architecture/test_graph_execution_ownership.py
+```
+
+其中只有前两个 path 是 production；既有 architecture case 只把 `joins_by_source` direct-owner 集合从
+routing + snapshot guard 收窄为 routing，没有新增 `_declared_joins` symbol/import/call 或 comprehension 的
+legacy AST 断言。已有 join success、malformed progress、duplicate progress 和 snapshot mismatch 用例继续保持
+原错误边界。没有新增 helper、cache、compiled field、State/State test、protocol 或持久化路径。
+
+当前工作树中的 complexity framework、Makefile、`pyproject.toml` complexity tables、README 和 monorepo
+pre-commit 改动属于独立 change unit，不进入 S08 manifest，也不作为 S08 或“全仓零负债”的证据；其 ratchet
+只防止结构指标回升，health target 的现有非零债务必须由该独立单元自行说明和审核。
+
+S08 scoped 验证结果为：7 个 join owner/behavior case 通过，Ruff 与格式检查通过，Pyright 0 errors，build 和
+Twine 通过。当前混合工作树的完整 test run 为 823 passed、1 failed、coverage 100%；唯一失败是独立 complexity
+ratchet 仍登记 `decision_points=1350`，而 S08 删除 comprehension 后实际为 1348。implementation scoped
+pre-commit 的其他 hooks 均通过，也只在同一个独立 complexity hook 失败。该结果证明 S08 没有行为/类型回归，
+但不能冒充完整 `make check` 或零负债工作树交付；必须先把 complexity framework 作为独立 change unit 审核、
+落地或移出当前工作树，再对 S08 manifest 重跑完整门禁。本 owner writeback 的 scoped pre-commit 已通过。
+
+本节 owner writeback 自身的独立 manifest 只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
+```
+
 ## 8. 文档同步和缺口
 
 当前行为与功能语义的 normative source 文件均存在，本轮按第 5.1 节的最小 source precedence 使用。完整
@@ -1156,8 +1202,9 @@ requirements、稳定 README 导航、本文 target 设计和 per-change manifes
 
 本次审查保留 23 个历史 ID，并把 S23 拆成两个原子单元，共得到 24 个实施单元：15 个 P1、9 个 P2（S12
 保持 P2）。15 个 P1 的范围、owner、删除对象、最多新增面、before→after 计数和 exact target 均已唯一化，
-目标 shape 已按实施方案固定；其中 S13、S18、S23A 已分别完成 production-only 简化，未新增 exact-shape
-architecture test，因此三者的 T0 均保持 `DEFERRED`。
+目标 shape 已按实施方案固定。S08 已完成 production、既有 owner gate 收窄和独立 owner writeback，但当前
+工作树仍混有未独立审核的 complexity unit，完整门禁未绿，因此不能记为零负债整体交付；S13、S18、S23A 已
+分别完成 production-only 简化，未新增 exact-shape architecture test，因此三者的 T0 均保持 `DEFERRED`。
 
 第八次复审 R9–R13 已回写：T0 在 Phase 0 只要求设计完成，批准后才与 production 原子落地；准入状态只由
 requirements 拥有；S18 固定每 owner 一个 count index，S20 固定 `UseStepRequestInput | None` keyword；S23A
@@ -1175,9 +1222,11 @@ P1 批准 `GSP-A05`。第十次复审 C2 经其登记 SHA 对象复核不成立�
 
 截至上述终局文档裁决时，production/tests 均未修改，15 个 T0 均为
 `DESIGNED / PENDING IMPLEMENTATION`。随后 S13、S18、S23A 已完成 production-only 变更，但因本次明确不新增
-exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `PASS`；其余 12 个 P1 的 production
-仍未开始。各单元仍必须把 production、target test 和实际受影响的 normative source 原子落地，T0 PASS
-后才可交付。9 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `PASS`。S08 随后完成唯一 join owner
+收敛，只更新既有 architecture owner 集合，不新增 legacy AST 断言；owner gate 已通过，但混合工作树的独立
+complexity hook 阻断完整交付。其余 11 个 P1 的 production 仍未开始。后续单元仍必须按各自批准口径落地
+production、gate 和实际受影响的 normative source。9 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence
+HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
@@ -1185,10 +1234,11 @@ exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `P
 | --- | --- | --- |
 | `GSP-A01` | requirements/implementation/review 分工明确；本轮最小 source precedence、State HARD KEEP 与 non-normative 调用链边界固定 | 1.2、2.4、5.1–5.3、8.1 |
 | `GSP-A02` | 24 个 execution-only 原子单元；15 个 P1 exact target 无条件式分支，S18/S20 已收口 | 3、3.6、6.1 |
-| `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact `path::test_case`、子断言和失败条件；S20 final simulation 与 S23A indirect baseline 口径明确 | 7.2.1–7.2.3 |
+| `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact `path::test_case`、断言和失败条件；S08 只收窄既有 direct-owner 集合、不新增 legacy AST 断言，S20 final simulation 与 S23A indirect baseline 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
 | `GSP-A06` | 9 个 P2 保持未继承批准，按单项设计和 evidence 另行准入 | 2.2、4、6 |
 
-Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。下一步按 Phase 1/2 顺序逐项实施获批 P1；
-不重新发现第 25 个简化点，不提前实施 P2，不把独立文档治理放回关键路径，也不触及 State 或持久化。
+Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S08 production/owner gate 已完成，但在独立
+complexity unit 与 S08 manifest 分离并重跑完整门禁前不得开始 S09；不重新发现第 25 个简化点，不提前实施 P2，
+不把独立文档治理放回关键路径，也不触及 State 或持久化。
