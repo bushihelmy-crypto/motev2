@@ -372,4 +372,4 @@ def resolve_routing(
     return plan_routing(graph, state, scope_run, frames).command
 
 
-__all__: list[str] = []
+__all__ = ["_declared_joins"]

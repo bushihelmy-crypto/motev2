@@ -3,7 +3,7 @@
 from typing import TypeVar
 
 from mote_kernel.execution.engine.resume_input import require_resume_input_binding
-from mote_kernel.execution.engine.routing import validate_routing_contribution
+from mote_kernel.execution.engine.routing import _declared_joins, validate_routing_contribution
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
@@ -45,9 +45,7 @@ def require_snapshot_matches_graph(
         not in parent_nodes
     ):
         raise InvalidExecutionSnapshotError("snapshot parent activation does not match a compiled parent node")
-    declared_joins = {
-        (edge.sources, edge.target) for edges in graph.transition.joins_by_source.values() for edge in edges
-    }
+    declared_joins = _declared_joins(graph)
     if any((progress.sources, progress.target) not in declared_joins for progress in state.join_progress):
         raise InvalidExecutionSnapshotError("snapshot references unknown join progress")
     require_resume_input_binding(graph, state)

@@ -302,7 +302,7 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
     assert owners == {
         "direct_targets": {"execution/engine/routing.py"},
         "conditional_targets": {"execution/engine/routing.py"},
-        "joins_by_source": {"execution/engine/routing.py", "execution/engine/snapshot_guard.py"},
+        "joins_by_source": {"execution/engine/routing.py"},
         "data_triggers": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
