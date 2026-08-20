@@ -645,17 +645,20 @@ python -B -m pytest -q \
 
 本节现在固定全部 15 个 P1 的 case-level evidence。`baseline` 是当前 production shape 在代码基线
 `7944159` 上的 characterization；`target gate` 是对应 production 原子变更必须新增或更新的 exact
-shape/tamper 断言，当前均为 `DESIGNED / PENDING IMPLEMENTATION`，不能把尚不存在的未来测试写成已通过。
+shape/tamper 断言；尚未落地的 gate 保持 `DESIGNED / PENDING IMPLEMENTATION`，已完成 production-only 的
+S13、S18、S23A 保持 `PRODUCTION IMPLEMENTED / T0 DEFERRED`，不能把尚不存在的未来测试写成已通过。
 每个 baseline case 均须有
 可核对的成功与失败/边界路径；target gate 还须写明断言对象和失败条件。下表中的 `PASS` 只表示本轮
 `make check` 覆盖的当前测试已经通过，不表示未来 target 已获准。
 
 本轮按表中当前 baseline nodeids 复跑 31 个 case（含参数化展开），第九次复审替换 S23B interrupt nodeid 后
 结果为 `31 passed in 0.29s`
-（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成，尚未编码。
+（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成，后续仅部分 production 已落地，未新增
+exact-shape tests。
 
 矩阵各行的 evidence profile 固定如下：`B0` 是当前 baseline case 命令；`T0` 在 Phase 0 是已固定的 target
-path、断言、失败条件和预期 manifest 类别，状态为 `DESIGNED / PENDING IMPLEMENTATION`。`GSP-A05` 后，T0
+path、断言、失败条件和预期 manifest 类别；尚未落地的 T0 状态为 `DESIGNED / PENDING IMPLEMENTATION`，已落地
+production-only 的 S13、S18、S23A 状态为 `PRODUCTION IMPLEMENTED / T0 DEFERRED`。`GSP-A05` 后，T0
 才随对应 production 生成 actual changed-file manifest，并按 7.3 的 `pre-commit run --files`、scoped
 whitespace、完整 `make check` 和 architecture exact-shape gate 执行。`B0` 已通过；T0 不得用未来文件名、
 固定历史清单或未运行的测试冒充 `PASS`。
@@ -740,14 +743,14 @@ S23A 删除的是 private `_AdvancedFrontier` marker；Phase 0 需要冻结的�
 | S13 | `GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_projects_existing_terminal_children`；completed/aborted child 映射到预期 boundary status | `tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_rejects_each_malformed_child_control_binding`；run/parent control tamper 抛 `SnapshotMismatchError` | PASS（31-case run） |
 | S14 | `GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_projects_existing_terminal_children` 与 `::test_recovery_preflight_propagates_an_awaiting_child_boundary`；recovery owner 保持 completed/aborted/awaiting boundary control | `tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_rejects_each_malformed_child_control_binding`；run/parent/control tamper 保持 `SnapshotMismatchError` | B0 PASS / B1 DIRECT PASS / T0 DESIGNED / PENDING IMPLEMENTATION |
 | S17 | `GSP-P02`、`GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_pure_skip_future_proof_accepts_a_substitution_candidate_path`；pure skip + replacement 完成，consumer 看到 replacement | `tests/execution/test_graph_api.py::test_pure_skip_future_proof_rejects_output_lost_after_a_runnable_step_before_commit`；历史 output 丢失抛 `ValueUnavailableError`，commit 仍为空 | PASS（31-case run） |
-| S18 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_resume_admission.py::test_resume_admission_keeps_distinct_scope_coordinates_isolated` 及 repeated-superstep B1 case；不同 coordinate 保持隔离 | `tests/execution/test_graph_api.py::test_duplicate_public_skip_candidates_are_rejected_before_commit` 直接覆盖 `plan_resumes()` duplicate action coordinate；resume-admission duplicate/confirmed collision 保持 `GraphValuePublicationError` | B0 PASS / B1 DIRECT PASS / T0 DESIGNED / PENDING IMPLEMENTATION |
+| S18 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_resume_admission.py::test_resume_admission_keeps_distinct_scope_coordinates_isolated` 及 repeated-superstep B1 case；不同 coordinate 保持隔离 | `tests/execution/test_graph_api.py::test_duplicate_public_skip_candidates_are_rejected_before_commit` 直接覆盖 `plan_resumes()` duplicate action coordinate；resume-admission duplicate/confirmed collision 保持 `GraphValuePublicationError` | B0 PASS / B1 DIRECT PASS / PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S20 | `GSP-P02`、`GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | `tests/execution/test_executor.py::test_resume_projection_covers_override_default_skip_and_interrupt_input_guards`；override/default/skip/interrupt 各自保留既有 input guard | `tests/execution/engine/test_resume_input_contract.py::test_materialization_reports_missing_confirmed_publication`；materialization 缺失 node output 抛 `GraphValueUnavailableError` | PASS（31-case run） |
 | S23A | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | facade nested success 与 `test_final_settlement_recovers_as_ready_to_resolve_without_reexecution` 间接证明 root loop/resolve 可继续 | facade nested coordination case 保持 fail closed；private return shape 已落地，direct T0 因不新增测试而 deferred | B0/B1 BEHAVIOR PASS（indirect owner coverage）；PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S23B | `GSP-P01`、`GSP-P04`、`GSP-P05`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_failure_resume_actions_are_canonicalized_and_share_run`；failure actions canonicalize 且结果共享 run | `tests/execution/test_graph_api.py::test_interrupt_resume_is_an_exact_action_inside_run`；public case 读取 `AwaitingResumeResult.interrupts[0]` 及其 `interrupt_id`，实际经过 Result projection，stale ID 仍 fail closed；payload/mixed-scope order 继续由 S23B T0 冻结 | PASS（31-case run） |
 
 上述 15 行的 baseline behavior 均为 `PASS`；S23A 的 owner coverage 是 indirect，但足以冻结外部循环语义。
 每行对应的 `T0` target path、断言和失败条件均已设计；尚未实施的单元保持
-`DESIGNED / PENDING IMPLEMENTATION`，S13 与 S23A 则按后续 owner writeback 标记为
+`DESIGNED / PENDING IMPLEMENTATION`，S13、S18 与 S23A 则按后续 owner writeback 标记为
 `PRODUCTION IMPLEMENTED / T0 DEFERRED`。requirements 第 7 节已依据本矩阵只批准这 15 个 P1；其余单元的
 T0 仍须随对应 production 原子落地并通过后才可交付。
 
@@ -792,7 +795,7 @@ Phase 0 已固定所有 target gate 的 path、子断言和失败条件，但尚
 | S13 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_initial_children_signature_contains_only_consumed_inputs`：`_initial_children()` 不再接受未使用 availability 参数或构造 phantom input；malformed child binding 仍 fail closed | PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S14 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_nested_outcome_keeps_boundary_owned_identity`：`S14.a` `_NestedOutcome` 仅两个字段；`S14.b` kind/availability 只读 boundary；`S14.c` disposition 只由 `ScopeControlStateCoordinate` projection 生成，不读取 `compare=False` state；非-terminal child 仍拒绝 projection | DESIGNED / PENDING IMPLEMENTATION |
 | S17 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_candidate_derives_skip_actions_from_command`：candidate 不再存储 `skip_actions`/`has_pure_skip` 镜像；pure-skip historical output loss 仍在 commit 前 fail closed | DESIGNED / PENDING IMPLEMENTATION |
-| S18 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_duplicate_indexes_are_owner_local_and_linear`，承载 `S18.a` invocation/admission 的两个 typed count dict、每 owner 一个 index、`S18.b` 无 `.count()`、`S18.c` 无先 `any` 后重扫且 duplicate-before-collision；`tests/execution/engine/test_resume_admission.py::test_resume_admission_rejects_duplicate_and_confirmed_substitution_coordinates`、`::test_resume_admission_keeps_repeated_superstep_coordinates_isolated` 和 `tests/execution/test_graph_api.py::test_duplicate_public_skip_candidates_are_rejected_before_commit` 继续证明行为、错误 identity 和 coordinate isolation | DESIGNED / PENDING IMPLEMENTATION |
+| S18 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_duplicate_indexes_are_owner_local_and_linear`，承载 `S18.a` invocation/admission 的两个 typed count dict、每 owner 一个 index、`S18.b` 无 `.count()`、`S18.c` 无先 `any` 后重扫且 duplicate-before-collision；`tests/execution/engine/test_resume_admission.py::test_resume_admission_rejects_duplicate_and_confirmed_substitution_coordinates`、`::test_resume_admission_keeps_repeated_superstep_coordinates_isolated` 和 `tests/execution/test_graph_api.py::test_duplicate_public_skip_candidates_are_rejected_before_commit` 继续证明行为、错误 identity 和 coordinate isolation | PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S20 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_materialization_does_not_construct_temporary_state`，其 `S20.a` 只允许既有 `materialize_node_input` owner 和唯一 `failed_retry_input: UseStepRequestInput \| None` keyword；`S20.b` 只禁止 failed-retry materialization 分支构造 replacement State/frontier，最终 `simulated = GraphFrontierState(...)` 与 `validate_graph_frontier(state, simulated)` 各保留一次，override 仍只走 codec；`S20.c` failed/pending identity、materialization missing publication 与现有错误优先级保持 | DESIGNED / PENDING IMPLEMENTATION |
 | S23A | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_family_driver_uses_none_for_advance_without_marker`：`S23A.a` return annotation 无 `_AdvancedFrontier`；`S23A.b` AdvanceGraphFrontier、普通 non-boundary 均返回 `None`；`S23A.c` nested coordination boundary/error 分类不变 | PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S23B | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_awaiting_result_views_use_one_ordered_projection`：`S23B.a` root→child 只一次 scoped-state scan；`S23B.b` 返回两个 typed tuple；`S23B.c` public Result/interrupt identity 与 mixed-scope order 不变，interrupt settlement mismatch 仍 fail closed | DESIGNED / PENDING IMPLEMENTATION |
@@ -808,6 +811,10 @@ exact-shape architecture test，因此该单元仍不满足 T0 交付条件。�
 S23A 同样标记为 `PRODUCTION IMPLEMENTED / T0 DEFERRED`：production 已完成，但本次按约束不新增
 `test_family_driver_uses_none_for_advance_without_marker` exact-shape architecture test，因此不将其写成
 T0 `PASS`。S23B 仍保持独立的 `DESIGNED / PENDING IMPLEMENTATION` 状态。
+
+S18 也标记为 `PRODUCTION IMPLEMENTED / T0 DEFERRED`：两个 owner 的 production 检查已完成，但本次按约束
+不新增 `test_resume_duplicate_indexes_are_owner_local_and_linear` exact-shape architecture test，因此不将
+S18 写成 T0 `PASS`。
 
 #### 7.2.3 Source/AST 子断言（R4 可执行口径）
 
@@ -1058,6 +1065,27 @@ mote-kernel/src/mote_kernel/execution/family_driver.py
 本次实施明确不新增 S23A 的 exact-shape architecture test，因此 T0 保持 `DEFERRED`，不能将 S23A 记为完整
 `PASS` 或据此自动放行 S23B。本文本节是独立 owner writeback，不计入上述 S23A production manifest。
 
+### 7.11 S18 production implementation writeback（2026-08-20）
+
+S18 已在 commit `7f778a2` 中完成 production 变更，actual changed-file manifest 为：
+
+```text
+mote-kernel/src/mote_kernel/execution/invocation.py
+mote-kernel/src/mote_kernel/execution/engine/resume_admission.py
+```
+
+`plan_resumes()` 现在使用 owner-local `action_counts`，在一次 canonical action enumeration 中记录重复
+`(scope, node_id)`；`admit_resume_candidates()` 使用 owner-local `publication_counts`，在一次 canonical
+substitution enumeration 中同时收集 duplicate 与 confirmed-publication collision。删除了 `tuple.count()`、
+先 `any()` 再重扫和重复 set/count 组合；duplicate 仍优先于 collision，坐标 identity、排序和错误文本保持。
+
+本变更没有修改 State、State tests、public API、protocol、持久化路径、candidate DTO 或跨 owner helper，也
+没有新增 architecture test。现有 resume/API 定向用例为 89 passed；变更后的 `make check` 为 817 passed、
+coverage 100%、Ruff、Pyright、build、Twine 全部通过。
+
+由于本次明确不新增 S18 exact-shape architecture test，T0 保持 `DEFERRED`，不能将 S18 记为完整 `PASS` 或
+据此自动放行后续单元。本文本节是独立 owner writeback，不计入上述 S18 production manifest。
+
 ## 8. 文档同步和缺口
 
 当前行为与功能语义的 normative source 文件均存在，本轮按第 5.1 节的最小 source precedence 使用。完整
@@ -1128,8 +1156,8 @@ requirements、稳定 README 导航、本文 target 设计和 per-change manifes
 
 本次审查保留 23 个历史 ID，并把 S23 拆成两个原子单元，共得到 24 个实施单元：15 个 P1、9 个 P2（S12
 保持 P2）。15 个 P1 的范围、owner、删除对象、最多新增面、before→after 计数和 exact target 均已唯一化，
-目标 shape 已按实施方案固定；其中 S13、S23A 已分别完成 production-only 简化，未新增 exact-shape
-architecture test，因此两者的 T0 均保持 `DEFERRED`。
+目标 shape 已按实施方案固定；其中 S13、S18、S23A 已分别完成 production-only 简化，未新增 exact-shape
+architecture test，因此三者的 T0 均保持 `DEFERRED`。
 
 第八次复审 R9–R13 已回写：T0 在 Phase 0 只要求设计完成，批准后才与 production 原子落地；准入状态只由
 requirements 拥有；S18 固定每 owner 一个 count index，S20 固定 `UseStepRequestInput | None` keyword；S23A
@@ -1146,8 +1174,8 @@ P1 批准 `GSP-A05`。第十次复审 C2 经其登记 SHA 对象复核不成立�
 `README.zh-CN.md` 仅出现一次，历史 manifest 无需删除。
 
 截至上述终局文档裁决时，production/tests 均未修改，15 个 T0 均为
-`DESIGNED / PENDING IMPLEMENTATION`。随后 S13、S23A 已完成 production-only 变更，但因本次明确不新增
-exact-shape architecture test，两者 T0 均为 `DEFERRED`，不计为完整 `PASS`；其余 13 个 P1 的 production
+`DESIGNED / PENDING IMPLEMENTATION`。随后 S13、S18、S23A 已完成 production-only 变更，但因本次明确不新增
+exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `PASS`；其余 12 个 P1 的 production
 仍未开始。各单元仍必须把 production、target test 和实际受影响的 normative source 原子落地，T0 PASS
 后才可交付。9 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
 
