@@ -650,7 +650,6 @@ def _initial_children(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
     scope_run: ScopeRunCoordinate,
-    availability: RecoveryAvailabilityCoordinates[GraphValueT],
     family: _RecoveryFamily[GraphValueT],
     invocation_new: tuple[GraphNodeId, ...],
 ) -> tuple[ChildRecoveryDisposition, ...]:
@@ -878,7 +877,6 @@ def _expand_quiescent_executable(
         graph,
         state,
         scope_run,
-        item.availability,
         family,
         item.invocation_new_children,
     )
@@ -1026,7 +1024,7 @@ def _prove_scope(
     initial = _RecoveryWorkItem(
         state,
         availability,
-        children=_initial_children(graph, state, scope_run, availability, family, ()),
+        children=_initial_children(graph, state, scope_run, family, ()),
     )
     family.budget.admit(1)
     sequence = 0
