@@ -788,7 +788,7 @@ Phase 0 已固定所有 target gate 的 path、子断言和失败条件，但尚
 | S09 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_projection_has_one_command_owner`：`RoutingResolution`/`plan_routing` forwarding path 归零，唯一 projection 直接返回 command；missing-input case 必须仍在 advance 前 abort | DESIGNED / PENDING IMPLEMENTATION |
 | S10 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_facts_have_one_canonical_output_diagnostic`：`S10.a` 要求 resolver 内只有一次 full binding scan；`S10.b` 只保留 `unavailable_graph_outputs`，两个镜像 bool 不存在；`S10.c` 独立 `graph_outputs_available` 仍短路并保留首个 missing/error order；completion output 缺失仍 abort/error | DESIGNED / PENDING IMPLEMENTATION |
 | S11 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_routing_target_facts_have_one_typed_scan`：`S11.a` `RequiredTarget` exact 三字段；`S11.b` 每个 unique target 只有一次 binding scan，cache key/value exact 为 `GraphNodeId/RequiredTarget`；`S11.c` source-kind、control→join→data 顺序和 first unavailable identity 固定；unavailable input 仍在 admission 前拒绝 | DESIGNED / PENDING IMPLEMENTATION |
-| S13 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_initial_children_signature_contains_only_consumed_inputs`：`_initial_children()` 不再接受未使用 availability 参数或构造 phantom input；malformed child binding 仍 fail closed | DESIGNED / PENDING IMPLEMENTATION |
+| S13 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_initial_children_signature_contains_only_consumed_inputs`：`_initial_children()` 不再接受未使用 availability 参数或构造 phantom input；malformed child binding 仍 fail closed | PRODUCTION IMPLEMENTED / T0 DEFERRED |
 | S14 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_nested_outcome_keeps_boundary_owned_identity`：`S14.a` `_NestedOutcome` 仅两个字段；`S14.b` kind/availability 只读 boundary；`S14.c` disposition 只由 `ScopeControlStateCoordinate` projection 生成，不读取 `compare=False` state；非-terminal child 仍拒绝 projection | DESIGNED / PENDING IMPLEMENTATION |
 | S17 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_candidate_derives_skip_actions_from_command`：candidate 不再存储 `skip_actions`/`has_pure_skip` 镜像；pure-skip historical output loss 仍在 commit 前 fail closed | DESIGNED / PENDING IMPLEMENTATION |
 | S18 | 待新增 `tests/architecture/test_graph_execution_ownership.py::test_resume_duplicate_indexes_are_owner_local_and_linear`，承载 `S18.a` invocation/admission 的两个 typed count dict、每 owner 一个 index、`S18.b` 无 `.count()`、`S18.c` 无先 `any` 后重扫且 duplicate-before-collision；`tests/execution/engine/test_resume_admission.py::test_resume_admission_rejects_duplicate_and_confirmed_substitution_coordinates`、`::test_resume_admission_keeps_repeated_superstep_coordinates_isolated` 和 `tests/execution/test_graph_api.py::test_duplicate_public_skip_candidates_are_rejected_before_commit` 继续证明行为、错误 identity 和 coordinate isolation | DESIGNED / PENDING IMPLEMENTATION |
@@ -799,6 +799,10 @@ Phase 0 已固定所有 target gate 的 path、子断言和失败条件，但尚
 上述 target gate 是已完成的 Phase 0 设计，不冒充当前已存在的测试，也不要求在 `GSP-A05` 前落地。
 requirements 已依据 baseline behavior、这张 target 设计表及 `GSP-A01`–`GSP-A04` evidence 完成 `GSP-A05`
 授权；每个 gate 必须与对应 production 原子落地，T0 未通过的单元不得交付或进入下一单元。
+
+S13 的 `PRODUCTION IMPLEMENTED / T0 DEFERRED` 不是 `PASS`：production 已完成，但本次明确不新增
+exact-shape architecture test，因此该单元仍不满足 T0 交付条件。其余 target gate 仍保持
+`DESIGNED / PENDING IMPLEMENTATION`。
 
 #### 7.2.3 Source/AST 子断言（R4 可执行口径）
 
@@ -1003,6 +1007,32 @@ untracked Markdown 的 `git diff --no-index --check /dev/null <path>` 均返回�
 monorepo `pre-commit run --all-files` 也全部通过。两类 manifest 保持分离，验证未修改 Git index，也不把文档
 批准冒充尚未实施的 production/T0 gate。
 
+### 7.9 S13 production implementation writeback（2026-08-20）
+
+S13 已在 commit `de7e935` 中完成 production 变更：`_initial_children()` 删除未使用的
+`availability` 参数，并同步删除两个调用点的对应实参。函数体、child sorting、错误边界和调用顺序均未改变。
+
+本次 S13 production change unit 的 actual changed-file manifest 只有：
+
+```text
+mote-kernel/src/mote_kernel/execution/engine/recovery.py
+```
+
+该变更没有触及 State、State tests、public API、normative behavior source 或持久化路径，也没有新增 helper、DTO、
+缓存或兼容层。已有 recovery characterization 通过：
+
+```text
+tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_projects_existing_terminal_children
+tests/execution/engine/test_recovery_identity.py::test_recovery_preflight_rejects_each_malformed_child_control_binding
+5 passed（含参数化展开）
+```
+
+S13 变更前后 `make check` 均通过（817 tests、coverage 100%、Ruff、Pyright、build、Twine），变更后的
+monorepo `pre-commit run --all-files` 也通过。
+
+本次实施明确不新增 S13 的 exact-shape architecture test，因此 T0 保持 `DEFERRED`，不能将 S13 记为完整
+`PASS` 或据此自动放行 S14。本文本节是独立 owner writeback，不计入上述 S13 production manifest。
+
 ## 8. 文档同步和缺口
 
 当前行为与功能语义的 normative source 文件均存在，本轮按第 5.1 节的最小 source precedence 使用。完整
@@ -1089,10 +1119,11 @@ requirements 第 7 节现已接受 per-change manifest、闭合 `GSP-A03/GSP-A04
 P1 批准 `GSP-A05`。第十次复审 C2 经其登记 SHA 对象复核不成立：第 7.4 节只有 5 个唯一 path，
 `README.zh-CN.md` 仅出现一次，历史 manifest 无需删除。
 
-截至本次终局文档裁决，production/tests 均未修改，15 个 T0 仍为
-`DESIGNED / PENDING IMPLEMENTATION`。Phase 1/2 现仅对获批的 15 个 P1 开放；各单元仍必须把 production、
-target test 和实际受影响的 normative source 原子落地，T0 PASS 后才可交付。9 个 P2 继续逐项受
-`GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+截至上述终局文档裁决时，production/tests 均未修改，15 个 T0 均为
+`DESIGNED / PENDING IMPLEMENTATION`。随后 S13 已完成 production-only 变更，但因本次明确不新增
+exact-shape architecture test，其 T0 仍为 `DEFERRED`，不计为完整 `PASS`；其余 14 个 P1 的 production
+仍未开始。各单元仍必须把 production、target test 和实际受影响的 normative source 原子落地，T0 PASS
+后才可交付。9 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
