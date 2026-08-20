@@ -69,7 +69,6 @@ from mote_kernel.execution.run_context import (
     _continuation,
 )
 from mote_kernel.state.graph_state import (
-    AdvanceGraphFrontier,
     FailedGraphNode,
     FenceGraphExecution,
     GraphExecutionToken,
@@ -87,11 +86,6 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
-
-
-@dataclass(frozen=True, slots=True)
-class _AdvancedFrontier:
-    pass
 
 
 class _TransitionSeal:
@@ -343,7 +337,7 @@ async def _advance_scope_quantum(
     executors: dict[tuple[GraphNodeId, ...], GraphExecutor[GraphValueT]],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
-) -> GraphBoundary | _AdvancedFrontier | None:
+) -> GraphBoundary | None:
     state = context.state_at(scope_run)
     projections = _child_projections(
         graph,
@@ -362,7 +356,7 @@ async def _advance_scope_quantum(
             commit,
         )
         context.replace_state(scope_run, confirmed)
-        return _AdvancedFrontier() if isinstance(disposition.command, AdvanceGraphFrontier) else None
+        return None
     if isinstance(disposition, ExecutableFrontier):
         await _execute_frontier(
             graph,
@@ -455,8 +449,6 @@ async def drive_root(
             limits,
             commit,
         )
-        if isinstance(disposition, _AdvancedFrontier):
-            continue
         if disposition is not None:
             return disposition
 
