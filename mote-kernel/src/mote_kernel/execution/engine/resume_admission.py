@@ -10,10 +10,12 @@ from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.run_context import (
     AdmittedSubstitution,
     CandidateFrameAvailability,
+    PublicationAvailabilityCoordinate,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
 )
 from mote_kernel.state.graph_state import (
+    GraphNodeId,
     GraphRunState,
     ResumeGraphNodes,
     SelectGraphRoute,
@@ -88,22 +90,28 @@ def admit_resume_candidates(
                 or route != action_route
             ):
                 raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
-    coordinates = tuple(substitution.coordinate for substitution in substitutions)
-    if len(coordinates) != len(set(coordinates)):
-        duplicates = tuple(
-            sorted({coordinate.activation.node_id for coordinate in coordinates if coordinates.count(coordinate) > 1})
-        )
+    canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
+    publication_counts: dict[PublicationAvailabilityCoordinate[GraphValueT], int] = {}
+    duplicate_coordinates: list[PublicationAvailabilityCoordinate[GraphValueT]] = []
+    collision_nodes: list[GraphNodeId] = []
+    for substitution in canonical:
+        coordinate = substitution.coordinate
+        count = publication_counts.get(coordinate, 0) + 1
+        publication_counts[coordinate] = count
+        if count == 2:
+            duplicate_coordinates.append(coordinate)
+        if frames.has_publication(coordinate):
+            collision_nodes.append(coordinate.activation.node_id)
+    if duplicate_coordinates:
+        duplicates = tuple(sorted({coordinate.activation.node_id for coordinate in duplicate_coordinates}))
         raise GraphValuePublicationError(
             f"resume substitution nodes {duplicates!r} supplied duplicate publication coordinates"
         )
-    if any(frames.has_publication(coordinate) for coordinate in coordinates):
-        collisions = tuple(
-            sorted(coordinate.activation.node_id for coordinate in coordinates if frames.has_publication(coordinate))
-        )
+    if collision_nodes:
+        collisions = tuple(sorted(collision_nodes))
         raise GraphValuePublicationError(
             f"resume substitution nodes {collisions!r} collide with confirmed publications"
         )
-    canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
     availability = CandidateFrameAvailability(frames, canonical)
     for candidate in candidates:
         facts = resolve_routing_facts(candidate.graph, candidate.successor, candidate.scope_run, availability)

@@ -370,11 +370,17 @@ def plan_resumes(
     canonical = tuple(sorted(resume, key=lambda action: (action.scope, action.node_id)))
     if canonical != resume:
         raise SnapshotMismatchError("resume actions must be supplied in canonical scope/node order")
-    action_coordinates = tuple((action.scope, action.node_id) for action in canonical)
-    if len(action_coordinates) != len(set(action_coordinates)):
-        duplicates = tuple(coordinate for coordinate in action_coordinates if action_coordinates.count(coordinate) > 1)
+    action_counts: dict[tuple[tuple[str, ...], GraphNodeId], int] = {}
+    duplicate_coordinates: list[tuple[tuple[str, ...], GraphNodeId]] = []
+    for action in canonical:
+        coordinate = (action.scope, action.node_id)
+        count = action_counts.get(coordinate, 0) + 1
+        action_counts[coordinate] = count
+        if count == 2:
+            duplicate_coordinates.append(coordinate)
+    if duplicate_coordinates:
         raise GraphValuePublicationError(
-            f"resume action nodes {tuple(dict.fromkeys(duplicates))!r} supplied duplicate candidate coordinates"
+            f"resume action nodes {tuple(duplicate_coordinates)!r} supplied duplicate candidate coordinates"
         )
     planned_states = states
     candidate_frames = frames
