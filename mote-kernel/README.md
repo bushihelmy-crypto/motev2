@@ -34,6 +34,16 @@ Passing a state with an active execution lease explicitly confirms that its prev
 
 Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, `Graph.ExecutionLimitError`, and the value admission/unavailability/publication errors for precise handling.
 
+## Documentation
+
+- [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
+- [Graph Node I/O implementation](docs/graph-node-input-output-contract-implementation.zh-CN.md) owns the current Node I/O, compiled topology, frame, continuation, and recovery shape.
+- [`skip_failed` requirements](docs/skip-failed-output-requirements.zh-CN.md) and [implementation](docs/skip-failed-output-implementation.zh-CN.md) own current skip-output behavior.
+- [Semantics-preserving simplification requirements](docs/graph-semantics-preserving-simplification-requirements.zh-CN.md) own only this refactor's preservation obligations, non-goals, and phase admission conditions.
+- [Semantics-preserving simplification implementation plan](docs/graph-semantics-preserving-simplification-implementation.zh-CN.md) owns only the target shape, atomic migration ledger, ordering, and verification plan.
+
+The implementation plan maintains the review and historical-research index; this README does not duplicate that evolving list or normative text.
+
 ## Design principles
 
 - One execution engine for every agent flow.

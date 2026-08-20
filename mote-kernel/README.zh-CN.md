@@ -34,7 +34,15 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 
 公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类；`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 以及 value admission/unavailability/publication errors 用于精确捕获。
 
-详细设计见 [架构说明](docs/architecture.zh-CN.md)。
+## 文档导航
+
+- [架构说明](docs/architecture.zh-CN.md)记录当前公共门面、execution/state owner 与持久化边界；
+- [Graph Node I/O 实施规范](docs/graph-node-input-output-contract-implementation.zh-CN.md)记录当前 Node I/O、compiled topology、frame、continuation 与 recovery shape；
+- [`skip_failed` 需求](docs/skip-failed-output-requirements.zh-CN.md)及其[实施规范](docs/skip-failed-output-implementation.zh-CN.md)记录当前 skip-output 行为；
+- [语义保持型简化需求](docs/graph-semantics-preserving-simplification-requirements.zh-CN.md)只拥有本轮行为保持义务、非目标与阶段准入条件；
+- [语义保持型简化实施方案](docs/graph-semantics-preserving-simplification-implementation.zh-CN.md)只拥有 target shape、原子迁移账本、实施顺序与验证计划。
+
+各轮评审和历史调研由实施方案的“关联记录”统一索引，README 不复制动态评审列表或规范正文。
 
 ## 开发
 
