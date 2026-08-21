@@ -30,11 +30,14 @@ from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
 )
 from mote_kernel.state.graph_state import (
+    FailedGraphNode,
+    GraphFrontierNode,
     GraphNodeId,
     GraphResumeInputPayload,
     GraphRunState,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    UseStepRequestInput,
     frontier_node,
 )
 
@@ -194,17 +197,26 @@ def materialize_node_input(
     scope_run: ScopeRunCoordinate,
     frames: ScopedFrameIndex[GraphValueT],
     node_id: GraphNodeId,
+    *,
+    failed_retry_input: UseStepRequestInput | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     require_resume_input_binding(graph, state)
     if state.run_id != scope_run.graph_run_id:
         raise SnapshotMismatchError("node materialization scope does not match authoritative state")
     node = frontier_node(state.frontier, node_id)
-    if node is None or not isinstance(node.settlement, PendingGraphNode):
-        raise SnapshotMismatchError("effective input requires a current pending node")
+    match node, failed_retry_input:
+        case GraphFrontierNode(settlement=PendingGraphNode(input=effective_input)), None:
+            pass
+        case GraphFrontierNode(settlement=FailedGraphNode()), UseStepRequestInput() as effective_input:
+            pass
+        case _:
+            raise SnapshotMismatchError(
+                "effective input requires a current pending node or a current failed node with failed retry input"
+            )
     activation = StableActivation(scope_run, state.superstep, node_id)
     plan = graph.materializations[node_id]
-    if isinstance(node.settlement.input, OverrideGraphNodeInput):
-        return decode_resume_input(graph, node_id, bytes(node.settlement.input.payload))
+    if isinstance(effective_input, OverrideGraphNodeInput):
+        return decode_resume_input(graph, node_id, bytes(effective_input.payload))
     resume_coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
         activation,
         plan.descriptor.identity,

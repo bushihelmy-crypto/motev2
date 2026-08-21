@@ -1,6 +1,5 @@
 """Sole scoped graph executor with prepare, execute, and resume projections."""
 
-from dataclasses import replace
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
@@ -145,23 +144,11 @@ class GraphExecutor(Generic[GraphValueT]):
                     binding = UseStepRequestInput()
                     frame = materialize_node_input(
                         self._graph,
-                        replace(
-                            state,
-                            frontier=GraphFrontierState(
-                                tuple(
-                                    GraphFrontierNode(
-                                        node.node_id,
-                                        PendingGraphNode(UseStepRequestInput())
-                                        if node.node_id == requested.node_id
-                                        else node.settlement,
-                                    )
-                                    for node in state.frontier.nodes
-                                )
-                            ),
-                        ),
+                        state,
                         request.scope_run,
                         request.frames,
                         requested.node_id,
+                        failed_retry_input=binding,
                     )
                 actions.append(ResumeFailedNode(requested.node_id, binding))
                 replacements[requested.node_id] = PendingGraphNode(binding)

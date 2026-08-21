@@ -48,6 +48,7 @@ from mote_kernel.state.graph_state import (
     GraphRunId,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    UseStepRequestInput,
 )
 
 
@@ -296,6 +297,21 @@ def test_materialization_requires_the_authoritative_graph_run_coordinate() -> No
             root_scope_run(GraphRunId("other")),
             ScopedFrameIndex(),
             GraphNodeId("source"),
+        )
+
+
+def test_failed_retry_materialization_requires_a_current_failed_node() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+
+    with pytest.raises(SnapshotMismatchError, match="current failed node"):
+        materialize_node_input(
+            graph,
+            state,
+            root_scope_run(state.run_id),
+            ScopedFrameIndex(),
+            GraphNodeId("source"),
+            failed_retry_input=UseStepRequestInput(),
         )
 
 
