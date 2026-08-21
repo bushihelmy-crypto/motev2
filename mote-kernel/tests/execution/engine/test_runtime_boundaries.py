@@ -1144,14 +1144,6 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
                 failed,
                 successor,
                 (substitution,),
-                (
-                    SkipFailedNode(
-                        GraphNodeId("nested"),
-                        GraphSkipReason("boundary replacement"),
-                        ContinueGraphRouting(),
-                    ),
-                ),
-                False,
                 command,
             ),
         ),
@@ -1238,9 +1230,7 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
             successor.revision,
         )
         substitutions.append(substitution)
-        candidates.append(
-            ScopedResumeCandidate(graph, scope_run, state, successor, (substitution,), (action,), False, command)
-        )
+        candidates.append(ScopedResumeCandidate(graph, scope_run, state, successor, (substitution,), command))
         parent = ParentGraphActivation(state.run_id, superstep, GraphNodeId("nested"))
         child_runs.append(child_scope_run_for_activation(scope_run, parent))
 

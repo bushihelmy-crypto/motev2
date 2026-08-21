@@ -6,7 +6,7 @@ from typing import Generic, TypeVar
 from mote_kernel.execution.engine.routing import resolve_routing_facts
 from mote_kernel.execution.errors import GraphValuePublicationError, GraphValueUnavailableError, SnapshotMismatchError
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.identity import ScopeRunCoordinate
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.run_context import (
     AdmittedSubstitution,
     CandidateFrameAvailability,
@@ -35,8 +35,6 @@ class ScopedResumeCandidate(Generic[GraphValueT]):
     previous: GraphRunState
     successor: GraphRunState
     substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
-    skip_actions: tuple[SkipFailedNode, ...]
-    has_pure_skip: bool
     command: ResumeGraphNodes
 
 
@@ -45,6 +43,7 @@ def admit_resume_candidates(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> CandidateFrameAvailability[GraphValueT]:
     substitutions = tuple(substitution for candidate in candidates for substitution in candidate.substitutions)
+    candidate_skip_actions: list[tuple[SkipFailedNode, ...]] = []
     for candidate in candidates:
         if candidate.previous.run_id != candidate.scope_run.graph_run_id or candidate.successor.run_id != (
             candidate.scope_run.graph_run_id
@@ -52,10 +51,8 @@ def admit_resume_candidates(
             raise SnapshotMismatchError("resume candidate states do not match their scoped graph run")
         if reduce_graph_run(candidate.previous, candidate.command) != candidate.successor:
             raise SnapshotMismatchError("resume candidate successor is not the exact command reduction")
-        if candidate.skip_actions != tuple(
-            action for action in candidate.command.actions if isinstance(action, SkipFailedNode)
-        ):
-            raise SnapshotMismatchError("resume candidate skip actions do not match its exact command")
+        skip_actions = tuple(action for action in candidate.command.actions if isinstance(action, SkipFailedNode))
+        candidate_skip_actions.append(skip_actions)
         for substitution in candidate.substitutions:
             activation = substitution.coordinate.activation
             try:
@@ -64,7 +61,7 @@ def admit_resume_candidates(
                 raise SnapshotMismatchError("resume substitution references an unknown publication node") from error
             node = frontier_node(candidate.successor.frontier, activation.node_id)
             action = next(
-                (action for action in candidate.skip_actions if action.node_id == activation.node_id),
+                (action for action in skip_actions if action.node_id == activation.node_id),
                 None,
             )
             route = (
@@ -113,7 +110,7 @@ def admit_resume_candidates(
             f"resume substitution nodes {collisions!r} collide with confirmed publications"
         )
     availability = CandidateFrameAvailability(frames, canonical)
-    for candidate in candidates:
+    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
         facts = resolve_routing_facts(candidate.graph, candidate.successor, candidate.scope_run, availability)
         unavailable = tuple(
             sorted(
@@ -127,11 +124,21 @@ def admit_resume_candidates(
         if unavailable:
             raise GraphValueUnavailableError(
                 f"resume of scoped graph {candidate.scope_run.scope!r} "
-                f"for actions {tuple(action.node_id for action in candidate.skip_actions)!r} "
+                f"for actions {tuple(action.node_id for action in skip_actions)!r} "
                 f"leaves required nodes and consumer inputs {unavailable!r} unavailable"
             )
+        skip_publication_coordinates: set[PublicationAvailabilityCoordinate[GraphValueT]] = {
+            PublicationAvailabilityCoordinate(
+                StableActivation(candidate.scope_run, candidate.previous.superstep, action.node_id),
+                candidate.graph.publications[action.node_id].descriptor.identity,
+            )
+            for action in skip_actions
+        }
+        pure_skip_coordinates = skip_publication_coordinates.difference(
+            substitution.coordinate for substitution in candidate.substitutions
+        )
         if (
-            candidate.has_pure_skip
+            pure_skip_coordinates
             and not any(
                 (
                     facts.control_targets,
@@ -142,7 +149,7 @@ def admit_resume_candidates(
             )
             and facts.unavailable_graph_outputs
         ):
-            actions = tuple(action.node_id for action in candidate.skip_actions)
+            actions = tuple(action.node_id for action in skip_actions)
             raise GraphValueUnavailableError(
                 f"resume actions {actions!r} in scoped graph {candidate.scope_run.scope!r} "
                 f"leave graph outputs/bindings {facts.unavailable_graph_outputs!r} unavailable"

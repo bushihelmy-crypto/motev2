@@ -195,8 +195,6 @@ class ScopedResumeCandidate(Generic[GraphValueT]):
     previous: GraphRunState
     successor: GraphRunState
     substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
-    skip_actions: tuple[SkipFailedNode, ...]
-    has_pure_skip: bool
     command: ResumeGraphNodes
 
 
@@ -206,7 +204,7 @@ def admit_resume_candidates(
 ) -> CandidateFrameAvailability[GraphValueT]: ...
 ```
 
-`invocation.plan_resumes()` 负责 scope resolution、executor admission、reducer simulation 和汇总；`admit_resume_candidates()` 一次性验证全部 scope 后返回 canonical candidate overlay。每个 candidate 自带该 scope 的 compiled graph，以避免 root graph 与 nested graph descriptor 混淆；`command` 是必填的 exact proof evidence，绝不允许 `None`。admission 无条件验证 `reduce_graph_run(previous, command) == successor`，并验证 `skip_actions` 正好等于 command 中的 `SkipFailedNode` actions、每个 substitution 与 exact successor 中的 skipped settlement/action/descriptor/revision逐项绑定。`has_pure_skip` 只是触发 future fail-closed proof 的 typed projection，不参与 reducer truth 的构造。
+`invocation.plan_resumes()` 负责 scope resolution、executor admission、reducer simulation 和汇总；`admit_resume_candidates()` 一次性验证全部 scope 后返回 canonical candidate overlay。每个 candidate 自带该 scope 的 compiled graph，以避免 root graph 与 nested graph descriptor 混淆；`command` 是必填的 exact proof evidence，绝不允许 `None`。admission 无条件验证 `reduce_graph_run(previous, command) == successor`，每个 candidate 只从 exact command 派生一次 ordered `SkipFailedNode` tuple，并将每个 substitution 与 exact successor 中的 skipped settlement/action/descriptor/revision逐项绑定。pure skip 不保存 bool：由 skip action 的完整 publication availability coordinate 集合减去 substitution coordinate 集合得到，差集非空才触发 future fail-closed proof。
 
 ### 6.2 唯一 routing facts resolver
 

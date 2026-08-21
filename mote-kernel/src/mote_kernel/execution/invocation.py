@@ -42,7 +42,6 @@ from mote_kernel.execution.request import (
     ResumeInterruptedNodeRequest,
     ResumeNodeRequest,
     ResumeRequest,
-    SkipFailedNodeRequest,
 )
 from mote_kernel.execution.result import (
     PreparedResume,
@@ -415,8 +414,6 @@ def plan_resumes(
                 binding.state,
                 candidate,
                 substitutions,
-                tuple(action for action in prepared.command.actions if isinstance(action, SkipFailedNode)),
-                any(isinstance(action, SkipFailedNodeRequest) and action.output is None for action in actions),
                 prepared.command,
             )
         )
