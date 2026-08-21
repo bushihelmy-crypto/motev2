@@ -44,7 +44,6 @@ ResolutionCommand: TypeAlias = AdvanceGraphFrontier | CompleteGraphFrontier | Ab
 @dataclass(frozen=True, slots=True)
 class RequiredTarget:
     node_id: GraphNodeId
-    inputs_available: bool
     historical_inputs_missing: bool
     unavailable_inputs: tuple[str, ...]
 
@@ -155,70 +154,6 @@ def unavailable_graph_outputs(
     return tuple(unavailable)
 
 
-def unavailable_target_inputs(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
-    frames: ScopedFrameAvailability[GraphValueT],
-    node_id: GraphNodeId,
-) -> tuple[str, ...]:
-    unavailable: list[str] = []
-    for binding in graph.materializations[node_id].bindings.entries:
-        source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run, graph.graph_input_descriptor.identity
-            )
-            if not frames.has_graph_input(graph_input_coordinate):
-                unavailable.append(f"{binding.destination.local_name}<-graph-input:{source.name}")
-            continue
-        selection = require_publication_selection(
-            binding.publication,
-            InvalidRoutingCommandError("compiled node-output binding lacks its activation selection"),
-        )
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(scope_run, selection.resolve(state.superstep + 1), source.node_id),
-            graph.publications[source.node_id].descriptor.identity,
-        )
-        if not frames.has_publication(publication_coordinate):
-            unavailable.append(f"{binding.destination.local_name}<-{source.node_id}.{source.output_name}")
-    return tuple(unavailable)
-
-
-def _target_has_historical_gap(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
-    frames: ScopedFrameAvailability[GraphValueT],
-    node_id: GraphNodeId,
-) -> bool:
-    unavailable = False
-    for binding in graph.materializations[node_id].bindings.entries:
-        source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run, graph.graph_input_descriptor.identity
-            )
-            unavailable = unavailable or not frames.has_graph_input(graph_input_coordinate)
-            continue
-        selection = require_publication_selection(
-            binding.publication,
-            InvalidRoutingCommandError("compiled node-output binding lacks its activation selection"),
-        )
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(scope_run, selection.resolve(state.superstep + 1), source.node_id),
-            graph.publications[source.node_id].descriptor.identity,
-        )
-        if frames.has_publication(publication_coordinate):
-            continue
-        current = next((node for node in state.frontier.nodes if node.node_id == source.node_id), None)
-        unavailable = unavailable or not (
-            current is not None
-            and isinstance(current.settlement, FailedGraphNode | InterruptedGraphNode | SkippedGraphNode)
-        )
-    return unavailable
-
-
 def resolve_routing_facts(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -264,14 +199,43 @@ def resolve_routing_facts(
         else:
             remaining.append(GraphJoinProgress(edge.sources, edge.target, frozenset(arrived)))
 
+    required_targets: dict[GraphNodeId, RequiredTarget] = {}
+
     def required(target: GraphNodeId) -> RequiredTarget:
-        unavailable = unavailable_target_inputs(graph, state, scope_run, frames, target)
-        return RequiredTarget(
-            target,
-            not unavailable,
-            _target_has_historical_gap(graph, state, scope_run, frames, target),
-            unavailable,
-        )
+        cached = required_targets.get(target)
+        if cached is not None:
+            return cached
+        historical_inputs_missing = False
+        unavailable_inputs: list[str] = []
+        for binding in graph.materializations[target].bindings.entries:
+            source = binding.source
+            if isinstance(source, GraphInputPort):
+                graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = (
+                    GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity)
+                )
+                if not frames.has_graph_input(graph_input_coordinate):
+                    unavailable_inputs.append(f"{binding.destination.local_name}<-graph-input:{source.name}")
+                    historical_inputs_missing = True
+                continue
+            selection = require_publication_selection(
+                binding.publication,
+                InvalidRoutingCommandError("compiled node-output binding lacks its activation selection"),
+            )
+            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
+                StableActivation(scope_run, selection.resolve(state.superstep + 1), source.node_id),
+                graph.publications[source.node_id].descriptor.identity,
+            )
+            if frames.has_publication(publication_coordinate):
+                continue
+            unavailable_inputs.append(f"{binding.destination.local_name}<-{source.node_id}.{source.output_name}")
+            current = next((node for node in state.frontier.nodes if node.node_id == source.node_id), None)
+            historical_inputs_missing = historical_inputs_missing or not (
+                current is not None
+                and isinstance(current.settlement, FailedGraphNode | InterruptedGraphNode | SkippedGraphNode)
+            )
+        resolved = RequiredTarget(target, historical_inputs_missing, tuple(unavailable_inputs))
+        required_targets[target] = resolved
+        return resolved
 
     control_facts = tuple(required(target) for target in sorted(direct_control_targets))
     completed_join_facts = tuple(required(target) for target in sorted(completed_join_targets))
@@ -291,14 +255,14 @@ def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> Resoluti
     unavailable_control = tuple(
         target.node_id
         for target in (*facts.control_targets, *facts.completed_join_targets)
-        if not target.inputs_available
+        if target.unavailable_inputs
     )
     if unavailable_control:
         return AbortGraphRun(
             state.revision,
             GraphAbortReason(f"required values unavailable for controlled nodes {unavailable_control!r}"),
         )
-    ready_data = {target.node_id for target in facts.data_targets if target.inputs_available}
+    ready_data = {target.node_id for target in facts.data_targets if not target.unavailable_inputs}
     next_nodes = control_targets | ready_data
     if next_nodes:
         return AdvanceGraphFrontier(

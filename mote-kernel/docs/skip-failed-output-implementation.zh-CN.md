@@ -216,7 +216,6 @@ def admit_resume_candidates(
 @dataclass(frozen=True, slots=True)
 class RequiredTarget:
     node_id: GraphNodeId
-    inputs_available: bool
     historical_inputs_missing: bool
     unavailable_inputs: tuple[str, ...]
 
@@ -239,6 +238,12 @@ def resolve_routing_facts(
 ```
 
 该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及 graph-output diagnostic identity。resolver 对 graph outputs 只执行一次完整 `unavailable_graph_outputs()` 扫描；独立 `graph_outputs_available(...) -> bool` 保留首次缺失短路，供 completed continuation、nested boundary 和 invocation validation 使用，不在 resolver 内重复调用。`historical_inputs_missing` 与 graph-output historical gap 均由同一份 availability truth 推导；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
+
+每个 unique target 的 materialization bindings 只按声明顺序扫描一次，在同一循环内生成
+`historical_inputs_missing` 与 `unavailable_inputs`。一次 resolver invocation 只维护一个
+`dict[GraphNodeId, RequiredTarget]`，并按 control → completed join → data 的顺序首次填充；同一 target 被多种
+contribution 命中时复用相同 fact，不重复读取 bindings。input availability 只由
+`not target.unavailable_inputs` 推导，不保存第二个 bool，也不增加跨 invocation cache 或 display identity。
 
 completion facts 只从 canonical tuple 和 target work 推导：
 

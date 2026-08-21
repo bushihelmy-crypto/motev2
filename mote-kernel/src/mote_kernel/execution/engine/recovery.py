@@ -986,7 +986,7 @@ def _resolve_quiescent(
     command = project_routing_facts(state, facts)
     if isinstance(command, AbortGraphRun):
         required = (*facts.control_targets, *facts.completed_join_targets)
-        if any(target.historical_inputs_missing for target in required if not target.inputs_available) or (
+        if any(target.historical_inputs_missing for target in required if target.unavailable_inputs) or (
             not any(
                 (
                     facts.control_targets,
@@ -998,7 +998,7 @@ def _resolve_quiescent(
             and facts.unavailable_graph_outputs
         ):
             missing_inputs = tuple(
-                (target.node_id, target.unavailable_inputs) for target in required if not target.inputs_available
+                (target.node_id, target.unavailable_inputs) for target in required if target.unavailable_inputs
             )
             raise GraphValueUnavailableError(
                 f"resume actions {family.action_node_ids()!r} require unavailable historical values "

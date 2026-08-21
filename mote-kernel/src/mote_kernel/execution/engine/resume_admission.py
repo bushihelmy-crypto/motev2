@@ -120,7 +120,7 @@ def admit_resume_candidates(
                 {
                     (target.node_id, target.unavailable_inputs)
                     for target in (*facts.control_targets, *facts.completed_join_targets, *facts.data_targets)
-                    if not target.inputs_available
+                    if target.unavailable_inputs
                 }
             )
         )
