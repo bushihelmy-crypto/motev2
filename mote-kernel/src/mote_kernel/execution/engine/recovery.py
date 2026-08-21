@@ -983,12 +983,11 @@ def _resolve_quiescent(
 ) -> _RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]:
     state = item.state
     facts = resolve_routing_facts(graph, state, scope_run, item.availability)
-    resolution = project_routing_facts(state, facts)
-    command = resolution.command
+    command = project_routing_facts(state, facts)
     if isinstance(command, AbortGraphRun):
         required = (*facts.control_targets, *facts.completed_join_targets)
         if any(target.historical_inputs_missing for target in required if not target.inputs_available) or (
-            not resolution.completion_outputs_available and facts.completion_output_history_missing
+            not facts.completion_output_available and facts.completion_output_history_missing
         ):
             missing_inputs = tuple(
                 (target.node_id, target.unavailable_inputs) for target in required if not target.inputs_available

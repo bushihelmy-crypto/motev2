@@ -42,15 +42,6 @@ ResolutionCommand: TypeAlias = AdvanceGraphFrontier | CompleteGraphFrontier | Ab
 
 
 @dataclass(frozen=True, slots=True)
-class RoutingResolution:
-    command: ResolutionCommand
-    selected_control_targets: tuple[GraphNodeId, ...]
-    selected_data_targets: tuple[GraphNodeId, ...]
-    unavailable_control_targets: tuple[GraphNodeId, ...]
-    completion_outputs_available: bool
-
-
-@dataclass(frozen=True, slots=True)
 class RequiredTarget:
     node_id: GraphNodeId
     inputs_available: bool
@@ -310,7 +301,7 @@ def resolve_routing_facts(
     )
 
 
-def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> RoutingResolution:
+def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> ResolutionCommand:
     control_targets = {target.node_id for target in (*facts.control_targets, *facts.completed_join_targets)}
     unavailable_control = tuple(
         target.node_id
@@ -318,49 +309,26 @@ def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> RoutingR
         if not target.inputs_available
     )
     if unavailable_control:
-        return RoutingResolution(
-            AbortGraphRun(
-                state.revision,
-                GraphAbortReason(f"required values unavailable for controlled nodes {unavailable_control!r}"),
-            ),
-            tuple(sorted(control_targets)),
-            (),
-            unavailable_control,
-            True,
+        return AbortGraphRun(
+            state.revision,
+            GraphAbortReason(f"required values unavailable for controlled nodes {unavailable_control!r}"),
         )
     ready_data = {target.node_id for target in facts.data_targets if target.inputs_available}
     next_nodes = control_targets | ready_data
     if next_nodes:
-        return RoutingResolution(
-            AdvanceGraphFrontier(state.revision, tuple(sorted(next_nodes)), facts.remaining_join_progress),
-            tuple(sorted(control_targets)),
-            tuple(sorted(ready_data)),
-            (),
-            True,
+        return AdvanceGraphFrontier(
+            state.revision,
+            tuple(sorted(next_nodes)),
+            facts.remaining_join_progress,
         )
     if facts.remaining_join_progress:
         raise RoutingDeadlockError("partial join progress has no next task able to complete it")
     if not facts.completion_output_available:
-        return RoutingResolution(
-            AbortGraphRun(
-                state.revision,
-                GraphAbortReason("required graph output values are unavailable at completion"),
-            ),
-            (),
-            (),
-            (),
-            False,
+        return AbortGraphRun(
+            state.revision,
+            GraphAbortReason("required graph output values are unavailable at completion"),
         )
-    return RoutingResolution(CompleteGraphFrontier(state.revision), (), (), (), True)
-
-
-def plan_routing(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
-    frames: ScopedFrameAvailability[GraphValueT],
-) -> RoutingResolution:
-    return project_routing_facts(state, resolve_routing_facts(graph, state, scope_run, frames))
+    return CompleteGraphFrontier(state.revision)
 
 
 def resolve_routing(
@@ -369,7 +337,7 @@ def resolve_routing(
     scope_run: ScopeRunCoordinate,
     frames: ScopedFrameAvailability[GraphValueT],
 ) -> ResolutionCommand:
-    return plan_routing(graph, state, scope_run, frames).command
+    return project_routing_facts(state, resolve_routing_facts(graph, state, scope_run, frames))
 
 
 __all__ = ["_declared_joins"]

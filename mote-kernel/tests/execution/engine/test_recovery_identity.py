@@ -16,7 +16,7 @@ from mote_kernel.execution.engine.recovery import (
     preflight_recovery,
     recovery_traversal_key,
 )
-from mote_kernel.execution.engine.routing import plan_routing
+from mote_kernel.execution.engine.routing import resolve_routing
 from mote_kernel.execution.engine.settlement import require_settlement_execution_token
 from mote_kernel.execution.errors import GraphValueUnavailableError, SnapshotMismatchError
 from mote_kernel.execution.graph.compiler import compile_graph
@@ -1104,7 +1104,7 @@ def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap()
     scope_run = root_scope_run(state.run_id)
     frames = _partial_history_frames(graph, scope_run)
     state = _settle_successes(state, (("available", None), ("missing", None)))
-    state = reduce_graph_run(state, plan_routing(graph, state, scope_run, frames).command)
+    state = reduce_graph_run(state, resolve_routing(graph, state, scope_run, frames))
     state = _settle_successes(state, (("decision", "consume"),))
 
     with pytest.raises(GraphValueUnavailableError, match="historical"):
@@ -1154,7 +1154,7 @@ def test_recovery_historical_output_scan_retains_present_outputs_before_the_gap(
     scope_run = root_scope_run(state.run_id)
     frames = _partial_history_frames(graph, scope_run)
     state = _settle_successes(state, (("available", None), ("missing", None)))
-    state = reduce_graph_run(state, plan_routing(graph, state, scope_run, frames).command)
+    state = reduce_graph_run(state, resolve_routing(graph, state, scope_run, frames))
     state = _settle_successes(state, (("final", None),))
 
     with pytest.raises(GraphValueUnavailableError, match="historical"):

@@ -242,7 +242,9 @@ def resolve_routing_facts(
 
 该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及无 next target 时的 graph completion output availability。`historical_inputs_missing` 与 `completion_output_history_missing` 是 state-only recovery 对同一 availability truth 的 typed 投影；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
 
-- `plan_routing()` 只把 `RoutingFacts` 投影为 `AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun`；
+- `project_routing_facts()` 是唯一 facts → command 投影，直接返回
+  `AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun`；`resolve_routing()` 只组合
+  `resolve_routing_facts()` 与该投影；
 - `resume_admission.py` 只把相同 facts 投影为允许或 `GraphValueUnavailableError`；
 - `recovery.py` worklist transfer只调用相同 resolver，不得重新扫描 direct/conditional targets、joins 或 `transition.data_triggers`；
 - nested boundary future traversal仍由 recovery worklist编排，但每个 scoped graph step 的 routing/availability facts只能来自该 resolver。
@@ -283,7 +285,7 @@ data contribution
 - 缺少 skipped source publication时，resume admission 抛出 `GraphValueUnavailableError`；
 - 只有未触发 compiled data dependency 的 target 不必达，不误拒绝 pure skip。
 
-正常 runtime `plan_routing()`、resume preflight 和 recovery traversal必须调用同一 target/data-contribution resolver。runtime 可继续把普通执行后的 unavailable control target 投影为现有 abort；resume admission 则在 commit 前将同一缺值事实提升为 `GraphValueUnavailableError`。共享的是拓扑、target 和 availability truth。
+正常 runtime `resolve_routing()`、resume preflight 和 recovery traversal必须调用同一 target/data-contribution resolver。runtime 可继续把普通执行后的 unavailable control target 投影为现有 abort；resume admission 则在 commit 前将同一缺值事实提升为 `GraphValueUnavailableError`。共享的是拓扑、target 和 availability truth。
 
 ### 6.5 所有 pure skip 的 future-path proof
 

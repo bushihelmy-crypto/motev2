@@ -306,7 +306,7 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "data_triggers": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
-    forbidden = {"materializations", "graph_outputs", "plan_routing"}
+    forbidden = {"materializations", "graph_outputs"}
     assert not {node.attr for node in ast.walk(recovery) if isinstance(node, ast.Attribute) and node.attr in forbidden}
     assert not {node.id for node in ast.walk(recovery) if isinstance(node, ast.Name) and node.id in forbidden}
 
