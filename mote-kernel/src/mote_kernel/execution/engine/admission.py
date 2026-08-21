@@ -154,9 +154,7 @@ def claim_resource_snapshot(
     resource_tasks = tuple(
         task
         for task in tasks
-        if task.node_id in graph.transition.callable_node_ids
-        and isinstance(definition := graph.nodes[task.node_id], CallableNodeDefinition)
-        and definition.resources
+        if isinstance(definition := graph.nodes[task.node_id], CallableNodeDefinition) and definition.resources
     )
     if not resource_tasks:
         return None

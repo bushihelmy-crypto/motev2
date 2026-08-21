@@ -872,7 +872,7 @@ def _expand_quiescent_executable(
         tasks = plan_tasks(graph, state, family.limits)
     except ExecutionLimitError:
         return (_boundary(_ScopeBoundaryKind.EXECUTION_LIMIT, state, scope_run, item.availability),)
-    nested_ids = tuple(task.node_id for task in tasks if task.node_id in graph.transition.nested_node_ids)
+    nested_ids = tuple(task.node_id for task in tasks if task.node_id in graph.nested_graphs)
     children = _initial_children(
         graph,
         state,

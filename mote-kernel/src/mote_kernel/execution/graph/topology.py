@@ -54,8 +54,6 @@ class DataTriggerPlan:
 @dataclass(frozen=True, slots=True)
 class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
-    callable_node_ids: tuple[GraphNodeId, ...]
-    nested_node_ids: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
     joins_by_source: FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]

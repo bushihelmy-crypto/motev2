@@ -7,7 +7,6 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import ResultCollectionError
-from mote_kernel.execution.graph.definition import NestedGraphNodeDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _node_output_from_view
@@ -49,7 +48,7 @@ def prepare_frontier(
     graph: CompiledGraph[GraphValueT], request: StepRequest[GraphValueT]
 ) -> FrontierPreparation[GraphValueT]:
     tasks = plan_tasks(graph, request.state, request.limits)
-    nested_tasks = tuple(task for task in tasks if task.node_id in graph.transition.nested_node_ids)
+    nested_tasks = tuple(task for task in tasks if task.node_id in graph.nested_graphs)
     expected = tuple(_activation(task) for task in nested_tasks)
     received = tuple(projection.parent for projection in request.child_projections)
     if received != expected:
@@ -58,15 +57,11 @@ def prepare_frontier(
     missing: list[PreparedNestedRun[GraphValueT]] = []
     active: list[ActiveChild] = []
     nested_results: list[TaskResult[GraphValueT]] = []
-    task_by_parent = {
-        _activation(task): (task, definition)
-        for task in nested_tasks
-        if isinstance(definition := graph.nodes[task.node_id], NestedGraphNodeDefinition)
-    }
+    task_by_parent = {_activation(task): task for task in nested_tasks}
     for projection in request.child_projections:
         parent = projection.parent
-        task, definition = task_by_parent[parent]
-        child_graph = graph.nested_graphs[definition.node_id]
+        task = task_by_parent[parent]
+        child_graph = graph.nested_graphs[task.node_id]
         expected_run_id = child_graph_run_id(parent.run_id, parent.superstep, parent.node_id)
         if isinstance(projection, MissingChild):
             missing.append(
@@ -103,7 +98,7 @@ def prepare_frontier(
     executable: list[tuple[GraphTask, CallableNodeDefinition[GraphValueT]]] = []
     for task in tasks:
         definition = graph.nodes[task.node_id]
-        if task.node_id in graph.transition.callable_node_ids and isinstance(definition, CallableNodeDefinition):
+        if isinstance(definition, CallableNodeDefinition):
             executable.append((task, definition))
     return FrontierPreparation(tasks, tuple(executable), tuple(nested_results), tuple(missing), tuple(active))
 

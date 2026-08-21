@@ -509,8 +509,6 @@ def test_graph_run_lifecycle_has_exactly_three_current_states() -> None:
 def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() -> None:
     assert _class_fields("execution/graph/topology.py", "FrontierTransitionPlan") == {
         "entries": "tuple[GraphNodeId, ...]",
-        "callable_node_ids": "tuple[GraphNodeId, ...]",
-        "nested_node_ids": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",

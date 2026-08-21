@@ -705,8 +705,6 @@ def _compile_graph(
 
     transition = FrontierTransitionPlan(
         entries,
-        tuple(node_id for node_id in node_ids if isinstance(nodes[node_id], CallableNodeDefinition)),
-        tuple(node_id for node_id in node_ids if isinstance(nodes[node_id], NestedGraphNodeDefinition)),
         frozen_map({node_id: tuple(sorted(targets)) for node_id, targets in direct_targets.items()}),
         frozen_map({node_id: frozen_map(routes) for node_id, routes in conditional_targets.items()}),
         frozen_map(
