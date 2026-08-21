@@ -55,8 +55,6 @@ class RoutingFacts:
     completed_join_targets: tuple[RequiredTarget, ...]
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     data_targets: tuple[RequiredTarget, ...]
-    completion_output_available: bool
-    completion_output_history_missing: bool
     unavailable_graph_outputs: tuple[str, ...]
 
 
@@ -221,15 +219,6 @@ def _target_has_historical_gap(
     return unavailable
 
 
-def _completion_output_history_missing(
-    graph: CompiledGraph[GraphValueT],
-    scope_run: ScopeRunCoordinate,
-    completion_superstep: int,
-    frames: ScopedFrameAvailability[GraphValueT],
-) -> bool:
-    return not graph_outputs_available(graph, scope_run, completion_superstep, frames)
-
-
 def resolve_routing_facts(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -284,20 +273,16 @@ def resolve_routing_facts(
             unavailable,
         )
 
-    all_targets = direct_control_targets | completed_join_targets | data_targets
-    completion_available = (
-        True if all_targets or remaining else graph_outputs_available(graph, scope_run, state.superstep, frames)
-    )
+    control_facts = tuple(required(target) for target in sorted(direct_control_targets))
+    completed_join_facts = tuple(required(target) for target in sorted(completed_join_targets))
+    data_facts = tuple(required(target) for target in sorted(data_targets))
+    output_diagnostics = unavailable_graph_outputs(graph, scope_run, state.superstep, frames)
     return RoutingFacts(
-        tuple(required(target) for target in sorted(direct_control_targets)),
-        tuple(required(target) for target in sorted(completed_join_targets)),
+        control_facts,
+        completed_join_facts,
         tuple(remaining),
-        tuple(required(target) for target in sorted(data_targets)),
-        completion_available,
-        not all_targets
-        and not remaining
-        and _completion_output_history_missing(graph, scope_run, state.superstep, frames),
-        unavailable_graph_outputs(graph, scope_run, state.superstep, frames),
+        data_facts,
+        output_diagnostics,
     )
 
 
@@ -323,7 +308,17 @@ def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> Resoluti
         )
     if facts.remaining_join_progress:
         raise RoutingDeadlockError("partial join progress has no next task able to complete it")
-    if not facts.completion_output_available:
+    if (
+        not any(
+            (
+                facts.control_targets,
+                facts.completed_join_targets,
+                facts.remaining_join_progress,
+                facts.data_targets,
+            )
+        )
+        and facts.unavailable_graph_outputs
+    ):
         return AbortGraphRun(
             state.revision,
             GraphAbortReason("required graph output values are unavailable at completion"),

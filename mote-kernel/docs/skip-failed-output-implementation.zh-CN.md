@@ -227,8 +227,6 @@ class RoutingFacts:
     completed_join_targets: tuple[RequiredTarget, ...]
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     data_targets: tuple[RequiredTarget, ...]
-    completion_output_available: bool
-    completion_output_history_missing: bool
     unavailable_graph_outputs: tuple[str, ...]
 
 
@@ -240,7 +238,18 @@ def resolve_routing_facts(
 ) -> RoutingFacts: ...
 ```
 
-该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及无 next target 时的 graph completion output availability。`historical_inputs_missing` 与 `completion_output_history_missing` 是 state-only recovery 对同一 availability truth 的 typed 投影；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
+该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及 graph-output diagnostic identity。resolver 对 graph outputs 只执行一次完整 `unavailable_graph_outputs()` 扫描；独立 `graph_outputs_available(...) -> bool` 保留首次缺失短路，供 completed continuation、nested boundary 和 invocation validation 使用，不在 resolver 内重复调用。`historical_inputs_missing` 与 graph-output historical gap 均由同一份 availability truth 推导；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
+
+completion facts 只从 canonical tuple 和 target work 推导：
+
+```text
+has routing work
+  := bool(control_targets or completed_join_targets or remaining_join_progress or data_targets)
+completion output available
+  := has routing work or not unavailable_graph_outputs
+completion output history missing
+  := not has routing work and bool(unavailable_graph_outputs)
+```
 
 - `project_routing_facts()` 是唯一 facts → command 投影，直接返回
   `AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun`；`resolve_routing()` 只组合

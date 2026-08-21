@@ -132,11 +132,15 @@ def admit_resume_candidates(
             )
         if (
             candidate.has_pure_skip
-            and not facts.control_targets
-            and not facts.completed_join_targets
-            and not facts.data_targets
-            and not facts.remaining_join_progress
-            and not facts.completion_output_available
+            and not any(
+                (
+                    facts.control_targets,
+                    facts.completed_join_targets,
+                    facts.remaining_join_progress,
+                    facts.data_targets,
+                )
+            )
+            and facts.unavailable_graph_outputs
         ):
             actions = tuple(action.node_id for action in candidate.skip_actions)
             raise GraphValueUnavailableError(

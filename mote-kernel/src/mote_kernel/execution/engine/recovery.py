@@ -987,7 +987,15 @@ def _resolve_quiescent(
     if isinstance(command, AbortGraphRun):
         required = (*facts.control_targets, *facts.completed_join_targets)
         if any(target.historical_inputs_missing for target in required if not target.inputs_available) or (
-            not facts.completion_output_available and facts.completion_output_history_missing
+            not any(
+                (
+                    facts.control_targets,
+                    facts.completed_join_targets,
+                    facts.remaining_join_progress,
+                    facts.data_targets,
+                )
+            )
+            and facts.unavailable_graph_outputs
         ):
             missing_inputs = tuple(
                 (target.node_id, target.unavailable_inputs) for target in required if not target.inputs_available
