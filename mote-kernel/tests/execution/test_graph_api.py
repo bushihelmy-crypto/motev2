@@ -13,11 +13,13 @@ from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.errors import FrameInstallationInvariantError, GraphValuePublicationError
 from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.family_driver import project_graph_result
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
+    AwaitingResume,
     PrepareDisposition,
     PreparedNestedRun,
     StartMissingChildren,
@@ -42,8 +44,11 @@ from mote_kernel.state.graph_state import (
     GraphFailure,
     GraphFrontierNode,
     GraphFrontierState,
+    GraphInterruptPayload,
     GraphNodeId,
+    GraphNodeInterrupt,
     GraphRunState,
+    InterruptedGraphNode,
     ParentGraphActivation,
     PendingGraphNode,
     ResumeGraphNodes,
@@ -51,6 +56,7 @@ from mote_kernel.state.graph_state import (
     StartGraphRun,
     UseStepRequestInput,
     child_graph_run_id,
+    derive_graph_node_interrupt_identity,
     reduce_graph_run,
 )
 
@@ -2415,6 +2421,83 @@ async def test_facade_drives_nested_graph_through_the_same_execution_owner() -> 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == "nested"
     assert any(transition.scope == ("child",) for transition in commits.transitions)
+
+
+@pytest.mark.asyncio
+async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_order() -> None:
+    async def fail_root(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.failure("root-failed")
+
+    async def interrupt_root(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"root")
+
+    def awaiting_child(name: str) -> Graph[str]:
+        async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+            return Graph.failure(f"{name}-failed")
+
+        async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+            return Graph.interrupt(name.encode())
+
+        child = Graph[str](f"public.awaiting-views.{name}")
+        child.set_resume_codec("text", 1, encode_text, decode_text)
+        child.add_node("failed", fail, inputs={}, outputs={})
+        child.add_node("interrupted", interrupt, inputs={}, outputs={})
+        child.set_outputs({})
+        return child
+
+    parent = Graph[str]("public.awaiting-views")
+    parent.set_resume_codec("text", 1, encode_text, decode_text)
+    parent.add_node("right", awaiting_child("right"), inputs={})
+    parent.add_node("left", awaiting_child("left"), inputs={})
+    parent.add_node("root-failed", fail_root, inputs={}, outputs={})
+    parent.add_node("root-interrupted", interrupt_root, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await parent.run(Graph.values())
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    root_state = replace(result.state, execution_sequence=max(1, result.state.execution_sequence))
+    root_interrupt = InterruptedGraphNode(
+        GraphNodeInterrupt(
+            derive_graph_node_interrupt_identity(
+                root_state.run_id,
+                root_state.superstep,
+                GraphNodeId("root-interrupted"),
+                root_state.execution_sequence,
+            ),
+            GraphInterruptPayload(b"root"),
+        )
+    )
+    root_state = replace(
+        root_state,
+        frontier=GraphFrontierState(
+            tuple(
+                replace(node, settlement=FailedGraphNode(GraphFailure("root-failed")))
+                if node.node_id == GraphNodeId("root-failed")
+                else replace(node, settlement=root_interrupt)
+                if node.node_id == GraphNodeId("root-interrupted")
+                else node
+                for node in root_state.frontier.nodes
+            )
+        ),
+    )
+    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
+    assert owner is not None
+    context = _context_from_continuation(owner.family_identity, result.state, result.continuation)
+    context.replace_root(root_state)
+    result = project_graph_result(owner.graph, context, AwaitingResume((), ()))
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert tuple((view.scope, view.node_id, view.failure) for view in result.failures) == (
+        ((), "root-failed", "root-failed"),
+        (("left",), "failed", "left-failed"),
+        (("right",), "failed", "right-failed"),
+    )
+    assert tuple((view.scope, view.node_id, view.request_payload) for view in result.interrupts) == (
+        ((), "root-interrupted", b"root"),
+        (("left",), "interrupted", b"left"),
+        (("right",), "interrupted", b"right"),
+    )
 
 
 @pytest.mark.asyncio
