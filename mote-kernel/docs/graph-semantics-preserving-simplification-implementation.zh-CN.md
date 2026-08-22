@@ -289,6 +289,84 @@ completion output history missing
 
 若实施时需要保留任一被删布尔，必须先证明它不能由上述 semantic basis 精确推导，并把 S10/S11 退回单项评审。
 
+#### 3.2.2 S07 GSP-A06 设计审查（DESIGNED / PENDING APPROVAL，2026-08-23）
+
+本节只是 S07 的 docs-only 设计审查，不构成 `GSP-A06` 批准、production 实施或 owner writeback。当前 production
+仍保持原状；只有 requirements owner 在独立批准单元中明确改变 S07 准入状态后，才允许开始 implementation。
+
+S07 拟只收敛从 compiled GraphInput、NodeOutput binding 与 resume materialization plan 形成 availability coordinate 的
+机械重复，适用 `GSP-P03`–`GSP-P08`；不触及公共 API 或 State/command，因此排除 `GSP-P01/P02`。拟议函数签名为：
+
+```python
+def _graph_input_coordinate(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+) -> GraphInputAvailabilityCoordinate[GraphValueT]: ...
+
+
+def _node_output_coordinate(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    source: NodeOutputPort,
+    superstep: int,
+) -> PublicationAvailabilityCoordinate[GraphValueT]: ...
+
+
+def _resume_input_coordinate(
+    activation: StableActivation,
+    plan: MaterializationPlan[GraphValueT],
+) -> ResumeInputAvailabilityCoordinate[GraphValueT]: ...
+```
+
+前两个 constructor 拟由 `engine/routing.py` 作为 binding availability owner 持有，供 admission、routing 与
+resume-input consumer 复用；第三个拟只留在 `engine/resume_input.py`。跨模块下划线 symbol 只在 routing 模块自己的
+`__all__` 中显式登记以满足 strict Pyright 的 `reportPrivateUsage`，不从 `mote_kernel.execution` 导出，不形成公共
+入口。NodeOutput constructor 只接受 exact `NodeOutputPort` 和调用方已经解析出的 `int` superstep；每个调用边界仍先
+以自己的 error variant 执行 `require_publication_selection()`，再调用 `selection.resolve()`。三个 constructor 都不
+接受 optional selection、wide union、`object`、callback、context bag 或 error 参数，因而不吸收调用边界错误分类。
+
+非 production prototype audit 给出的预期净复杂度账本如下：GraphInput direct assembly `6 → 1`，
+NodeOutput-binding direct assembly `6 → 1`，resume-input direct assembly `2 → 1`；State-settlement 派生的
+publication assembly 不是 NodeOutput nominal source，保持 `1 → 1`。因此三个目标 source 的 assembly sites
+`14 → 3`、重复 assembly `11 → 0`，全部 direct coordinate constructor calls `15 → 4`；private source-specific
+constructor `0 → 3`，field/DTO/cache/index/semantic branch/full scan 均 `0 → 0`。prototype 中三个新函数分别有
+6、6、2 个 call site，不是 single-use thin helper；prototype production diff 为 `59 insertions / 71 deletions`、净删
+12 行，但这些数字只作为批准前可复核证据，不描述当前 production，也不替代实施后的 actual diff/source review。
+
+成功 characterization 复用
+`tests/execution/test_graph_api.py::test_graph_output_can_project_and_rename_an_admitted_graph_input`、
+`tests/execution/engine/test_routing.py::test_direct_conditional_and_terminal_routing_use_one_contribution_model` 与
+`tests/execution/engine/test_resume_input_contract.py::test_pending_input_availability_accepts_state_and_acknowledged_overrides`。
+失败/边界 characterization 复用 output projection/availability 的 missing GraphInput、missing publication、missing
+selection cases，resume input 的 missing GraphInput/publication、missing selection、foreign scope cases，以及 recovery
+historical target/output gap cases。exact-shape/tamper 证据拟继续由既有 coordinate type single-owner、generic integrity、
+source discipline、dependency direction 与 public/owner behavior cases 承担；不新增 legacy/private-shape AST test。
+若获批准并实施，`14 → 3` 与旧 direct blocks 归零必须由该 implementation unit 的 actual diff/source review 重新闭合，
+不能引用 prototype 作为完成证明。
+
+change unit 必须按以下顺序独立提交，manifest 互不混合：
+
+1. 当前 design-review unit 只包含
+   `mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md`。
+2. approval unit 只包含
+   `mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md`；只有该单元可以改变 `GSP-A06`
+   的 S07 准入状态。
+3. 获批后的 implementation unit 只包含：
+
+   ```text
+   mote-kernel/src/mote_kernel/execution/engine/admission.py
+   mote-kernel/src/mote_kernel/execution/engine/resume_input.py
+   mote-kernel/src/mote_kernel/execution/engine/routing.py
+   mote-kernel/docs/graph-node-input-output-contract-implementation.zh-CN.md
+   ```
+
+4. implementation 完成并通过 scoped gate 后，owner-writeback unit 只包含
+   `mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md`，记录 actual manifest、actual
+   diff/source review 与验证结果。
+
+任一单元都不包含测试、State、protocol、README 或 complexity unit；existing behavior gates 只复用，不增加 legacy
+测试。
+
 ### 3.3 Recovery 与 continuation validation（S12–S15）
 
 | ID | 目标与唯一 owner | 删除 | 最多新增/替代 | 位置 | 级别 |
