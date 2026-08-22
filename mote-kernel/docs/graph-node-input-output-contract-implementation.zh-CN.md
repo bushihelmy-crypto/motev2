@@ -511,6 +511,12 @@ New-run root 在 acknowledgement 前也不得使用 descriptor-only 或 provisio
 
 `ChildControlStateCoordinate` 是在 exact child State/snapshot binding admission 通过后、相对于 `ChildRecoveryDisposition.child_scope_run` 生成的 transfer-relevant control projection，覆盖 definition/parent/status/superstep/frontier settlement variants/routing/join/resource/revision/codec identity；child State 的 run ID 必须先与 `child_scope_run.graph_run_id` exact match，projection 内不再维护第二份可独立漂移的 run identity。`control is None` 唯一表示 `MissingChild`，并仍携带由 parent activation 预先派生的 expected `child_scope_run`，不是只有 path 的无 generation sentinel；Active/Completed/Aborted 直接由 non-optional control 的 exact status 派生，不重复保存 projection discriminator。State-owned opaque resume bytes、failure/request payload 等用户内容不进入 coordinate，已 admission override 只由 `ResumeInputAvailabilityCoordinate` 表示。
 
+Recovery 的 private nested outcome 只携带 nested `node_id` 与 canonical scope boundary；boundary kind、availability
+和 child disposition 不再作为 outcome 字段重复保存。所有 consumer 直接读取 boundary 的 equality-participating
+`kind`/`availability`/`control`，其中 `ChildRecoveryDisposition` 逐字段从 `ScopeControlStateCoordinate` 投影；不得从
+boundary 中 `compare=False` 的 concrete State 重建 child identity。Missing child 仍只由初始 child projection 的
+`control is None` 表示，不伪造 scope boundary。
+
 Frame-level availability 只有在 matching runtime coordinate 下 frame key set、每项 exact type 与完整 compiled descriptor 全部 admission 成功后才存在；因此 coordinate presence 同时证明 scoped-run identity、completeness 和 descriptor identity，不创建 partial-port bitmap。Child control coordinate 与 Missing/Active/Completed/Aborted 状态由 `ChildRecoveryDisposition` 拥有；child graph-input/`ChildBoundaryAvailabilityCoordinate` presence 由全局 `RecoveryAvailabilityCoordinates` 唯一拥有，不在 disposition 中复制。`GraphRunContext`/complete or recovered continuation snapshot 继续唯一持有第 8.2 节 immutable `ScopedFrameIndex`：它以 `GraphInputAvailabilityCoordinate | PublicationAvailabilityCoordinate | ResumeInputAvailabilityCoordinate | ChildBoundaryAvailabilityCoordinate` 的 closed typed segments 映射到各自 immutable concrete frame；seed admission 只把真实存在且完整的 frame 投影为同一个 coordinate，recovery successor 也只增删 coordinates。相同 exact coordinate 的 different frame 是 invariant violation；不同 `ScopeRunCoordinate` 的 frame 必须并存，不能覆盖、误判 duplicate 或复用旧值。Worklist 从不比较、排序、hash、repr 或复制任意用户 concrete value。
 
 唯一 transfer 规则为：

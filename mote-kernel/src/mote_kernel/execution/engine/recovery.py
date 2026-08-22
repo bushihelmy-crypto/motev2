@@ -330,9 +330,6 @@ class _RecoveryWorkItem(Generic[GraphValueT]):
 @dataclass(frozen=True, slots=True)
 class _NestedOutcome(Generic[GraphValueT]):
     node_id: GraphNodeId
-    kind: _ScopeBoundaryKind
-    availability: RecoveryAvailabilityCoordinates[GraphValueT]
-    disposition: ChildRecoveryDisposition
     boundary: _ScopeBoundary[GraphValueT]
 
 
@@ -455,24 +452,27 @@ def _scope_control(state: GraphRunState, scope_run: ScopeRunCoordinate) -> Scope
     )
 
 
-def _child_control(state: GraphRunState, scope_run: ScopeRunCoordinate) -> ChildControlStateCoordinate:
-    control = _scope_control(state, scope_run)
-    if control.parent is None:
+def _child_disposition_from_control(control: ScopeControlStateCoordinate) -> ChildRecoveryDisposition:
+    parent = control.parent
+    if parent is None:
         raise SnapshotMismatchError("nested recovery state is missing its parent activation")
-    return ChildControlStateCoordinate(
-        control.definition_id,
-        control.definition_version,
-        control.status,
-        control.superstep,
-        control.execution_sequence,
-        control.frontier,
-        control.join_progress,
-        control.resources,
-        control.execution,
-        control.resume_codec_id,
-        control.resume_codec_version,
-        control.parent,
-        control.revision,
+    return ChildRecoveryDisposition(
+        control.scope_run,
+        ChildControlStateCoordinate(
+            control.definition_id,
+            control.definition_version,
+            control.status,
+            control.superstep,
+            control.execution_sequence,
+            control.frontier,
+            control.join_progress,
+            control.resources,
+            control.execution,
+            control.resume_codec_id,
+            control.resume_codec_version,
+            parent,
+            control.revision,
+        ),
     )
 
 
@@ -628,15 +628,6 @@ def _select_live(
     return tuple(sorted((*live, *(task.node_id for task in selected))))
 
 
-def _child_disposition(
-    coordinate: ScopeRunCoordinate,
-    state: GraphRunState | None,
-) -> ChildRecoveryDisposition:
-    if state is None:
-        return ChildRecoveryDisposition(coordinate, None)
-    return ChildRecoveryDisposition(coordinate, _child_control(state, coordinate))
-
-
 def _initial_children(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -656,8 +647,11 @@ def _initial_children(
             raise GraphValueUnavailableError(
                 f"resume actions {family.action_node_ids()!r} lack child snapshot/nested boundary at {coordinate!r}"
             )
-        child_state = binding.state if binding is not None else None
-        dispositions.append(_child_disposition(coordinate, child_state))
+        if binding is None:
+            disposition = ChildRecoveryDisposition(coordinate, None)
+        else:
+            disposition = _child_disposition_from_control(_scope_control(binding.state, coordinate))
+        dispositions.append(disposition)
     return tuple(sorted(dispositions, key=lambda disposition: disposition.child_scope_run))
 
 
@@ -674,25 +668,15 @@ def _completed_child_outcome(
     node_id: GraphNodeId,
     graph: CompiledGraph[GraphValueT],
     boundary: _ScopeBoundary[GraphValueT],
-    coordinate: ScopeRunCoordinate,
 ) -> _NestedOutcome[GraphValueT]:
     availability = boundary.availability
     boundary_coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
-        coordinate, graph.graph_output_descriptor.identity
+        boundary.control.scope_run, graph.graph_output_descriptor.identity
     )
     availability = availability.with_child_boundary(boundary_coordinate)
-    disposition = _child_disposition(coordinate, boundary.state)
     return _NestedOutcome(
         node_id,
-        _ScopeBoundaryKind.COMPLETED,
-        availability,
-        disposition,
-        _boundary(
-            _ScopeBoundaryKind.COMPLETED,
-            boundary.state,
-            coordinate,
-            availability,
-        ),
+        _ScopeBoundary(boundary.kind, availability, boundary.control, boundary.state),
     )
 
 
@@ -739,7 +723,7 @@ def _child_outcomes(
             coordinate,
             child_availability,
         )
-        return (_completed_child_outcome(node_id, child_graph, boundary, coordinate),)
+        return (_completed_child_outcome(node_id, child_graph, boundary),)
     if child_state.status is GraphRunStatus.ABORTED:
         boundary = _boundary(
             _ScopeBoundaryKind.ABORTED,
@@ -747,15 +731,7 @@ def _child_outcomes(
             coordinate,
             child_availability,
         )
-        return (
-            _NestedOutcome(
-                node_id,
-                _ScopeBoundaryKind.ABORTED,
-                child_availability,
-                _child_disposition(coordinate, child_state),
-                boundary,
-            ),
-        )
+        return (_NestedOutcome(node_id, boundary),)
     boundaries = _prove_scope(
         child_graph,
         child_state,
@@ -766,17 +742,9 @@ def _child_outcomes(
     outcomes: list[_NestedOutcome[GraphValueT]] = []
     for boundary in boundaries:
         if boundary.kind is _ScopeBoundaryKind.COMPLETED:
-            outcomes.append(_completed_child_outcome(node_id, child_graph, boundary, coordinate))
+            outcomes.append(_completed_child_outcome(node_id, child_graph, boundary))
         else:
-            outcomes.append(
-                _NestedOutcome(
-                    node_id,
-                    boundary.kind,
-                    boundary.availability,
-                    _child_disposition(coordinate, boundary.state),
-                    boundary,
-                )
-            )
+            outcomes.append(_NestedOutcome(node_id, boundary))
     return tuple(outcomes)
 
 
@@ -802,19 +770,25 @@ def _nested_outcome_plans(
             family,
         )
         boundaries.extend(
-            _NestedCombination((*selected, outcome), outcome.availability)
+            _NestedCombination((*selected, outcome), outcome.boundary.availability)
             for outcome in outcomes
-            if outcome.kind in (_ScopeBoundaryKind.AWAITING_RESUME, _ScopeBoundaryKind.EXECUTION_LIMIT)
+            if outcome.boundary.kind in (_ScopeBoundaryKind.AWAITING_RESUME, _ScopeBoundaryKind.EXECUTION_LIMIT)
         )
-        completed = next((outcome for outcome in outcomes if outcome.kind is _ScopeBoundaryKind.COMPLETED), None)
-        aborted = next((outcome for outcome in outcomes if outcome.kind is _ScopeBoundaryKind.ABORTED), None)
+        completed = next(
+            (outcome for outcome in outcomes if outcome.boundary.kind is _ScopeBoundaryKind.COMPLETED),
+            None,
+        )
+        aborted = next(
+            (outcome for outcome in outcomes if outcome.boundary.kind is _ScopeBoundaryKind.ABORTED),
+            None,
+        )
         primary = completed if completed is not None else aborted
         if primary is None:
             return tuple(boundaries)
         if completed is not None and aborted is not None:
             alternatives.append((len(selected), aborted))
         selected.append(primary)
-        current_availability = primary.availability
+        current_availability = primary.boundary.availability
     primary_plan = _NestedCombination(tuple(selected), current_availability)
     variations = tuple(
         _NestedCombination(
@@ -835,7 +809,7 @@ def _settle_nested_outcomes(
     current = state
     availability = combination.availability
     for outcome in combination.outcomes:
-        if outcome.kind is _ScopeBoundaryKind.COMPLETED:
+        if outcome.boundary.kind is _ScopeBoundaryKind.COMPLETED:
             previous = current
             current = reduce_graph_run(
                 current,
@@ -882,13 +856,17 @@ def _expand_quiescent_executable(
     successors: list[_RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]] = []
     for combination in combinations:
         limited = next(
-            (outcome for outcome in combination.outcomes if outcome.kind is _ScopeBoundaryKind.EXECUTION_LIMIT),
+            (
+                outcome
+                for outcome in combination.outcomes
+                if outcome.boundary.kind is _ScopeBoundaryKind.EXECUTION_LIMIT
+            ),
             None,
         )
         if limited is not None:
             successors.append(limited.boundary)
             continue
-        if any(outcome.kind is _ScopeBoundaryKind.AWAITING_RESUME for outcome in combination.outcomes):
+        if any(outcome.boundary.kind is _ScopeBoundaryKind.AWAITING_RESUME for outcome in combination.outcomes):
             successors.append(
                 _boundary(
                     _ScopeBoundaryKind.AWAITING_RESUME,
@@ -929,7 +907,8 @@ def _expand_quiescent_executable(
                 settled,
                 availability,
                 live,
-                tuple(outcome.disposition for outcome in combination.outcomes) or children,
+                tuple(_child_disposition_from_control(outcome.boundary.control) for outcome in combination.outcomes)
+                or children,
                 (),
             )
         )
