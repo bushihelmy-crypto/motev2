@@ -109,7 +109,7 @@ def graph_outputs_available(
     completion_superstep: int,
     frames: ScopedFrameAvailability[GraphValueT],
 ) -> bool:
-    for binding in graph.graph_outputs.entries:
+    for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
             graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
@@ -143,7 +143,7 @@ def unavailable_graph_outputs(
     frames: ScopedFrameAvailability[GraphValueT],
 ) -> tuple[str, ...]:
     unavailable: list[str] = []
-    for binding in graph.graph_outputs.entries:
+    for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
             graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
@@ -218,7 +218,7 @@ def resolve_routing_facts(
             return cached
         historical_inputs_missing = False
         unavailable_inputs: list[str] = []
-        for binding in graph.materializations[target].bindings.entries:
+        for binding in graph.transition.materializations[target].bindings.entries:
             source = binding.source
             if isinstance(source, GraphInputPort):
                 graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = (

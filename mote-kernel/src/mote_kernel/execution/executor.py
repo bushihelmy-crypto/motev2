@@ -133,7 +133,7 @@ class GraphExecutor(Generic[GraphValueT]):
             if current is None:
                 raise SnapshotMismatchError("resume request references an unknown frontier node")
             activation = StableActivation(request.scope_run, state.superstep, requested.node_id)
-            descriptor = self._graph.materializations[requested.node_id].descriptor.identity
+            descriptor = self._graph.transition.materializations[requested.node_id].descriptor.identity
             if isinstance(requested, ResumeFailedNodeRequest):
                 if not isinstance(current.settlement, FailedGraphNode):
                     raise SnapshotMismatchError("failure resume requires a failed node")

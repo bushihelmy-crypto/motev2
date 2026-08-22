@@ -11,7 +11,6 @@ from mote_kernel.execution.graph.ports import (
     FrameDescriptor,
     GraphOutputBindings,
     MaterializationPlan,
-    OutputDeclarations,
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
@@ -63,43 +62,17 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryAvailabilityPlan(Generic[GraphValueT]):
-    transition: FrontierTransitionPlan[GraphValueT]
-
-
-@dataclass(frozen=True, slots=True)
 class CompiledGraph(Generic[GraphValueT]):
     definition_id: GraphDefinitionId
     version: GraphDefinitionVersion
     definition_scope: DefinitionScope
     nodes: FrozenMap[GraphNodeId, GraphNode[GraphValueT]]
     nested_graphs: FrozenMap[GraphNodeId, "CompiledGraph[GraphValueT]"]
-    graph_inputs: OutputDeclarations[GraphValueT]
     graph_input_descriptor: FrameDescriptor[GraphValueT]
     graph_output_descriptor: FrameDescriptor[GraphValueT]
-    recovery: RecoveryAvailabilityPlan[GraphValueT]
+    transition: FrontierTransitionPlan[GraphValueT]
     resources: FrozenMap[ResourceId, ResourceDefinition]
     resume_input: ResumeInputBinding[GraphValueT] | None
-
-    @property
-    def transition(self) -> FrontierTransitionPlan[GraphValueT]:
-        return self.recovery.transition
-
-    @property
-    def entries(self) -> tuple[GraphNodeId, ...]:
-        return self.transition.entries
-
-    @property
-    def materializations(self) -> FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]:
-        return self.transition.materializations
-
-    @property
-    def graph_outputs(self) -> GraphOutputBindings[GraphValueT]:
-        return self.transition.graph_outputs
-
-    @property
-    def resource_order(self) -> tuple[ResourceId, ...]:
-        return self.transition.resource_order
 
 
 def frozen_map(values: Mapping[KeyT, ValueT_co]) -> FrozenMap[KeyT, ValueT_co]:

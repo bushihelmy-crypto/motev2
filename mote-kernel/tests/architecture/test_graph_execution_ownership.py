@@ -518,9 +518,21 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "graph_outputs": "GraphOutputBindings[GraphValueT]",
         "resource_order": "tuple[ResourceId, ...]",
     }
-    assert _class_fields("execution/graph/topology.py", "RecoveryAvailabilityPlan") == {
-        "transition": "FrontierTransitionPlan[GraphValueT]"
+    compiled_graph = _top_level_definition("execution/graph/topology.py", "CompiledGraph")
+    assert isinstance(compiled_graph, ast.ClassDef)
+    assert _class_fields("execution/graph/topology.py", "CompiledGraph") == {
+        "definition_id": "GraphDefinitionId",
+        "version": "GraphDefinitionVersion",
+        "definition_scope": "DefinitionScope",
+        "nodes": "FrozenMap[GraphNodeId, GraphNode[GraphValueT]]",
+        "nested_graphs": "FrozenMap[GraphNodeId, 'CompiledGraph[GraphValueT]']",
+        "graph_input_descriptor": "FrameDescriptor[GraphValueT]",
+        "graph_output_descriptor": "FrameDescriptor[GraphValueT]",
+        "transition": "FrontierTransitionPlan[GraphValueT]",
+        "resources": "FrozenMap[ResourceId, ResourceDefinition]",
+        "resume_input": "ResumeInputBinding[GraphValueT] | None",
     }
+    assert all(isinstance(statement, ast.AnnAssign) for statement in compiled_graph.body)
 
 
 def test_recovery_consumes_shared_claim_and_settlement_lowering() -> None:

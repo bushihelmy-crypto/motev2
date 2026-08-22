@@ -549,7 +549,7 @@ def _validate_frame_index(
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
         scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
-        materialization = scoped_graph.materializations.get(coordinate.activation.node_id)
+        materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
         if (
             materialization is None
             or coordinate.descriptor != materialization.descriptor.identity

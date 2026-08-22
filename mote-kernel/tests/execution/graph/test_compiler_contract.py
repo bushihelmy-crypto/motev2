@@ -88,7 +88,7 @@ def test_compiler_resolves_a_later_named_output_declaration() -> None:
 
     compiled = compile_graph(definition((source, consumer)))
 
-    binding = compiled.materializations[GraphNodeId("consumer")].bindings.entries[0]
+    binding = compiled.transition.materializations[GraphNodeId("consumer")].bindings.entries[0]
     assert isinstance(binding.source, NodeOutputPort)
     assert binding.source.output_name == "second"
 
@@ -274,7 +274,7 @@ def test_compiler_uses_relative_selection_for_loop_producer_data_trigger() -> No
         )
     )
 
-    selection = compiled.materializations[GraphNodeId("target")].bindings.entries[0].publication
+    selection = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0].publication
     assert selection is not None
     assert selection.kind is PublicationSelectionKind.RELATIVE
     assert selection.superstep == 1
@@ -311,7 +311,7 @@ def test_compiler_uses_relative_selection_for_loop_graph_output() -> None:
         )
     )
 
-    selection = compiled.graph_outputs.entries[0].publication
+    selection = compiled.transition.graph_outputs.entries[0].publication
     assert selection is not None
     assert selection.kind is PublicationSelectionKind.RELATIVE
     assert selection.superstep == 0
@@ -368,7 +368,7 @@ def test_join_to_end_is_one_terminal_gate_for_output_guarantees() -> None:
         )
     )
 
-    assert compiled.graph_outputs.entries[0].source == NodeOutputPort((), GraphNodeId("left"), "value")
+    assert compiled.transition.graph_outputs.entries[0].source == NodeOutputPort((), GraphNodeId("left"), "value")
 
 
 def test_compiler_rejects_a_join_between_mutually_exclusive_routes() -> None:

@@ -64,7 +64,10 @@ def require_snapshot_matches_graph(
             if resources is not None:
                 raise InvalidExecutionSnapshotError("resource-free pending nodes cannot retain acquisitions")
             return
-        if resources is None or tuple(lock.resource_id for lock in resources.resources) != graph.resource_order:
+        if (
+            resources is None
+            or tuple(lock.resource_id for lock in resources.resources) != graph.transition.resource_order
+        ):
             raise InvalidExecutionSnapshotError("active resource participants require the compiled resource snapshot")
         acquisitions = {item.node_id: item for item in resources.acquisitions}
         if acquisitions.keys() != required.keys() or any(

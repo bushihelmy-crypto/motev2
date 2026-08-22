@@ -34,15 +34,12 @@ def output_graph():
 
 def test_output_projection_rejects_a_compiled_binding_without_activation_selection() -> None:
     compiled = output_graph()
-    malformed_binding = replace(compiled.graph_outputs.entries[0], publication=None)
+    malformed_binding = replace(compiled.transition.graph_outputs.entries[0], publication=None)
     malformed = replace(
         compiled,
-        recovery=replace(
-            compiled.recovery,
-            transition=replace(
-                compiled.transition,
-                graph_outputs=GraphOutputBindings((malformed_binding,)),
-            ),
+        transition=replace(
+            compiled.transition,
+            graph_outputs=GraphOutputBindings((malformed_binding,)),
         ),
     )
 
@@ -85,15 +82,12 @@ def test_graph_output_availability_reports_a_missing_admitted_graph_input() -> N
 
 def test_graph_output_availability_rejects_a_missing_compiled_selection() -> None:
     compiled = output_graph()
-    malformed_binding = replace(compiled.graph_outputs.entries[0], publication=None)
+    malformed_binding = replace(compiled.transition.graph_outputs.entries[0], publication=None)
     malformed = replace(
         compiled,
-        recovery=replace(
-            compiled.recovery,
-            transition=replace(
-                compiled.transition,
-                graph_outputs=GraphOutputBindings((malformed_binding,)),
-            ),
+        transition=replace(
+            compiled.transition,
+            graph_outputs=GraphOutputBindings((malformed_binding,)),
         ),
     )
 

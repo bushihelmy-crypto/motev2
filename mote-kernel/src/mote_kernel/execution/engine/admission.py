@@ -42,7 +42,7 @@ def admit_graph_input(
     graph: CompiledGraph[GraphValueT],
     values: _GraphValues[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_inputs.entries)
+    declarations = tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries)
     return _make_graph_input_frame(values, declarations)
 
 
@@ -50,7 +50,7 @@ def admit_child_graph_input(
     graph: CompiledGraph[GraphValueT],
     frame: NodeInputFrame[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_inputs.entries)
+    declarations = tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries)
     return _graph_input_from_node_input(frame, declarations)
 
 
@@ -61,7 +61,7 @@ def project_graph_outputs(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> GraphOutputView[GraphValueT]:
     entries: list[NamedValue[GraphValueT]] = []
-    for binding in graph.graph_outputs.entries:
+    for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
             graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
@@ -98,7 +98,7 @@ def project_graph_outputs(
 def initial_resource_snapshot(graph: CompiledGraph[GraphValueT]) -> ResourceSnapshot:
     """Create the replay base used only while projecting one atomic claim."""
 
-    return ResourceSnapshot(tuple(ResourceLock(resource_id) for resource_id in graph.resource_order))
+    return ResourceSnapshot(tuple(ResourceLock(resource_id) for resource_id in graph.transition.resource_order))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +113,7 @@ def admit_tasks(
     tasks: tuple[GraphTask, ...],
     snapshot: ResourceSnapshot,
 ) -> TaskAdmission:
-    if tuple(lock.resource_id for lock in snapshot.resources) != graph.resource_order:
+    if tuple(lock.resource_id for lock in snapshot.resources) != graph.transition.resource_order:
         raise ResourceTransitionError("resource snapshot does not match compiled resource order")
     task_by_node = {task.node_id: task for task in tasks}
     if len(task_by_node) != len(tasks):

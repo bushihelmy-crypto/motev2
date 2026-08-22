@@ -82,7 +82,7 @@ def _admit_override(
     node_id: GraphNodeId,
     values: _GraphValues[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
-    plan = graph.materializations[node_id]
+    plan = graph.transition.materializations[node_id]
     declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in values.items()),
@@ -138,7 +138,7 @@ def node_inputs_available(
     frames: ScopedFrameAvailability[GraphValueT],
     node_id: GraphNodeId,
 ) -> bool:
-    for binding in graph.materializations[node_id].bindings.entries:
+    for binding in graph.transition.materializations[node_id].bindings.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
             graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
@@ -177,7 +177,7 @@ def pending_node_input_available(
         raise SnapshotMismatchError("input availability requires a current pending node")
     if isinstance(node.settlement.input, OverrideGraphNodeInput):
         return True
-    plan = graph.materializations[node_id]
+    plan = graph.transition.materializations[node_id]
     coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
         StableActivation(scope_run, state.superstep, node_id),
         plan.descriptor.identity,
@@ -214,7 +214,7 @@ def materialize_node_input(
                 "effective input requires a current pending node or a current failed node with failed retry input"
             )
     activation = StableActivation(scope_run, state.superstep, node_id)
-    plan = graph.materializations[node_id]
+    plan = graph.transition.materializations[node_id]
     if isinstance(effective_input, OverrideGraphNodeInput):
         return decode_resume_input(graph, node_id, bytes(effective_input.payload))
     resume_coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(

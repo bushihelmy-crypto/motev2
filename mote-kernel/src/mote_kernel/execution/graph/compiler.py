@@ -41,7 +41,6 @@ from mote_kernel.execution.graph.topology import (
     CompiledGraph,
     DataTriggerPlan,
     FrontierTransitionPlan,
-    RecoveryAvailabilityPlan,
     frozen_map,
 )
 from mote_kernel.execution.graph.validation import validate_graph
@@ -69,7 +68,7 @@ def _nested_outputs(graph: CompiledGraph[GraphValueT]) -> OutputDeclarations[Gra
     return OutputDeclarations(
         tuple(
             OutputDeclaration(binding.destination.boundary_name, binding.descriptor)
-            for binding in graph.graph_outputs.entries
+            for binding in graph.transition.graph_outputs.entries
         )
     )
 
@@ -517,7 +516,7 @@ def _compile_graph(
             )
         resolved_bindings = ResolvedInputBindings(tuple(resolved))
         if isinstance(node, NestedGraphNodeDefinition):
-            expected = nested_graphs[node_id].graph_inputs.entries
+            expected = nested_graphs[node_id].graph_input_descriptor.declarations.entries
             actual = tuple(
                 OutputDeclaration(binding.destination.local_name, binding.descriptor)
                 for binding in resolved_bindings.entries
@@ -713,7 +712,6 @@ def _compile_graph(
         graph_outputs,
         tuple(resource.resource_id for resource in definition.resources),
     )
-    recovery = RecoveryAvailabilityPlan(transition)
     resource_order = transition.resource_order
     positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
     canonical_nodes = {
@@ -736,7 +734,6 @@ def _compile_graph(
         definition_scope=scope,
         nodes=frozen_map(canonical_nodes),
         nested_graphs=frozen_map(nested_graphs),
-        graph_inputs=graph_inputs,
         graph_input_descriptor=_frame_descriptor(definition, FrameKind.GRAPH_INPUT, 0, graph_inputs),
         graph_output_descriptor=_frame_descriptor(
             definition,
@@ -749,7 +746,7 @@ def _compile_graph(
                 )
             ),
         ),
-        recovery=recovery,
+        transition=transition,
         resources=frozen_map({resource.resource_id: resource for resource in definition.resources}),
         resume_input=definition.resume_input,
     )

@@ -1030,7 +1030,7 @@ def _partial_history_frames(
 ) -> ScopedFrameIndex[str]:
     graph_input = _make_graph_input_frame(
         Graph.values(input="present"),
-        tuple((item.name, item.descriptor) for item in graph.graph_inputs.entries),
+        tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries),
     )
     publication = graph.transition.publications[GraphNodeId("available")]
     output = _make_node_output_frame(
