@@ -250,7 +250,7 @@ async def _consume_session(
                 activation = StableActivation(scope_run, state.superstep, completed.result.task.node_id)
                 coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
                     activation,
-                    graph.publications[completed.result.task.node_id].descriptor.identity,
+                    graph.transition.publications[completed.result.task.node_id].identity,
                 )
                 context.frames = context.frames.add_publication(
                     ConfirmedPublication(

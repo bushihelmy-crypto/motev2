@@ -28,6 +28,7 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphJoinProgress,
     GraphNodeId,
+    GraphRouteId,
     GraphRoutingContribution,
     GraphRunState,
     InterruptedGraphNode,
@@ -75,6 +76,16 @@ def validate_routing_contribution(
             raise UnknownRouteError("node selected an unknown conditional route")
 
 
+def _success_routes(
+    graph: CompiledGraph[GraphValueT],
+    node_id: GraphNodeId,
+) -> tuple[GraphRouteId | None, ...]:
+    routes = tuple(graph.transition.conditional_targets[node_id])
+    if routes:
+        return routes
+    return (None,)
+
+
 def _join_key(
     sources: tuple[GraphNodeId, ...],
     target: GraphNodeId,
@@ -118,7 +129,7 @@ def graph_outputs_available(
                     selection.resolve(completion_superstep),
                     source.node_id,
                 ),
-                graph.publications[source.node_id].descriptor.identity,
+                graph.transition.publications[source.node_id].identity,
             )
             if not frames.has_publication(publication_coordinate):
                 return False
@@ -147,7 +158,7 @@ def unavailable_graph_outputs(
         )
         publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
             StableActivation(scope_run, selection.resolve(completion_superstep), source.node_id),
-            graph.publications[source.node_id].descriptor.identity,
+            graph.transition.publications[source.node_id].identity,
         )
         if not frames.has_publication(publication_coordinate):
             unavailable.append(f"{binding.destination.boundary_name}<-{source.node_id}.{source.output_name}")
@@ -183,7 +194,7 @@ def resolve_routing_facts(
     for node in state.frontier.nodes:
         publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
             StableActivation(scope_run, state.superstep, node.node_id),
-            graph.publications[node.node_id].descriptor.identity,
+            graph.transition.publications[node.node_id].identity,
         )
         if isinstance(node.settlement, (SucceededGraphNode, SkippedGraphNode)) and frames.has_publication(
             publication_coordinate
@@ -223,7 +234,7 @@ def resolve_routing_facts(
             )
             publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
                 StableActivation(scope_run, selection.resolve(state.superstep + 1), source.node_id),
-                graph.publications[source.node_id].descriptor.identity,
+                graph.transition.publications[source.node_id].identity,
             )
             if frames.has_publication(publication_coordinate):
                 continue
@@ -299,4 +310,4 @@ def resolve_routing(
     return project_routing_facts(state, resolve_routing_facts(graph, state, scope_run, frames))
 
 
-__all__ = ["_declared_joins"]
+__all__ = ["_declared_joins", "_success_routes"]

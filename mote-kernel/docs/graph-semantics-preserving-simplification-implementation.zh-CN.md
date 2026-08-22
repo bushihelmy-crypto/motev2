@@ -185,7 +185,7 @@ S03–S06 必须逐项原子实施；不得先引入新 field 双写，再在后
 以下清单是实施边界，不以“迁移全部 consumer”代替可核对位置。每项必须在同一原子变更中完成 production producer、consumer、imports、normative shape 和 direct exact-shape tests：
 
 - S03 definition/producer：`graph/topology.py` 删除两个 field，`graph/compiler.py` 删除两个 classification tuple 的构造和 `FrontierTransitionPlan` 实参；runtime consumers：`engine/frontier.py`、`engine/recovery.py`、`engine/admission.py`；direct tests/import gate：`tests/execution/graph/test_topology.py`、`tests/execution/graph/test_compiler.py`、`tests/architecture/test_graph_execution_ownership.py`。同时复跑 frontier、resource admission、nested recovery characterization。
-- S04 definition/producer：`graph/ports.py` 删除两个 DTO 和 `MaterializationPlan.node_id`；`graph/topology.py` 删除 `outcomes` field、`CompiledGraph.outcomes`/`CompiledGraph.publications` projections 并收窄 `publications` value type；`graph/compiler.py` 只生成 descriptor map。runtime consumers：`engine/scheduler.py`、`engine/frontier.py`、`engine/recovery.py`、`executor.py`、`engine/routing.py`、`engine/resume_input.py`、`engine/resume_admission.py`、`engine/admission.py`、`invocation.py`、`family_driver.py`；direct tests/import gate：`tests/execution/graph/test_topology.py`、`tests/execution/graph/test_compiler_contract.py`、`tests/architecture/test_graph_execution_ownership.py`、`tests/execution/engine/test_routing.py`、`tests/execution/engine/test_output_projection.py`、`tests/execution/engine/test_resume_input_contract.py`、`tests/execution/engine/test_resume_admission.py`、`tests/execution/engine/test_recovery_identity.py`、`tests/execution/engine/test_runtime_boundaries.py`、`tests/execution/test_executor.py`、`tests/execution/test_continuation_integrity.py`、`tests/execution/test_graph_api.py`。所有 removed DTO imports、`.outcomes[node_id]`、`graph.publications`/`scoped_graph.publications` 和 `.publications[node_id].descriptor` 访问必须同原子归零；publication consumers 必须直接形成 `graph.transition.publications[node_id]`，不得留给 S06 再次触碰。
+- S04 definition/producer：`graph/ports.py` 删除两个 DTO 和 `MaterializationPlan.node_id`；`graph/topology.py` 删除 `outcomes` field、`CompiledGraph.outcomes`/`CompiledGraph.publications` projections 并收窄 `publications` value type；`graph/compiler.py` 只生成 descriptor map。runtime consumers：`engine/scheduler.py`、`engine/frontier.py`、`engine/recovery.py`、`executor.py`、`engine/routing.py`、`engine/resume_input.py`、`engine/resume_admission.py`、`engine/admission.py`、`invocation.py`、`family_driver.py`；direct tests/import gate：既有 `tests/architecture/test_graph_execution_ownership.py`、`tests/execution/graph/test_compiler_contract.py`、`tests/execution/engine/test_routing.py`、`tests/execution/engine/test_output_projection.py`、`tests/execution/engine/test_resume_input_contract.py`、`tests/execution/engine/test_resume_admission.py`、`tests/execution/engine/test_recovery_identity.py`、`tests/execution/engine/test_runtime_boundaries.py`、`tests/execution/test_executor.py`、`tests/execution/test_continuation_integrity.py`、`tests/execution/test_graph_api.py`。所有 removed DTO imports、旧 projection 读取和 `.descriptor` 二次访问由本次 actual diff/source review 归零；publication consumers 直接形成 `graph.transition.publications[node_id]`，不得留给 S06 再次触碰，也不新增 legacy AST 子断言。
 - S05 definition/producer：`graph/topology.py` 删除 field，`graph/compiler.py` 删除 `CompiledGraph` 实参并把 nested child declaration 读取迁移到 `graph_input_descriptor.declarations`；runtime consumers：`engine/admission.py`；direct tests/import gate：`tests/execution/graph/test_compiler.py`、`tests/execution/graph/test_compiler_contract.py`、`tests/execution/graph/test_topology.py`、`tests/execution/engine/test_recovery_identity.py`、`tests/architecture/test_graph_execution_ownership.py`。同时复跑 compiler contract、graph-input admission 和 nested boundary tests，并更新 architecture/generic shape gate。
 - S06 definition/producer：`graph/topology.py` 删除 `RecoveryAvailabilityPlan`、`CompiledGraph.recovery` field、`transition` property、`entries`/`materializations`/`graph_outputs`/`resource_order` properties，并把 `transition: FrontierTransitionPlan[GraphValueT]` 作为 direct field；`graph/compiler.py` 直接传入 transition，删除 recovery wrapper assembly。剩余 consumer 必须改为 `graph.transition.*`，不得新增 alias、property、局部 wrapper 或双写过渡：
 
@@ -647,7 +647,7 @@ python -B -m pytest -q \
 
 本节现在固定全部 15 个 P1 的 case-level evidence。`baseline` 是当前 production shape 在代码基线
 `7944159` 上的 characterization；`target gate` 是对应 production 原子变更必须新增或更新的 owner/shape/tamper
-断言。S08 已通过更新既有 owner 集合断言闭合，不新增 private helper/import/comprehension 的 legacy AST 断言；
+断言。S03 已删除既有 owner field-set 中的两个分类镜像并以 source review 闭合，不新增 private shape 的 legacy AST 断言；S04 已通过更新既有 owner field-set、既有行为 case 与 source review 闭合，同样不新增 legacy AST 断言；S08 已通过更新既有 owner 集合断言闭合，不新增 private helper/import/comprehension 的 legacy AST 断言；
 S09 已迁移既有行为 case，并以 actual diff/source review 确认 DTO、wrapper 和镜像字段归零；S10 已迁移既有
 output/recovery/resume 行为边界，并以 actual diff/source review 确认 canonical diagnostic 与单次 full scan；S11
 继续复用既有 target/recovery/resume 行为边界，并以 actual diff/source review 确认每个 unique target 的单次 binding
@@ -667,14 +667,14 @@ production-only 的 S13、S18、S23A 保持
 
 本轮按表中当前 baseline nodeids 复跑 31 个 case（含参数化展开），第九次复审替换 S23B interrupt nodeid 后
 结果为 `31 passed in 0.29s`
-（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成。随后 S08 复用并收窄既有 architecture
+（2026-08-20，代码基线 `7944159`）；15 个 target gate 的设计已形成。随后 S03/S04 更新既有 owner field-set，S08 复用并收窄既有 architecture
 owner case，S09–S11、S17、S20 与 S23B 复用既有行为 gate 和一次性 source review；S23B 另新增一条 public
 mixed root/child-scope ordering case；这些单元均未新增 exact-shape test，
 其他 target 仍按各自当前状态处理。
 
 矩阵各行的 evidence profile 固定如下：`B0` 是当前 baseline case 命令；`T0` 在 Phase 0 是已固定的 target
 path、断言、失败条件和预期 manifest 类别；S08 的既有 owner gate 已通过单一集合收窄，S09–S11、S17 与 S20 的
-既有行为 gate 和一次性 source review 已通过，S23B 的 public behavior gate 与一次性 source review 也已通过，但七个
+既有行为 gate 和一次性 source review 已通过，S23B 的 public behavior gate 与一次性 source review 也已通过，但九个
 change unit 的完整交付仍被工作树中的独立 complexity unit 阻断；尚未
 落地的 T0 状态为 `DESIGNED / PENDING IMPLEMENTATION`，已落地 production-only 的 S13、S18、S23A 状态为
 `PRODUCTION IMPLEMENTED / T0 DEFERRED`。`GSP-A05` 后，T0
@@ -752,7 +752,7 @@ S23A 删除的是 private `_AdvancedFrontier` marker；Phase 0 需要冻结的�
 | 单元 | 全部适用 requirements | baseline 成功路径与断言（当前） | baseline 失败/边界路径与断言（当前） | baseline 状态 |
 | --- | --- | --- | --- | --- |
 | S03 | `GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_facade_drives_nested_graph_through_the_same_execution_owner`；完成结果通过同一 facade/engine，提交中存在 child scope | `tests/execution/graph/test_compiler_contract.py::test_compiler_requires_nested_inputs_to_match_child_boundary_exactly`；child boundary 不匹配在 compile 前抛 `GraphValidationError` | B0 DIRECT PASS / PRODUCTION IMPLEMENTED / OWNER + SOURCE REVIEW PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT |
-| S04 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_skip_failed_substitution_publishes_exact_output_for_downstream_materialization`；replacement publication 被下游消费并得到 `accepted:replacement` | `tests/execution/engine/test_output_projection.py::test_output_projection_reports_a_missing_confirmed_publication`；缺失 confirmed publication 抛 `GraphValueAdmissionError` | PASS（31-case run） |
+| S04 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_skip_failed_substitution_publishes_exact_output_for_downstream_materialization`；replacement publication 被下游消费并得到 `accepted:replacement` | `tests/execution/engine/test_output_projection.py::test_output_projection_reports_a_missing_confirmed_publication`；缺失 confirmed publication 抛 `GraphValueAdmissionError` | B0 DIRECT PASS / PRODUCTION IMPLEMENTED / BEHAVIOR + OWNER + SOURCE REVIEW PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT（2026-08-22） |
 | S05 | `GSP-P01`、`GSP-P03`、`GSP-P04`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/test_graph_api.py::test_graph_output_can_project_and_rename_an_admitted_graph_input`；admitted graph input 按声明投影为 renamed output | `tests/execution/graph/test_compiler_contract.py::test_compiler_requires_nested_inputs_to_match_child_boundary_exactly`；nested boundary mismatch 保持 compile-time rejection | PASS（31-case run） |
 | S06 | `GSP-P03`、`GSP-P04`、`GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/graph/test_compiler.py::test_compilation_normalizes_node_requirements_by_graph_resource_order`；graph、node、resource tuple 均保持 canonical FIFO 顺序 | `tests/execution/engine/test_admission.py::test_admission_rejects_snapshot_with_noncompiled_resource_order`；顺序 tamper 在 admission 前抛 `ResourceTransitionError` | PASS（31-case run） |
 | S08 | `GSP-P05`、`GSP-P06`、`GSP-P07`、`GSP-P08` | `tests/execution/engine/test_routing.py::test_join_fires_only_after_all_sources_arrive_across_supersteps`；首步保留 join progress，全部 source 到达后才 advance target | `tests/execution/engine/test_routing.py::test_duplicate_recovered_join_progress_fails_closed`；重复 recovered progress 抛 `JoinProgressError` | B0 PASS / PRODUCTION IMPLEMENTED / OWNER GATE PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT |
@@ -769,7 +769,7 @@ S23A 删除的是 private `_AdvancedFrontier` marker；Phase 0 需要冻结的�
 
 上述 15 行的 baseline behavior 均为 `PASS`；S23A 的 owner coverage 是 indirect，但足以冻结外部循环语义。
 每行对应的 `T0` target path、断言和失败条件均已设计；尚未实施的单元保持
-`DESIGNED / PENDING IMPLEMENTATION`。S09–S11、S17、S20 与 S23B 已按最终裁决以 public/既有行为 gate 和一次性 source review 闭合，不新增
+`DESIGNED / PENDING IMPLEMENTATION`。S03、S04、S09–S11、S17、S20 与 S23B 已按最终裁决以 public/既有行为 gate 和一次性 source review 闭合，不新增
 legacy AST test；S13、S18 与 S23A 则按后续 owner writeback 标记为
 `PRODUCTION IMPLEMENTED / T0 DEFERRED`。requirements 第 7 节已依据本矩阵只批准这 15 个 P1；其余单元的
 T0 仍须随对应 production 原子落地并通过后才可交付。
@@ -806,7 +806,7 @@ Phase 0 已固定所有 target gate 的 path、子断言和失败条件；当前
 | 单元 | exact-shape/tamper gate（路径、断言目标、失败条件） | 当前状态 |
 | --- | --- | --- |
 | S03 | 更新既有 `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering`，仅从既有 exact field set 删除 `callable_node_ids`/`nested_node_ids` 两项；compiler 的两个 tuple producer 删除和 consumer 向 `nested_graphs` keys / `CallableNodeDefinition` nominal check 的迁移由本次 actual diff/source review 闭合，不新增 producer、consumer、私有 symbol 或表达式形状的 legacy AST 断言。nested facade、compile mismatch、frontier、resource admission 与 nested recovery 继续由既有行为用例覆盖 | BEHAVIOR + OWNER + SOURCE REVIEW PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT（2026-08-21） |
-| S04 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S04.a`：`outcomes`/`publications` DTO 与 `CompiledGraph` projection 不存在；`S04.b`：`MaterializationPlan` 无重复 `node_id`；`S04.c`：publication map value exact 为 `FrameDescriptor[...]` 且 consumer 访问 `graph.transition.publications[node_id]`；malformed publication 继续由 `tests/execution/test_continuation_integrity.py::test_complete_continuation_rejects_a_malformed_publication_record` fail closed。该 grouped owner case 随 S04 原子变更只落地 S04 断言 | DESIGNED / PENDING IMPLEMENTATION |
+| S04 | 更新既有 `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering`，只删除 `outcomes` field expected 并收窄 `publications` value expected 为 `FrameDescriptor[...]`；`MaterializationPlan.node_id`、两个 DTO、旧 projection 读取与 `.descriptor` 二次访问由 actual diff/source review 核对；同一 review 确认 conditional route 解释只在 routing owner，scheduler 复用 `validate_routing_contribution()`、recovery 复用 routing owner 的 `_success_routes()`，不新增 legacy AST/private-symbol 子断言。malformed publication 继续由 `tests/execution/test_continuation_integrity.py::test_complete_continuation_rejects_a_malformed_publication_record` fail closed | BEHAVIOR + OWNER + SOURCE REVIEW PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT（2026-08-22） |
 | S05 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S05.a`：`CompiledGraph` 不定义 `graph_inputs` field/property/alias；`S05.b`：compiler/runtime 只读取 `graph_input_descriptor.declarations`；`S05.c`：`tests/execution/graph/test_compiler_contract.py::test_compiler_requires_nested_inputs_to_match_child_boundary_exactly` 仍在 compile 前拒绝 boundary mismatch。该 grouped owner case 随 S05 原子变更只落地 S05 断言 | DESIGNED / PENDING IMPLEMENTATION |
 | S06 | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 的 `S06.a`：`recovery` wrapper/storage 不存在；`S06.b`：`transition` 是 direct dataclass field，不是 property；`S06.c`：`entries`/`materializations`/`publications`/`graph_outputs`/`resource_order` 不在 `CompiledGraph` 定义；resource-order tamper 仍由 `tests/execution/engine/test_admission.py::test_admission_rejects_snapshot_with_noncompiled_resource_order` 拒绝。该 grouped owner case 随 S06 原子变更只落地 S06 断言 | DESIGNED / PENDING IMPLEMENTATION |
 | S08 | 更新既有 `tests/architecture/test_graph_execution_ownership.py::test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard`，只把 `joins_by_source` 的 production direct-owner 集合从 routing + snapshot guard 收窄为 routing。`_declared_joins` 的 import/call、helper symbol 和 comprehension 形状只作为本次 actual diff/source review，不新增永久 legacy AST 断言；重复/malformed progress 继续由既有行为测试 fail closed | OWNER GATE PASS / DELIVERY BLOCKED BY INDEPENDENT WORKTREE UNIT（2026-08-21） |
@@ -833,6 +833,17 @@ AST 断言。nested facade、compile mismatch、frontier、resource admission �
 通过，actual source review 确认 active production/tests 中两个旧 symbol、两个 compiler tuple producer 与全部旧
 projection 读取均为 0。因此 S03 的 behavior/owner/source target 已通过，但完整工作树仍受独立 complexity unit
 阻断，当前不记为零负债整体交付 `PASS`。
+
+S04 已完成 publication/outcome 编译计划收敛。`graph/ports.py` 删除 `OutcomeAdmissionPlan`、`PublicationPlan` 和
+`MaterializationPlan.node_id`；`FrontierTransitionPlan` 删除 `outcomes`，其 `publications` map 直接保存
+`FrameDescriptor`，`CompiledGraph.outcomes`/`publications` projection 同步删除。scheduler 通过 routing owner 的既有
+`validate_routing_contribution()` 校验 route，recovery 使用从 routing owner 迁移的既有 `_success_routes()`；因此
+conditional route 的直接解释仍只有 `routing.py`。publication descriptor declarations 负责构造 node output；frontier、admission、routing、recovery、resume、executor、family driver 与 invocation 全部直接读取
+`graph.transition.publications[node_id]`，不再经过 wrapper 或 `.descriptor` 二次访问。既有 owner field-set 仅删除
+`outcomes` expected 并收窄 publication value expected，没有新增 legacy/private-shape AST 断言；actual source review
+确认两个 DTO、旧字段、旧 projection 和旧 consumer 读取均为 0，既有 publication/output/recovery/nested 行为保持
+通过。因此 S04 的 behavior/owner/source target 已通过，但完整工作树仍受独立 complexity unit 阻断，当前不记为零
+负债整体交付 `PASS`。
 
 S08 已复用既有 architecture owner case，只收窄 `joins_by_source` 的 direct-owner 集合；没有新增针对
 `_declared_joins` 私有 symbol、import/call 或具体 comprehension 的 legacy AST 断言。production actual diff 和
@@ -876,7 +887,7 @@ public failure/interrupt identity、payload、stale-ID fail closed 和 mixed roo
 整体交付 `PASS`。
 
 S13 的 `PRODUCTION IMPLEMENTED / T0 DEFERRED` 不是 `PASS`：production 已完成，但本次明确不新增
-exact-shape architecture test，因此该单元仍不满足 T0 交付条件。S04–S06、S14 target gate 仍保持
+exact-shape architecture test，因此该单元仍不满足 T0 交付条件。S05、S06、S14 target gate 仍保持
 `DESIGNED / PENDING IMPLEMENTATION`。
 
 S23A 同样标记为 `PRODUCTION IMPLEMENTED / T0 DEFERRED`：production 已完成，但本次按约束不新增
@@ -891,9 +902,9 @@ S18 写成 T0 `PASS`。
 #### 7.2.3 Source/AST 子断言（R4 可执行口径）
 
 以下谓词必须由对应 architecture owner gate 或等价的静态检查直接执行；只检查文件名、注释或测试名称
-不算通过。S03、S08–S11、S17、S20 与 S23B 按 7.2.2 的最终裁决复用 public/既有行为/owner gate，并以各自 implementation actual diff/source
-review 闭合，不为已删除 private symbol 或具体表达式形状新增永久断言。除这八个单元外，每个 predicate 的可复现
-`path::test_case` 由 7.2.2 同一单元行注册：S04–S06 使用
+不算通过。S03、S04、S08–S11、S17、S20 与 S23B 按 7.2.2 的最终裁决复用 public/既有行为/owner gate，并以各自 implementation actual diff/source
+review 闭合，不为已删除 private symbol 或具体表达式形状新增永久断言。除这九个单元外，每个 predicate 的可复现
+`path::test_case` 由 7.2.2 同一单元行注册：S05–S06 使用
 `test_frontier_transition_plan_is_the_single_compiled_execution_lowering` 并逐原子单元只更新自己的分组断言，
 S18 使用待新增的 `test_resume_duplicate_indexes_are_owner_local_and_linear`；本节的 predicate 表不能脱离这些
 nodeid 单独充当 `GSP-A03` evidence。谓词针对目标提交的最终 source shape，不改变当前 baseline，也不允许通过
@@ -902,7 +913,7 @@ nodeid 单独充当 `GSP-A03` evidence。谓词针对目标提交的最终 sourc
 | 单元 | 必须为真的 source/AST 谓词 | 失败条件 |
 | --- | --- | --- |
 | S03 | 既有 owner gate 的 exact field set 不含 `callable_node_ids`/`nested_node_ids`；本次 actual diff/source review 确认 compiler 两个 classification tuple producer 与 active consumer 的旧 projection 读取均为 0，consumer 只按 `nested_graphs` keys 或 `CallableNodeDefinition` nominal variant 分类 | owner field set 仍登记旧字段，source review 发现 producer/旧读取残留，或行为用例不再保持 nested/frontier/resource/recovery 边界 |
-| S04 | `OutcomeAdmissionPlan`/`PublicationPlan` 不再被 topology/compiler/runtime imports；`MaterializationPlan` 无 `node_id` field；`CompiledGraph` 无 `outcomes`/`publications` attribute；publication consumer 的最终访问形状为 `graph.transition.publications[node_id]`，其 value 不再 `.descriptor` | DTO/import/property/重复 key 残留，或 consumer 继续走旧 projection |
+| S04 | 既有 owner gate 的 exact field set 不含 `outcomes`，且 `publications` value exact 为 `FrameDescriptor[...]`；本次 actual diff/source review 确认两个 DTO、`MaterializationPlan.node_id`、`CompiledGraph` 旧 projection、旧 graph publication/outcome 读取与 `.descriptor` 二次访问均为 0，publication consumer 直接读取 `graph.transition.publications[node_id]`，conditional route 解释只由 routing owner 持有 | DTO/import/property/重复 key/旧 projection/非 routing route interpretation 残留，或 consumer 未迁到 canonical descriptor map |
 | S05 | `CompiledGraph.__dataclass_fields__` 不含 `graph_inputs`；`CompiledGraph` `__dict__`/class MRO 无同名 property；nested compiler/admission 只读取 `graph_input_descriptor.declarations` | field、property、alias 或第二 graph-input declaration source |
 | S06 | `CompiledGraph.__dataclass_fields__["transition"]` 存在且不是 property；不含 `recovery`/`entries`/`materializations`/`publications`/`graph_outputs`/`resource_order`；`RecoveryAvailabilityPlan` 无 production import | wrapper/forwarding property/direct-field 反转或 publication projection 回归 |
 | S08 | 既有 owner gate 只允许 routing 直接读取 `joins_by_source`；snapshot guard 对 routing owner 的复用由本次 actual diff/source review 核对，不新增 private helper/import/comprehension AST 断言 | owner gate 仍登记 snapshot guard 或其他 production 模块为 `joins_by_source` direct reader；行为用例不再对 malformed/duplicate progress fail closed |
@@ -916,7 +927,7 @@ nodeid 单独充当 `GSP-A03` evidence。谓词针对目标提交的最终 sourc
 | S23B | 本次 actual diff/source review 确认 `_project_result_views` 只调用一次 `_scoped_states`，以两个 typed list accumulator 返回两个 tuple；`_failure_views`/`_interrupt_views` symbol/reference 为 0；public mixed root/child-scope case 直接验证两类 view 的 canonical root→child ordering 与 payload | 两次 scoped scan、旧 helper、Result mirror 残留，或 public identity/payload/mixed-scope ordering 改变 |
 | S18 | `invocation.py` 只有 `dict[tuple[tuple[str, ...], GraphNodeId], int]` action-count index；`engine/resume_admission.py` 只有 `dict[PublicationAvailabilityCoordinate[GraphValueT], int]` publication-count index；admission 在同一次 canonical enumeration 中收集 duplicate/collision；source AST 不出现 `.count(` 或先 `any(...)` 后再次完整枚举 | 第三个 index、O(n²) count、双扫描、跨 owner generic helper、duplicate/collision 报错顺序或 identity 顺序改变 |
 
-除 7.2.2 已明确采用 public/既有行为/owner gate 加 actual source review 的八个单元外，其余 `Sxx.a/b/c`
+除 7.2.2 已明确采用 public/既有行为/owner gate 加 actual source review 的九个单元外，其余 `Sxx.a/b/c`
 子断言都必须在同一 owner 测试中可单独定位。静态检查发现
 任何 `Any`、`object`、动态导入、反射或 compatibility alias 时，按第 2.3 节和 `GSP-P08` 立即失败；不能以
 Ruff/formatter 通过代替 source-discipline gate。
@@ -1492,6 +1503,62 @@ complexity ratchet/health unit 仍不属于 S03，本单元不修改其 limits�
 mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
 ```
 
+### 7.20 S04 implementation owner writeback（2026-08-22）
+
+S04 已完成 publication/outcome 编译计划收敛。`graph/ports.py` 删除 `OutcomeAdmissionPlan`、`PublicationPlan` 和
+`MaterializationPlan.node_id`；`FrontierTransitionPlan` 删除 `outcomes`，其 `publications` map 直接保存
+`FrameDescriptor[GraphValueT]`，`CompiledGraph.outcomes`/`CompiledGraph.publications` projection 同步删除。
+compiler 只生成 keyed publication descriptor map；scheduler 通过 routing owner 的既有
+`validate_routing_contribution()` 校验 `ContinueGraphRouting`/`SelectGraphRoute`，不直接解释
+`conditional_targets`；recovery 使用从 routing owner 迁移的既有 `_success_routes()`，因此 conditional route 的直接
+解释仍只有 `routing.py`。frontier、admission、routing、recovery、resume、executor、family driver 与 invocation
+全部直接读取 `graph.transition.publications[node_id]`，不再经过 wrapper 或 `.descriptor` 二次访问。
+
+既有 compiled-lowering architecture owner case 只删除 `outcomes` expected 并收窄 publication value expected，
+没有新增 helper（`_success_routes()` 只是从 recovery 原位迁移到 routing owner），也没有新增 DTO、producer/consumer/private-symbol
+或具体表达式形状的 legacy AST 断言。actual source review 确认
+两个旧 DTO、`MaterializationPlan.node_id`、旧 `CompiledGraph` projection、旧 graph publication/outcome 读取与
+`.descriptor` 二次访问均为 0；既有 publication/output/recovery/nested 行为保持通过。
+
+本次 S04 implementation change unit 的 exact repo-relative manifest 为：
+
+```text
+mote-kernel/src/mote_kernel/execution/graph/ports.py
+mote-kernel/src/mote_kernel/execution/graph/topology.py
+mote-kernel/src/mote_kernel/execution/graph/compiler.py
+mote-kernel/src/mote_kernel/execution/engine/scheduler.py
+mote-kernel/src/mote_kernel/execution/engine/frontier.py
+mote-kernel/src/mote_kernel/execution/engine/admission.py
+mote-kernel/src/mote_kernel/execution/engine/routing.py
+mote-kernel/src/mote_kernel/execution/engine/recovery.py
+mote-kernel/src/mote_kernel/execution/engine/resume_input.py
+mote-kernel/src/mote_kernel/execution/engine/resume_admission.py
+mote-kernel/src/mote_kernel/execution/executor.py
+mote-kernel/src/mote_kernel/execution/family_driver.py
+mote-kernel/src/mote_kernel/execution/invocation.py
+mote-kernel/tests/architecture/test_graph_execution_ownership.py
+mote-kernel/tests/execution/engine/test_recovery_identity.py
+mote-kernel/tests/execution/engine/test_resume_admission.py
+mote-kernel/tests/execution/engine/test_runtime_boundaries.py
+mote-kernel/docs/graph-node-input-output-contract-implementation.zh-CN.md
+```
+
+本次没有修改 State/State tests、公共 API、command/reducer、recovery semantics、protocol、持久化或 commit/install
+时序；没有新增 field、helper、cache、DTO、alias、compatibility path 或第二 publication/outcome owner。指定的
+compiler/routing/output/resume/recovery/executor/continuation/graph-api 与 architecture owner 定向套件共 296 passed；
+Ruff、格式检查、严格 Pyright 与 `git diff --check` 通过。按用户约束未运行全量 pytest 或 `make check`；独立
+complexity hook 不属于 S04，未纳入 manifest，也未修改其 limits/configuration。
+
+S04 的 outcome/publication DTO `2 → 0`、keyed-plan `node_id` fields `3 → 0`、CompiledGraph projection `2 → 0`，
+批准账本结构净变化为 `Δ=-7`；publication map value 收窄为 descriptor，所有 consumer 访问 hop 同时减少一层。
+该结构收益不把独立 complexity health 当作全仓零负债证明。
+
+本节 owner writeback 自身的独立 manifest 只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
+```
+
 ## 8. 文档同步和缺口
 
 当前行为与功能语义的 normative source 文件均存在，本轮按第 5.1 节的最小 source precedence 使用。完整
@@ -1563,8 +1630,8 @@ requirements、稳定 README 导航、本文 target 设计和 per-change manifes
 本次审查保留 23 个历史 ID，并把 S23 拆成两个原子单元，共得到 24 个实施单元：15 个 P1、9 个 P2（S12
 保持 P2）。15 个 P1 的范围、owner、删除对象、最多新增面、before→after 计数和 exact target 均已唯一化，
 目标 shape 已按实施方案固定。S08 已完成 production、既有 owner gate 收窄和独立 owner writeback；S09–S11、S17、S20 与
-S23B 以及 S03 已完成 production、public/既有行为/owner gate、一次性 source review、所需 normative 同步和独立 owner writeback。当前工作树仍混有未独立
-审核的 complexity unit，完整门禁未绿，因此八个 change unit 都不能记为零负债整体交付；S13、S18、S23A 已分别完成
+S23B 以及 S03、S04 已完成 production、public/既有行为/owner gate、一次性 source review、所需 normative 同步和独立 owner writeback。当前工作树仍混有未独立
+审核的 complexity unit，完整门禁未绿，因此九个 change unit 都不能记为零负债整体交付；S13、S18、S23A 已分别完成
 production-only 简化，未新增 exact-shape architecture test，因此三者的 T0 均保持 `DEFERRED`。
 
 第八次复审 R9–R13 已回写：T0 在 Phase 0 只要求设计完成，批准后才与 production 原子落地；准入状态只由
@@ -1593,8 +1660,9 @@ exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `P
 materializer，同时保留最终 simulated frontier validation；S23B 再把 failure/interrupt Result projection 合并为
 一次 canonical scoped-state scan，并以 public mixed root/child-scope case 冻结两类 view 顺序；S03 随后删除
 transition 中的两个 node-classification 镜像及 compiler producer，让 nested/callable 分类只消费 canonical graph
-maps/nominal definitions。八个单元均不新增 legacy AST 断言，scoped gate 已通过，但混合工作树的独立 complexity
-hook 阻断完整交付。其余 4 个 P1（S04–S06、S14）的 production
+maps/nominal definitions；S04 随后删除 outcome/publication DTO 与 compiled projection，让所有 publication consumer
+直接读取 canonical descriptor map。九个单元均不新增 legacy AST 断言，scoped gate 已通过，但混合工作树的独立 complexity
+hook 阻断完整交付。其余 3 个 P1（S05、S06、S14）的 production
 仍未开始。
 后续单元仍必须按各自批准口径落地
 production、gate 和实际受影响的 normative source。9 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence
@@ -1606,12 +1674,12 @@ HARD KEEP 保持不变。
 | --- | --- | --- |
 | `GSP-A01` | requirements/implementation/review 分工明确；本轮最小 source precedence、State HARD KEEP 与 non-normative 调用链边界固定 | 1.2、2.4、5.1–5.3、8.1 |
 | `GSP-A02` | 24 个 execution-only 原子单元；15 个 P1 exact target 无条件式分支，S18/S20/S23B 已收口 | 3、3.6、6.1 |
-| `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S08–S11、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
+| `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S04、S08–S11、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
 | `GSP-A06` | 9 个 P2 保持未继承批准，按单项设计和 evidence 另行准入 | 2.2、4、6 |
 
-Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S08–S11、S17、S20 与 S23B 的
-production/scoped gate 已完成，但在独立 complexity unit 与八个 implementation manifest 分离并重跑完整门禁前，
-不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03 也已完成；下一原子单元是 S04。不得重新发现第 25 个
+Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S08–S11、S17、S20 与 S23B 的
+production/scoped gate 已完成，但在独立 complexity unit 与九个 implementation manifest 分离并重跑完整门禁前，
+不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03、S04 也已完成；下一原子单元是 S05。不得重新发现第 25 个
 简化点、提前实施 P2、把独立文档治理放回关键路径，或触及 State/持久化。

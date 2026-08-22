@@ -1032,10 +1032,10 @@ def _partial_history_frames(
         Graph.values(input="present"),
         tuple((item.name, item.descriptor) for item in graph.graph_inputs.entries),
     )
-    publication = graph.publications[GraphNodeId("available")]
+    publication = graph.transition.publications[GraphNodeId("available")]
     output = _make_node_output_frame(
         Graph.values(value="present"),
-        tuple((item.name, item.descriptor) for item in publication.descriptor.declarations.entries),
+        tuple((item.name, item.descriptor) for item in publication.declarations.entries),
     )
     return ScopedFrameIndex(
         graph_inputs=(
@@ -1048,7 +1048,7 @@ def _partial_history_frames(
             ConfirmedPublication(
                 PublicationAvailabilityCoordinate(
                     StableActivation(scope_run, 0, GraphNodeId("available")),
-                    publication.descriptor.identity,
+                    publication.identity,
                 ),
                 output,
                 1,

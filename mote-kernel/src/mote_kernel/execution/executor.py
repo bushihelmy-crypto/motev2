@@ -196,15 +196,14 @@ class GraphExecutor(Generic[GraphValueT]):
                     routing,
                 )
                 if requested.output is not None:
-                    publication = self._graph.publications[requested.node_id]
+                    publication = self._graph.transition.publications[requested.node_id]
                     declarations = tuple(
-                        (declaration.name, declaration.descriptor)
-                        for declaration in publication.descriptor.declarations.entries
+                        (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
                     )
                     frame = _make_node_output_frame(requested.output, declarations)
                     substitutions.append(
                         PreparedSubstitution(
-                            PublicationAvailabilityCoordinate(activation, publication.descriptor.identity),
+                            PublicationAvailabilityCoordinate(activation, publication.identity),
                             frame,
                             SkipSubstitutionProvenance(),
                         )

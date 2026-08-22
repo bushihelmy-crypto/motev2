@@ -81,7 +81,7 @@ def project_graph_outputs(
                     selection.resolve(completion_superstep),
                     source.node_id,
                 ),
-                graph.publications[source.node_id].descriptor.identity,
+                graph.transition.publications[source.node_id].identity,
             )
             try:
                 frame = frames.lookup(publication_coordinate).frame

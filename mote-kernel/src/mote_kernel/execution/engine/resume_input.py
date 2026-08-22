@@ -120,7 +120,7 @@ def _publication_value(
     )
     coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
         StableActivation(scope_run, selection.resolve(anchor_superstep), source.node_id),
-        graph.publications[source.node_id].descriptor.identity,
+        graph.transition.publications[source.node_id].identity,
     )
     try:
         frame = frames.lookup(coordinate).frame
@@ -158,7 +158,7 @@ def node_inputs_available(
                     selection.resolve(activation_superstep),
                     source.node_id,
                 ),
-                graph.publications[source.node_id].descriptor.identity,
+                graph.transition.publications[source.node_id].identity,
             )
             if not frames.has_publication(publication_coordinate):
                 return False

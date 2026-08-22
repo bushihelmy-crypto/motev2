@@ -11,9 +11,7 @@ from mote_kernel.execution.graph.ports import (
     FrameDescriptor,
     GraphOutputBindings,
     MaterializationPlan,
-    OutcomeAdmissionPlan,
     OutputDeclarations,
-    PublicationPlan,
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
@@ -59,8 +57,7 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
     joins_by_source: FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]
     data_triggers: FrozenMap[GraphNodeId, DataTriggerPlan]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
-    outcomes: FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]
-    publications: FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]
+    publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]
     resource_order: tuple[ResourceId, ...]
 
@@ -95,14 +92,6 @@ class CompiledGraph(Generic[GraphValueT]):
     @property
     def materializations(self) -> FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]:
         return self.transition.materializations
-
-    @property
-    def outcomes(self) -> FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]:
-        return self.transition.outcomes
-
-    @property
-    def publications(self) -> FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]:
-        return self.transition.publications
 
     @property
     def graph_outputs(self) -> GraphOutputBindings[GraphValueT]:

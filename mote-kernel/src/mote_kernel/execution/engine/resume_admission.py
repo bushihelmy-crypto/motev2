@@ -56,7 +56,7 @@ def admit_resume_candidates(
         for substitution in candidate.substitutions:
             activation = substitution.coordinate.activation
             try:
-                publication = candidate.graph.publications[activation.node_id]
+                publication = candidate.graph.transition.publications[activation.node_id]
             except KeyError as error:
                 raise SnapshotMismatchError("resume substitution references an unknown publication node") from error
             node = frontier_node(candidate.successor.frontier, activation.node_id)
@@ -79,7 +79,7 @@ def admit_resume_candidates(
                 or activation.superstep != candidate.previous.superstep
                 or substitution.expected_revision != candidate.successor.revision
                 or type(substitution.provenance) is not SkipSubstitutionProvenance
-                or substitution.coordinate.descriptor != publication.descriptor.identity
+                or substitution.coordinate.descriptor != publication.identity
                 or node is None
                 or not isinstance(node.settlement, SkippedGraphNode)
                 or action is None
@@ -130,7 +130,7 @@ def admit_resume_candidates(
         skip_publication_coordinates: set[PublicationAvailabilityCoordinate[GraphValueT]] = {
             PublicationAvailabilityCoordinate(
                 StableActivation(candidate.scope_run, candidate.previous.superstep, action.node_id),
-                candidate.graph.publications[action.node_id].descriptor.identity,
+                candidate.graph.transition.publications[action.node_id].identity,
             )
             for action in skip_actions
         }

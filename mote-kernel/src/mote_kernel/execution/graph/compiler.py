@@ -29,10 +29,8 @@ from mote_kernel.execution.graph.ports import (
     NodeOutputPort,
     NodeOutputRef,
     NominalTypeDescriptor,
-    OutcomeAdmissionPlan,
     OutputDeclaration,
     OutputDeclarations,
-    PublicationPlan,
     PublicationSelection,
     PublicationSelectionKind,
     ResolvedInputBinding,
@@ -678,8 +676,7 @@ def _compile_graph(
     graph_outputs = GraphOutputBindings(tuple(graph_output_bindings))
 
     materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
-    outcomes: dict[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]] = {}
-    publications: dict[GraphNodeId, PublicationPlan[GraphValueT]] = {}
+    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {}
     for ordinal, node_id in enumerate(node_ids):
         input_declarations = OutputDeclarations(
             tuple(
@@ -689,7 +686,6 @@ def _compile_graph(
         )
         input_descriptor = _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations)
         materializations[node_id] = MaterializationPlan(
-            node_id,
             resolved_by_node[node_id],
             input_descriptor,
         )
@@ -699,9 +695,7 @@ def _compile_graph(
             ordinal,
             node_outputs[node_id],
         )
-        routes = tuple(sorted(conditional_targets[node_id]))
-        outcomes[node_id] = OutcomeAdmissionPlan(node_id, node_outputs[node_id], output_descriptor, routes)
-        publications[node_id] = PublicationPlan(node_id, output_descriptor)
+        publications[node_id] = output_descriptor
 
     transition = FrontierTransitionPlan(
         entries,
@@ -715,7 +709,6 @@ def _compile_graph(
         ),
         frozen_map({node_id: DataTriggerPlan(tuple(sorted(targets))) for node_id, targets in data_targets.items()}),
         frozen_map(materializations),
-        frozen_map(outcomes),
         frozen_map(publications),
         graph_outputs,
         tuple(resource.resource_id for resource in definition.resources),

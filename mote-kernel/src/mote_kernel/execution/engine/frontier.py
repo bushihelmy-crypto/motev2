@@ -89,7 +89,10 @@ def prepare_frontier(
         elif isinstance(projection, CompletedChild):
             if child.status is not GraphRunStatus.COMPLETED:
                 raise ResultCollectionError("completed child requires a completed child state")
-            declarations = tuple((item.name, item.descriptor) for item in graph.outcomes[task.node_id].outputs.entries)
+            declarations = tuple(
+                (item.name, item.descriptor)
+                for item in graph.transition.publications[task.node_id].declarations.entries
+            )
             nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
         else:
             if child.status is not GraphRunStatus.ABORTED or child.abort is None:

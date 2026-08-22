@@ -523,10 +523,10 @@ def _validate_frame_index(
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
         scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
-        publication = scoped_graph.publications.get(coordinate.activation.node_id)
+        publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
         if (
             publication is None
-            or coordinate.descriptor != publication.descriptor.identity
+            or coordinate.descriptor != publication.identity
             or coordinate.activation.superstep > binding.state.superstep
             or record.acknowledged_revision < 1
             or record.acknowledged_revision > binding.state.revision
@@ -539,7 +539,7 @@ def _validate_frame_index(
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
         declarations = tuple(
-            (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
+            (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
         )
         try:
             _admit_node_output_frame(record.frame, declarations)
@@ -598,7 +598,7 @@ def _validate_complete_context(
             if isinstance(node.settlement, SucceededGraphNode):
                 coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
                     StableActivation(binding.scope_run, state.superstep, node.node_id),
-                    scoped_graph.publications[node.node_id].descriptor.identity,
+                    scoped_graph.transition.publications[node.node_id].identity,
                 )
                 if not context.frames.has_publication(coordinate):
                     raise SnapshotMismatchError("complete continuation is missing a current success publication")

@@ -85,18 +85,15 @@ def _data_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
 
 
 def _substitution(graph: CompiledGraph[str], state: GraphRunState) -> AdmittedSubstitution[str]:
-    publication = graph.publications[GraphNodeId("source")]
+    publication = graph.transition.publications[GraphNodeId("source")]
     return AdmittedSubstitution(
         PublicationAvailabilityCoordinate(
             StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId("source")),
-            publication.descriptor.identity,
+            publication.identity,
         ),
         _make_node_output_frame(
             Graph.values(value="replacement"),
-            tuple(
-                (declaration.name, declaration.descriptor)
-                for declaration in publication.descriptor.declarations.entries
-            ),
+            tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries),
         ),
         SkipSubstitutionProvenance(),
         state.revision + 1,
@@ -246,7 +243,7 @@ def test_resume_admission_rejects_incomplete_substitution_evidence_before_commit
             substitution,
             coordinate=replace(
                 substitution.coordinate,
-                descriptor=graph.publications[GraphNodeId("other")].descriptor.identity,
+                descriptor=graph.transition.publications[GraphNodeId("other")].identity,
             ),
         )
     elif tamper == "provenance":

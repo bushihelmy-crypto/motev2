@@ -10,6 +10,7 @@ from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.resume_input import pending_node_input_available
 from mote_kernel.execution.engine.routing import (
+    _success_routes,
     graph_outputs_available,
     project_routing_facts,
     resolve_routing_facts,
@@ -590,7 +591,7 @@ def _publication_coordinate(
 ) -> PublicationAvailabilityCoordinate[GraphValueT]:
     return PublicationAvailabilityCoordinate(
         StableActivation(scope_run, state.superstep, node_id),
-        graph.publications[node_id].descriptor.identity,
+        graph.transition.publications[node_id].identity,
     )
 
 
@@ -625,16 +626,6 @@ def _select_live(
         started_node_ids=frozenset(live),
     )
     return tuple(sorted((*live, *(task.node_id for task in selected))))
-
-
-def _success_routes(
-    graph: CompiledGraph[GraphValueT],
-    node_id: GraphNodeId,
-) -> tuple[GraphRouteId | None, ...]:
-    routes = graph.outcomes[node_id].declared_routes
-    if routes:
-        return tuple(GraphRouteId(route) for route in routes)
-    return (None,)
 
 
 def _child_disposition(
