@@ -117,7 +117,7 @@ owner 同时接受第 6 节 `GSP-A04` 的 per-change actual manifest 口径；�
 | `GSP-A03` | **CLOSED** | 15/15 P1 均映射适用 `GSP-P01`–`GSP-P08`，具有当前成功/失败或边界 baseline，以及 `DESIGNED / PENDING IMPLEMENTATION` 的 exact T0 nodeid、断言和失败条件 |
 | `GSP-A04` | **CLOSED** | 接受每个 actual change unit 独立 manifest、owner writeback/review audit 分离且历史记录不累计的模型；文档门禁可复现 |
 | `GSP-A05` | **APPROVED — 仅限下列 15 个 P1** | A01–A04 evidence 已闭合；批准后 production、对应 target test 和实际受影响 normative source 按实施方案逐单元原子落地，T0 通过后才可交付 |
-| `GSP-A06` | **NOT SATISFIED / NOT TRIGGERED** | 9 个 P2 未提交各自单项设计，不继承本次 P1 批准 |
+| `GSP-A06` | **SATISFIED — 仅限 S07** | S07 已单独提交 exact typed signatures、删除/新增上限、净复杂度、成功/失败/边界 characterization、existing owner/tamper evidence 与 planned manifests；用户于 2026-08-23 以原文“补上吧，我是批准的”显式批准 S07，其余 8 个 P2 不继承该批准 |
 
 `GSP-A05` 本次明确且穷尽地只批准以下 15 个 P1：
 
@@ -125,10 +125,11 @@ owner 同时接受第 6 节 `GSP-A04` 的 per-change actual manifest 口径；�
 S03, S04, S05, S06, S08, S09, S10, S11, S13, S14, S17, S18, S20, S23A, S23B
 ```
 
-以下 9 个 P2 未获批准，仍须逐项满足 `GSP-A06`：
+S07 已于 2026-08-23 单项满足 `GSP-A06`；target shape、证据和 planned manifests 由实施方案第 3.2.2 节
+唯一拥有，本文不复制。以下 8 个 P2 仍未获批准，须各自逐项满足 `GSP-A06`：
 
 ```text
-S01, S02, S07, S12, S15, S16, S19, S21, S22
+S01, S02, S12, S15, S16, S19, S21, S22
 ```
 
 因此 Phase 1/2 只对上述 15 个 P1 开放，并必须遵循实施方案的原子顺序、per-change manifest 和完整门禁。
