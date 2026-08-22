@@ -2,6 +2,7 @@
 
 from typing import TypeVar
 
+from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
     GraphValueUnavailableError,
@@ -9,6 +10,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph.ports import (
     GraphInputPort,
+    MaterializationPlan,
     NodeOutputPort,
     PublicationSelection,
     require_publication_selection,
@@ -23,8 +25,6 @@ from mote_kernel.execution.graph.values import (
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.run_context import (
-    GraphInputAvailabilityCoordinate,
-    PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameAvailability,
     ScopedFrameIndex,
@@ -42,6 +42,16 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
+
+
+def _resume_input_coordinate(
+    activation: StableActivation,
+    plan: MaterializationPlan[GraphValueT],
+) -> ResumeInputAvailabilityCoordinate[GraphValueT]:
+    return ResumeInputAvailabilityCoordinate(
+        activation,
+        plan.descriptor.identity,
+    )
 
 
 def _require_decoded_values(
@@ -118,10 +128,7 @@ def _publication_value(
         selection,
         SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
     )
-    coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-        StableActivation(scope_run, selection.resolve(anchor_superstep), source.node_id),
-        graph.transition.publications[source.node_id].identity,
-    )
+    coordinate = _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
     try:
         frame = frames.lookup(coordinate).frame
     except SnapshotMismatchError as error:
@@ -141,10 +148,7 @@ def node_inputs_available(
     for binding in graph.transition.materializations[node_id].bindings.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
+            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
             if not frames.has_graph_input(graph_input_coordinate):
                 return False
         else:
@@ -152,13 +156,8 @@ def node_inputs_available(
                 binding.publication,
                 SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
             )
-            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                StableActivation(
-                    scope_run,
-                    selection.resolve(activation_superstep),
-                    source.node_id,
-                ),
-                graph.transition.publications[source.node_id].identity,
+            publication_coordinate = _node_output_coordinate(
+                graph, scope_run, source, selection.resolve(activation_superstep)
             )
             if not frames.has_publication(publication_coordinate):
                 return False
@@ -178,10 +177,7 @@ def pending_node_input_available(
     if isinstance(node.settlement.input, OverrideGraphNodeInput):
         return True
     plan = graph.transition.materializations[node_id]
-    coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
-        StableActivation(scope_run, state.superstep, node_id),
-        plan.descriptor.identity,
-    )
+    coordinate = _resume_input_coordinate(StableActivation(scope_run, state.superstep, node_id), plan)
     return frames.has_resume_input(coordinate) or node_inputs_available(
         graph,
         scope_run,
@@ -217,10 +213,7 @@ def materialize_node_input(
     plan = graph.transition.materializations[node_id]
     if isinstance(effective_input, OverrideGraphNodeInput):
         return decode_resume_input(graph, node_id, bytes(effective_input.payload))
-    resume_coordinate: ResumeInputAvailabilityCoordinate[GraphValueT] = ResumeInputAvailabilityCoordinate(
-        activation,
-        plan.descriptor.identity,
-    )
+    resume_coordinate = _resume_input_coordinate(activation, plan)
     try:
         return frames.lookup(resume_coordinate).frame
     except SnapshotMismatchError:
@@ -229,10 +222,7 @@ def materialize_node_input(
     for binding in plan.bindings.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
-            coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
+            coordinate = _graph_input_coordinate(graph, scope_run)
             try:
                 value = _frame_value(frames.lookup(coordinate).frame, source.name)
             except SnapshotMismatchError as error:

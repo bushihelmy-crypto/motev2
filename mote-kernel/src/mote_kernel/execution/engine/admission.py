@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import TypeVar
 
+from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import GraphValueAdmissionError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
@@ -19,13 +20,9 @@ from mote_kernel.execution.graph.values import (
     _make_graph_input_frame,
     _make_graph_output_view,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.run_context import (
-    GraphInputAvailabilityCoordinate,
-    PublicationAvailabilityCoordinate,
-    ScopedFrameIndex,
-)
+from mote_kernel.execution.run_context import ScopedFrameIndex
 from mote_kernel.state.graph_state import (
     AcquireResources,
     GraphNodeId,
@@ -64,10 +61,7 @@ def project_graph_outputs(
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
+            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
             frame = frames.lookup(graph_input_coordinate).frame
             value = _frame_value(frame, source.name)
         else:
@@ -75,13 +69,8 @@ def project_graph_outputs(
                 binding.publication,
                 GraphValueAdmissionError("compiled graph output binding lacks its activation selection"),
             )
-            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                StableActivation(
-                    scope_run,
-                    selection.resolve(completion_superstep),
-                    source.node_id,
-                ),
-                graph.transition.publications[source.node_id].identity,
+            publication_coordinate = _node_output_coordinate(
+                graph, scope_run, source, selection.resolve(completion_superstep)
             )
             try:
                 frame = frames.lookup(publication_coordinate).frame

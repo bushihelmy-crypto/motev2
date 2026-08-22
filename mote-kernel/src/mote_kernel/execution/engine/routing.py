@@ -11,7 +11,11 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.edge import JoinEdge
-from mote_kernel.execution.graph.ports import GraphInputPort, require_publication_selection
+from mote_kernel.execution.graph.ports import (
+    GraphInputPort,
+    NodeOutputPort,
+    require_publication_selection,
+)
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.run_context import (
@@ -56,6 +60,25 @@ class RoutingFacts:
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     data_targets: tuple[RequiredTarget, ...]
     unavailable_graph_outputs: tuple[str, ...]
+
+
+def _graph_input_coordinate(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+) -> GraphInputAvailabilityCoordinate[GraphValueT]:
+    return GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity)
+
+
+def _node_output_coordinate(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    source: NodeOutputPort,
+    superstep: int,
+) -> PublicationAvailabilityCoordinate[GraphValueT]:
+    return PublicationAvailabilityCoordinate(
+        StableActivation(scope_run, superstep, source.node_id),
+        graph.transition.publications[source.node_id].identity,
+    )
 
 
 def validate_routing_contribution(
@@ -112,10 +135,7 @@ def graph_outputs_available(
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run,
-                graph.graph_input_descriptor.identity,
-            )
+            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
             if not frames.has_graph_input(graph_input_coordinate):
                 return False
         else:
@@ -123,13 +143,8 @@ def graph_outputs_available(
                 binding.publication,
                 InvalidRoutingCommandError("compiled graph output binding lacks its activation selection"),
             )
-            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                StableActivation(
-                    scope_run,
-                    selection.resolve(completion_superstep),
-                    source.node_id,
-                ),
-                graph.transition.publications[source.node_id].identity,
+            publication_coordinate = _node_output_coordinate(
+                graph, scope_run, source, selection.resolve(completion_superstep)
             )
             if not frames.has_publication(publication_coordinate):
                 return False
@@ -146,9 +161,7 @@ def unavailable_graph_outputs(
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
-            graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-                scope_run, graph.graph_input_descriptor.identity
-            )
+            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
             if not frames.has_graph_input(graph_input_coordinate):
                 unavailable.append(f"{binding.destination.boundary_name}<-graph-input:{source.name}")
             continue
@@ -156,9 +169,8 @@ def unavailable_graph_outputs(
             binding.publication,
             InvalidRoutingCommandError("compiled graph output binding lacks its activation selection"),
         )
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(scope_run, selection.resolve(completion_superstep), source.node_id),
-            graph.transition.publications[source.node_id].identity,
+        publication_coordinate = _node_output_coordinate(
+            graph, scope_run, source, selection.resolve(completion_superstep)
         )
         if not frames.has_publication(publication_coordinate):
             unavailable.append(f"{binding.destination.boundary_name}<-{source.node_id}.{source.output_name}")
@@ -221,9 +233,7 @@ def resolve_routing_facts(
         for binding in graph.transition.materializations[target].bindings.entries:
             source = binding.source
             if isinstance(source, GraphInputPort):
-                graph_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = (
-                    GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity)
-                )
+                graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
                 if not frames.has_graph_input(graph_input_coordinate):
                     unavailable_inputs.append(f"{binding.destination.local_name}<-graph-input:{source.name}")
                     historical_inputs_missing = True
@@ -232,9 +242,8 @@ def resolve_routing_facts(
                 binding.publication,
                 InvalidRoutingCommandError("compiled node-output binding lacks its activation selection"),
             )
-            publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                StableActivation(scope_run, selection.resolve(state.superstep + 1), source.node_id),
-                graph.transition.publications[source.node_id].identity,
+            publication_coordinate = _node_output_coordinate(
+                graph, scope_run, source, selection.resolve(state.superstep + 1)
             )
             if frames.has_publication(publication_coordinate):
                 continue
@@ -310,4 +319,4 @@ def resolve_routing(
     return project_routing_facts(state, resolve_routing_facts(graph, state, scope_run, frames))
 
 
-__all__ = ["_declared_joins", "_success_routes"]
+__all__ = ["_declared_joins", "_graph_input_coordinate", "_node_output_coordinate", "_success_routes"]
