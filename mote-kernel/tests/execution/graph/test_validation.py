@@ -18,10 +18,10 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END, START
-from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
+from mote_kernel.execution.graph.ports import normalize_graph_output_declarations, normalize_input_bindings
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
@@ -186,6 +186,48 @@ def test_duplicate_conditional_route_fails_closed() -> None:
 
     with pytest.raises(DuplicateEdgeError):
         compile_graph(definition)
+
+
+def test_validation_checks_all_node_identities_before_duplicate_nodes() -> None:
+    invalid = graph(nodes=(node("a"), node("a"), node(" invalid")))
+
+    with pytest.raises(InvalidGraphIdentityError, match="node identity"):
+        compile_graph(invalid)
+
+
+def test_validation_preserves_edge_declaration_order_across_nominal_variants() -> None:
+    direct = DirectEdge(GraphNodeId("a"), GraphNodeId("missing"))
+    conditional = ConditionalEdge(GraphNodeId("a"), GraphRouteId(""), GraphNodeId("b"))
+    join = JoinEdge((GraphNodeId("a"),), GraphNodeId("b"))
+
+    cases: tuple[tuple[tuple[Edge, ...], type[GraphValidationError], str], ...] = (
+        ((direct, conditional, join), UnknownNodeError, "direct edge"),
+        ((conditional, join, direct), InvalidGraphIdentityError, "route identity"),
+        ((join, direct, conditional), InvalidJoinError, "invalid join"),
+    )
+    for edges, error, message in cases:
+        with pytest.raises(error, match=message):
+            compile_graph(graph(nodes=(node("a"), node("b")), edges=edges))
+
+
+def test_conditional_endpoint_error_precedes_nested_source_error() -> None:
+    child = definition("child.graph", 1, nodes=(node("child"),))
+    nested = NestedGraphNodeDefinition(
+        GraphNodeId("nested"),
+        child,
+        normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+    )
+    parent = GraphDefinition(
+        GraphDefinitionId("parent.graph"),
+        GraphDefinitionVersion(1),
+        (nested,),
+        (ConditionalEdge(GraphNodeId("nested"), GraphRouteId("next"), GraphNodeId("missing")),),
+        (),
+        normalize_graph_output_declarations({}),
+    )
+
+    with pytest.raises(UnknownNodeError, match="conditional edge"):
+        compile_graph(parent)
 
 
 @pytest.mark.parametrize(

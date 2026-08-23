@@ -16,7 +16,7 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
 )
 from mote_kernel.execution.graph.constants import END, START
-from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
@@ -60,18 +60,20 @@ def _validate_resources(definition: GraphDefinition[GraphValueT]) -> None:
             raise InvalidResourceDefinitionError(f"node {node.node_id!r} references an unknown resource")
 
 
-def _validate_edges(definition: GraphDefinition[GraphValueT], known: frozenset[GraphNodeId]) -> None:
+def _validate_edges(
+    definition: GraphDefinition[GraphValueT],
+    nodes_by_id: dict[GraphNodeId, GraphNode[GraphValueT]],
+) -> None:
     if len(definition.entries) != len(set(definition.entries)):
         raise DuplicateBoundaryError("graph definition contains duplicate explicit START entries")
-    if any(entry not in known for entry in definition.entries):
+    if any(entry not in nodes_by_id for entry in definition.entries):
         raise UnknownNodeError("START edge references an unknown node")
     direct_seen: set[DirectEdge] = set()
     conditional_seen: set[tuple[GraphNodeId, str]] = set()
-    join_seen: set[tuple[tuple[GraphNodeId, ...], GraphNodeId]] = set()
-    nested_ids = frozenset(node.node_id for node in definition.nodes if isinstance(node, NestedGraphNodeDefinition))
+    join_seen: set[tuple[frozenset[GraphNodeId], GraphNodeId]] = set()
     for edge in definition.edges:
         if isinstance(edge, DirectEdge):
-            if edge.source not in known or edge.target not in (*known, END):
+            if edge.source not in nodes_by_id or (edge.target != END and edge.target not in nodes_by_id):
                 raise UnknownNodeError("direct edge references an unknown node")
             if edge in direct_seen:
                 raise DuplicateEdgeError(f"duplicate direct edge: {edge.source} -> {edge.target}")
@@ -79,22 +81,22 @@ def _validate_edges(definition: GraphDefinition[GraphValueT], known: frozenset[G
             continue
         if isinstance(edge, ConditionalEdge):
             require_graph_identity(edge.route, kind="route")
-            if edge.source not in known or edge.target not in (*known, END):
+            if edge.source not in nodes_by_id or (edge.target != END and edge.target not in nodes_by_id):
                 raise UnknownNodeError("conditional edge references an unknown node")
-            if edge.source in nested_ids:
+            if isinstance(nodes_by_id[edge.source], NestedGraphNodeDefinition):
                 raise InvalidGraphIdentityError("nested graph nodes cannot be conditional routing sources")
             key = (edge.source, edge.route)
             if key in conditional_seen:
                 raise DuplicateEdgeError(f"duplicate conditional route {edge.route!r} from {edge.source!r}")
             conditional_seen.add(key)
             continue
-        sources = tuple(sorted(edge.sources))
+        sources = frozenset(edge.sources)
         key = (sources, edge.target)
         if (
-            len(sources) < 2
-            or len(sources) != len(set(sources))
-            or not set(sources) <= known
-            or edge.target not in (*known, END)
+            len(edge.sources) < 2
+            or len(sources) != len(edge.sources)
+            or not sources.issubset(nodes_by_id)
+            or (edge.target != END and edge.target not in nodes_by_id)
             or edge.target in sources
         ):
             raise InvalidJoinError(f"invalid join into node: {edge.target}")
@@ -123,16 +125,17 @@ def _validate_definition(
             )
         return
     visits[key] = _DefinitionVisit(id(definition), _ValidationStatus.VISITING)
-    node_ids = tuple(node.node_id for node in definition.nodes)
-    for node_id in node_ids:
+    nodes_by_id: dict[GraphNodeId, GraphNode[GraphValueT]] = {}
+    for node in definition.nodes:
+        node_id = node.node_id
         require_graph_identity(node_id, kind="node")
         if node_id in (START, END):
             raise InvalidGraphIdentityError("START and END cannot be concrete graph nodes")
-    if len(node_ids) != len(set(node_ids)):
+        nodes_by_id[node_id] = node
+    if len(nodes_by_id) != len(definition.nodes):
         raise DuplicateNodeError("graph definition contains duplicate node identities")
-    known = frozenset(node_ids)
     _validate_resources(definition)
-    _validate_edges(definition, known)
+    _validate_edges(definition, nodes_by_id)
     binding = definition.resume_input
     if binding is not None:
         require_graph_identity(binding.codec_id, kind="resume input codec")
