@@ -213,7 +213,7 @@ The monorepo is designed to support multiple languages without duplicating autho
 
 - **Python owns agent flow semantics.** `mote-kernel` defines how an agent interacts and advances.
 - **Go owns control-plane mechanisms.** Future Go components may implement Agent registration, lineage, communication, placement, leases, routing, and distributed ownership without defining Swarm collaboration or interpreting agent cognition.
-- **Infra owns execution and state mechanisms.** The local Rust implementation may provide host execution, isolation, durable state, and effect mechanisms. The pure TypeScript Cloudflare implementation uses Workers and Durable Objects for the same ownership tier. Neither decides what the agent should do.
+- **Infra owns execution and state mechanisms.** The local Rust implementation may provide host execution, isolation, durable state, and effect mechanisms. The Cloudflare Python and TypeScript implementations use Workers and Durable Objects for the same ownership tier. None decides what the agent should do.
 - **`conformance/` owns shared observable contracts.** No language implementation may privately reinterpret a released cross-language behavior.
 
 Go and the deployment-specific Infra implementations therefore extend deployment and implementation choices; they do not become co-owners of the Agent flow.
@@ -243,7 +243,9 @@ motev2/
 ├── mote-kernel/       Python Agent flow and state-machine semantics
 ├── mote-infra/        deployment-specific execution and state mechanisms
 │   ├── local/         local Rust implementation
-│   └── cloudflare/    Cloudflare TypeScript implementation
+│   └── cloudflare/    Cloudflare implementations
+│       ├── python/    Python Worker and Durable Object implementation
+│       └── ts/        TypeScript Worker and Durable Object implementation
 ├── mote-runtime/      planned Runtime Port implementations
 │   ├── control-plane/
 │   ├── model-gateway/
@@ -312,8 +314,8 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-infra/local/README.md`](mote-infra/local/README.md), [`mote-infra/cloudflare/README.md`](mote-infra/cloudflare/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-infra/local/README.md`](mote-infra/local/README.md), [`mote-infra/cloudflare/python/README.md`](mote-infra/cloudflare/python/README.md), [`mote-infra/cloudflare/ts/README.md`](mote-infra/cloudflare/ts/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details.
 
 ## License
 
-The implemented Python Kernel and both Infra projects are licensed under the Apache License 2.0. Each child project owns and declares the license of its release artifact.
+The implemented Python Kernel and Infra projects are licensed under the Apache License 2.0. Each child project owns and declares the license of its release artifact.

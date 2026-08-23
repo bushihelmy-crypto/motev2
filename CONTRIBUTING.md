@@ -21,10 +21,19 @@ cd mote-infra/local
 make check
 ```
 
-For the Cloudflare Infra:
+For the Cloudflare Python Infra:
 
 ```bash
-cd mote-infra/cloudflare
+cd mote-infra/cloudflare/python
+uv sync --locked
+pnpm install --frozen-lockfile
+make check
+```
+
+For the Cloudflare TypeScript Infra:
+
+```bash
+cd mote-infra/cloudflare/ts
 pnpm install --frozen-lockfile
 pnpm run check
 ```

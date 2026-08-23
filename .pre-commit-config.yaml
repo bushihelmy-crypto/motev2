@@ -26,15 +26,21 @@ repos:
         language: system
         pass_filenames: false
         files: ^mote-infra/local/.*\.rs$
-      - id: cloudflare-static
-        name: cloudflare static checks
-        entry: pnpm --dir mote-infra/cloudflare run check:static
+      - id: cloudflare-ts-static
+        name: Cloudflare TypeScript static checks
+        entry: pnpm --dir mote-infra/cloudflare/ts run check:static
         language: system
         pass_filenames: false
-        files: ^mote-infra/cloudflare/
+        files: ^mote-infra/cloudflare/ts/
+      - id: cloudflare-python-static
+        name: Cloudflare Python static checks
+        entry: make -C mote-infra/cloudflare/python static
+        language: system
+        pass_filenames: false
+        files: ^mote-infra/cloudflare/python/
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/local/third_party_licenses/|mote-infra/cloudflare/pnpm-lock\.yaml)
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/local/third_party_licenses/|mote-infra/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))

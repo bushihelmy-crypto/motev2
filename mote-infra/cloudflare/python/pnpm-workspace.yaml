@@ -1,0 +1,7 @@
+packages:
+  - .
+
+# pywrangler invokes the project-local Wrangler. Its bundle pipeline uses esbuild and workerd.
+allowBuilds:
+  esbuild: true
+  workerd: true

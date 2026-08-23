@@ -12,11 +12,25 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: npm
-    directory: /mote-infra/cloudflare
+    directory: /mote-infra/cloudflare/ts
     schedule:
       interval: weekly
     groups:
-      cloudflare-development-dependencies:
+      cloudflare-typescript-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: pip
+    directory: /mote-infra/cloudflare/python
+    schedule:
+      interval: weekly
+    groups:
+      cloudflare-python-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /mote-infra/cloudflare/python
+    schedule:
+      interval: weekly
+    groups:
+      cloudflare-python-wrangler:
         dependency-type: development
   - package-ecosystem: github-actions
     directory: /

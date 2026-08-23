@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+worker-dist/
+
+# Environments
+.venv/
+.env
+.env.*
+!.env.example
+
+# Test and analysis caches
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.pyright/
+.ruff_cache/
+
+# Cloudflare local state and generated files
+.wrangler/
+.venv-workers/
+python_modules/
+worker-configuration.d.py
+*.sqlite
+*.sqlite3
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local tooling
+*.log

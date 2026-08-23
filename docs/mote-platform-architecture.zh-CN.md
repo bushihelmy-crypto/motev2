@@ -655,7 +655,9 @@ motev2/
 │   └── terminal/          Rust 为主，可含 provider adapters
 ├── mote-infra/            部署相关的状态与可靠执行机制
 │   ├── local/             Rust：本地与宿主机原生实现
-│   └── cloudflare/        TypeScript：Workers 与 Durable Objects 实现
+│   └── cloudflare/        Cloudflare 平台实现
+│       ├── python/        Python：Workers、Durable Objects 与 Kernel 同运行时实现
+│       └── ts/            TypeScript：Workers 与 Durable Objects 实现
 └── conformance/           跨语言 observable contracts
 ```
 

@@ -1,0 +1,103 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mote-infra-cloudflare-python"
+version = "0.1.0"
+description = "Cloudflare Python Worker and Durable Object infrastructure for Mote agents."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+authors = [{ name = "Mote contributors" }]
+keywords = ["agent", "cloudflare", "durable-objects", "infra", "workers"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "build>=1.3",
+  "hatchling>=1.27",
+  "pip-audit>=2.9",
+  "pyright>=1.1.411",
+  "pytest>=9.0",
+  "pytest-asyncio>=1.0",
+  "pytest-cov>=7.0",
+  "ruff>=0.16",
+  "twine>=7.0",
+  "workers-py==1.16.7",
+  "workers-runtime-sdk==1.6.15",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mote_infra_cloudflare"]
+artifacts = ["src/mote_infra_cloudflare/py.typed"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/AGENTS.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/README.md",
+  "/README.zh-CN.md",
+  "/pyproject.toml",
+  "/wrangler.jsonc",
+]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+pythonpath = ["src"]
+testpaths = ["tests"]
+xfail_strict = true
+asyncio_mode = "strict"
+
+[tool.coverage.run]
+branch = true
+source = ["mote_infra_cloudflare"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 100
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["A", "ANN", "ASYNC", "B", "C4", "E", "F", "FA", "I", "N", "PERF", "PIE", "PTH", "RET", "RUF", "SIM", "T20", "UP", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/mote_infra_cloudflare/entry.py" = ["RUF029"]
+"tests/**/*.py" = ["ANN", "S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+quote-style = "double"
+
+[tool.pyright]
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "error"
+
+[tool.uv]
+required-version = "==0.12.3"

@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mote-infra-cloudflare-python",
+  "main": "src/mote_infra_cloudflare/entry.py",
+  "compatibility_date": "2026-08-24",
+  "compatibility_flags": ["python_workers"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AGENT_OBJECTS",
+        "class_name": "AgentDurableObject"
+      }
+    ]
+  },
+  "exports": {
+    "AgentDurableObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

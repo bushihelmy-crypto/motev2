@@ -15,7 +15,7 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2024",
-    "types": ["./src/worker-configuration.d.ts"],
+    "types": ["@cloudflare/workers-types", "./src/worker-configuration.d.ts"],
     "verbatimModuleSyntax": true
   },
   "include": ["src/**/*.ts", "vitest.config.ts"]
