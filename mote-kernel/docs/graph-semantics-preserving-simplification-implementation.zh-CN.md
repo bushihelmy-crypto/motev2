@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S03–S06、S08–S11、S14、S17、S20 production/owner gate 已完成，工作树交付待独立 complexity unit 分离
-- 日期：2026-08-22（本轮独立回写 S14；不把混合工作树冒记为零负债交付）
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07 已单项完成；S01 target 已通过第四次评审，等待 requirements 批准，尚未实现
+- 日期：2026-08-23（S01 complexity gate 明确排除；target 已收口为四文件 production/behavior 原子实施）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
 - 唯一公共门面：`mote_kernel.execution.Graph`
@@ -26,6 +26,12 @@
 - [第八次复审结论](graph-semantics-preserving-simplification-implementation-eighth-review.zh-CN.md)
 - [第九次复审结论](graph-semantics-preserving-simplification-implementation-ninth-review.zh-CN.md)
 - [第十次复审结论](graph-semantics-preserving-simplification-implementation-tenth-review.zh-CN.md)
+- [S01 单项实施方案审查](graph-semantics-preserving-simplification-s01-implementation-review.zh-CN.md)
+- [S01 单项重新设计第二次评审](graph-semantics-preserving-simplification-s01-implementation-second-review.zh-CN.md)
+- [S01 第二次评审回复](graph-semantics-preserving-simplification-s01-implementation-second-review-response.zh-CN.md)
+- [S01 单项重新设计第三次评审](graph-semantics-preserving-simplification-s01-implementation-third-review.zh-CN.md)
+- [S01 第三次评审回复](graph-semantics-preserving-simplification-s01-implementation-third-review-response.zh-CN.md)
+- [S01 单项重新设计第四次评审](graph-semantics-preserving-simplification-s01-implementation-fourth-review.zh-CN.md)
 - [Execution / State / Frontier 调用链（非规范性草稿）](execution-state-frontier-call-chain.zh-CN.md)
 - [历史两提交调研](../example/graph-two-commits-simplification-review.zh-CN.md)
 
@@ -175,7 +181,7 @@ artifact，或新增任何持久化/存储实现，即视为当前单元越界�
 
 | ID | 目标与唯一 owner | 删除 | 最多新增/替代 | 位置 | 级别 |
 | --- | --- | --- | --- | --- | --- |
-| S01 | `_compile_graph()` 仍是唯一编排 owner；只有收集/解析、edge lowering、activation proof、descriptor assembly 已形成窄 nominal phase 边界时才拆分 | 跨阶段局部变量和重复阶段判断 | 不超过 6 个窄 phase 函数；禁止 context bag | `graph/compiler.py` | P2 |
+| S01 | `_compile_graph()` 保留 nested recursion、完整 phase/error order 和最终装配；typed `dict` 是 invocation-local lookup，`ActivationGate`/`direct_targets`/`FrontierTransitionPlan` 分别拥有各自唯一事实 | `control_gates`、`direct_pairs`、单次使用的 `RouteCause` alias、三个无语义转交 alias 和两份 source-only predicate | 一个被两个 production consumer 复用的窄 predicate；零 phase helper/DTO/cache/额外 scan，顶层定义不增长 | 见 3.1.2 完整单项设计 | P2 |
 | S02 | validation 仍集中拥有错误优先级；只有 direct/conditional/join 或 definition 子校验能形成独立 invariant 且净分支/变量下降时才提取 | 经证明可独立的重复校验分支 | 每个 nominal variant 至多一个 validator；不得改变遍历顺序 | `graph/validation.py` | P2 |
 | S03 | nested 分类直接取 `nested_graphs` key；callable 分类按 `nodes` 中 `CallableNodeDefinition` nominal variant 判断 | `FrontierTransitionPlan.callable_node_ids`、`nested_node_ids` 及 compiler producer | 无 | 见 3.1.1 完整迁移清单 | P1 |
 | S04 | `FrontierTransitionPlan.publications` 精确收窄为 `FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]`；本单元同时删除 `CompiledGraph.publications` projection，全部 publication consumer 一次迁移到 `graph.transition.publications[node_id]`；outputs 取 `descriptor.declarations`，routes 取 `conditional_targets[node_id]` | `FrontierTransitionPlan.outcomes`、`CompiledGraph.outcomes`、`CompiledGraph.publications`、`OutcomeAdmissionPlan`、`PublicationPlan`、keyed plan 中重复 `node_id`，包括 `MaterializationPlan.node_id` | 不新增 DTO；只收窄 map value type | 见 3.1.1 完整迁移清单 | P1 |
@@ -210,6 +216,340 @@ normative shape 和 direct exact-shape tests：
 S04 完成后的 exact shape 必须同时满足：`FrontierTransitionPlan` 不再有 `outcomes`，`CompiledGraph` 不再有 `outcomes` 或 `publications` projection，最终访问路径为 `graph.transition.publications[node_id]`，value 本身就是 `FrameDescriptor[GraphValueT]`，且不存在 `OutcomeAdmissionPlan`、`PublicationPlan` 或 keyed plan 内重复的 `node_id`。
 
 S06 完成后的 `CompiledGraph` exact-shape gate 必须断言：`recovery` 不再存在；`transition` 是 direct dataclass field 而不是 property；`entries`、`materializations`、`publications`、`graph_outputs`、`resource_order` 均不再在 `CompiledGraph` 定义；publication projection 和 direct consumer 已由 S04 归零，本单元只验证其未回归。topology exact shape 与唯一访问路径只由 `tests/architecture/test_graph_execution_ownership.py` 冻结；`test_source_discipline.py` 仍作为连续模块头、`Any`、动态导入和反射门禁运行，不复制 topology 断言。
+
+<a id="312-s01-gsp-a06-单项重新设计pending-review--not-approved2026-08-23"></a>
+<a id="s01-gsp-a06"></a>
+
+#### 3.1.2 S01 `GSP-A06` 单项重新设计（REVIEW PASSED / PENDING APPROVAL，2026-08-23）
+
+本节是 S01 target shape、结构净删除账本、characterization、planned manifest 和实施门禁的**唯一 owner**。
+原独立 S01 proposal 已撤销为不含 target 内容的迁移指针；S01 review 只保留裁决和整改证据。requirements
+继续唯一拥有批准状态，且当前仍为未批准。本文档单元不授权修改 production/tests，不更新 `GSP-A06` 状态。
+
+本 target 只删除 compiler invocation 内的重复事实和无语义转交。当前不实现持久化；第 2.4 节的 State、command、
+reducer、protocol、Store/no-Store 与 callback 边界全部 `HARD KEEP`。S01 也不改变 public `Graph` API、
+`CompiledGraph`/`FrontierTransitionPlan` 字段 shape、错误分类或 runtime/recovery 的消费路径。
+
+**Requirement 适用性**
+
+| Requirement | 裁决 | S01 触及面 |
+| --- | --- | --- |
+| `GSP-P01` | 适用 | compiler validation error 分类、文本和首错时点仍从 public `Graph`/`compile_graph()` surface 可观察 |
+| `GSP-P02` | 排除 | 不读取或修改 State shape、command、revision、durable control facts；State tests 只原样复跑 |
+| `GSP-P03` | 排除 | 不触及 admission、commit、confirmation、memory installation 或 partial-confirmation transaction |
+| `GSP-P04` | 适用 | resolved binding 的 materialization/publication descriptor assembly 被就地简化 |
+| `GSP-P05` | 适用 | direct/conditional/join/data eligibility、guarantee 与 publication selection proof 继续消费同一 gate facts |
+| `GSP-P06` | 适用 | runtime 与 recovery 必须继续消费同一个 `FrontierTransitionPlan`，不得形成第二 lowering |
+| `GSP-P07` | 适用 | nested definition-order recursion、resource first-seen order、canonical node/resource ordering 保持 |
+| `GSP-P08` | 适用 | `_compile_graph()`/execution owner、nominal generic、module-scope import 和无第二 execution/store owner 是硬边界 |
+
+**Exact target signature 与新增上限**
+
+`_compile_graph()` 的签名和递归入口保持不变：
+
+```python
+def _compile_graph(
+    definition: GraphDefinition[GraphValueT],
+    scope: DefinitionScope,
+) -> CompiledGraph[GraphValueT]: ...
+```
+
+S01 不新增 phase helper。唯一允许新增的 private function 是下列被 controlled-producer proof 与 input-publication
+selection 两个 production consumer 共同复用的 predicate：
+
+```python
+ActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+
+
+def _all_single_source_gates(
+    source: GraphNodeId,
+    gates: list[ActivationGate],
+) -> bool:
+    return bool(gates) and all(
+        len(gate) == 1 and gate[0][0] == source
+        for gate in gates
+    )
+```
+
+`ActivationGate` 保留为 route-aware typed alias；仅删除只被它引用一次的 `RouteCause` alias，并把 exact pair
+shape 内联到 `ActivationGate`。这使新增的共享语义函数与被删除的单次 alias 在 top-level-definition 账本中一进一出，
+不靠删除一个有独立行为的 leaf helper 为新 helper 腾指标。predicate 依赖 validation 已保证的非空、无重复 source
+gate shape；它不排序、不分配 source map、不缓存，也不改变 route-aware joint-activation proof。
+
+两个既有 helper 只做窄类型迁移，不增加 owner：
+
+```python
+def _guaranteed_sets(
+    node_ids: tuple[GraphNodeId, ...],
+    entries: tuple[GraphNodeId, ...],
+    activation_gates: dict[GraphNodeId, list[ActivationGate]],
+    data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
+) -> dict[GraphNodeId, frozenset[GraphNodeId]]: ...
+
+
+def _input_publication_selection(
+    source: NodeOutputPort,
+    target: GraphNodeId,
+    absolute_levels: dict[GraphNodeId, int],
+    activation_gates: dict[GraphNodeId, list[ActivationGate]],
+    data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
+) -> PublicationSelection: ...
+```
+
+`_guaranteed_sets()` 只以 `for source, _route in gate` 消费 source；`_input_publication_selection()` 调用唯一
+predicate。`_resolve_source()` 继续接收
+`dict[GraphNodeId, OutputDeclarations[GraphValueT]]`；不为提前 `FrozenMap` 化改成掩盖线性 lookup 的抽象。
+`node_outputs` 在 `_compile_graph()` 内显式标注为同一完整 generic `dict` 类型。
+
+新增上限固定为：一个 private predicate、零 DTO/dataclass/field/property/alias/cache/index/runner/store、零
+phase wrapper、零 module import、零额外 full scan/sort/freeze。若 exact candidate 需要第二个新函数或任何宽
+context/multi-map return，即不满足本 target，不得以“小改”继续。
+
+**唯一编排与错误顺序**
+
+`_compile_graph()` 直接保留下列顺序，并用 phase comment 表达边界：
+
+1. 按 `definition.nodes` 的原始顺序递归编译 nested graph；parent/child phase、sibling 次序和首个 child error
+   只由 `_compile_graph()` 拥有；
+2. 建立 typed `nodes`/`nested_graphs`/`node_outputs` lookup，收集 graph input declaration；
+3. 按 canonical `node_ids` 完成一次 binding scan、nested boundary validation 和 data-cycle check；
+4. 按 `definition.edges` 原始顺序完成一次 direct/conditional/join/activation lowering；
+5. 依次完成 duplicate、entry、successor/reachability、joint activation、guarantee、terminal/output proof；
+6. 复用既有 `_frame_descriptor()` 组装 materialization/publication，构造唯一 `FrontierTransitionPlan`；
+7. 直接按 `transition.resource_order` canonicalize callable resources，在最终 `CompiledGraph` 边界冻结 maps。
+
+不得把 nested loop、binding scan、edge lowering、proof 或 final assembly 移入 single-use wrapper、闭包、DTO 或
+多 map tuple。不得新增 `definition.edges`、`node.inputs.entries`、`definition.outputs.entries` 或 node-id full scan；
+现有各 scan 的顺序和首错时点保持，不把“仍有多个不同职责的 `node_ids` 遍历”误报为重复扫描。
+
+**唯一事实与删除面**
+
+| 事实 | 唯一 owner | 删除/禁止 |
+| --- | --- | --- |
+| route-aware non-terminal activation | `activation_gates: dict[GraphNodeId, list[ActivationGate]]` | 删除 route 丢失后的常驻 `control_gates` 投影 |
+| non-END direct target membership | `direct_targets: dict[GraphNodeId, set[GraphNodeId]]` | 删除 `direct_pairs`；duplicate data/direct 用 `target in direct_targets[source]` |
+| terminal control gate | `gates_to_end` 派生的 `terminal_gates` | 不把不含 END 的 `direct_targets` 错称为 terminal owner |
+| controlled source-only causal relation | `_all_single_source_gates()` 按需从 `ActivationGate` 派生 | 不保存 source-only map/set/bool，不复制 predicate |
+| compile-time lookup | invocation-local typed `dict` | 不提前生成 `FrozenMap`，不保留 dict/frozen 双工作索引 |
+| compiled execution lowering | `FrontierTransitionPlan` | 不新增 recovery/runtime projection、runner 或 cache |
+| descriptor construction | resolved declarations + 既有 `_frame_descriptor()` | 删除 `input_descriptor`、`output_descriptor` 转交 alias |
+| canonical resource order | `transition.resource_order` | 删除 `resource_order` 转交 alias；`positions` 直接 enumerate canonical tuple |
+
+`nested_graphs`、`node_outputs` 和 proof indexes 在 compiler invocation 内保持 typed `dict` 的近似 O(1) lookup；
+`frozen_map()` 只在 `FrontierTransitionPlan`/`CompiledGraph` 最终 representation 边界调用。S01 不减少必要的最终
+freeze，也不增加额外 sort/freeze；不得把 tuple-backed `FrozenMap` 用作 binding/output proof 的高频工作索引。
+
+source-only predicate 的完整语义固定如下：
+
+| Gate shape | 结果/consumer 行为 |
+| --- | --- |
+| empty gates | `False`；data-only producer 继续走唯一 `data_dependencies` 分支 |
+| 同一 source 的两个 conditional routes 指向同一 target | `True`；route identity 不参与 producer guarantee/relative selection |
+| 同一 source 的 direct 与 conditional gate 指向同一 target | `True`；两个 gate 都只有同一个 causal source |
+| 任一 join gate 含第二 source | `False`；不得误判为 single-source causal |
+| route mutually exclusive / partial join | `_validate_joint_activation_paths()` 继续读取完整 `(source, route)` 并 fail closed |
+| terminal join/output | 继续由 `terminal_gates`、`_terminal_guarantees()`、`_output_publication_selection()` 拥有 |
+
+**结构净删除与零新增负债账本**
+
+S01 的净复杂度证据只由 exact target 的结构删除/新增面、一次性 source review 和 behavior evidence 构成，不依赖仓库
+complexity gate、snapshot、baseline、ratchet、health identity 或 `pyproject.toml` limit。上述独立治理项按用户明确要求
+不适用于 S01，不得成为 review、批准、实施或交付前置。
+
+| 可核对结构 | 当前 | target | 净变化/约束 |
+| --- | ---: | ---: | --- |
+| duplicate mutable facts/index | 2（`control_gates`、`direct_pairs`） | 0 | `-2`；不得换名或转移到第二 projection |
+| source-only predicate copies | 2 | 1 | `-1`；只保留一个双 consumer predicate |
+| 无语义转交 alias | 3（`input_descriptor`、`output_descriptor`、`resource_order`） | 0 | `-3`；直接消费 canonical value |
+| top-level definitions | `RouteCause` alias | `_all_single_source_gates()` | 一删一增；新增函数有两个 production consumer |
+| phase helper/DTO/dataclass/field/property | 0 | 0 | 不新增 |
+| cache/context/runner/store/compatibility path | 0 | 0 | 不新增 |
+| 额外 full scan/sort/freeze | 0 | 0 | 不新增；最终 representation 所需 freeze 原样保留 |
+| public/compiled/State/protocol shape | 当前 shape | 当前 shape | 不改变 |
+
+“零负债”在 S01 中精确表示：重复事实和无语义转交净删除，新增 predicate 具有两个真实 production consumer，并且不新增、
+不转移、不掩盖 DTO、wrapper、cache、第二 index、低效 lookup、private test hook、compatibility 或持久化债务。implementation
+writeback 必须按 actual diff 逐行闭合上表；任何一项需要扩大新增面或不能达到 target 即停止并重新评审。
+
+**Case-level behavior evidence**
+
+以下均通过 public `compile_graph()` 或既有 owner/runtime surface 断言行为；标为 `PLANNED` 的两个新 case 和
+`PLANNED ASSERTION` 的既有 case 补强与 production 在同一 implementation unit 落地。不得新增测试 private helper
+名称、局部变量、loop/comprehension、扫描次数或源码文本。
+
+| Requirement/场景 | Exact `path::test_case` | 断言目标 | 失败条件 |
+| --- | --- | --- | --- |
+| P01 unknown source | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_value_source_from_an_unknown_node` | 保持 `UnknownNodeError` 与 source error surface | 错误分类、文本归属或首错阶段改变 |
+| P01 direct/data duplicate | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_duplicate_data_and_direct_control_pair` | 删除 `direct_pairs` 后仍抛 `DuplicateEdgeError` | membership 漏检、改报其他错误或错误延后 |
+| P01 nested error priority（PLANNED） | `tests/execution/graph/test_nested_graph.py::test_nested_compilation_preserves_definition_order_error_priority` | 两个 child 同时含不同 compile-time invalidity 时仍报告 definition-order 第一个 child | 第二个 child/parent error 抢先，或 sibling traversal 被排序/搬迁 |
+| P04 data-only relative selection | `tests/execution/graph/test_compiler_contract.py::test_compiler_uses_relative_selection_for_loop_producer_data_trigger` | 无 control gate、唯一 data producer 仍为 `RELATIVE/1` | empty gate 被误判为 causal control 或 selection 改变 |
+| P04/P05 same-source multi-route（PLANNED） | `tests/execution/graph/test_compiler_contract.py::test_compiler_uses_relative_selection_for_same_source_conditional_routes` | loop source 的两个 routes 指向同一 bound target，编译成功且 materialization 为 `RELATIVE/1` | route identity 误入 source-only proof、编译失败或 superstep 漂移 |
+| P05 direct + conditional 同 target（PLANNED ASSERTION） | `tests/execution/graph/test_compiler.py::test_compile_indexes_conditional_routes_and_joins` | 在既有 conditional/join 断言之外，精确断言 `direct_targets["a"] == ("b", "c")`；该 case 只证明 edge lowering/index 共存，不冒充 source-only publication predicate evidence | direct target 遗漏/排序漂移，或 conditional/join index 改变 |
+| P05 multi-source join 不可冒充 single source | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_ambiguous_loop_publication_for_join_consumer` | join consumer 的 publication selection 继续 fail closed | 多 source gate 被误判为 relative causal |
+| P05 mutually exclusive route | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_join_between_mutually_exclusive_routes` | route-aware joint proof 保持 `jointly satisfiable` error | source-only projection 污染 route proof 或错误消失 |
+| P05 partial join | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route` | partial source set 继续 fail closed | route requirement 被忽略 |
+| P04/P05 terminal output | `tests/execution/graph/test_compiler_contract.py::test_join_to_end_is_one_terminal_gate_for_output_guarantees` | join-to-END 仍形成一个 terminal gate 并允许 guaranteed output | `direct_targets` 被误作 END owner 或 terminal guarantee 漂移 |
+| P04/P05 terminal negative | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_output_not_guaranteed_on_every_terminal_branch` | 每条 terminal branch 的 output guarantee 保持 | output proof 被弱化或错误顺序改变 |
+| P06 NodeOutput availability consumer | `tests/execution/engine/test_resume_input_contract.py::test_node_input_availability_reports_missing_publication` | availability 从 compiled NodeOutput binding/selection 形成 publication lookup；缺失时返回 unavailable | NodeOutput binding 不再要求 publication，或错误地报告 available |
+| P06 NodeOutput materialization fail closed | `tests/execution/engine/test_resume_input_contract.py::test_materialization_rejects_compiled_node_output_without_selection`；`tests/execution/engine/test_resume_input_contract.py::test_materialization_reports_missing_confirmed_publication` | selection 缺失时抛 `SnapshotMismatchError`；selection 存在但 publication 未确认时抛 `GraphValueUnavailableError` | selection 被绕过、错误分类改变或缺失 publication 被静默接受 |
+| P06 relative coordinate 正向消费 | `tests/execution/engine/test_runtime_boundaries.py::test_repeated_child_activations_isolate_parent_boundary_substitutions` | 两次不同 superstep 的 publication 均由同一 compiled `RELATIVE/1` materialization selection 解析并得到各自值 | runtime 固定 absolute coordinate、跨 activation 串值或建立第二 selection truth |
+| P06 compiled lowering exact shape | `tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering` | `FrontierTransitionPlan` fields 与 `CompiledGraph.transition` direct-field shape 原样保持 | field/projection shape 漂移或 `transition` 不再是 direct field；该 case 不声称证明 consumer owner set |
+| P07 nested recursion | `tests/execution/graph/test_nested_graph.py::test_invalid_deeply_nested_graph_fails_root_compilation` | deep child error 继续冒泡到 root | recursion owner、scope 或失败时点漂移 |
+| P07 resource order | `tests/execution/graph/test_compiler.py::test_compilation_normalizes_node_requirements_by_graph_resource_order` | first-seen `resource_order` 与 canonical node resources 保持 | alias 删除改变排序、identity 或 operation |
+| P08 generic/owner/import | `tests/architecture/test_generic_integrity.py::test_production_boundaries_preserve_generic_types`；`tests/architecture/test_source_discipline.py::test_imports_form_a_contiguous_module_header`；`tests/architecture/test_graph_execution_ownership.py::test_graph_state_and_execution_contracts_have_single_owners` | 完整 generic、module-scope import、Graph/execution/State owner 原样保持 | bare container、`Any`/`object`/cast、局部 import、第二 execution/store owner |
+
+**第三次评审接受项回写（2026-08-23）**
+
+第三次评审对当前 target 的非 complexity 设计与 evidence 引用完成复核。成立部分由本节吸收为 owner 状态，不由 review
+record 反向拥有 target 或批准状态：
+
+| 项目 | 当前 owner 状态 | 精确边界 |
+| --- | --- | --- |
+| R1 direct/conditional index evidence 与 manifest | **DESIGN CLOSED / IMPLEMENTATION PLANNED** | direct-index exact assertion 与 `test_compiler.py` 已登记；断言尚未编码 |
+| R2 NodeOutput publication consumer evidence | **CLOSED** | 三个 negative consumer 与 repeated-activation positive consumer 引用真实；same-source compiler case 仍为 `PLANNED` |
+| R3 compiled-lowering architecture evidence | **CLOSED** | 只证明 exact field shape；consumer 唯一性继续由 behavior + actual source review 闭合 |
+| no-persistence、唯一 owner 与基础设计复用 | **HARD KEEP** | 不修改 State/Store/protocol/callback，不新增 DTO/cache/runner/compatibility path |
+| 既有 behavior/owner baseline | **PASS — 19 existing nodeids** | 本次按上表 exact nodeid 复跑为 `19 passed in 0.43s`；只证明当前 production baseline |
+| 两个 `PLANNED` case 与一个 `PLANNED ASSERTION` | **PENDING IMPLEMENTATION** | 不得因既有 baseline 绿色冒记为已落地或已通过 target behavior |
+| `GSP-A06` 批准 | **PENDING APPROVAL** | 技术评审已经通过；只有 requirements owner 可授权 implementation |
+
+核心 positive case 必须包含：source 自环使 absolute coordinate 不成立；同一 source 的两个不同
+`ConditionalEdge` route 指向同一 target；target input 绑定该 source output；最终断言
+`PublicationSelectionKind.RELATIVE` 且 `superstep == 1`。它不测试 `_all_single_source_gates()` 名称。
+
+既有 direct + conditional index case 在 implementation unit 中只增加一个 public compiled-index 断言：
+`direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))`。它与 planned same-source multi-route
+case 职责分离：前者证明 edge lowering/index，后者才证明 route-insensitive source-only publication selection。
+
+error-priority case 必须构造两个 validation 可通过、但 compile phase 分别失败的 sibling child，并用不同错误分类/
+文本证明原 `definition.nodes` 顺序决定首错；不得通过 mock private helper、AST 或调用计数实现。
+
+**第四次评审接受项回写（2026-08-23）**
+
+[第四次评审](graph-semantics-preserving-simplification-s01-implementation-fourth-review.zh-CN.md)对第三次评审回复的
+R4–R5 纠偏由本唯一 owner 完整吸收：
+
+- complexity gate、snapshot、baseline、ratchet、health identity、`pyproject.toml` limit、Makefile
+  `complexity-ratchet` 和 pre-commit `kernel-complexity` 对 S01 均为 `NOT APPLICABLE`；
+- 这些内容不形成 S01 的通过、失败、整改项、批准前置、implementation manifest 或交付门禁；
+- S01 的净复杂度证据由本节 exact 结构账本、behavior matrix 与 actual diff/source review 闭合；
+- 非 complexity production + behavior manifest 精确为四个文件，第三次评审从未主张用该子集替换另一个有效 manifest；
+- R1–R3 和 target 技术质量保持 `PASS`，requirements approval 在本 owner 回写时仍单独等待明确授权。
+
+该回写只纠正准入范围，不改变第四次评审已经通过的 production target shape、behavior evidence 或 no-persistence 边界，
+也不创建第二份 target。
+
+**Exact-shape/source review 与 lookup evidence**
+
+public/owner-internal topology shape不变，因此既有
+`tests/architecture/test_graph_execution_ownership.py::test_frontier_transition_plan_is_the_single_compiled_execution_lowering`
+只证明 exact field shape并原样复跑，不增加 S01-specific architecture assertion。runtime 对 canonical materialization/
+publication selection 的消费由上表 P06 behavior cases 证明；没有新增 consumer/projection owner 则由 actual diff 与
+一次性 source review 证明，不扩大 AST gate。private/local 删除只在 owner writeback 记录 actual diff 和下列一次性
+命令；这些命令不是 repository test：
+
+```bash
+rg -n '\b(control_gates|direct_pairs|RouteCause)\b' \
+  src/mote_kernel/execution/graph/compiler.py
+# 期望：exit 1 且无输出
+
+rg -n '^\s+(input_descriptor|output_descriptor|resource_order)\s*=' \
+  src/mote_kernel/execution/graph/compiler.py
+# 期望：exit 1 且无输出；transition.resource_order 的 canonical field 读取必须仍存在
+
+rg -n 'transition\.(materializations|publications)' \
+  src/mote_kernel/execution
+# 记录 actual readers，并通过本单元 diff 确认没有新增 projection/consumer owner；不把列表写进永久测试
+```
+
+writeback 还必须列出 `activation_gates`、`direct_targets`、`nested_graphs`、`node_outputs` 的 actual typed owner，核对
+`node_outputs`/`nested_graphs` 后续 lookup 发生在 `frozen_map(...)` 之前，并报告 `frozen_map`/sort/full-scan source diff。
+发现提前 `FrozenMap`、dict/frozen 双工作索引、额外 sort/freeze/full scan 或 lookup 从 typed `dict` 退化，即使测试
+绿色也失败。不得把这些一次性检查转写为永久 AST/private-source test。
+
+**原子 change units 与 exact planned manifest**
+
+1. 本次 design-owner migration unit 只修改：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
+   mote-kernel/docs/graph-semantics-preserving-simplification-s01-implementation.zh-CN.md
+   ```
+
+   第二个文件只撤销原 proposal 并指向本节，不复制 target、账本、evidence 或批准状态。review record 不在本单元
+   修改，也不成为 target owner。
+
+2. 第四次评审与本次 owner 回写只负责闭合设计和准入范围；它们不改变 requirements 批准状态。S01 不等待、不修改、
+   也不消费独立 complexity framework，后者不得进入 S01 的提交历史或验收结论。
+
+3. 用户明确批准后，approval unit 只修改：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+   ```
+
+   只有该单元可把 S01 的 `GSP-A06` 状态改为 satisfied；本次重新设计请求不冒充批准。
+
+4. approval 之后，production + behavior implementation unit 的 planned manifest 精确为：
+
+   ```text
+   mote-kernel/src/mote_kernel/execution/graph/compiler.py
+   mote-kernel/tests/execution/graph/test_compiler.py
+   mote-kernel/tests/execution/graph/test_compiler_contract.py
+   mote-kernel/tests/execution/graph/test_nested_graph.py
+   ```
+
+   S01 不修改 `pyproject.toml`、complexity rules/tests、Makefile 或 pre-commit hook，也不改变 frozen normative shape，
+   因此不修改 Node I/O、architecture、State/protocol 文档；若 actual behavior/shape 证明必须同步其他 normative owner，
+   先停止并重新评审，不静默扩大 manifest。
+
+5. implementation 通过后，owner writeback unit 只修改本文，记录 actual structural ledger、lookup/scan/freeze、exact
+   manifest 和全部适用 gate；后续 review audit 若发生，只修改自己的 review record，不反向拥有 target/approval。
+
+四类 unit 不得累计历史文件、混合提交或依赖 compatibility bridge。implementation 不得包含
+`src/mote_kernel/state/**`、`tests/state/**`、protocol/conformance、Store/repository/journal/checkpoint/database、
+README、private/AST architecture gate 或新测试文件。
+
+**实施门禁与停止条件**
+
+批准后的 scoped checks 至少为：
+
+```bash
+python -B -m pytest -q \
+  tests/execution/graph/test_compiler.py \
+  tests/execution/graph/test_compiler_contract.py \
+  tests/execution/graph/test_join.py \
+  tests/execution/graph/test_nested_graph.py \
+  tests/execution/graph/test_topology.py \
+  tests/execution/engine/test_resume_input_contract.py \
+  tests/execution/engine/test_runtime_boundaries.py::test_repeated_child_activations_isolate_parent_boundary_substitutions
+python -B -m pytest -q \
+  tests/architecture/test_generic_integrity.py \
+  tests/architecture/test_source_discipline.py \
+  tests/architecture/test_dependency_direction.py \
+  tests/architecture/test_graph_execution_ownership.py
+python -B -m ruff check src tests
+python -B -m ruff format --check src tests
+pyright
+python -B -m pytest --ignore=tests/architecture/test_complexity_gate.py \
+  --cov=mote_kernel --cov-report=term-missing
+python -B -m build --no-isolation
+python -B -m twine check dist/*
+cd .. && SKIP=kernel-complexity pre-commit run --all-files
+git diff --check
+```
+
+完整 `make check` 不作为 S01 命令，因为它无条件包含已排除的 `complexity-ratchet`；上述命令逐项覆盖其余 lint、typecheck、
+behavior/coverage 和 package checks。monorepo pre-commit 同样只跳过 `kernel-complexity`，其他 hooks 必须全部通过。不得把
+这种明确排除冒记为完整 `make check` 或未跳过 pre-commit 已通过。
+
+除 requirements 的 `GSP-S01`–`GSP-S08` 外，出现任一条件即停止 S01：需要第二 predicate/phase helper/DTO/context/
+cache/index；错误优先级、definition-order nested recursion、edge/binding scan 或排序改变；`control_gates`/`direct_pairs`/
+无语义转交 alias/双 freeze 残留；typed `dict` lookup 退化；新增 private/AST/source-layout test；actual manifest 越界；
+State/持久化边界被触及；任一适用 scoped/engineering check 未通过且无精确阻断记录。
+
+只有 actual diff 同时满足唯一 owner、结构账本全部闭合、重复事实归零、behavior matrix、无 legacy gate、no-State/
+no-persistence、四文件原子 manifest 和全部适用 gate，S01 才能在后续 owner writeback 标记 implementation 完成。
 
 ### 3.2 Routing、join 与 availability facts（S07–S11）
 
@@ -646,7 +986,8 @@ normative 文档和 exact-shape tests 迁移；S05、S06 不得再拆成两个 i
 
 ### Phase 3：engine 内部 P2
 
-S01、S02、S07、S12、S15、S16、S19 只有满足 `GSP-A06` 并通过单项设计复审后才能实施；未通过的单元保持现状，不影响已批准 P1。S12 即使其他 P1 已获准，也不继承其批准状态。
+S07 已按 3.2.2 完成。S01、S02、S12、S15、S16、S19 只有满足 `GSP-A06` 并通过单项设计复审后才能实施；
+未通过的单元保持现状，不影响已批准 P1。S12 即使其他 P1 已获准，也不继承其批准状态。
 
 ### Phase 4：facade/transaction P2
 
@@ -1934,7 +2275,8 @@ CompiledGraph convenience projection，让 direct transition 成为唯一 loweri
 上述单元均不新增 legacy AST 断言，scoped gate 已通过，但混合工作树的独立 complexity hook 阻断完整交付。
 15 个已批准 P1 的 production target 至此全部落地；S07 随后在用户明确批准后首个完成 P2 单项 `GSP-A06`
 设计、production、既有 behavior/owner gate 与 normative 同步，三类目标 source 的重复 coordinate assembly 已归零。
-其余 8 个 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+S01 已按 3.1.2 重新提交单项 target/evidence，但尚未获得 requirements owner 批准、未修改 production；未获批的
+8 个 P2（含 S01）继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
@@ -1945,7 +2287,7 @@ CompiledGraph convenience projection，让 direct transition 成为唯一 loweri
 | `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S04、S05+S06、S08–S11、S14、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
-| `GSP-A06` | S07 已按单项签名、nominal type、删除/新增上限、净复杂度、behavior/tamper evidence 与三个独立 manifest 闭合；其余 8 个 P2 不继承该批准 | 3.2.2、7.23 |
+| `GSP-A06` | S07 已按单项签名、nominal type、删除/新增上限、净复杂度、behavior/tamper evidence 与三个独立 manifest 闭合；S01 重新设计已提交但仍待 review/requirements approval，其余 P2 不继承 S07 批准 | 3.1.2、3.2.2、7.23 |
 
 Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S05+S06、S08–S11、S14、S17、S20 与
 S23B 的 production/scoped gate 已完成，但在独立 complexity unit 与各 implementation manifest 分离并重跑完整
