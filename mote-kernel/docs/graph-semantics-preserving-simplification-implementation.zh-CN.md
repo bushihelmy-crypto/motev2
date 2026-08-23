@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07 已单项完成；S01 已单项满足 `GSP-A06`，可直接实施但尚未实现
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07、S01 已分别单项完成；S01 implementation commit 为 `0f34aa2`
 - 日期：2026-08-23（S01 complexity gate 明确排除；target 已收口为四文件 production/behavior 原子实施）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
@@ -112,7 +112,7 @@ HARD KEEP。若说明性文档与这些基线冲突，不从冲突中推导未�
 - P2：方向可能成立，但必须先给出窄 nominal target、净复杂度下降证据和行为 characterization，并单项再评审；不得与 P1 混合实施。
 
 P1/P2 都不表示可以跳过规范同步、完整门禁或代码评审。requirements 第 7 节通过 `GSP-A05` 只授权当前矩阵中的
-15 个 P1；随后 `GSP-A06` 只对 S07 单项闭合，其余 8 个 P2 和账本外方向仍未获批。
+15 个 P1；随后 `GSP-A06` 已分别对 S07、S01 单项闭合，其余 7 个 P2 和账本外方向仍未获批。
 
 ### 2.3 允许与禁止
 
@@ -220,18 +220,18 @@ S06 完成后的 `CompiledGraph` exact-shape gate 必须断言：`recovery` 不�
 <a id="312-s01-gsp-a06-单项重新设计pending-review--not-approved2026-08-23"></a>
 <a id="s01-gsp-a06"></a>
 
-#### 3.1.2 S01 `GSP-A06` 单项重新设计（APPROVED / READY FOR IMPLEMENTATION，2026-08-23）
+#### 3.1.2 S01 `GSP-A06` 单项重新设计（APPROVED / IMPLEMENTED，2026-08-23）
 
-本节是 S01 target shape、结构净删除账本、characterization、planned manifest 和实施门禁的**唯一 owner**。
+本节是 S01 target shape、结构净删除账本、characterization、manifest 和实施门禁的**唯一 owner**。
 原独立 S01 proposal 已撤销为不含 target 内容的迁移指针；S01 review 只保留裁决和整改证据。requirements
-继续唯一拥有批准状态，并已在 approval commit `785c796` 将 S01 记为 `GSP-A06 SATISFIED`。实施者现在可按本节
-四文件 manifest 直接修改 production/tests，不需要等待另一次 design review、requirements 批准或 complexity unit。
+继续唯一拥有批准状态，并已在 approval commit `785c796` 将 S01 记为 `GSP-A06 SATISFIED`。S01 已按本节
+四文件 manifest 完成 production/tests；不引入独立 complexity unit，也不需要扩大批准范围。
 
 **直接实施授权**
 
 - final design/review commit：`d34c117`；
 - requirements-only approval commit：`785c796`；
-- 当前实施状态：`AUTHORIZED / NOT YET IMPLEMENTED`；
+- 当前实施状态：`IMPLEMENTED / VERIFIED`（implementation commit `0f34aa2`）；
 - 唯一实施范围：本节第 4 项登记的 compiler + 三个既有 behavior test 文件；
 - 明确排除：持久化/State/protocol、`pyproject.toml`、complexity framework、legacy/AST/private-source-shape gate 和新测试文件。
 
@@ -382,18 +382,18 @@ writeback 必须按 actual diff 逐行闭合上表；任何一项需要扩大新
 
 **Case-level behavior evidence**
 
-以下均通过 public `compile_graph()` 或既有 owner/runtime surface 断言行为；标为 `PLANNED` 的两个新 case 和
-`PLANNED ASSERTION` 的既有 case 补强与 production 在同一 implementation unit 落地。不得新增测试 private helper
+以下均通过 public `compile_graph()` 或既有 owner/runtime surface 断言行为；原设计登记的两个新 case 和一个既有 case
+补强已与 production 在同一 implementation unit 落地。不得新增测试 private helper
 名称、局部变量、loop/comprehension、扫描次数或源码文本。
 
 | Requirement/场景 | Exact `path::test_case` | 断言目标 | 失败条件 |
 | --- | --- | --- | --- |
 | P01 unknown source | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_value_source_from_an_unknown_node` | 保持 `UnknownNodeError` 与 source error surface | 错误分类、文本归属或首错阶段改变 |
 | P01 direct/data duplicate | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_duplicate_data_and_direct_control_pair` | 删除 `direct_pairs` 后仍抛 `DuplicateEdgeError` | membership 漏检、改报其他错误或错误延后 |
-| P01 nested error priority（PLANNED） | `tests/execution/graph/test_nested_graph.py::test_nested_compilation_preserves_definition_order_error_priority` | 两个 child 同时含不同 compile-time invalidity 时仍报告 definition-order 第一个 child | 第二个 child/parent error 抢先，或 sibling traversal 被排序/搬迁 |
+| P01 nested error priority | `tests/execution/graph/test_nested_graph.py::test_nested_compilation_preserves_definition_order_error_priority` | 两个 child 同时含不同 compile-time invalidity 时仍报告 definition-order 第一个 child | 第二个 child/parent error 抢先，或 sibling traversal 被排序/搬迁 |
 | P04 data-only relative selection | `tests/execution/graph/test_compiler_contract.py::test_compiler_uses_relative_selection_for_loop_producer_data_trigger` | 无 control gate、唯一 data producer 仍为 `RELATIVE/1` | empty gate 被误判为 causal control 或 selection 改变 |
-| P04/P05 same-source multi-route（PLANNED） | `tests/execution/graph/test_compiler_contract.py::test_compiler_uses_relative_selection_for_same_source_conditional_routes` | loop source 的两个 routes 指向同一 bound target，编译成功且 materialization 为 `RELATIVE/1` | route identity 误入 source-only proof、编译失败或 superstep 漂移 |
-| P05 direct + conditional 同 target（PLANNED ASSERTION） | `tests/execution/graph/test_compiler.py::test_compile_indexes_conditional_routes_and_joins` | 在既有 conditional/join 断言之外，精确断言 `direct_targets["a"] == ("b", "c")`；该 case 只证明 edge lowering/index 共存，不冒充 source-only publication predicate evidence | direct target 遗漏/排序漂移，或 conditional/join index 改变 |
+| P04/P05 same-source multi-route | `tests/execution/graph/test_compiler_contract.py::test_compiler_uses_relative_selection_for_same_source_conditional_routes` | loop source 的两个 routes 指向同一 bound target，编译成功且 materialization 为 `RELATIVE/1` | route identity 误入 source-only proof、编译失败或 superstep 漂移 |
+| P05 direct + conditional 同 target | `tests/execution/graph/test_compiler.py::test_compile_indexes_conditional_routes_and_joins` | 在既有 conditional/join 断言之外，精确断言 `direct_targets["a"] == ("b", "c")`；该 case 只证明 edge lowering/index 共存，不冒充 source-only publication predicate evidence | direct target 遗漏/排序漂移，或 conditional/join index 改变 |
 | P05 multi-source join 不可冒充 single source | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_ambiguous_loop_publication_for_join_consumer` | join consumer 的 publication selection 继续 fail closed | 多 source gate 被误判为 relative causal |
 | P05 mutually exclusive route | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_join_between_mutually_exclusive_routes` | route-aware joint proof 保持 `jointly satisfiable` error | source-only projection 污染 route proof 或错误消失 |
 | P05 partial join | `tests/execution/graph/test_compiler_contract.py::test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route` | partial source set 继续 fail closed | route requirement 被忽略 |
@@ -414,20 +414,20 @@ record 反向拥有 target 或批准状态：
 
 | 项目 | 当前 owner 状态 | 精确边界 |
 | --- | --- | --- |
-| R1 direct/conditional index evidence 与 manifest | **DESIGN CLOSED / IMPLEMENTATION PLANNED** | direct-index exact assertion 与 `test_compiler.py` 已登记；断言尚未编码 |
-| R2 NodeOutput publication consumer evidence | **CLOSED** | 三个 negative consumer 与 repeated-activation positive consumer 引用真实；same-source compiler case 仍为 `PLANNED` |
+| R1 direct/conditional index evidence 与 manifest | **IMPLEMENTED / PASS** | direct-index exact assertion 已在 `test_compiler.py` 落地；actual manifest 与 implementation commit 见 7.24 |
+| R2 NodeOutput publication consumer evidence | **CLOSED / IMPLEMENTED** | 三个 negative consumer、repeated-activation positive consumer 与 same-source compiler case 均已落地并通过 |
 | R3 compiled-lowering architecture evidence | **CLOSED** | 只证明 exact field shape；consumer 唯一性继续由 behavior + actual source review 闭合 |
 | no-persistence、唯一 owner 与基础设计复用 | **HARD KEEP** | 不修改 State/Store/protocol/callback，不新增 DTO/cache/runner/compatibility path |
 | 既有 behavior/owner baseline | **PASS — 19 existing nodeids** | 本次按上表 exact nodeid 复跑为 `19 passed in 0.43s`；只证明当前 production baseline |
-| 两个 `PLANNED` case 与一个 `PLANNED ASSERTION` | **PENDING IMPLEMENTATION** | 不得因既有 baseline 绿色冒记为已落地或已通过 target behavior |
-| `GSP-A06` 批准 | **SATISFIED / IMPLEMENTATION AUTHORIZED** | requirements approval commit `785c796` 已完成；production 尚未修改 |
+| 两个 target case 与一个既有 case 补强 | **PASS / IMPLEMENTED** | same-source multi-route、nested definition-order priority 与 direct-index assertion 均已落地并通过 |
+| `GSP-A06` 批准 | **SATISFIED / IMPLEMENTED** | requirements approval commit `785c796` 后由 implementation commit `0f34aa2` 完成 production + behavior unit |
 
 核心 positive case 必须包含：source 自环使 absolute coordinate 不成立；同一 source 的两个不同
 `ConditionalEdge` route 指向同一 target；target input 绑定该 source output；最终断言
 `PublicationSelectionKind.RELATIVE` 且 `superstep == 1`。它不测试 `_all_single_source_gates()` 名称。
 
 既有 direct + conditional index case 在 implementation unit 中只增加一个 public compiled-index 断言：
-`direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))`。它与 planned same-source multi-route
+`direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))`。它与 same-source multi-route
 case 职责分离：前者证明 edge lowering/index，后者才证明 route-insensitive source-only publication selection。
 
 error-priority case 必须构造两个 validation 可通过、但 compile phase 分别失败的 sibling child，并用不同错误分类/
@@ -497,8 +497,8 @@ writeback 还必须列出 `activation_gates`、`direct_targets`、`nested_graphs
    mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
    ```
 
-   该单元已把 S01 的 `GSP-A06` 状态改为 satisfied；design/review commit `d34c117` 在前，production implementation
-   必须在后，Git 历史已形成可核对的 design → approval 顺序。
+   该单元已把 S01 的 `GSP-A06` 状态改为 satisfied；design/review commit `d34c117`、approval commit `785c796`
+   在前，production implementation commit `0f34aa2` 在后，Git 历史已形成可核对的 design → approval → implementation 顺序。
 
 4. approval 之后，production + behavior implementation unit 的 planned manifest 精确为：
 
@@ -558,8 +558,8 @@ cache/index；错误优先级、definition-order nested recursion、edge/binding
 无语义转交 alias/双 freeze 残留；typed `dict` lookup 退化；新增 private/AST/source-layout test；actual manifest 越界；
 State/持久化边界被触及；任一适用 scoped/engineering check 未通过且无精确阻断记录。
 
-只有 actual diff 同时满足唯一 owner、结构账本全部闭合、重复事实归零、behavior matrix、无 legacy gate、no-State/
-no-persistence、四文件原子 manifest 和全部适用 gate，S01 才能在后续 owner writeback 标记 implementation 完成。
+actual diff 已同时满足唯一 owner、结构账本全部闭合、重复事实归零、behavior matrix、无 legacy gate、no-State/
+no-persistence、四文件原子 manifest 和全部适用 gate；S01 implementation 完成证据见 7.24 owner writeback。
 
 ### 3.2 Routing、join 与 availability facts（S07–S11）
 
@@ -996,7 +996,7 @@ normative 文档和 exact-shape tests 迁移；S05、S06 不得再拆成两个 i
 
 ### Phase 3：engine 内部 P2
 
-S07 已按 3.2.2 完成；S01 已按 3.1.2 满足 `GSP-A06` 并获准直接实施。S02、S12、S15、S16、S19 仍须单项满足
+S07 已按 3.2.2 完成；S01 已按 3.1.2 完成 implementation。S02、S12、S15、S16、S19 仍须单项满足
 `GSP-A06` 并通过设计复审；未通过的单元保持现状。S12 不继承 S01、S07 或 P1 的批准状态。
 
 ### Phase 4：facade/transaction P2
@@ -2175,6 +2175,55 @@ complexity unit 纳入 S07。未新增 legacy/private-shape AST test；复用的
 `3 passed`。Ruff、目标 production 文件严格 Pyright、exact-file monorepo pre-commit（`kernel-complexity` 按范围跳过）
 和 scoped `git diff --check` 均通过；完整 pytest/`make check` 未运行，符合 WSL 约束。
 
+### 7.24 S01 implementation owner writeback（2026-08-23）
+
+S01 已按 3.1.2 完成 compiler invocation 内重复事实与无语义转交的收敛。Git 历史顺序为 design/review
+`d34c117` → requirements-only approval `785c796` → production + behavior implementation
+`0f34aa2 refactor(kernel): simplify graph compiler facts`；因此批准、实现和本次 owner writeback 没有互相追认。
+
+实际 production 结果如下：`ActivationGate` 直接拥有 route-aware `(source, route)` shape，`activation_gates` 是
+non-terminal activation 的唯一事实；`_all_single_source_gates()` 是唯一新增且被 controlled-producer proof 与
+input-publication selection 两个 production consumer 复用的窄 predicate。`_guaranteed_sets()` 继续消费完整
+gate source，joint-activation proof 继续保留 route identity；`direct_targets` 直接承担 non-END membership，duplicate
+data/direct 检查不再维护 `direct_pairs`。`control_gates`、`direct_pairs`、`RouteCause` 以及
+`input_descriptor`、`output_descriptor`、`resource_order` 三项转交局部 alias 均已归零；`node_outputs` 保持完整 generic
+invocation-local `dict`，最终只在
+`FrontierTransitionPlan`/`CompiledGraph` representation 边界 freeze。public Graph、CompiledGraph/transition shape、
+State、command、reducer、protocol、Store/no-Store、callback 与 runtime/recovery owner 均未改变。
+
+新增/补强的既有 public behavior cases 已全部通过：
+
+- `test_compiler.py` 的 direct target public index 断言为 `("b", "c")`；
+- `test_compiler_contract.py::test_compiler_uses_relative_selection_for_same_source_conditional_routes` 验证同一
+  self-loop source 的两个 conditional routes 指向同一 target 时仍为 `PublicationSelectionKind.RELATIVE / 1`；
+- `test_nested_graph.py::test_nested_compilation_preserves_definition_order_error_priority` 以两个 validation 可通过、
+  compile phase 分别失败的 child 验证 `definition.nodes` 原始顺序决定首错类型与文本。
+
+本次 implementation change unit 的 actual repo-relative manifest 只有：
+
+```text
+mote-kernel/src/mote_kernel/execution/graph/compiler.py
+mote-kernel/tests/execution/graph/test_compiler.py
+mote-kernel/tests/execution/graph/test_compiler_contract.py
+mote-kernel/tests/execution/graph/test_nested_graph.py
+```
+
+限定验证结果为：graph compiler/contract/nested/join/topology 套件 `56 passed`；resume-input/runtime boundary 套件
+`15 passed`；generic/source/dependency/ownership architecture 套件 `37 passed`；四文件 Ruff check 与 format check
+通过；严格 Pyright `0 errors, 0 warnings, 0 informations`；四文件 exact-file monorepo pre-commit 的所有适用 hook
+通过，按批准边界跳过 `kernel-complexity`；implementation commit `git show --check` 通过。按用户的 WSL 约束未运行
+全量 pytest、coverage、`make check`、build 或 Twine；这些未运行项目不冒记为 S01 证据。
+
+本次没有新增 legacy、AST、private-source-shape 或测试 helper；没有修改 State/State tests、normative Node I/O、
+protocol、README、Makefile、`pyproject.toml`、pre-commit 配置或 complexity framework。当前工作树中的 unrelated
+complexity/治理 dirty files 不属于 S01 manifest；独立 complexity health 也不作为本单元“全仓零负债”的证明。
+
+本节 owner writeback unit 的独立 manifest 只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
+```
+
 ## 8. 文档同步和缺口
 
 当前行为与功能语义的 normative source 文件均存在，本轮按第 5.1 节的最小 source precedence 使用。完整
@@ -2213,7 +2262,7 @@ Phase 0 和各 delivery change unit 中仍必须完成：
 | 历史调研 | history record | `example/graph-two-commits-simplification-review.zh-CN.md` | 只供溯源，不是 normative 或实施事实源 |
 
 requirements、稳定 README 导航、本文 target 设计和 per-change manifest 规则均已形成。requirements 第 7 节
-只对当前 15 个 P1 显式批准 `GSP-A05`，并只对 S07 单项闭合 `GSP-A06`；其余 8 个 P2 不继承批准。
+只对当前 15 个 P1 显式批准 `GSP-A05`；`GSP-A06` 已分别对 S07、S01 单项闭合，其余 7 个 P2 不继承批准。
 
 ## 9. 明确排除的方向
 
@@ -2247,7 +2296,7 @@ requirements、稳定 README 导航、本文 target 设计和 per-change manifes
 9 个 P2（S12 保持 P2）。S05+S06 按明确授权合并为一个 delivery change unit，因此交付边界共 23 个：14 个 P1、
 9 个 P2。15 个 P1 target 的范围、owner、删除对象、最多新增面、before→after 计数和 exact target 均已唯一化，
 目标 shape 已按实施方案固定。S08 已完成 production、既有 owner gate 收窄和独立 owner writeback；S09–S11、
-S14、S17、S20、S23B、S03、S04 以及 S05+S06 联合单元已完成 production、public/既有行为/owner gate、一次性 source
+S14、S17、S20、S23B、S03、S04、S05+S06 联合单元以及 S01 已完成 production、public/既有行为/owner gate、一次性 source
 review、所需 normative 同步和对应 owner writeback。当前工作树仍混有未独立
 审核的 complexity unit，完整门禁未绿，因此这些 change unit 都不能记为零负债整体交付；S13、S18、S23A 已分别完成
 production-only 简化，未新增 exact-shape architecture test，因此三者的 T0 均保持 `DEFERRED`。
@@ -2285,8 +2334,8 @@ CompiledGraph convenience projection，让 direct transition 成为唯一 loweri
 上述单元均不新增 legacy AST 断言，scoped gate 已通过，但混合工作树的独立 complexity hook 阻断完整交付。
 15 个已批准 P1 的 production target 至此全部落地；S07 随后在用户明确批准后首个完成 P2 单项 `GSP-A06`
 设计、production、既有 behavior/owner gate 与 normative 同步，三类目标 source 的重复 coordinate assembly 已归零。
-S01 已按 3.1.2 完成单项 target/evidence、第四次评审和 requirements approval，当前可直接实施但尚未修改 production；
-其余 7 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+S01 随后按 3.1.2 完成 implementation commit `0f34aa2`、四文件 actual manifest、behavior/source evidence 与 owner
+writeback；其余 7 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
@@ -2297,10 +2346,10 @@ S01 已按 3.1.2 完成单项 target/evidence、第四次评审和 requirements 
 | `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S04、S05+S06、S08–S11、S14、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
-| `GSP-A06` | S07 已完成；S01 已按 exact signature/nominal type、删除/新增上限、结构净删除、behavior/exact-shape evidence 与四文件 manifest 闭合，并由 approval commit `785c796` 授权；其余 P2 不继承批准 | 3.1.2、3.2.2、7.23 |
+| `GSP-A06` | S07、S01 已分别完成；S01 按 exact signature/nominal type、删除/新增上限、结构净删除、behavior/source evidence 与四文件 actual manifest 闭合，并由 approval commit `785c796` 授权、implementation commit `0f34aa2` 落地；其余 P2 不继承批准 | 3.1.2、3.2.2、7.23–7.24 |
 
 Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S05+S06、S08–S11、S14、S17、S20 与
 S23B 的 production/scoped gate 已完成，但在独立 complexity unit 与各 implementation manifest 分离并重跑完整
 门禁前，不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03、S04、S05+S06、S14 也已完成；
-当前没有剩余的已批准 P1 delivery change unit；S01 是唯一已批准但尚未实施的 P2。除已单项闭合的 S07、S01 外，
-不得重新发现第 25 个简化点、提前实施其余 P2、把独立文档治理放回关键路径，或触及 State/持久化。
+当前没有剩余的已批准 P1 delivery change unit；S01 这一已批准 P2 也已完成。其余 7 个未获批 P2 仍须逐项满足
+`GSP-A06`，不得重新发现第 25 个简化点、提前实施其余 P2、把独立文档治理放回关键路径，或触及 State/持久化。
