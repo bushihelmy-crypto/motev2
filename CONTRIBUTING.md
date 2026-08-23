@@ -17,7 +17,7 @@ make check
 For the Rust Infra:
 
 ```bash
-cd mote-infra
+cd mote-infra/local
 make check
 ```
 
@@ -25,7 +25,7 @@ Install `cargo-deny` before running the dependency license, source, and advisory
 
 ```bash
 cargo install cargo-deny --version 0.19.7 --locked
-cd mote-infra
+cd mote-infra/local
 make security
 ```
 

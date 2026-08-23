@@ -8,7 +8,7 @@ updates:
       kernel-development-dependencies:
         dependency-type: development
   - package-ecosystem: cargo
-    directory: /mote-infra
+    directory: /mote-infra/local
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

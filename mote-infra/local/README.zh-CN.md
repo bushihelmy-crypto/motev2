@@ -36,7 +36,7 @@ Mote Infra 是 Mote 中由 Rust 所有的可靠性底座。它将提供持久状
 
 根目录 conformance 是跨语言和 durable protocol 的唯一 owner。本项目的协议变更必须同时更新对应 conformance schema 与 cases。
 
-整体愿景和 owner 边界见 [Mote 平台架构](../docs/mote-platform-architecture.zh-CN.md)。
+整体愿景和 owner 边界见 [Mote 平台架构](../../docs/mote-platform-architecture.zh-CN.md)。
 
 ## 状态
 

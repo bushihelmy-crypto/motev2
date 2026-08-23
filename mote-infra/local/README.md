@@ -36,7 +36,7 @@ Install cargo-deny before running dependency license, source, and advisory check
 
 The root conformance directory owns cross-language and durable protocol contracts. Protocol work in this package must be accompanied by the corresponding conformance schema and cases.
 
-See the [Mote platform architecture](../docs/mote-platform-architecture.zh-CN.md) for the wider vision and owner boundaries.
+See the [Mote platform architecture](../../docs/mote-platform-architecture.zh-CN.md) for the wider vision and owner boundaries.
 
 ## Status
 

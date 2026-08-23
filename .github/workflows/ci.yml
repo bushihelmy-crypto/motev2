@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: mote-infra
+        working-directory: mote-infra/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: mote-infra
+        working-directory: mote-infra/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"

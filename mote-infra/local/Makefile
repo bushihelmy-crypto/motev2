@@ -20,7 +20,7 @@ package-check:
 	cargo package --locked --allow-dirty
 
 security:
-	cd .. && pre-commit run detect-secrets --all-files
+	cd ../.. && pre-commit run detect-secrets --all-files
 	cargo deny check
 
 check: lint test docs build package-check
