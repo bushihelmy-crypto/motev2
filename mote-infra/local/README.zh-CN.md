@@ -1,6 +1,6 @@
-# Mote Infra
+# Mote Local Infra
 
-Mote Infra 是 Mote 中由 Rust 所有的可靠性底座。它将提供持久状态、原子提交、operation receipt、并发协调、可靠 execution attempt、workspace 状态和存储适配器，但不解释 Agent Flow 业务语义。
+Mote Local Infra 是面向本地和宿主机原生部署的 Rust 可靠性底座实现。它将提供持久状态、原子提交、operation receipt、并发协调、可靠 execution attempt、workspace 状态和存储适配器，但不解释 Agent Flow 业务语义。
 
 项目目前处于初始化阶段，尚未固定公共 Commit、wire、RPC 或 daemon 启动 API。
 

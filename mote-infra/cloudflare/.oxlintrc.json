@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+  "options": {
+    "reportUnusedDisableDirectives": "error"
+  },
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": ["coverage/**", "dist/**", "node_modules/**", "src/worker-configuration.d.ts"],
+  "rules": {
+    "no-console": "error",
+    "no-debugger": "error",
+    "typescript/no-explicit-any": "error"
+  }
+}

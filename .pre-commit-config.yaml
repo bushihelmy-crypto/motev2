@@ -26,9 +26,15 @@ repos:
         language: system
         pass_filenames: false
         files: ^mote-infra/local/.*\.rs$
+      - id: cloudflare-static
+        name: cloudflare static checks
+        entry: pnpm --dir mote-infra/cloudflare run check:static
+        language: system
+        pass_filenames: false
+        files: ^mote-infra/cloudflare/
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/local/third_party_licenses/)
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/local/third_party_licenses/|mote-infra/cloudflare/pnpm-lock\.yaml)

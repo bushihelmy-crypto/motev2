@@ -1,6 +1,6 @@
-# Mote Infra
+# Mote Local Infra
 
-Mote Infra is the Rust-owned reliability substrate for Mote. It will provide durable state, atomic commit, operation receipts, coordination, reliable execution attempts, workspace state, and storage adapters without interpreting Agent flow semantics.
+Mote Local Infra is the Rust implementation of Mote's reliability substrate for local and host-native deployments. It will provide durable state, atomic commit, operation receipts, coordination, reliable execution attempts, workspace state, and storage adapters without interpreting Agent flow semantics.
 
 The project is in its bootstrap phase. No public commit, wire, RPC, or daemon startup API has been fixed yet.
 
