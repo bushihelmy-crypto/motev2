@@ -6,8 +6,7 @@ from tests.execution.engine.factories import conditional, direct, join, running_
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
-from mote_kernel.execution.engine.routing import plan_routing, validate_routing_contribution
-from mote_kernel.execution.engine.routing import resolve_routing as resolve_state_routing
+from mote_kernel.execution.engine.routing import resolve_routing, validate_routing_contribution
 from mote_kernel.execution.errors import (
     InvalidRoutingCommandError,
     JoinProgressError,
@@ -27,6 +26,7 @@ from mote_kernel.state.graph_state import (
     AdvanceGraphFrontier,
     CompleteGraphFrontier,
     ContinueGraphRouting,
+    GraphAbortReason,
     GraphFrontierNode,
     GraphFrontierState,
     GraphJoinProgress,
@@ -49,15 +49,17 @@ def test_selected_control_target_with_missing_input_aborts_before_advance() -> N
         ),
     )
 
-    resolution = plan_routing(
+    command = resolve_routing(
         graph,
         state,
         root_scope_run(state.run_id),
         ScopedFrameIndex(),
     )
 
-    assert isinstance(resolution.command, AbortGraphRun)
-    assert resolution.unavailable_control_targets == (GraphNodeId("target"),)
+    assert command == AbortGraphRun(
+        state.revision,
+        GraphAbortReason("required values unavailable for controlled nodes ('target',)"),
+    )
 
 
 def expected_advance(
@@ -102,7 +104,7 @@ def resolve_contributions(
             frame,
         )
     )
-    return resolve_state_routing(graph, state, scope_run, frames)
+    return resolve_routing(graph, state, scope_run, frames)
 
 
 def test_direct_conditional_and_terminal_routing_use_one_contribution_model() -> None:
@@ -413,13 +415,13 @@ def test_duplicate_recovered_join_progress_fails_closed() -> None:
         resolve_contributions(graph, continue_for("b"), (progress, progress))
 
 
-def test_routing_resolution_is_immutable() -> None:
-    resolution = resolve_contributions(
+def test_routing_command_is_immutable() -> None:
+    command = resolve_contributions(
         topology("a", "b", edges=(direct("a", "b"),)),
         continue_for("a"),
         (),
     )
-    assert isinstance(resolution, AdvanceGraphFrontier)
+    assert isinstance(command, AdvanceGraphFrontier)
 
     with pytest.raises(FrozenInstanceError):
-        resolution.node_ids = ()  # type: ignore[misc]
+        command.node_ids = ()  # type: ignore[misc]

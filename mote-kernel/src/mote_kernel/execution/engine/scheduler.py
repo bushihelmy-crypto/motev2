@@ -4,12 +4,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
+from mote_kernel.execution.engine.routing import validate_routing_contribution
 from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId
-from mote_kernel.execution.errors import (
-    InvalidRoutingCommandError,
-    NodeExecutionContractError,
-    UnknownRouteError,
-)
+from mote_kernel.execution.errors import NodeExecutionContractError
 from mote_kernel.execution.graph.definition import NestedGraphNodeDefinition
 from mote_kernel.execution.graph.outcome import (
     _GraphFailureOutcome,
@@ -23,6 +20,7 @@ from mote_kernel.execution.graph.values import (
     _public_node_input,
 )
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
+from mote_kernel.state.graph_state import ContinueGraphRouting, GraphRouteId, SelectGraphRoute
 
 GraphValueT = TypeVar("GraphValueT")
 NodeReturn: TypeAlias = (
@@ -58,15 +56,10 @@ def _project_outcome(
         return TaskFailure(executable.task, outcome.failure)
     else:
         return TaskInterrupt(executable.task, outcome.request_payload)
-    plan = graph.outcomes[executable.task.node_id]
-    if plan.declared_routes:
-        if route is None:
-            raise InvalidRoutingCommandError("a conditional node must select one declared route")
-        if route not in plan.declared_routes:
-            raise UnknownRouteError("node selected an unknown conditional route")
-    elif route is not None:
-        raise InvalidRoutingCommandError("a non-conditional node cannot select a route")
-    declarations = tuple((item.name, item.descriptor) for item in plan.outputs.entries)
+    routing = ContinueGraphRouting() if route is None else SelectGraphRoute(GraphRouteId(route))
+    validate_routing_contribution(graph, executable.task.node_id, routing)
+    descriptor = graph.transition.publications[executable.task.node_id]
+    declarations = tuple((item.name, item.descriptor) for item in descriptor.declarations.entries)
     return TaskSuccess(
         executable.task,
         _make_node_output_frame(output, declarations),

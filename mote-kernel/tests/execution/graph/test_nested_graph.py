@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 from tests.execution.graph.factories import node
 
@@ -5,8 +7,11 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
     DuplicateEdgeError,
     DuplicateGraphDefinitionError,
+    GraphValidationError,
+    InvalidGraphIdentityError,
     MissingEntryError,
     RecursiveGraphDefinitionError,
+    UnknownNodeError,
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -106,6 +111,109 @@ def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
 
     with pytest.raises(MissingEntryError):
         compile_graph(root)
+
+
+def test_nested_compilation_preserves_definition_order_error_priority() -> None:
+    unknown_source = replace(
+        node("unknown-source"),
+        inputs=normalize_input_bindings(
+            {
+                "value": Graph.graph_input("value", str),
+                "broken": Graph.node_output("unknown", "value"),
+            }
+        ),
+    )
+    self_source = replace(
+        node("self-source"),
+        inputs=normalize_input_bindings(
+            {
+                "value": Graph.graph_input("value", str),
+                "broken": Graph.node_output("self-source", "value"),
+            }
+        ),
+    )
+    first_child = GraphDefinition(
+        definition_id=GraphDefinitionId("first-child.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(unknown_source,),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    second_child = GraphDefinition(
+        definition_id=GraphDefinitionId("second-child.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(self_source,),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+
+    first_parent = GraphDefinition(
+        definition_id=GraphDefinitionId("first-parent.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested("first", first_child), nested("second", second_child)),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    with pytest.raises(UnknownNodeError, match="value source references unknown node"):
+        compile_graph(first_parent)
+
+    second_parent = GraphDefinition(
+        definition_id=GraphDefinitionId("second-parent.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested("second", second_child), nested("first", first_child)),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    with pytest.raises(GraphValidationError, match="cannot bind its own output"):
+        compile_graph(second_parent)
+
+
+def test_nested_validation_preserves_definition_order_error_priority() -> None:
+    invalid_route = GraphDefinition(
+        definition_id=GraphDefinitionId("invalid-route.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(node("a"), node("b")),
+        edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId(""), GraphNodeId("b")),),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    duplicate_edge = GraphDefinition(
+        definition_id=GraphDefinitionId("duplicate-edge.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(node("a"), node("b")),
+        edges=(
+            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
+        ),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+
+    route_first = GraphDefinition(
+        definition_id=GraphDefinitionId("route-first.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested("route", invalid_route), nested("edge", duplicate_edge)),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    with pytest.raises(InvalidGraphIdentityError, match="route identity"):
+        compile_graph(route_first)
+
+    edge_first = GraphDefinition(
+        definition_id=GraphDefinitionId("edge-first.graph"),
+        version=GraphDefinitionVersion(1),
+        nodes=(nested("edge", duplicate_edge), nested("route", invalid_route)),
+        edges=(),
+        entries=(),
+        outputs=normalize_graph_output_declarations({}),
+    )
+    with pytest.raises(DuplicateEdgeError, match="duplicate direct edge"):
+        compile_graph(edge_first)
 
 
 def test_nested_graph_with_duplicate_route_fails_parent_compilation() -> None:

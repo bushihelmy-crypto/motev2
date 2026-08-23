@@ -42,7 +42,6 @@ from mote_kernel.execution.request import (
     ResumeInterruptedNodeRequest,
     ResumeNodeRequest,
     ResumeRequest,
-    SkipFailedNodeRequest,
 )
 from mote_kernel.execution.result import (
     PreparedResume,
@@ -370,11 +369,17 @@ def plan_resumes(
     canonical = tuple(sorted(resume, key=lambda action: (action.scope, action.node_id)))
     if canonical != resume:
         raise SnapshotMismatchError("resume actions must be supplied in canonical scope/node order")
-    action_coordinates = tuple((action.scope, action.node_id) for action in canonical)
-    if len(action_coordinates) != len(set(action_coordinates)):
-        duplicates = tuple(coordinate for coordinate in action_coordinates if action_coordinates.count(coordinate) > 1)
+    action_counts: dict[tuple[tuple[str, ...], GraphNodeId], int] = {}
+    duplicate_coordinates: list[tuple[tuple[str, ...], GraphNodeId]] = []
+    for action in canonical:
+        coordinate = (action.scope, action.node_id)
+        count = action_counts.get(coordinate, 0) + 1
+        action_counts[coordinate] = count
+        if count == 2:
+            duplicate_coordinates.append(coordinate)
+    if duplicate_coordinates:
         raise GraphValuePublicationError(
-            f"resume action nodes {tuple(dict.fromkeys(duplicates))!r} supplied duplicate candidate coordinates"
+            f"resume action nodes {tuple(duplicate_coordinates)!r} supplied duplicate candidate coordinates"
         )
     planned_states = states
     candidate_frames = frames
@@ -409,8 +414,6 @@ def plan_resumes(
                 binding.state,
                 candidate,
                 substitutions,
-                tuple(action for action in prepared.command.actions if isinstance(action, SkipFailedNode)),
-                any(isinstance(action, SkipFailedNodeRequest) and action.output is None for action in actions),
                 prepared.command,
             )
         )
@@ -520,10 +523,10 @@ def _validate_frame_index(
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
         scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
-        publication = scoped_graph.publications.get(coordinate.activation.node_id)
+        publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
         if (
             publication is None
-            or coordinate.descriptor != publication.descriptor.identity
+            or coordinate.descriptor != publication.identity
             or coordinate.activation.superstep > binding.state.superstep
             or record.acknowledged_revision < 1
             or record.acknowledged_revision > binding.state.revision
@@ -536,7 +539,7 @@ def _validate_frame_index(
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
         declarations = tuple(
-            (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
+            (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
         )
         try:
             _admit_node_output_frame(record.frame, declarations)
@@ -546,7 +549,7 @@ def _validate_frame_index(
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
         scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
-        materialization = scoped_graph.materializations.get(coordinate.activation.node_id)
+        materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
         if (
             materialization is None
             or coordinate.descriptor != materialization.descriptor.identity
@@ -595,7 +598,7 @@ def _validate_complete_context(
             if isinstance(node.settlement, SucceededGraphNode):
                 coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
                     StableActivation(binding.scope_run, state.superstep, node.node_id),
-                    scoped_graph.publications[node.node_id].descriptor.identity,
+                    scoped_graph.transition.publications[node.node_id].identity,
                 )
                 if not context.frames.has_publication(coordinate):
                     raise SnapshotMismatchError("complete continuation is missing a current success publication")

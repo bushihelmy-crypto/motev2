@@ -41,6 +41,10 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
     )
     compiled = compile_graph(definition)
 
+    assert compiled.transition.direct_targets[GraphNodeId("a")] == (
+        GraphNodeId("b"),
+        GraphNodeId("c"),
+    )
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("b")
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("c")
     expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d"))
@@ -84,7 +88,7 @@ def test_multiple_entries_and_direct_fan_out_are_sorted() -> None:
     )
     compiled = compile_graph(definition)
 
-    assert compiled.entries == (GraphNodeId("a"), GraphNodeId("b"))
+    assert compiled.transition.entries == (GraphNodeId("a"), GraphNodeId("b"))
     assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("c"), GraphNodeId("d"))
 
 
@@ -185,6 +189,6 @@ def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> N
     compiled_node = compiled.nodes[GraphNodeId("a")]
 
     assert isinstance(compiled_node, CallableNodeDefinition)
-    assert compiled.resource_order == (ResourceId("database"), ResourceId("file"))
+    assert compiled.transition.resource_order == (ResourceId("database"), ResourceId("file"))
     assert compiled_node.resources == (ResourceId("database"), ResourceId("file"))
     assert tuple(compiled.resources) == (ResourceId("database"), ResourceId("file"))

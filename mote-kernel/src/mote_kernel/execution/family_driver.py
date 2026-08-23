@@ -69,7 +69,6 @@ from mote_kernel.execution.run_context import (
     _continuation,
 )
 from mote_kernel.state.graph_state import (
-    AdvanceGraphFrontier,
     FailedGraphNode,
     FenceGraphExecution,
     GraphExecutionToken,
@@ -87,11 +86,6 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
-
-
-@dataclass(frozen=True, slots=True)
-class _AdvancedFrontier:
-    pass
 
 
 class _TransitionSeal:
@@ -256,7 +250,7 @@ async def _consume_session(
                 activation = StableActivation(scope_run, state.superstep, completed.result.task.node_id)
                 coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
                     activation,
-                    graph.publications[completed.result.task.node_id].descriptor.identity,
+                    graph.transition.publications[completed.result.task.node_id].identity,
                 )
                 context.frames = context.frames.add_publication(
                     ConfirmedPublication(
@@ -343,7 +337,7 @@ async def _advance_scope_quantum(
     executors: dict[tuple[GraphNodeId, ...], GraphExecutor[GraphValueT]],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
-) -> GraphBoundary | _AdvancedFrontier | None:
+) -> GraphBoundary | None:
     state = context.state_at(scope_run)
     projections = _child_projections(
         graph,
@@ -362,7 +356,7 @@ async def _advance_scope_quantum(
             commit,
         )
         context.replace_state(scope_run, confirmed)
-        return _AdvancedFrontier() if isinstance(disposition.command, AdvanceGraphFrontier) else None
+        return None
     if isinstance(disposition, ExecutableFrontier):
         await _execute_frontier(
             graph,
@@ -455,8 +449,6 @@ async def drive_root(
             limits,
             commit,
         )
-        if isinstance(disposition, _AdvancedFrontier):
-            continue
         if disposition is not None:
             return disposition
 
@@ -470,37 +462,32 @@ def _scoped_states(
     )
 
 
-def _failure_views(context: GraphRunContext[GraphValueT]) -> tuple[GraphFailureView, ...]:
-    return tuple(
-        GraphFailureView(scope, node.node_id, str(node.settlement.failure))
-        for scope, state in _scoped_states(context)
-        for node in state.frontier.nodes
-        if isinstance(node.settlement, FailedGraphNode)
-    )
-
-
-def _interrupt_views(context: GraphRunContext[GraphValueT]) -> tuple[GraphInterruptView, ...]:
-    views: list[GraphInterruptView] = []
+def _project_result_views(
+    context: GraphRunContext[GraphValueT],
+) -> tuple[tuple[GraphFailureView, ...], tuple[GraphInterruptView, ...]]:
+    failures: list[GraphFailureView] = []
+    interrupts: list[GraphInterruptView] = []
     for scope, state in _scoped_states(context):
         for node in state.frontier.nodes:
             settlement = node.settlement
-            if not isinstance(settlement, InterruptedGraphNode):
-                continue
-            identity = settlement.interrupt.identity
-            views.append(
-                GraphInterruptView(
-                    scope,
-                    node.node_id,
-                    graph_interrupt_id(
-                        identity.run_id,
-                        identity.superstep,
-                        identity.node_id,
-                        identity.execution_generation,
-                    ),
-                    bytes(settlement.interrupt.request_payload),
+            if isinstance(settlement, FailedGraphNode):
+                failures.append(GraphFailureView(scope, node.node_id, str(settlement.failure)))
+            elif isinstance(settlement, InterruptedGraphNode):
+                identity = settlement.interrupt.identity
+                interrupts.append(
+                    GraphInterruptView(
+                        scope,
+                        node.node_id,
+                        graph_interrupt_id(
+                            identity.run_id,
+                            identity.superstep,
+                            identity.node_id,
+                            identity.execution_generation,
+                        ),
+                        bytes(settlement.interrupt.request_payload),
+                    )
                 )
-            )
-    return tuple(views)
+    return tuple(failures), tuple(interrupts)
 
 
 def project_graph_result(
@@ -522,12 +509,8 @@ def project_graph_result(
         if state.abort is None:
             raise SnapshotMismatchError("aborted root state is missing its canonical abort")
         return _aborted_result(state, continuation, GraphAbortView((), state.abort.reason))
-    return _awaiting_result(
-        state,
-        continuation,
-        _failure_views(context),
-        _interrupt_views(context),
-    )
+    failures, interrupts = _project_result_views(context)
+    return _awaiting_result(state, continuation, failures, interrupts)
 
 
 __all__: list[str] = []

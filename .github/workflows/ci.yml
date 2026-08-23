@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: mote-infra
+        working-directory: mote-infra/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: mote-infra
+        working-directory: mote-infra/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
@@ -95,3 +95,49 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo +stable test --locked --all-targets --all-features
+
+  cloudflare-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mote-infra/cloudflare
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mote-infra/cloudflare/package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: mote-infra/cloudflare/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:ci
+
+  cloudflare-node-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22.19", "24", "26"]
+    defaults:
+      run:
+        working-directory: mote-infra/cloudflare
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: mote-infra/cloudflare/package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+          cache-dependency-path: mote-infra/cloudflare/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test

@@ -653,7 +653,9 @@ motev2/
 │   ├── approval/
 │   ├── eventbus/
 │   └── terminal/          Rust 为主，可含 provider adapters
-├── mote-infra/            Rust：状态与可靠执行机制
+├── mote-infra/            部署相关的状态与可靠执行机制
+│   ├── local/             Rust：本地与宿主机原生实现
+│   └── cloudflare/        TypeScript：Workers 与 Durable Objects 实现
 └── conformance/           跨语言 observable contracts
 ```
 

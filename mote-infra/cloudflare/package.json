@@ -1,0 +1,44 @@
+{
+  "name": "@mote/infra-cloudflare",
+  "version": "0.1.0",
+  "description": "Cloudflare-native durable state and execution mechanisms for Mote agents.",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Mote contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bushihelmy-crypto/motev2.git",
+    "directory": "mote-infra/cloudflare"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check": "pnpm run check:static && pnpm run test && pnpm run build",
+    "check:ci": "pnpm run check:static && pnpm run test:coverage && pnpm run build",
+    "check:static": "pnpm run format:check && pnpm run lint && pnpm run types:check && pnpm run typecheck",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown",
+    "lint": "oxlint --deny-warnings src tests vitest.config.ts",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tests/tsconfig.json",
+    "types": "wrangler types src/worker-configuration.d.ts --include-runtime false",
+    "types:check": "wrangler types src/worker-configuration.d.ts --include-runtime false --check"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.0.0",
+    "@cloudflare/workers-types": "5.20260820.1",
+    "@vitest/coverage-istanbul": "4.1.11",
+    "oxlint": "1.79.0",
+    "prettier": "3.9.6",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.125.0"
+  }
+}

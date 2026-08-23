@@ -85,18 +85,15 @@ def _data_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
 
 
 def _substitution(graph: CompiledGraph[str], state: GraphRunState) -> AdmittedSubstitution[str]:
-    publication = graph.publications[GraphNodeId("source")]
+    publication = graph.transition.publications[GraphNodeId("source")]
     return AdmittedSubstitution(
         PublicationAvailabilityCoordinate(
             StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId("source")),
-            publication.descriptor.identity,
+            publication.identity,
         ),
         _make_node_output_frame(
             Graph.values(value="replacement"),
-            tuple(
-                (declaration.name, declaration.descriptor)
-                for declaration in publication.descriptor.declarations.entries
-            ),
+            tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries),
         ),
         SkipSubstitutionProvenance(),
         state.revision + 1,
@@ -141,7 +138,6 @@ def _candidate(
     actions: tuple[SkipFailedNode, ...] = (),
     *,
     scope_run: ScopeRunCoordinate | None = None,
-    has_pure_skip: bool = False,
 ) -> ScopedResumeCandidate[str]:
     command = ResumeGraphNodes(state.revision, actions)
     return ScopedResumeCandidate(
@@ -150,8 +146,6 @@ def _candidate(
         state,
         reduce_graph_run(state, command),
         substitutions,
-        actions,
-        has_pure_skip,
         command,
     )
 
@@ -192,7 +186,7 @@ def test_resume_admission_rejects_candidate_states_from_another_scoped_run() -> 
     state = running_state(frontier=("source",))
     scope_run = root_scope_run(GraphRunId("other-run"))
     command = ResumeGraphNodes(state.revision, (_skip_action(),))
-    candidate = ScopedResumeCandidate(graph, scope_run, state, state, (), (), False, command)
+    candidate = ScopedResumeCandidate(graph, scope_run, state, state, (), command)
 
     with pytest.raises(SnapshotMismatchError, match="states do not match"):
         admit_resume_candidates((candidate,), ScopedFrameIndex())
@@ -219,39 +213,10 @@ def test_resume_admission_rejects_a_successor_not_produced_by_its_exact_command(
             ),
         ),
         (_substitution(graph, state),),
-        (_skip_action(),),
-        False,
         command,
     )
 
     with pytest.raises(SnapshotMismatchError, match="exact command reduction"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_rejects_skip_facts_not_bound_to_the_exact_command() -> None:
-    graph = topology("source")
-    state = running_state(frontier=("source",))
-    state = replace(
-        state,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(GraphNodeId("source"), FailedGraphNode(GraphFailure("failed"))),)
-        ),
-    )
-    action = _skip_action()
-    command = ResumeGraphNodes(state.revision, (action,))
-    successor = reduce_graph_run(state, command)
-    candidate = ScopedResumeCandidate(
-        graph,
-        root_scope_run(state.run_id),
-        state,
-        successor,
-        (),
-        (_skip_action("other"),),
-        False,
-        command,
-    )
-
-    with pytest.raises(SnapshotMismatchError, match="skip actions"):
         admit_resume_candidates((candidate,), ScopedFrameIndex())
 
 
@@ -278,7 +243,7 @@ def test_resume_admission_rejects_incomplete_substitution_evidence_before_commit
             substitution,
             coordinate=replace(
                 substitution.coordinate,
-                descriptor=graph.publications[GraphNodeId("other")].descriptor.identity,
+                descriptor=graph.transition.publications[GraphNodeId("other")].identity,
             ),
         )
     elif tamper == "provenance":
@@ -376,8 +341,6 @@ def test_non_skip_resume_admission_rejects_unavailable_control_target() -> None:
         state,
         successor,
         (),
-        (action,),
-        True,
         command,
     )
 
@@ -428,7 +391,7 @@ def test_resume_admission_join_targets_are_required_only_after_completion() -> N
     scope_run = root_scope_run(state.run_id)
 
     admit_resume_candidates(
-        (ScopedResumeCandidate(graph, scope_run, state, settled_a, (), (action_a,), True, command_a),),
+        (ScopedResumeCandidate(graph, scope_run, state, settled_a, (), command_a),),
         ScopedFrameIndex(),
     )
 
@@ -446,6 +409,6 @@ def test_resume_admission_join_targets_are_required_only_after_completion() -> N
     completed = reduce_graph_run(both, command)
     with pytest.raises(GraphValueUnavailableError, match=r"required nodes.*target"):
         admit_resume_candidates(
-            (ScopedResumeCandidate(graph, scope_run, both, completed, (), actions, True, command),),
+            (ScopedResumeCandidate(graph, scope_run, both, completed, (), command),),
             ScopedFrameIndex(),
         )

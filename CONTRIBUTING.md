@@ -17,15 +17,23 @@ make check
 For the Rust Infra:
 
 ```bash
-cd mote-infra
+cd mote-infra/local
 make check
+```
+
+For the Cloudflare Infra:
+
+```bash
+cd mote-infra/cloudflare
+pnpm install --frozen-lockfile
+pnpm run check
 ```
 
 Install `cargo-deny` before running the dependency license, source, and advisory checks:
 
 ```bash
 cargo install cargo-deny --version 0.19.7 --locked
-cd mote-infra
+cd mote-infra/local
 make security
 ```
 

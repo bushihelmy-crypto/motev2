@@ -195,8 +195,6 @@ class ScopedResumeCandidate(Generic[GraphValueT]):
     previous: GraphRunState
     successor: GraphRunState
     substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
-    skip_actions: tuple[SkipFailedNode, ...]
-    has_pure_skip: bool
     command: ResumeGraphNodes
 
 
@@ -206,7 +204,7 @@ def admit_resume_candidates(
 ) -> CandidateFrameAvailability[GraphValueT]: ...
 ```
 
-`invocation.plan_resumes()` 负责 scope resolution、executor admission、reducer simulation 和汇总；`admit_resume_candidates()` 一次性验证全部 scope 后返回 canonical candidate overlay。每个 candidate 自带该 scope 的 compiled graph，以避免 root graph 与 nested graph descriptor 混淆；`command` 是必填的 exact proof evidence，绝不允许 `None`。admission 无条件验证 `reduce_graph_run(previous, command) == successor`，并验证 `skip_actions` 正好等于 command 中的 `SkipFailedNode` actions、每个 substitution 与 exact successor 中的 skipped settlement/action/descriptor/revision逐项绑定。`has_pure_skip` 只是触发 future fail-closed proof 的 typed projection，不参与 reducer truth 的构造。
+`invocation.plan_resumes()` 负责 scope resolution、executor admission、reducer simulation 和汇总；`admit_resume_candidates()` 一次性验证全部 scope 后返回 canonical candidate overlay。每个 candidate 自带该 scope 的 compiled graph，以避免 root graph 与 nested graph descriptor 混淆；`command` 是必填的 exact proof evidence，绝不允许 `None`。admission 无条件验证 `reduce_graph_run(previous, command) == successor`，每个 candidate 只从 exact command 派生一次 ordered `SkipFailedNode` tuple，并将每个 substitution 与 exact successor 中的 skipped settlement/action/descriptor/revision逐项绑定。pure skip 不保存 bool：由 skip action 的完整 publication availability coordinate 集合减去 substitution coordinate 集合得到，差集非空才触发 future fail-closed proof。
 
 ### 6.2 唯一 routing facts resolver
 
@@ -216,7 +214,6 @@ def admit_resume_candidates(
 @dataclass(frozen=True, slots=True)
 class RequiredTarget:
     node_id: GraphNodeId
-    inputs_available: bool
     historical_inputs_missing: bool
     unavailable_inputs: tuple[str, ...]
 
@@ -227,8 +224,6 @@ class RoutingFacts:
     completed_join_targets: tuple[RequiredTarget, ...]
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     data_targets: tuple[RequiredTarget, ...]
-    completion_output_available: bool
-    completion_output_history_missing: bool
     unavailable_graph_outputs: tuple[str, ...]
 
 
@@ -240,9 +235,28 @@ def resolve_routing_facts(
 ) -> RoutingFacts: ...
 ```
 
-该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及无 next target 时的 graph completion output availability。`historical_inputs_missing` 与 `completion_output_history_missing` 是 state-only recovery 对同一 availability truth 的 typed 投影；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
+该函数族唯一负责：direct/conditional selection、join arrivals/completion/remaining progress、基于 publication availability 的 data triggers、必达 target 完整 input availability，以及 graph-output diagnostic identity。resolver 对 graph outputs 只执行一次完整 `unavailable_graph_outputs()` 扫描；独立 `graph_outputs_available(...) -> bool` 保留首次缺失短路，供 completed continuation、nested boundary 和 invocation validation 使用，不在 resolver 内重复调用。`historical_inputs_missing` 与 graph-output historical gap 均由同一份 availability truth 推导；`unavailable_inputs` 与 `unavailable_graph_outputs` 是确定性诊断 identity，不构成第二 resolver，也不携带 concrete value。
 
-- `plan_routing()` 只把 `RoutingFacts` 投影为 `AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun`；
+每个 unique target 的 materialization bindings 只按声明顺序扫描一次，在同一循环内生成
+`historical_inputs_missing` 与 `unavailable_inputs`。一次 resolver invocation 只维护一个
+`dict[GraphNodeId, RequiredTarget]`，并按 control → completed join → data 的顺序首次填充；同一 target 被多种
+contribution 命中时复用相同 fact，不重复读取 bindings。input availability 只由
+`not target.unavailable_inputs` 推导，不保存第二个 bool，也不增加跨 invocation cache 或 display identity。
+
+completion facts 只从 canonical tuple 和 target work 推导：
+
+```text
+has routing work
+  := bool(control_targets or completed_join_targets or remaining_join_progress or data_targets)
+completion output available
+  := has routing work or not unavailable_graph_outputs
+completion output history missing
+  := not has routing work and bool(unavailable_graph_outputs)
+```
+
+- `project_routing_facts()` 是唯一 facts → command 投影，直接返回
+  `AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun`；`resolve_routing()` 只组合
+  `resolve_routing_facts()` 与该投影；
 - `resume_admission.py` 只把相同 facts 投影为允许或 `GraphValueUnavailableError`；
 - `recovery.py` worklist transfer只调用相同 resolver，不得重新扫描 direct/conditional targets、joins 或 `transition.data_triggers`；
 - nested boundary future traversal仍由 recovery worklist编排，但每个 scoped graph step 的 routing/availability facts只能来自该 resolver。
@@ -283,7 +297,7 @@ data contribution
 - 缺少 skipped source publication时，resume admission 抛出 `GraphValueUnavailableError`；
 - 只有未触发 compiled data dependency 的 target 不必达，不误拒绝 pure skip。
 
-正常 runtime `plan_routing()`、resume preflight 和 recovery traversal必须调用同一 target/data-contribution resolver。runtime 可继续把普通执行后的 unavailable control target 投影为现有 abort；resume admission 则在 commit 前将同一缺值事实提升为 `GraphValueUnavailableError`。共享的是拓扑、target 和 availability truth。
+正常 runtime `resolve_routing()`、resume preflight 和 recovery traversal必须调用同一 target/data-contribution resolver。runtime 可继续把普通执行后的 unavailable control target 投影为现有 abort；resume admission 则在 commit 前将同一缺值事实提升为 `GraphValueUnavailableError`。共享的是拓扑、target 和 availability truth。
 
 ### 6.5 所有 pure skip 的 future-path proof
 

@@ -1111,10 +1111,8 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
     failed = reduce_graph_run(claimed, settle_result(graph, claimed, prepared.nested_results[0]))
     failed = replace(failed, execution=None)
     scope_run = root_scope_run(parent.run_id)
-    publication = graph.publications[GraphNodeId("nested")]
-    declarations = tuple(
-        (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
-    )
+    publication = graph.transition.publications[GraphNodeId("nested")]
+    declarations = tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries)
     command = ResumeGraphNodes(
         failed.revision,
         (
@@ -1129,7 +1127,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
     substitution = AdmittedSubstitution(
         PublicationAvailabilityCoordinate(
             StableActivation(scope_run, failed.superstep, GraphNodeId("nested")),
-            publication.descriptor.identity,
+            publication.identity,
         ),
         _make_node_output_frame(Graph.values(value="replacement"), declarations),
         SkipSubstitutionProvenance(),
@@ -1144,14 +1142,6 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
                 failed,
                 successor,
                 (substitution,),
-                (
-                    SkipFailedNode(
-                        GraphNodeId("nested"),
-                        GraphSkipReason("boundary replacement"),
-                        ContinueGraphRouting(),
-                    ),
-                ),
-                False,
                 command,
             ),
         ),
@@ -1200,10 +1190,8 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
 def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> None:
     graph = nested_graph(with_consumer=True)
     scope_run = root_scope_run(GraphRunId("repeated-parent"))
-    publication = graph.publications[GraphNodeId("nested")]
-    declarations = tuple(
-        (declaration.name, declaration.descriptor) for declaration in publication.descriptor.declarations.entries
-    )
+    publication = graph.transition.publications[GraphNodeId("nested")]
+    declarations = tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries)
     candidates: list[ScopedResumeCandidate[str]] = []
     substitutions: list[AdmittedSubstitution[str]] = []
     child_runs: list[ScopeRunCoordinate] = []
@@ -1231,16 +1219,14 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
         substitution = AdmittedSubstitution(
             PublicationAvailabilityCoordinate(
                 StableActivation(scope_run, superstep, GraphNodeId("nested")),
-                publication.descriptor.identity,
+                publication.identity,
             ),
             _make_node_output_frame(Graph.values(value=value), declarations),
             SkipSubstitutionProvenance(),
             successor.revision,
         )
         substitutions.append(substitution)
-        candidates.append(
-            ScopedResumeCandidate(graph, scope_run, state, successor, (substitution,), (action,), False, command)
-        )
+        candidates.append(ScopedResumeCandidate(graph, scope_run, state, successor, (substitution,), command))
         parent = ParentGraphActivation(state.run_id, superstep, GraphNodeId("nested"))
         child_runs.append(child_scope_run_for_activation(scope_run, parent))
 

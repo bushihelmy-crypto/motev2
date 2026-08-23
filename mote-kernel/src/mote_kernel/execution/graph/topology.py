@@ -11,9 +11,6 @@ from mote_kernel.execution.graph.ports import (
     FrameDescriptor,
     GraphOutputBindings,
     MaterializationPlan,
-    OutcomeAdmissionPlan,
-    OutputDeclarations,
-    PublicationPlan,
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
@@ -54,22 +51,14 @@ class DataTriggerPlan:
 @dataclass(frozen=True, slots=True)
 class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
-    callable_node_ids: tuple[GraphNodeId, ...]
-    nested_node_ids: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
     joins_by_source: FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]
     data_triggers: FrozenMap[GraphNodeId, DataTriggerPlan]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
-    outcomes: FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]
-    publications: FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]
+    publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]
     resource_order: tuple[ResourceId, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryAvailabilityPlan(Generic[GraphValueT]):
-    transition: FrontierTransitionPlan[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,40 +68,11 @@ class CompiledGraph(Generic[GraphValueT]):
     definition_scope: DefinitionScope
     nodes: FrozenMap[GraphNodeId, GraphNode[GraphValueT]]
     nested_graphs: FrozenMap[GraphNodeId, "CompiledGraph[GraphValueT]"]
-    graph_inputs: OutputDeclarations[GraphValueT]
     graph_input_descriptor: FrameDescriptor[GraphValueT]
     graph_output_descriptor: FrameDescriptor[GraphValueT]
-    recovery: RecoveryAvailabilityPlan[GraphValueT]
+    transition: FrontierTransitionPlan[GraphValueT]
     resources: FrozenMap[ResourceId, ResourceDefinition]
     resume_input: ResumeInputBinding[GraphValueT] | None
-
-    @property
-    def transition(self) -> FrontierTransitionPlan[GraphValueT]:
-        return self.recovery.transition
-
-    @property
-    def entries(self) -> tuple[GraphNodeId, ...]:
-        return self.transition.entries
-
-    @property
-    def materializations(self) -> FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]:
-        return self.transition.materializations
-
-    @property
-    def outcomes(self) -> FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]:
-        return self.transition.outcomes
-
-    @property
-    def publications(self) -> FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]:
-        return self.transition.publications
-
-    @property
-    def graph_outputs(self) -> GraphOutputBindings[GraphValueT]:
-        return self.transition.graph_outputs
-
-    @property
-    def resource_order(self) -> tuple[ResourceId, ...]:
-        return self.transition.resource_order
 
 
 def frozen_map(values: Mapping[KeyT, ValueT_co]) -> FrozenMap[KeyT, ValueT_co]:

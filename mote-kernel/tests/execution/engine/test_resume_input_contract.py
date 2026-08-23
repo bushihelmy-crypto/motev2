@@ -48,6 +48,7 @@ from mote_kernel.state.graph_state import (
     GraphRunId,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    UseStepRequestInput,
 )
 
 
@@ -120,21 +121,18 @@ def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = Fa
 
 
 def without_publication_selection(graph: CompiledGraph[str]) -> CompiledGraph[str]:
-    plan = graph.materializations[GraphNodeId("consumer")]
+    plan = graph.transition.materializations[GraphNodeId("consumer")]
     binding = replace(plan.bindings.entries[0], publication=None)
     malformed_plan = replace(plan, bindings=ResolvedInputBindings((binding,)))
     materializations = frozen_map(
         {
             node_id: malformed_plan if node_id == GraphNodeId("consumer") else candidate
-            for node_id, candidate in graph.materializations.items()
+            for node_id, candidate in graph.transition.materializations.items()
         }
     )
     return replace(
         graph,
-        recovery=replace(
-            graph.recovery,
-            transition=replace(graph.transition, materializations=materializations),
-        ),
+        transition=replace(graph.transition, materializations=materializations),
     )
 
 
@@ -269,7 +267,7 @@ def test_pending_input_availability_accepts_state_and_acknowledged_overrides() -
 
     assert pending_node_input_available(graph, override_state, scope_run, ScopedFrameIndex(), node_id)
 
-    plan = graph.materializations[node_id]
+    plan = graph.transition.materializations[node_id]
     frame = _make_node_input_frame(
         (NamedValue("value", "admitted"),),
         tuple((item.destination.local_name, item.descriptor) for item in plan.bindings.entries),
@@ -296,6 +294,21 @@ def test_materialization_requires_the_authoritative_graph_run_coordinate() -> No
             root_scope_run(GraphRunId("other")),
             ScopedFrameIndex(),
             GraphNodeId("source"),
+        )
+
+
+def test_failed_retry_materialization_requires_a_current_failed_node() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+
+    with pytest.raises(SnapshotMismatchError, match="current failed node"):
+        materialize_node_input(
+            graph,
+            state,
+            root_scope_run(state.run_id),
+            ScopedFrameIndex(),
+            GraphNodeId("source"),
+            failed_retry_input=UseStepRequestInput(),
         )
 
 

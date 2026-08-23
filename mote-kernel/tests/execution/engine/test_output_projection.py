@@ -6,7 +6,7 @@ from tests.execution.graph.factories import graph, node
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import project_graph_outputs
-from mote_kernel.execution.engine.routing import graph_outputs_available, plan_routing
+from mote_kernel.execution.engine.routing import graph_outputs_available, resolve_routing
 from mote_kernel.execution.errors import GraphValueAdmissionError, InvalidRoutingCommandError
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.ports import GraphOutputBindings, normalize_graph_output_declarations
@@ -15,6 +15,7 @@ from mote_kernel.execution.run_context import ScopedFrameIndex
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ContinueGraphRouting,
+    GraphAbortReason,
     GraphFrontierNode,
     GraphFrontierState,
     GraphRunId,
@@ -33,15 +34,12 @@ def output_graph():
 
 def test_output_projection_rejects_a_compiled_binding_without_activation_selection() -> None:
     compiled = output_graph()
-    malformed_binding = replace(compiled.graph_outputs.entries[0], publication=None)
+    malformed_binding = replace(compiled.transition.graph_outputs.entries[0], publication=None)
     malformed = replace(
         compiled,
-        recovery=replace(
-            compiled.recovery,
-            transition=replace(
-                compiled.transition,
-                graph_outputs=GraphOutputBindings((malformed_binding,)),
-            ),
+        transition=replace(
+            compiled.transition,
+            graph_outputs=GraphOutputBindings((malformed_binding,)),
         ),
     )
 
@@ -84,15 +82,12 @@ def test_graph_output_availability_reports_a_missing_admitted_graph_input() -> N
 
 def test_graph_output_availability_rejects_a_missing_compiled_selection() -> None:
     compiled = output_graph()
-    malformed_binding = replace(compiled.graph_outputs.entries[0], publication=None)
+    malformed_binding = replace(compiled.transition.graph_outputs.entries[0], publication=None)
     malformed = replace(
         compiled,
-        recovery=replace(
-            compiled.recovery,
-            transition=replace(
-                compiled.transition,
-                graph_outputs=GraphOutputBindings((malformed_binding,)),
-            ),
+        transition=replace(
+            compiled.transition,
+            graph_outputs=GraphOutputBindings((malformed_binding,)),
         ),
     )
 
@@ -126,12 +121,14 @@ def test_routing_aborts_when_completion_output_is_unavailable() -> None:
         ),
     )
 
-    resolution = plan_routing(
+    command = resolve_routing(
         compiled,
         state,
         root_scope_run(state.run_id),
         ScopedFrameIndex(),
     )
 
-    assert isinstance(resolution.command, AbortGraphRun)
-    assert not resolution.completion_outputs_available
+    assert command == AbortGraphRun(
+        state.revision,
+        GraphAbortReason("required graph output values are unavailable at completion"),
+    )

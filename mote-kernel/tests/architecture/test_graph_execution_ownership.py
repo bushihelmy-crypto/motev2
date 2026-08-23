@@ -302,11 +302,11 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
     assert owners == {
         "direct_targets": {"execution/engine/routing.py"},
         "conditional_targets": {"execution/engine/routing.py"},
-        "joins_by_source": {"execution/engine/routing.py", "execution/engine/snapshot_guard.py"},
+        "joins_by_source": {"execution/engine/routing.py"},
         "data_triggers": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
-    forbidden = {"materializations", "graph_outputs", "plan_routing"}
+    forbidden = {"materializations", "graph_outputs"}
     assert not {node.attr for node in ast.walk(recovery) if isinstance(node, ast.Attribute) and node.attr in forbidden}
     assert not {node.id for node in ast.walk(recovery) if isinstance(node, ast.Name) and node.id in forbidden}
 
@@ -509,21 +509,30 @@ def test_graph_run_lifecycle_has_exactly_three_current_states() -> None:
 def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() -> None:
     assert _class_fields("execution/graph/topology.py", "FrontierTransitionPlan") == {
         "entries": "tuple[GraphNodeId, ...]",
-        "callable_node_ids": "tuple[GraphNodeId, ...]",
-        "nested_node_ids": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
         "data_triggers": "FrozenMap[GraphNodeId, DataTriggerPlan]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
-        "outcomes": "FrozenMap[GraphNodeId, OutcomeAdmissionPlan[GraphValueT]]",
-        "publications": "FrozenMap[GraphNodeId, PublicationPlan[GraphValueT]]",
+        "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",
         "resource_order": "tuple[ResourceId, ...]",
     }
-    assert _class_fields("execution/graph/topology.py", "RecoveryAvailabilityPlan") == {
-        "transition": "FrontierTransitionPlan[GraphValueT]"
+    compiled_graph = _top_level_definition("execution/graph/topology.py", "CompiledGraph")
+    assert isinstance(compiled_graph, ast.ClassDef)
+    assert _class_fields("execution/graph/topology.py", "CompiledGraph") == {
+        "definition_id": "GraphDefinitionId",
+        "version": "GraphDefinitionVersion",
+        "definition_scope": "DefinitionScope",
+        "nodes": "FrozenMap[GraphNodeId, GraphNode[GraphValueT]]",
+        "nested_graphs": "FrozenMap[GraphNodeId, 'CompiledGraph[GraphValueT]']",
+        "graph_input_descriptor": "FrameDescriptor[GraphValueT]",
+        "graph_output_descriptor": "FrameDescriptor[GraphValueT]",
+        "transition": "FrontierTransitionPlan[GraphValueT]",
+        "resources": "FrozenMap[ResourceId, ResourceDefinition]",
+        "resume_input": "ResumeInputBinding[GraphValueT] | None",
     }
+    assert all(isinstance(statement, ast.AnnAssign) for statement in compiled_graph.body)
 
 
 def test_recovery_consumes_shared_claim_and_settlement_lowering() -> None:

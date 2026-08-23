@@ -27,7 +27,7 @@ def project_start_graph_command(
         run_id=run_id,
         definition_id=graph.definition_id,
         definition_version=graph.version,
-        node_ids=graph.entries,
+        node_ids=graph.transition.entries,
         parent=parent,
         resume_input_codec=(GraphResumeInputCodec(binding.codec_id, binding.version) if binding is not None else None),
     )

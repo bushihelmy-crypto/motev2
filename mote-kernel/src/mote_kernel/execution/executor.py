@@ -1,6 +1,5 @@
 """Sole scoped graph executor with prepare, execute, and resume projections."""
 
-from dataclasses import replace
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
@@ -134,7 +133,7 @@ class GraphExecutor(Generic[GraphValueT]):
             if current is None:
                 raise SnapshotMismatchError("resume request references an unknown frontier node")
             activation = StableActivation(request.scope_run, state.superstep, requested.node_id)
-            descriptor = self._graph.materializations[requested.node_id].descriptor.identity
+            descriptor = self._graph.transition.materializations[requested.node_id].descriptor.identity
             if isinstance(requested, ResumeFailedNodeRequest):
                 if not isinstance(current.settlement, FailedGraphNode):
                     raise SnapshotMismatchError("failure resume requires a failed node")
@@ -145,23 +144,11 @@ class GraphExecutor(Generic[GraphValueT]):
                     binding = UseStepRequestInput()
                     frame = materialize_node_input(
                         self._graph,
-                        replace(
-                            state,
-                            frontier=GraphFrontierState(
-                                tuple(
-                                    GraphFrontierNode(
-                                        node.node_id,
-                                        PendingGraphNode(UseStepRequestInput())
-                                        if node.node_id == requested.node_id
-                                        else node.settlement,
-                                    )
-                                    for node in state.frontier.nodes
-                                )
-                            ),
-                        ),
+                        state,
                         request.scope_run,
                         request.frames,
                         requested.node_id,
+                        failed_retry_input=binding,
                     )
                 actions.append(ResumeFailedNode(requested.node_id, binding))
                 replacements[requested.node_id] = PendingGraphNode(binding)
@@ -209,15 +196,14 @@ class GraphExecutor(Generic[GraphValueT]):
                     routing,
                 )
                 if requested.output is not None:
-                    publication = self._graph.publications[requested.node_id]
+                    publication = self._graph.transition.publications[requested.node_id]
                     declarations = tuple(
-                        (declaration.name, declaration.descriptor)
-                        for declaration in publication.descriptor.declarations.entries
+                        (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
                     )
                     frame = _make_node_output_frame(requested.output, declarations)
                     substitutions.append(
                         PreparedSubstitution(
-                            PublicationAvailabilityCoordinate(activation, publication.descriptor.identity),
+                            PublicationAvailabilityCoordinate(activation, publication.identity),
                             frame,
                             SkipSubstitutionProvenance(),
                         )

@@ -1,0 +1,8 @@
+packages:
+  - .
+
+# pnpm denies dependency lifecycle scripts unless they are reviewed here. Wrangler uses esbuild
+# for bundling, and the Vitest integration uses Cloudflare's workerd runtime.
+allowBuilds:
+  esbuild: true
+  workerd: true

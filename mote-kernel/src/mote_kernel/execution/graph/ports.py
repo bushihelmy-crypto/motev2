@@ -195,22 +195,7 @@ class FrameDescriptor(Generic[GraphValueT]):
 
 @dataclass(frozen=True, slots=True)
 class MaterializationPlan(Generic[GraphValueT]):
-    node_id: GraphNodeId
     bindings: ResolvedInputBindings[GraphValueT]
-    descriptor: FrameDescriptor[GraphValueT]
-
-
-@dataclass(frozen=True, slots=True)
-class OutcomeAdmissionPlan(Generic[GraphValueT]):
-    node_id: GraphNodeId
-    outputs: OutputDeclarations[GraphValueT]
-    descriptor: FrameDescriptor[GraphValueT]
-    declared_routes: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PublicationPlan(Generic[GraphValueT]):
-    node_id: GraphNodeId
     descriptor: FrameDescriptor[GraphValueT]
 
 
