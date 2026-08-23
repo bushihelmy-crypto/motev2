@@ -35,7 +35,12 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.graph.values import _make_graph_input_frame, _make_node_output_frame
+from mote_kernel.execution.graph.values import (
+    NodeInputFrame,
+    _make_graph_input_frame,
+    _make_node_input_frame,
+    _make_node_output_frame,
+)
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
@@ -46,6 +51,7 @@ from mote_kernel.execution.identity import (
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
+    AdmittedResumeInput,
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
@@ -79,8 +85,10 @@ from mote_kernel.state.graph_state import (
     InterruptedGraphNodeOutcome,
     ParentGraphActivation,
     PendingGraphNode,
+    ResumeGraphNodes,
     SelectGraphRoute,
     SettleGraphNode,
+    SkipFailedNode,
     SkippedGraphNode,
     SucceededGraphNodeOutcome,
     UseStepRequestInput,
@@ -277,21 +285,19 @@ def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -
         child,
         child_control,
     )
-    resumed: AdmittedResumeFact[str] = AdmittedResumeFact(
+    resumed = AdmittedResumeFact(
         activation,
         AdmittedActionKind.RESUME_INTERRUPTED,
         GraphInterruptId("interrupt"),
         None,
         None,
-        resume_input,
     )
-    skipped: AdmittedResumeFact[str] = AdmittedResumeFact(
+    skipped = AdmittedResumeFact(
         activation,
         AdmittedActionKind.SKIP_FAILED,
         None,
         "operator skip",
         GraphRouteId("route"),
-        None,
     )
     rich = replace(
         baseline,
@@ -332,6 +338,50 @@ def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -
     new_child = replace(rich, invocation_new_children=(GraphNodeId("child"),))
     assert new_child != rich
     assert recovery_traversal_key(new_child) != recovery_traversal_key(rich)
+
+
+def test_recovery_valid_domain_equality_uses_availability_as_the_only_resume_input_fact() -> None:
+    graph = empty_graph()
+    baseline = baseline_transfer()
+    activation = StableActivation(
+        baseline.control.scope_run,
+        baseline.control.superstep,
+        GraphNodeId("node"),
+    )
+    exact: ResumeInputAvailabilityCoordinate[str] = ResumeInputAvailabilityCoordinate(
+        activation,
+        graph.transition.materializations[GraphNodeId("node")].descriptor.identity,
+    )
+    alternate: ResumeInputAvailabilityCoordinate[str] = ResumeInputAvailabilityCoordinate(
+        activation,
+        interruptible_graph().transition.materializations[GraphNodeId("node")].descriptor.identity,
+    )
+    assert alternate != exact
+    action = AdmittedResumeFact(
+        activation,
+        AdmittedActionKind.RESUME_FAILED,
+        None,
+        None,
+        None,
+    )
+    exact_state = replace(
+        baseline,
+        availability=replace(baseline.availability, resume_inputs=(exact,)),
+        admitted_actions=(action,),
+    )
+    alternate_state = replace(
+        exact_state,
+        availability=replace(exact_state.availability, resume_inputs=(alternate,)),
+    )
+    assert exact_state != alternate_state
+    assert len({exact_state, alternate_state}) == 2
+
+    different_action_state = replace(
+        exact_state,
+        admitted_actions=(replace(action, action=AdmittedActionKind.RESUME_FAILED_WITH),),
+    )
+    assert exact_state != different_action_state
+    assert len({exact_state, different_action_state}) == 2
 
 
 class HostileValue:
@@ -418,12 +468,11 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     with pytest.raises(SnapshotMismatchError, match="unique and canonical"):
         preflight_recovery(graph, duplicate_bindings)
 
-    duplicate_action: AdmittedResumeFact[str] = AdmittedResumeFact(
+    duplicate_action = AdmittedResumeFact(
         StableActivation(scope_run, state.superstep, GraphNodeId("node")),
         AdmittedActionKind.SKIP_FAILED,
         None,
         "skip",
-        None,
         None,
     )
     with pytest.raises(SnapshotMismatchError, match="actions must be unique"):
@@ -438,7 +487,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
             ),
         )
 
-    foreign_action: AdmittedResumeFact[str] = replace(
+    foreign_action = replace(
         duplicate_action,
         target=StableActivation(root_scope_run(GraphRunId("foreign")), state.superstep, GraphNodeId("node")),
     )
@@ -454,7 +503,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
             ),
         )
 
-    missing_action: AdmittedResumeFact[str] = replace(
+    missing_action = replace(
         duplicate_action,
         target=StableActivation(scope_run, state.superstep, GraphNodeId("missing")),
     )
@@ -494,7 +543,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         ),
         revision=state.revision + 1,
     )
-    mismatched_action: AdmittedResumeFact[str] = replace(duplicate_action, skip_reason="different")
+    mismatched_action = replace(duplicate_action, skip_reason="different")
     with pytest.raises(SnapshotMismatchError, match="facts do not match"):
         preflight_recovery(
             graph,
@@ -507,7 +556,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
             ),
         )
 
-    resumed_action: AdmittedResumeFact[str] = replace(
+    resumed_action = replace(
         duplicate_action,
         action=AdmittedActionKind.RESUME_FAILED,
         skip_reason=None,
@@ -557,6 +606,163 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     assert len(terminal) == 1
     assert terminal[0].control.status is GraphRunStatus.COMPLETED
     assert terminal[0].control.execution_sequence == completed.execution_sequence
+
+
+def test_recovery_preflight_requires_exact_resume_input_availability_for_each_non_skip_action() -> None:
+    graph = empty_graph()
+    node_id = GraphNodeId("node")
+    root_state = reduce_graph_run(
+        None,
+        project_start_graph_command(graph, GraphRunId("resume-invariant-root")),
+    )
+    root_scope = root_scope_run(root_state.run_id)
+    activation = StableActivation(root_scope, root_state.superstep, node_id)
+    action = AdmittedResumeFact(
+        activation,
+        AdmittedActionKind.RESUME_FAILED,
+        None,
+        None,
+        None,
+    )
+    plan = graph.transition.materializations[node_id]
+    input_frame: NodeInputFrame[str] = _make_node_input_frame((), ())
+    exact_record: AdmittedResumeInput[str] = AdmittedResumeInput(
+        ResumeInputAvailabilityCoordinate(activation, plan.descriptor.identity),
+        input_frame,
+    )
+    limits = ExecutionLimits(2, 1)
+    base_seed: RecoveryInvocationSeed[str] = RecoveryInvocationSeed(
+        RecoveryStateBinding(root_scope, root_state),
+        (),
+        ScopedFrameIndex(resume_inputs=(exact_record,)),
+        limits,
+        (action,),
+    )
+
+    exact_boundaries = preflight_recovery(graph, base_seed)
+    assert exact_boundaries
+    assert all(boundary.availability.has_resume_input(exact_record.coordinate) for boundary in exact_boundaries)
+
+    with pytest.raises(SnapshotMismatchError) as missing_error:
+        preflight_recovery(graph, replace(base_seed, frames=ScopedFrameIndex()))
+    assert str(missing_error.value) == ("recovery admitted resume action lacks its exact resume-input availability")
+
+    wrong_descriptor = interruptible_graph().transition.materializations[node_id].descriptor.identity
+    assert wrong_descriptor != plan.descriptor.identity
+    wrong_record: AdmittedResumeInput[str] = AdmittedResumeInput(
+        ResumeInputAvailabilityCoordinate(activation, wrong_descriptor),
+        input_frame,
+    )
+    with pytest.raises(SnapshotMismatchError) as wrong_descriptor_error:
+        preflight_recovery(
+            graph,
+            replace(base_seed, frames=ScopedFrameIndex(resume_inputs=(wrong_record,))),
+        )
+    assert str(wrong_descriptor_error.value) == (
+        "recovery admitted resume action lacks its exact resume-input availability"
+    )
+
+    unknown_state = reduce_graph_run(
+        None,
+        project_start_graph_command(graph, GraphRunId("resume-invariant-unknown")),
+    )
+    unknown_scope = ScopeRunCoordinate((GraphNodeId("unknown"),), unknown_state.run_id)
+    unknown_action = replace(
+        action,
+        target=StableActivation(unknown_scope, unknown_state.superstep, node_id),
+    )
+    unknown_seed: RecoveryInvocationSeed[str] = RecoveryInvocationSeed(
+        RecoveryStateBinding(root_scope, root_state),
+        (RecoveryStateBinding(unknown_scope, unknown_state),),
+        ScopedFrameIndex(),
+        limits,
+        (unknown_action,),
+    )
+    with pytest.raises(SnapshotMismatchError) as unknown_scope_error:
+        preflight_recovery(graph, unknown_seed)
+    assert str(unknown_scope_error.value) == "scope references unknown nested node 'unknown'"
+
+    missing_materializations = replace(
+        graph.transition.materializations,
+        entries=tuple(
+            (candidate, candidate_plan)
+            for candidate, candidate_plan in graph.transition.materializations.entries
+            if candidate != node_id
+        ),
+    )
+    forged_graph = replace(
+        graph,
+        transition=replace(graph.transition, materializations=missing_materializations),
+    )
+    with pytest.raises(SnapshotMismatchError) as unknown_materialization_error:
+        preflight_recovery(
+            forged_graph,
+            replace(base_seed, frames=ScopedFrameIndex()),
+        )
+    assert str(unknown_materialization_error.value) == ("node input references an unknown compiled materialization")
+
+    publication = graph.transition.publications[node_id]
+    publication_record: ConfirmedPublication[str] = ConfirmedPublication(
+        PublicationAvailabilityCoordinate(activation, publication.identity),
+        _make_node_output_frame(Graph.values(), ()),
+        root_state.revision,
+        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("duplicate-publication"))),
+    )
+    duplicate_frames: ScopedFrameIndex[str] = ScopedFrameIndex(publications=(publication_record, publication_record))
+    with pytest.raises(SnapshotMismatchError) as duplicate_publication_error:
+        preflight_recovery(graph, replace(unknown_seed, frames=duplicate_frames))
+    assert str(duplicate_publication_error.value) == ("recovery publication availability coordinates must be unique")
+
+    claimed = reduce_graph_run(
+        root_state,
+        ClaimGraphExecution(
+            root_state.revision,
+            GraphExecutionAttemptId("resume-invariant-failure"),
+            None,
+        ),
+    )
+    execution = claimed.execution
+    assert execution is not None
+    failed = reduce_graph_run(
+        claimed,
+        SettleGraphNode(
+            claimed.revision,
+            execution.token,
+            FailedGraphNodeOutcome(node_id, GraphFailure("resume invariant failure")),
+        ),
+    )
+    skipped = reduce_graph_run(
+        failed,
+        ResumeGraphNodes(
+            failed.revision,
+            (
+                SkipFailedNode(
+                    node_id,
+                    GraphSkipReason("operator skip"),
+                    ContinueGraphRouting(),
+                ),
+            ),
+        ),
+    )
+    skip_action = AdmittedResumeFact(
+        StableActivation(root_scope, skipped.superstep, node_id),
+        AdmittedActionKind.SKIP_FAILED,
+        None,
+        "operator skip",
+        None,
+    )
+    skip_boundaries = preflight_recovery(
+        graph,
+        RecoveryInvocationSeed(
+            RecoveryStateBinding(root_scope, skipped),
+            (),
+            ScopedFrameIndex(resume_inputs=(exact_record,)),
+            limits,
+            (skip_action,),
+        ),
+    )
+    assert skip_boundaries
+    assert all(boundary.availability.has_resume_input(exact_record.coordinate) for boundary in skip_boundaries)
 
 
 def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:

@@ -22,7 +22,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph, _compiled_graph_at_scope
 from mote_kernel.execution.graph.values import (
     _admit_graph_input_frame,
     _admit_graph_output_view,
@@ -165,19 +165,6 @@ def install_confirmed_resume_frames(
     return installed
 
 
-def _compiled_at(
-    root: CompiledGraph[GraphValueT],
-    scope: tuple[GraphNodeId, ...],
-) -> CompiledGraph[GraphValueT]:
-    current = root
-    for segment in scope:
-        try:
-            current = current.nested_graphs[segment]
-        except KeyError as error:
-            raise SnapshotMismatchError(f"scope references unknown nested node {segment!r}") from error
-    return current
-
-
 def executors_for(root: CompiledGraph[GraphValueT]) -> dict[tuple[GraphNodeId, ...], GraphExecutor[GraphValueT]]:
     values: dict[tuple[GraphNodeId, ...], GraphExecutor[GraphValueT]] = {}
 
@@ -233,7 +220,7 @@ def plan_fences(
     planned = states
     fences: list[_PlannedFence] = []
     for binding in states:
-        _compiled_at(graph, binding.scope_run.scope)
+        _compiled_graph_at_scope(graph, binding.scope_run.scope)
         executor = executors[binding.scope_run.scope]
         executor.validate_state(binding.state)
         if binding.state.run_id != binding.scope_run.graph_run_id:
@@ -292,22 +279,17 @@ def _resume_facts(
     scope_run: ScopeRunCoordinate,
     superstep: int,
     actions: tuple[ResumeNodeRequest[GraphValueT], ...],
-    prepared: PreparedResume[GraphValueT],
-) -> tuple[AdmittedResumeFact[GraphValueT], ...]:
-    facts: list[AdmittedResumeFact[GraphValueT]] = []
+) -> tuple[AdmittedResumeFact, ...]:
+    facts: list[AdmittedResumeFact] = []
     for action in actions:
         activation = StableActivation(scope_run, superstep, action.node_id)
-        admitted = next(
-            (item.coordinate for item in prepared.inputs if item.coordinate.activation.node_id == action.node_id),
-            None,
-        )
         if isinstance(action, ResumeFailedNodeRequest):
             kind = (
                 AdmittedActionKind.RESUME_FAILED_WITH
                 if isinstance(action.input, OverrideNodeInput)
                 else AdmittedActionKind.RESUME_FAILED
             )
-            facts.append(AdmittedResumeFact(activation, kind, None, None, None, admitted))
+            facts.append(AdmittedResumeFact(activation, kind, None, None, None))
         elif isinstance(action, ResumeInterruptedNodeRequest):
             facts.append(
                 AdmittedResumeFact(
@@ -316,7 +298,6 @@ def _resume_facts(
                     action.interrupt_id,
                     None,
                     None,
-                    admitted,
                 )
             )
         else:
@@ -327,7 +308,6 @@ def _resume_facts(
                     None,
                     action.reason,
                     GraphRouteId(action.route) if action.route is not None else None,
-                    None,
                 )
             )
     return tuple(facts)
@@ -340,7 +320,7 @@ def _forbid_aborted_child_restart(
     state: GraphRunState,
     actions: tuple[ResumeNodeRequest[GraphValueT], ...],
 ) -> None:
-    scoped_graph = _compiled_at(graph, scope_run.scope)
+    scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
     for action in actions:
         if not isinstance(action, ResumeFailedNodeRequest) or action.node_id not in scoped_graph.nested_graphs:
             continue
@@ -360,7 +340,7 @@ def plan_resumes(
     tuple[_PlannedState, ...],
     CandidateFrameAvailability[GraphValueT],
     tuple[_PlannedResume[GraphValueT], ...],
-    tuple[AdmittedResumeFact[GraphValueT], ...],
+    tuple[AdmittedResumeFact, ...],
 ]:
     if not resume:
         return states, CandidateFrameAvailability(frames, ()), (), ()
@@ -384,7 +364,7 @@ def plan_resumes(
     planned_states = states
     candidate_frames = frames
     plans: list[_PlannedResume[GraphValueT]] = []
-    facts: list[AdmittedResumeFact[GraphValueT]] = []
+    facts: list[AdmittedResumeFact] = []
     candidates: list[ScopedResumeCandidate[GraphValueT]] = []
     scopes = tuple(dict.fromkeys(action.scope for action in canonical))
     for scope in scopes:
@@ -394,7 +374,7 @@ def plan_resumes(
         _forbid_aborted_child_restart(graph, planned_states, scope_run, binding.state, actions)
         prepared = executors[scope].resume(ResumeRequest(binding.state, scope_run, candidate_frames, actions))
         candidate = reduce_graph_run(binding.state, prepared.command)
-        action_facts = _resume_facts(scope_run, binding.state.superstep, actions, prepared)
+        action_facts = _resume_facts(scope_run, binding.state.superstep, actions)
         for admitted in prepared.inputs:
             candidate_frames = candidate_frames.add_resume_input(admitted)
         substitutions = tuple(
@@ -430,7 +410,7 @@ def recovery_seed(
     states: tuple[_PlannedState, ...],
     frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT],
     limits: ExecutionLimits,
-    facts: tuple[AdmittedResumeFact[GraphValueT], ...],
+    facts: tuple[AdmittedResumeFact, ...],
 ) -> RecoveryInvocationSeed[GraphValueT]:
     root = states[0]
     children = tuple(binding for binding in states if binding.scope_run.scope)
@@ -451,7 +431,7 @@ def admit_state_owned_overrides(
     for binding in states:
         if binding.state.status is not GraphRunStatus.RUNNING:
             continue
-        scoped_graph = _compiled_at(graph, binding.scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         for node in binding.state.frontier.nodes:
             if isinstance(node.settlement, PendingGraphNode) and isinstance(
                 node.settlement.input,
@@ -508,7 +488,7 @@ def _validate_frame_index(
         coordinate = record.coordinate
         if coordinate.scope_run not in coordinates:
             raise SnapshotMismatchError("continuation graph input belongs to an unknown scoped run")
-        scoped_graph = _compiled_at(graph, coordinate.scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
         if coordinate.descriptor != scoped_graph.graph_input_descriptor.identity:
             raise SnapshotMismatchError("continuation graph input descriptor does not match its scope")
         declarations = tuple(
@@ -522,7 +502,7 @@ def _validate_frame_index(
     for record in context.frames.publications:
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
-        scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
         if (
             publication is None
@@ -548,7 +528,7 @@ def _validate_frame_index(
     for record in context.frames.resume_inputs:
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.activation.scope_run)
-        scoped_graph = _compiled_at(graph, coordinate.activation.scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
         if (
             materialization is None
@@ -567,7 +547,7 @@ def _validate_frame_index(
     for record in context.frames.child_boundaries:
         coordinate = record.coordinate
         binding = _planned_state(bindings, coordinate.child_scope_run)
-        scoped_graph = _compiled_at(graph, coordinate.child_scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.child_scope_run.scope)
         if (
             coordinate.descriptor != scoped_graph.graph_output_descriptor.identity
             or binding.state.status is not GraphRunStatus.COMPLETED
@@ -592,7 +572,7 @@ def _validate_complete_context(
     if admitted_inputs != frozenset(binding.scope_run for binding in states):
         raise SnapshotMismatchError("complete continuation must retain every scoped graph input")
     for binding in states:
-        scoped_graph = _compiled_at(graph, binding.scope_run.scope)
+        scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         state = binding.state
         for node in state.frontier.nodes:
             if isinstance(node.settlement, SucceededGraphNode):
