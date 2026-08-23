@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07 已单项完成；S01 target 已通过第四次评审，等待 requirements 批准，尚未实现
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07 已单项完成；S01 已单项满足 `GSP-A06`，可直接实施但尚未实现
 - 日期：2026-08-23（S01 complexity gate 明确排除；target 已收口为四文件 production/behavior 原子实施）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
@@ -220,11 +220,20 @@ S06 完成后的 `CompiledGraph` exact-shape gate 必须断言：`recovery` 不�
 <a id="312-s01-gsp-a06-单项重新设计pending-review--not-approved2026-08-23"></a>
 <a id="s01-gsp-a06"></a>
 
-#### 3.1.2 S01 `GSP-A06` 单项重新设计（REVIEW PASSED / PENDING APPROVAL，2026-08-23）
+#### 3.1.2 S01 `GSP-A06` 单项重新设计（APPROVED / READY FOR IMPLEMENTATION，2026-08-23）
 
 本节是 S01 target shape、结构净删除账本、characterization、planned manifest 和实施门禁的**唯一 owner**。
 原独立 S01 proposal 已撤销为不含 target 内容的迁移指针；S01 review 只保留裁决和整改证据。requirements
-继续唯一拥有批准状态，且当前仍为未批准。本文档单元不授权修改 production/tests，不更新 `GSP-A06` 状态。
+继续唯一拥有批准状态，并已在 approval commit `785c796` 将 S01 记为 `GSP-A06 SATISFIED`。实施者现在可按本节
+四文件 manifest 直接修改 production/tests，不需要等待另一次 design review、requirements 批准或 complexity unit。
+
+**直接实施授权**
+
+- final design/review commit：`d34c117`；
+- requirements-only approval commit：`785c796`；
+- 当前实施状态：`AUTHORIZED / NOT YET IMPLEMENTED`；
+- 唯一实施范围：本节第 4 项登记的 compiler + 三个既有 behavior test 文件；
+- 明确排除：持久化/State/protocol、`pyproject.toml`、complexity framework、legacy/AST/private-source-shape gate 和新测试文件。
 
 本 target 只删除 compiler invocation 内的重复事实和无语义转交。当前不实现持久化；第 2.4 节的 State、command、
 reducer、protocol、Store/no-Store 与 callback 边界全部 `HARD KEEP`。S01 也不改变 public `Graph` API、
@@ -411,7 +420,7 @@ record 反向拥有 target 或批准状态：
 | no-persistence、唯一 owner 与基础设计复用 | **HARD KEEP** | 不修改 State/Store/protocol/callback，不新增 DTO/cache/runner/compatibility path |
 | 既有 behavior/owner baseline | **PASS — 19 existing nodeids** | 本次按上表 exact nodeid 复跑为 `19 passed in 0.43s`；只证明当前 production baseline |
 | 两个 `PLANNED` case 与一个 `PLANNED ASSERTION` | **PENDING IMPLEMENTATION** | 不得因既有 baseline 绿色冒记为已落地或已通过 target behavior |
-| `GSP-A06` 批准 | **PENDING APPROVAL** | 技术评审已经通过；只有 requirements owner 可授权 implementation |
+| `GSP-A06` 批准 | **SATISFIED / IMPLEMENTATION AUTHORIZED** | requirements approval commit `785c796` 已完成；production 尚未修改 |
 
 核心 positive case 必须包含：source 自环使 absolute coordinate 不成立；同一 source 的两个不同
 `ConditionalEdge` route 指向同一 target；target input 绑定该 source output；最终断言
@@ -434,7 +443,7 @@ R4–R5 纠偏由本唯一 owner 完整吸收：
 - 这些内容不形成 S01 的通过、失败、整改项、批准前置、implementation manifest 或交付门禁；
 - S01 的净复杂度证据由本节 exact 结构账本、behavior matrix 与 actual diff/source review 闭合；
 - 非 complexity production + behavior manifest 精确为四个文件，第三次评审从未主张用该子集替换另一个有效 manifest；
-- R1–R3 和 target 技术质量保持 `PASS`，requirements approval 在本 owner 回写时仍单独等待明确授权。
+- R1–R3 和 target 技术质量保持 `PASS`；requirements 随后已在独立 approval commit `785c796` 明确授权实施。
 
 该回写只纠正准入范围，不改变第四次评审已经通过的 production target shape、behavior evidence 或 no-persistence 边界，
 也不创建第二份 target。
@@ -482,13 +491,14 @@ writeback 还必须列出 `activation_gates`、`direct_targets`、`nested_graphs
 2. 第四次评审与本次 owner 回写只负责闭合设计和准入范围；它们不改变 requirements 批准状态。S01 不等待、不修改、
    也不消费独立 complexity framework，后者不得进入 S01 的提交历史或验收结论。
 
-3. 用户明确批准后，approval unit 只修改：
+3. 用户以原文“你做到让我可以交付一个直接实施的文档”明确授权后，approval commit `785c796` 只修改：
 
    ```text
    mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
    ```
 
-   只有该单元可把 S01 的 `GSP-A06` 状态改为 satisfied；本次重新设计请求不冒充批准。
+   该单元已把 S01 的 `GSP-A06` 状态改为 satisfied；design/review commit `d34c117` 在前，production implementation
+   必须在后，Git 历史已形成可核对的 design → approval 顺序。
 
 4. approval 之后，production + behavior implementation unit 的 planned manifest 精确为：
 
@@ -986,8 +996,8 @@ normative 文档和 exact-shape tests 迁移；S05、S06 不得再拆成两个 i
 
 ### Phase 3：engine 内部 P2
 
-S07 已按 3.2.2 完成。S01、S02、S12、S15、S16、S19 只有满足 `GSP-A06` 并通过单项设计复审后才能实施；
-未通过的单元保持现状，不影响已批准 P1。S12 即使其他 P1 已获准，也不继承其批准状态。
+S07 已按 3.2.2 完成；S01 已按 3.1.2 满足 `GSP-A06` 并获准直接实施。S02、S12、S15、S16、S19 仍须单项满足
+`GSP-A06` 并通过设计复审；未通过的单元保持现状。S12 不继承 S01、S07 或 P1 的批准状态。
 
 ### Phase 4：facade/transaction P2
 
@@ -2275,8 +2285,8 @@ CompiledGraph convenience projection，让 direct transition 成为唯一 loweri
 上述单元均不新增 legacy AST 断言，scoped gate 已通过，但混合工作树的独立 complexity hook 阻断完整交付。
 15 个已批准 P1 的 production target 至此全部落地；S07 随后在用户明确批准后首个完成 P2 单项 `GSP-A06`
 设计、production、既有 behavior/owner gate 与 normative 同步，三类目标 source 的重复 coordinate assembly 已归零。
-S01 已按 3.1.2 重新提交单项 target/evidence，但尚未获得 requirements owner 批准、未修改 production；未获批的
-8 个 P2（含 S01）继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+S01 已按 3.1.2 完成单项 target/evidence、第四次评审和 requirements approval，当前可直接实施但尚未修改 production；
+其余 7 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
@@ -2287,10 +2297,10 @@ S01 已按 3.1.2 重新提交单项 target/evidence，但尚未获得 requiremen
 | `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S04、S05+S06、S08–S11、S14、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
-| `GSP-A06` | S07 已按单项签名、nominal type、删除/新增上限、净复杂度、behavior/tamper evidence 与三个独立 manifest 闭合；S01 重新设计已提交但仍待 review/requirements approval，其余 P2 不继承 S07 批准 | 3.1.2、3.2.2、7.23 |
+| `GSP-A06` | S07 已完成；S01 已按 exact signature/nominal type、删除/新增上限、结构净删除、behavior/exact-shape evidence 与四文件 manifest 闭合，并由 approval commit `785c796` 授权；其余 P2 不继承批准 | 3.1.2、3.2.2、7.23 |
 
 Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S05+S06、S08–S11、S14、S17、S20 与
 S23B 的 production/scoped gate 已完成，但在独立 complexity unit 与各 implementation manifest 分离并重跑完整
 门禁前，不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03、S04、S05+S06、S14 也已完成；
-当前没有剩余的已批准 P1 delivery change unit。除已单项闭合的 S07 外，不得重新发现第 25 个简化点、提前实施
-其余 P2、把独立文档治理放回关键路径，或触及 State/持久化。
+当前没有剩余的已批准 P1 delivery change unit；S01 是唯一已批准但尚未实施的 P2。除已单项闭合的 S07、S01 外，
+不得重新发现第 25 个简化点、提前实施其余 P2、把独立文档治理放回关键路径，或触及 State/持久化。
