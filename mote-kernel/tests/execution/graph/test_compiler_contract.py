@@ -280,6 +280,35 @@ def test_compiler_uses_relative_selection_for_loop_producer_data_trigger() -> No
     assert selection.superstep == 1
 
 
+def test_compiler_uses_relative_selection_for_same_source_conditional_routes() -> None:
+    source = node(
+        "source",
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    target = node(
+        "target",
+        inputs={"value": Graph.node_output("source", "value")},
+        outputs={},
+    )
+    compiled = compile_graph(
+        definition(
+            (source, target),
+            edges=(
+                DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("left"), GraphNodeId("target")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("right"), GraphNodeId("target")),
+            ),
+            entries=("source",),
+        )
+    )
+
+    selection = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0].publication
+    assert selection is not None
+    assert selection.kind is PublicationSelectionKind.RELATIVE
+    assert selection.superstep == 1
+
+
 def test_compiler_rejects_ambiguous_loop_publication_for_join_consumer() -> None:
     source = node("source", inputs={}, outputs={"value": str})
     gate = node("gate", inputs={}, outputs={})

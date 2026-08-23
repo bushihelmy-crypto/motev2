@@ -41,6 +41,10 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
     )
     compiled = compile_graph(definition)
 
+    assert compiled.transition.direct_targets[GraphNodeId("a")] == (
+        GraphNodeId("b"),
+        GraphNodeId("c"),
+    )
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("b")
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("c")
     expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d"))

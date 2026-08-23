@@ -48,8 +48,14 @@ from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 RouteRequirements: TypeAlias = tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
-RouteCause: TypeAlias = tuple[GraphNodeId, GraphRouteId | None]
-ActivationGate: TypeAlias = tuple[RouteCause, ...]
+ActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+
+
+def _all_single_source_gates(
+    source: GraphNodeId,
+    gates: list[ActivationGate],
+) -> bool:
+    return bool(gates) and all(len(gate) == 1 and gate[0][0] == source for gate in gates)
 
 
 def _declaration(
@@ -186,7 +192,7 @@ def _can_reach(
 def _guaranteed_sets(
     node_ids: tuple[GraphNodeId, ...],
     entries: tuple[GraphNodeId, ...],
-    control_gates: dict[GraphNodeId, list[frozenset[GraphNodeId]]],
+    activation_gates: dict[GraphNodeId, list[ActivationGate]],
     data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
 ) -> dict[GraphNodeId, frozenset[GraphNodeId]]:
     guarantees = {node_id: frozenset((node_id,)) for node_id in node_ids}
@@ -197,11 +203,11 @@ def _guaranteed_sets(
             alternatives: list[frozenset[GraphNodeId]] = []
             if node_id in entry_set:
                 alternatives.append(frozenset())
-            gates = control_gates[node_id]
+            gates = activation_gates[node_id]
             if gates:
                 for gate in gates:
                     guaranteed: set[GraphNodeId] = set()
-                    for source in gate:
+                    for source, _route in gate:
                         guaranteed.update(guarantees[source])
                     alternatives.append(frozenset(guaranteed))
             elif data_dependencies[node_id]:
@@ -442,14 +448,14 @@ def _input_publication_selection(
     source: NodeOutputPort,
     target: GraphNodeId,
     absolute_levels: dict[GraphNodeId, int],
-    control_gates: dict[GraphNodeId, list[frozenset[GraphNodeId]]],
+    activation_gates: dict[GraphNodeId, list[ActivationGate]],
     data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
 ) -> PublicationSelection:
     absolute = absolute_levels.get(source.node_id)
     if absolute is not None:
         return PublicationSelection(PublicationSelectionKind.ABSOLUTE, absolute)
-    gates = control_gates[target]
-    directly_causal = (bool(gates) and all(gate == frozenset((source.node_id,)) for gate in gates)) or (
+    gates = activation_gates[target]
+    directly_causal = _all_single_source_gates(source.node_id, gates) or (
         not gates and data_dependencies[target] == {source.node_id}
     )
     if directly_causal:
@@ -483,7 +489,7 @@ def _compile_graph(
     nodes = {node.node_id: node for node in definition.nodes}
     node_ids = tuple(sorted(nodes))
     graph_inputs = _collect_graph_inputs(definition)
-    node_outputs = {
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]] = {
         node_id: (
             node.outputs
             if isinstance(node := nodes[node_id], CallableNodeDefinition)
@@ -533,26 +539,21 @@ def _compile_graph(
     direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {node_id: set() for node_id in node_ids}
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {node_id: {} for node_id in node_ids}
     joins_by_source: dict[GraphNodeId, list[JoinEdge]] = {node_id: [] for node_id in node_ids}
-    control_gates: dict[GraphNodeId, list[frozenset[GraphNodeId]]] = {node_id: [] for node_id in node_ids}
     activation_gates: dict[GraphNodeId, list[ActivationGate]] = {node_id: [] for node_id in node_ids}
     gates_to_end: list[frozenset[GraphNodeId]] = []
-    direct_pairs: set[tuple[GraphNodeId, GraphNodeId]] = set()
     joins: list[JoinEdge] = []
     for edge in definition.edges:
         if isinstance(edge, DirectEdge):
-            direct_pairs.add((edge.source, edge.target))
             if edge.target == END:
                 gates_to_end.append(frozenset((edge.source,)))
             else:
                 direct_targets[edge.source].add(edge.target)
-                control_gates[edge.target].append(frozenset((edge.source,)))
                 activation_gates[edge.target].append(((edge.source, None),))
         elif isinstance(edge, ConditionalEdge):
             conditional_targets[edge.source][edge.route] = edge.target
             if edge.target == END:
                 gates_to_end.append(frozenset((edge.source,)))
             else:
-                control_gates[edge.target].append(frozenset((edge.source,)))
                 activation_gates[edge.target].append(((edge.source, edge.route),))
         else:
             normalized = JoinEdge(tuple(sorted(edge.sources)), edge.target)
@@ -560,18 +561,17 @@ def _compile_graph(
             if edge.target == END:
                 gates_to_end.append(frozenset(edge.sources))
             else:
-                control_gates[edge.target].append(frozenset(edge.sources))
                 activation_gates[edge.target].append(tuple((source, None) for source in normalized.sources))
             for source in edge.sources:
                 joins_by_source[source].append(normalized)
     for target, sources in data_dependencies.items():
         for source in sources:
-            if (source, target) in direct_pairs:
+            if target in direct_targets[source]:
                 raise DuplicateEdgeError(f"node output binding and direct edge duplicate {source!r} -> {target!r}")
 
     explicit_entries = tuple(sorted(definition.entries))
     automatic_entries = tuple(
-        node_id for node_id in node_ids if not data_dependencies[node_id] and not control_gates[node_id]
+        node_id for node_id in node_ids if not data_dependencies[node_id] and not activation_gates[node_id]
     )
     duplicates = set(explicit_entries).intersection(automatic_entries)
     if duplicates:
@@ -593,8 +593,8 @@ def _compile_graph(
                 successors[source].add(join.target)
     for target, sources in data_dependencies.items():
         for source in sources:
-            if control_gates[target]:
-                directly_causal = all(gate == frozenset((source,)) for gate in control_gates[target])
+            if activation_gates[target]:
+                directly_causal = _all_single_source_gates(source, activation_gates[target])
                 if target == source or (_can_reach(target, source, successors) and not directly_causal):
                     raise GraphValidationError(
                         f"node output {source!r} is not guaranteed before controlled node {target!r}"
@@ -617,9 +617,9 @@ def _compile_graph(
         tuple(joins),
     )
 
-    guarantees = _guaranteed_sets(node_ids, entries, control_gates, data_dependencies)
+    guarantees = _guaranteed_sets(node_ids, entries, activation_gates, data_dependencies)
     for target, sources in data_dependencies.items():
-        if control_gates[target] and not sources <= guarantees[target]:
+        if activation_gates[target] and not sources <= guarantees[target]:
             missing = tuple(sorted(sources - guarantees[target]))
             raise GraphValidationError(f"controlled node {target!r} can activate before required producers {missing!r}")
     terminal_gates = _terminal_gates(
@@ -642,7 +642,7 @@ def _compile_graph(
                         binding.source,
                         node_id,
                         absolute_levels,
-                        control_gates,
+                        activation_gates,
                         data_dependencies,
                     ),
                 )
@@ -683,18 +683,16 @@ def _compile_graph(
                 for binding in resolved_by_node[node_id].entries
             )
         )
-        input_descriptor = _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations)
         materializations[node_id] = MaterializationPlan(
             resolved_by_node[node_id],
-            input_descriptor,
+            _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations),
         )
-        output_descriptor = _frame_descriptor(
+        publications[node_id] = _frame_descriptor(
             definition,
             FrameKind.NODE_OUTPUT,
             ordinal,
             node_outputs[node_id],
         )
-        publications[node_id] = output_descriptor
 
     transition = FrontierTransitionPlan(
         entries,
@@ -712,8 +710,7 @@ def _compile_graph(
         graph_outputs,
         tuple(resource.resource_id for resource in definition.resources),
     )
-    resource_order = transition.resource_order
-    positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
+    positions = {resource_id: position for position, resource_id in enumerate(transition.resource_order)}
     canonical_nodes = {
         node_id: (
             CallableNodeDefinition(
