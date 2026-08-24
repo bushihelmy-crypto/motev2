@@ -1,6 +1,7 @@
 """Recovery invocation validation and fence-resume planning."""
 
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.recovery import (
@@ -472,18 +473,16 @@ def _validate_frame_index(
         for record in context.frames.child_boundaries
     ):
         raise SnapshotMismatchError("continuation child boundary segment contains a malformed record")
-    graph_input_coordinates = tuple(record.coordinate for record in context.frames.graph_inputs)
-    publication_coordinates = tuple(record.coordinate for record in context.frames.publications)
-    resume_coordinates = tuple(record.coordinate for record in context.frames.resume_inputs)
-    boundary_coordinates = tuple(record.coordinate for record in context.frames.child_boundaries)
-    for name, segment in (
-        ("graph input", graph_input_coordinates),
-        ("publication", publication_coordinates),
-        ("resume input", resume_coordinates),
-        ("child boundary", boundary_coordinates),
+    if any(previous.coordinate >= current.coordinate for previous, current in pairwise(context.frames.graph_inputs)):
+        raise SnapshotMismatchError("continuation graph input coordinates are not unique and canonical")
+    if any(previous.coordinate >= current.coordinate for previous, current in pairwise(context.frames.publications)):
+        raise SnapshotMismatchError("continuation publication coordinates are not unique and canonical")
+    if any(previous.coordinate >= current.coordinate for previous, current in pairwise(context.frames.resume_inputs)):
+        raise SnapshotMismatchError("continuation resume input coordinates are not unique and canonical")
+    if any(
+        previous.coordinate >= current.coordinate for previous, current in pairwise(context.frames.child_boundaries)
     ):
-        if len(segment) != len(set(segment)) or segment != tuple(sorted(segment)):
-            raise SnapshotMismatchError(f"continuation {name} coordinates are not unique and canonical")
+        raise SnapshotMismatchError("continuation child boundary coordinates are not unique and canonical")
     for record in context.frames.graph_inputs:
         coordinate = record.coordinate
         if coordinate.scope_run not in coordinates:
