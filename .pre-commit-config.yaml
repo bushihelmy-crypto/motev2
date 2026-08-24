@@ -20,21 +20,45 @@ repos:
         files: ^mote-kernel/(src|tests)/.*\.py$
   - repo: local
     hooks:
+      - id: kernel-complexity
+        name: kernel structural complexity ratchet
+        entry: make -C mote-kernel complexity-ratchet
+        language: system
+        pass_filenames: false
+        files: ^mote-kernel/(pyproject\.toml|src/.*\.py|tests/.*\.py)$
       - id: rustfmt
         name: rustfmt
-        entry: cargo fmt --manifest-path mote-infra/local/Cargo.toml --all -- --check
+        entry: cargo fmt --manifest-path mote-persistence/local/Cargo.toml --all -- --check
         language: system
         pass_filenames: false
-        files: ^mote-infra/local/.*\.rs$
-      - id: cloudflare-static
-        name: cloudflare static checks
-        entry: pnpm --dir mote-infra/cloudflare run check:static
+        files: ^mote-persistence/local/.*\.rs$
+      - id: persistence-cloudflare-python-static
+        name: Cloudflare Python Persistence static checks
+        entry: make -C mote-persistence/cloudflare/python static
         language: system
         pass_filenames: false
-        files: ^mote-infra/cloudflare/
+        files: ^mote-persistence/cloudflare/python/
+      - id: persistence-cloudflare-ts-static
+        name: Cloudflare TypeScript Persistence static checks
+        entry: pnpm --dir mote-persistence/cloudflare/ts run check:static
+        language: system
+        pass_filenames: false
+        files: ^mote-persistence/cloudflare/ts/
+      - id: container-cloudflare-ts-static
+        name: Cloudflare TypeScript Container static checks
+        entry: pnpm --dir mote-container/cloudflare/ts run check:static
+        language: system
+        pass_filenames: false
+        files: ^mote-container/cloudflare/ts/
+      - id: container-cloudflare-python-static
+        name: Cloudflare Python Container static checks
+        entry: make -C mote-container/cloudflare/python static
+        language: system
+        pass_filenames: false
+        files: ^mote-container/cloudflare/python/
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/local/third_party_licenses/|mote-infra/cloudflare/pnpm-lock\.yaml)
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-persistence/local/third_party_licenses/|mote-persistence/cloudflare/ts/pnpm-lock\.yaml|mote-container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))

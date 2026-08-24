@@ -1,0 +1,34 @@
+[package]
+name = "mote-persistence"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Reliable state, execution, and workspace mechanisms for Mote."
+readme = "README.md"
+license = "Apache-2.0"
+authors = ["Mote contributors"]
+repository = "https://github.com/bushihelmy-crypto/motev2"
+publish = false
+include = [
+    "src/**",
+    "tests/**",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "README.zh-CN.md",
+    "deny.toml",
+    "rust-toolchain.toml",
+    "third_party_licenses/**",
+]
+
+[lib]
+name = "mote_persistence"
+path = "src/lib.rs"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"

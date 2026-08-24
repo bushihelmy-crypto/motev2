@@ -4,6 +4,8 @@ from typing import Generic, TypeVar
 
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
 from mote_kernel.execution.engine.resume_input import (
+    _require_node_materialization,
+    _resume_input_coordinate,
     decode_resume_input,
     encode_resume_input,
     materialize_node_input,
@@ -30,7 +32,6 @@ from mote_kernel.execution.run_context import (
     AdmittedResumeInput,
     PreparedSubstitution,
     PublicationAvailabilityCoordinate,
-    ResumeInputAvailabilityCoordinate,
     SkipSubstitutionProvenance,
 )
 from mote_kernel.state.graph_state import (
@@ -133,49 +134,44 @@ class GraphExecutor(Generic[GraphValueT]):
             if current is None:
                 raise SnapshotMismatchError("resume request references an unknown frontier node")
             activation = StableActivation(request.scope_run, state.superstep, requested.node_id)
-            descriptor = self._graph.transition.materializations[requested.node_id].descriptor.identity
-            if isinstance(requested, ResumeFailedNodeRequest):
-                if not isinstance(current.settlement, FailedGraphNode):
-                    raise SnapshotMismatchError("failure resume requires a failed node")
-                if isinstance(requested.input, OverrideNodeInput):
+            if isinstance(requested, ResumeFailedNodeRequest | ResumeInterruptedNodeRequest):
+                plan = _require_node_materialization(self._graph, requested.node_id)
+                if isinstance(requested, ResumeFailedNodeRequest):
+                    if not isinstance(current.settlement, FailedGraphNode):
+                        raise SnapshotMismatchError("failure resume requires a failed node")
+                    if isinstance(requested.input, OverrideNodeInput):
+                        binding = encode_resume_input(self._graph, requested.input.values)
+                        frame = decode_resume_input(self._graph, requested.node_id, bytes(binding.payload))
+                    else:
+                        binding = UseStepRequestInput()
+                        frame = materialize_node_input(
+                            self._graph,
+                            state,
+                            request.scope_run,
+                            request.frames,
+                            requested.node_id,
+                            failed_retry_input=binding,
+                        )
+                    actions.append(ResumeFailedNode(requested.node_id, binding))
+                    replacements[requested.node_id] = PendingGraphNode(binding)
+                else:
+                    if not isinstance(current.settlement, InterruptedGraphNode):
+                        raise SnapshotMismatchError("interrupt resume requires an interrupted node")
+                    identity = current.settlement.interrupt.identity
+                    if requested.interrupt_id != graph_interrupt_id(
+                        identity.run_id,
+                        identity.superstep,
+                        identity.node_id,
+                        identity.execution_generation,
+                    ):
+                        raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
                     binding = encode_resume_input(self._graph, requested.input.values)
                     frame = decode_resume_input(self._graph, requested.node_id, bytes(binding.payload))
-                else:
-                    binding = UseStepRequestInput()
-                    frame = materialize_node_input(
-                        self._graph,
-                        state,
-                        request.scope_run,
-                        request.frames,
-                        requested.node_id,
-                        failed_retry_input=binding,
-                    )
-                actions.append(ResumeFailedNode(requested.node_id, binding))
-                replacements[requested.node_id] = PendingGraphNode(binding)
+                    actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
+                    replacements[requested.node_id] = PendingGraphNode(binding)
                 admitted_inputs.append(
                     AdmittedResumeInput(
-                        ResumeInputAvailabilityCoordinate(activation, descriptor),
-                        frame,
-                    )
-                )
-            elif isinstance(requested, ResumeInterruptedNodeRequest):
-                if not isinstance(current.settlement, InterruptedGraphNode):
-                    raise SnapshotMismatchError("interrupt resume requires an interrupted node")
-                identity = current.settlement.interrupt.identity
-                if requested.interrupt_id != graph_interrupt_id(
-                    identity.run_id,
-                    identity.superstep,
-                    identity.node_id,
-                    identity.execution_generation,
-                ):
-                    raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
-                binding = encode_resume_input(self._graph, requested.input.values)
-                frame = decode_resume_input(self._graph, requested.node_id, bytes(binding.payload))
-                actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
-                replacements[requested.node_id] = PendingGraphNode(binding)
-                admitted_inputs.append(
-                    AdmittedResumeInput(
-                        ResumeInputAvailabilityCoordinate(activation, descriptor),
+                        _resume_input_coordinate(activation, plan),
                         frame,
                     )
                 )

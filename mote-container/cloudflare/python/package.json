@@ -1,0 +1,14 @@
+{
+  "name": "@mote/container-cloudflare-python-toolchain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned Wrangler toolchain for the Mote Cloudflare Python container.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "devDependencies": {
+    "wrangler": "4.125.0"
+  }
+}

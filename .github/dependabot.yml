@@ -8,15 +8,43 @@ updates:
       kernel-development-dependencies:
         dependency-type: development
   - package-ecosystem: cargo
-    directory: /mote-infra/local
+    directory: /mote-persistence/local
     schedule:
       interval: weekly
-  - package-ecosystem: npm
-    directory: /mote-infra/cloudflare
+  - package-ecosystem: pip
+    directory: /mote-persistence/cloudflare/python
     schedule:
       interval: weekly
     groups:
-      cloudflare-development-dependencies:
+      persistence-cloudflare-python-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /mote-persistence/cloudflare/ts
+    schedule:
+      interval: weekly
+    groups:
+      persistence-cloudflare-typescript-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /mote-container/cloudflare/ts
+    schedule:
+      interval: weekly
+    groups:
+      container-cloudflare-typescript-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: pip
+    directory: /mote-container/cloudflare/python
+    schedule:
+      interval: weekly
+    groups:
+      container-cloudflare-python-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /mote-container/cloudflare/python
+    schedule:
+      interval: weekly
+    groups:
+      container-cloudflare-python-wrangler:
         dependency-type: development
   - package-ecosystem: github-actions
     directory: /

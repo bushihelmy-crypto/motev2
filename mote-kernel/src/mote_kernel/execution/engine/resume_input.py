@@ -44,6 +44,16 @@ from mote_kernel.state.graph_state import (
 GraphValueT = TypeVar("GraphValueT")
 
 
+def _require_node_materialization(
+    graph: CompiledGraph[GraphValueT],
+    node_id: GraphNodeId,
+) -> MaterializationPlan[GraphValueT]:
+    plan = graph.transition.materializations.get(node_id)
+    if plan is None:
+        raise SnapshotMismatchError("node input references an unknown compiled materialization")
+    return plan
+
+
 def _resume_input_coordinate(
     activation: StableActivation,
     plan: MaterializationPlan[GraphValueT],
@@ -92,7 +102,7 @@ def _admit_override(
     node_id: GraphNodeId,
     values: _GraphValues[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
-    plan = graph.transition.materializations[node_id]
+    plan = _require_node_materialization(graph, node_id)
     declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in values.items()),
@@ -145,7 +155,8 @@ def node_inputs_available(
     frames: ScopedFrameAvailability[GraphValueT],
     node_id: GraphNodeId,
 ) -> bool:
-    for binding in graph.transition.materializations[node_id].bindings.entries:
+    plan = _require_node_materialization(graph, node_id)
+    for binding in plan.bindings.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
             graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
@@ -176,7 +187,7 @@ def pending_node_input_available(
         raise SnapshotMismatchError("input availability requires a current pending node")
     if isinstance(node.settlement.input, OverrideGraphNodeInput):
         return True
-    plan = graph.transition.materializations[node_id]
+    plan = _require_node_materialization(graph, node_id)
     coordinate = _resume_input_coordinate(StableActivation(scope_run, state.superstep, node_id), plan)
     return frames.has_resume_input(coordinate) or node_inputs_available(
         graph,
@@ -210,7 +221,7 @@ def materialize_node_input(
                 "effective input requires a current pending node or a current failed node with failed retry input"
             )
     activation = StableActivation(scope_run, state.superstep, node_id)
-    plan = graph.transition.materializations[node_id]
+    plan = _require_node_materialization(graph, node_id)
     if isinstance(effective_input, OverrideGraphNodeInput):
         return decode_resume_input(graph, node_id, bytes(effective_input.payload))
     resume_coordinate = _resume_input_coordinate(activation, plan)
@@ -244,4 +255,4 @@ def materialize_node_input(
     return _make_node_input_frame(tuple(entries), declarations)
 
 
-__all__: list[str] = []
+__all__ = ["_require_node_materialization", "_resume_input_coordinate"]

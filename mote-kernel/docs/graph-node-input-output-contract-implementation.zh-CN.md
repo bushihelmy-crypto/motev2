@@ -499,7 +499,6 @@ AdmittedResumeFact(
     interrupt_identity | None,
     skip_reason | None,
     concrete_route | None,
-    resume_input_availability | None,
 )
 ```
 
@@ -515,6 +514,16 @@ resume-input coordinate 只由 `engine/resume_input.py::_resume_input_coordinate
 路径跳过。State settlement、recovery outcome、substitution 和 post-commit installation 不是这三类 binding source，
 不伪造 port 进入这些 constructor，继续由各自边界形成 coordinate。
 
+Resume-input runtime、executor admission 与 recovery invariant 这组 consumer 只通过
+`engine/resume_input.py::_require_node_materialization(graph, node_id)` 从 authoritative
+`CompiledGraph.transition.materializations` 取得 exact `MaterializationPlan[GraphValueT]`；unknown node 固定抛
+`SnapshotMismatchError("node input references an unknown compiled materialization")`。该 query 不缓存或复制 compiled fact，
+recovery 也不直接读取 materialization map。Continuation validator 为保持 coordinate/frame integrity 的统一错误契约、routing
+为解释 binding/readiness，继续各自直接读取同一 immutable map；本 query 不冒充全仓 global accessor。Compiled scope traversal
+同样只有 topology-owned `_compiled_graph_at_scope(root, scope)`：invocation 与 recovery 按原 segment 顺序复用它，unknown segment
+固定抛 `SnapshotMismatchError("scope references unknown nested node <segment!r>")`，不建立 family map、path normalization 或
+forwarding alias。
+
 `ScopeRunCoordinate` 是 execution 对 existing State identity 的唯一 transient projection，不写入 State。Root coordinate 固定为 `ScopeRunCoordinate((), root_state.run_id)`；给定 parent nested `StableActivation(parent_scope_run, parent_superstep, nested_node_id)`，child coordinate 唯一为 `ScopeRunCoordinate(parent_scope_run.scope + (nested_node_id,), child_graph_run_id(parent_scope_run.graph_run_id, parent_superstep, nested_node_id))`。Family driver 在 child start 和 recovered child admission 都复用 existing `child_graph_run_id()` validation；同一 scope path 在不同 parent superstep 再次 activation 会得到不同 child run ID，因此不是同一 coordinate。`StableActivation` 直接嵌入 `ScopeRunCoordinate`，publication/resume/settlement 不再各自保存可漂移的 raw scope/run pair。
 
 New-run root 在 acknowledgement 前也不得使用 descriptor-only 或 provisional alternate key：facade 先一次性生成/校验最终 `run_id`，让 graph-input candidate 使用 `ScopeRunCoordinate((), start_command.run_id)` 完成 exact frame admission，但暂不安装到 run context/continuation；`StartGraphRun` exact successor 经 commit 确认后，必须验证 `successor.run_id == start_command.run_id`，再以同一个 coordinate 原子安装 root graph-input frame。Commit mismatch、exception 或 cancellation 只丢弃 candidate，不留下 frame；确认后的 `successor` 就是上述 `root_state`，不存在第二 root-run identity 或 pre-State fallback。Child start 对称地由 exact parent activation 预先派生 expected child coordinate，并只在 child `StartGraphRun` successor 确认后安装 child input frame。
@@ -527,11 +536,11 @@ Recovery 的 private nested outcome 只携带 nested `node_id` 与 canonical sco
 boundary 中 `compare=False` 的 concrete State 重建 child identity。Missing child 仍只由初始 child projection 的
 `control is None` 表示，不伪造 scope boundary。
 
-Frame-level availability 只有在 matching runtime coordinate 下 frame key set、每项 exact type 与完整 compiled descriptor 全部 admission 成功后才存在；因此 coordinate presence 同时证明 scoped-run identity、completeness 和 descriptor identity，不创建 partial-port bitmap。Child control coordinate 与 Missing/Active/Completed/Aborted 状态由 `ChildRecoveryDisposition` 拥有；child graph-input/`ChildBoundaryAvailabilityCoordinate` presence 由全局 `RecoveryAvailabilityCoordinates` 唯一拥有，不在 disposition 中复制。`GraphRunContext`/complete or recovered continuation snapshot 继续唯一持有第 8.2 节 immutable `ScopedFrameIndex`：它以 `GraphInputAvailabilityCoordinate | PublicationAvailabilityCoordinate | ResumeInputAvailabilityCoordinate | ChildBoundaryAvailabilityCoordinate` 的 closed typed segments 映射到各自 immutable concrete frame；seed admission 只把真实存在且完整的 frame 投影为同一个 coordinate，recovery successor 也只增删 coordinates。相同 exact coordinate 的 different frame 是 invariant violation；不同 `ScopeRunCoordinate` 的 frame 必须并存，不能覆盖、误判 duplicate 或复用旧值。Worklist 从不比较、排序、hash、repr 或复制任意用户 concrete value。
+Frame-level availability 只有在 matching runtime coordinate 下 frame key set、每项 exact type 与完整 compiled descriptor 全部 admission 成功后才存在；因此 coordinate presence 同时证明 scoped-run identity、completeness 和 descriptor identity，不创建 partial-port bitmap。Child control coordinate 与 Missing/Active/Completed/Aborted 状态由 `ChildRecoveryDisposition` 拥有；child graph-input/`ChildBoundaryAvailabilityCoordinate` presence 由全局 `RecoveryAvailabilityCoordinates` 唯一拥有，不在 disposition 中复制。`GraphRunContext`/complete or recovered continuation snapshot 继续唯一持有第 8.2 节 immutable `ScopedFrameIndex`：它以 `GraphInputAvailabilityCoordinate | PublicationAvailabilityCoordinate | ResumeInputAvailabilityCoordinate | ChildBoundaryAvailabilityCoordinate` 的 closed typed segments 映射到各自 immutable concrete frame；seed admission 只把真实存在且完整的 frame 投影为同一个 coordinate，recovery successor 也只增删 coordinates。相同 exact coordinate 的 different frame 是 invariant violation；不同 `ScopeRunCoordinate` 的 frame 必须并存，不能覆盖、误判 duplicate 或复用旧值。`AdmittedResumeFact` 只拥有 target、action kind、interrupt ID、skip reason 与 concrete route 的五字段 equality；resume-input presence 只由 equality-participating `RecoveryAvailabilityCoordinates.resume_inputs` 拥有。每个 non-skip admitted action 必须在 recovery seed admission 时，用 shared scope/materialization owner 和唯一 coordinate constructor 推导 exact coordinate并确认其 presence；missing 或 same activation/wrong descriptor 均在任何 mutation 前抛 `SnapshotMismatchError("recovery admitted resume action lacks its exact resume-input availability")`。Skip action 不声明本 invocation resume-input requirement，也不删除或拒绝历史 resume coordinate。Worklist 从不比较、排序、hash、repr 或复制任意用户 concrete value。
 
 唯一 transfer 规则为：
 
-1. 从 exact authoritative State、已校验 effective limits 与 snapshot 中真实存在且已完整 admission 的 frames/child snapshots 建立 seed；先从 root/child State 和 exact parent activation 生成统一 `ScopeRunCoordinate`，再让每个 frame 只投影上述 runtime + descriptor coordinate，concrete value 留在 incoming run context/continuation。State-owned opaque override、zero-input activation 和已 admission resume candidate 只形成对应 scoped activation 的 `ResumeInputAvailabilityCoordinate`/`AdmittedResumeFact`，不扩张其他 port。
+1. 从 exact authoritative State、已校验 effective limits 与 snapshot 中真实存在且已完整 admission 的 frames/child snapshots 建立 seed；先从 root/child State 和 exact parent activation 生成统一 `ScopeRunCoordinate`，再让每个 frame 只投影上述 runtime + descriptor coordinate，concrete value 留在 incoming run context/continuation。State-owned opaque override、zero-input activation 和已 admission resume candidate 只形成对应 scoped activation 的 `ResumeInputAvailabilityCoordinate`；resume/skip request 只形成五字段 `AdmittedResumeFact`。Availability projection 完成后、family construction与proof之前，每个 non-skip action必须存在shared owner推导的exact resume-input coordinate，skip则绕过该current-input invariant；二者都不扩张其他 port。
 2. Active seed 先按 existing `FenceGraphExecution` 与 reducer semantics 模拟 exact quiescent successor，再模拟 admitted resume/skip；quiescent seed 不伪造 fence。这一 abstract ordering 与 concrete driver 相同，但 preflight 不提前提交 fence。
 3. Invocation seed 中 current frontier 已有 settlement 的 node 保留 State-owned canonical routing contribution，不对该 node 重新枚举 outcome；frontier 全部 quiescent 后才使用这些 concrete contributions 与 State-owned join progress 调用 shared routing resolver。已经给定的 `skip_failed(..., route=...)` 先通过同一 resume validation 投影唯一 simulated skipped settlement，再只沿该 concrete route。二者都不得枚举同一 source 的其他 declared routes。
 4. 被 `resume_failed()`、`resume_failed_with()` 或 `resume_interrupted()` 重新置为 Pending 的 ordinary callable，与其他尚未执行的 ordinary callable 一样，availability proof 只展开 canonical success projection：conditional success 枚举全部 declared `SelectGraphRoute` contributions，non-conditional success 固定为 `ContinueGraphRouting`。Shared prepare 在 claim 前一次性 admission 当前 frontier 的全部 callable input；failure/interrupt 不产生 publication 或下一 frontier control contribution，因此由 quiescence invariant 单独证明最终只能到 awaiting boundary，不加入 worklist outcome/permutation 状态。一旦 success projection 产生 settlement，其后 routing 只读取该 concrete contribution。
@@ -895,7 +904,7 @@ ResumeInputAvailabilityCoordinate[GraphValueT]
 ChildBoundaryAvailabilityCoordinate[GraphValueT]
 ChildControlStateCoordinate
 ChildRecoveryDisposition
-AdmittedResumeFact[GraphValueT]
+AdmittedResumeFact
 _ScopeBoundary(kind=EXECUTION_LIMIT)
 AdmittedGraphInput[GraphValueT]
 ConfirmedPublication[GraphValueT]

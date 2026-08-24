@@ -8,7 +8,11 @@ from typing import Generic, TypeVar
 from mote_kernel.execution.engine.admission import claim_resource_snapshot, select_executable_tasks
 from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.planner import plan_tasks
-from mote_kernel.execution.engine.resume_input import pending_node_input_available
+from mote_kernel.execution.engine.resume_input import (
+    _require_node_materialization,
+    _resume_input_coordinate,
+    pending_node_input_available,
+)
 from mote_kernel.execution.engine.routing import (
     _success_routes,
     graph_outputs_available,
@@ -26,7 +30,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph, _compiled_graph_at_scope
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, child_scope_run_for_activation
 from mote_kernel.execution.limits import ExecutionLimits
@@ -261,13 +265,12 @@ class ChildRecoveryDisposition:
 
 
 @dataclass(frozen=True, slots=True)
-class AdmittedResumeFact(Generic[GraphValueT]):
+class AdmittedResumeFact:
     target: StableActivation
     action: AdmittedActionKind
     interrupt_id: GraphInterruptId | None
     skip_reason: str | None
     concrete_route: GraphRouteId | None
-    resume_input_availability: ResumeInputAvailabilityCoordinate[GraphValueT] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +280,7 @@ class RecoveryTransferState(Generic[GraphValueT]):
     live: tuple[GraphNodeId, ...]
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
     children: tuple[ChildRecoveryDisposition, ...]
-    admitted_actions: tuple[AdmittedResumeFact[GraphValueT], ...]
+    admitted_actions: tuple[AdmittedResumeFact, ...]
     invocation_new_children: tuple[GraphNodeId, ...] = ()
 
 
@@ -315,7 +318,7 @@ class RecoveryInvocationSeed(Generic[GraphValueT]):
         compare=False, repr=False, hash=False
     )
     limits: ExecutionLimits
-    admitted_actions: tuple[AdmittedResumeFact[GraphValueT], ...] = ()
+    admitted_actions: tuple[AdmittedResumeFact, ...] = ()
 
 
 @dataclass(slots=True)
@@ -350,10 +353,10 @@ class _RecoveryProofBudget:
 
 
 @dataclass(frozen=True, slots=True)
-class _RecoveryFamily(Generic[GraphValueT]):
+class _RecoveryFamily:
     bindings: tuple[RecoveryStateBinding, ...]
     limits: ExecutionLimits
-    admitted_actions: tuple[AdmittedResumeFact[GraphValueT], ...]
+    admitted_actions: tuple[AdmittedResumeFact, ...]
     budget: _RecoveryProofBudget
 
     def binding(self, coordinate: ScopeRunCoordinate) -> RecoveryStateBinding | None:
@@ -570,7 +573,7 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
 def _transfer_state(
     scope_run: ScopeRunCoordinate,
     item: _RecoveryWorkItem[GraphValueT],
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> RecoveryTransferState[GraphValueT]:
     return RecoveryTransferState(
         _scope_control(item.state, scope_run),
@@ -632,7 +635,7 @@ def _initial_children(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
     scope_run: ScopeRunCoordinate,
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
     invocation_new: tuple[GraphNodeId, ...],
 ) -> tuple[ChildRecoveryDisposition, ...]:
     dispositions: list[ChildRecoveryDisposition] = []
@@ -686,7 +689,7 @@ def _child_outcomes(
     parent_scope_run: ScopeRunCoordinate,
     node_id: GraphNodeId,
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> tuple[_NestedOutcome[GraphValueT], ...]:
     child_graph = parent_graph.nested_graphs[node_id]
     parent = ParentGraphActivation(parent_state.run_id, parent_state.superstep, node_id)
@@ -754,7 +757,7 @@ def _nested_outcome_plans(
     scope_run: ScopeRunCoordinate,
     node_ids: tuple[GraphNodeId, ...],
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> tuple[_NestedCombination[GraphValueT], ...]:
     selected: list[_NestedOutcome[GraphValueT]] = []
     alternatives: list[tuple[int, _NestedOutcome[GraphValueT]]] = []
@@ -830,7 +833,7 @@ def _expand_quiescent_executable(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> tuple[_RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT], ...]:
     state = item.state
     try:
@@ -919,7 +922,7 @@ def _expand_live(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> tuple[_RecoveryWorkItem[GraphValueT], ...]:
     successors: list[_RecoveryWorkItem[GraphValueT]] = []
     node_id = item.live[0]
@@ -949,7 +952,7 @@ def _resolve_quiescent(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> _RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]:
     state = item.state
     facts = resolve_routing_facts(graph, state, scope_run, item.availability)
@@ -996,7 +999,7 @@ def _prove_scope(
     state: GraphRunState,
     scope_run: ScopeRunCoordinate,
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
-    family: _RecoveryFamily[GraphValueT],
+    family: _RecoveryFamily,
 ) -> tuple[_ScopeBoundary[GraphValueT], ...]:
     initial = _RecoveryWorkItem(
         state,
@@ -1133,10 +1136,18 @@ def preflight_recovery(
                 raise SnapshotMismatchError("recovery skip action facts do not match its simulated successor")
         elif not isinstance(node.settlement, PendingGraphNode):
             raise SnapshotMismatchError("recovery resume action does not match its simulated successor settlement")
-    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     availability: RecoveryAvailabilityCoordinates[GraphValueT] = RecoveryAvailabilityCoordinates[
         GraphValueT
     ].from_frames(seed.frames)
+    for action in seed.admitted_actions:
+        if action.action is AdmittedActionKind.SKIP_FAILED:
+            continue
+        scoped_graph = _compiled_graph_at_scope(graph, action.target.scope_run.scope)
+        plan = _require_node_materialization(scoped_graph, action.target.node_id)
+        expected = _resume_input_coordinate(action.target, plan)
+        if not availability.has_resume_input(expected):
+            raise SnapshotMismatchError("recovery admitted resume action lacks its exact resume-input availability")
+    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     boundaries = _prove_scope(
         graph,
         seed.root.state,

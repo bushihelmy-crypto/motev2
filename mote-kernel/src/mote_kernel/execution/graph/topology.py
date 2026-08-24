@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.edge import JoinEdge
 from mote_kernel.execution.graph.ports import (
@@ -75,8 +76,21 @@ class CompiledGraph(Generic[GraphValueT]):
     resume_input: ResumeInputBinding[GraphValueT] | None
 
 
+def _compiled_graph_at_scope(
+    root: CompiledGraph[GraphValueT],
+    scope: DefinitionScope,
+) -> CompiledGraph[GraphValueT]:
+    current = root
+    for segment in scope:
+        try:
+            current = current.nested_graphs[segment]
+        except KeyError as error:
+            raise SnapshotMismatchError(f"scope references unknown nested node {segment!r}") from error
+    return current
+
+
 def frozen_map(values: Mapping[KeyT, ValueT_co]) -> FrozenMap[KeyT, ValueT_co]:
     return FrozenMap(tuple(sorted(values.items(), key=lambda item: item[0])))
 
 
-__all__: list[str] = []
+__all__ = ["_compiled_graph_at_scope"]

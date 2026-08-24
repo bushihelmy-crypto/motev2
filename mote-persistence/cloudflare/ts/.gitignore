@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+dist/
+.wrangler/
+*.sqlite
+*.sqlite3
+*.log
+.DS_Store
