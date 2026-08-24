@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：`DESIGN COMPLETE / READY FOR INDEPENDENT TECHNICAL REVIEW / GSP-A06 NOT APPROVED`
+- 状态：`IMPLEMENTED / VERIFIED / IMPLEMENTATION-OWNER WRITEBACK COMPLETE`
 - 日期：2026-08-24
 - 单元：Graph 语义保持型简化 S15（P2）
 - 源码基线：Git `7247a93485f30746638a5168e06be8766a64a120`
@@ -17,7 +17,7 @@
 关联 owner：
 
 - [Graph 语义保持型简化 requirements](graph-semantics-preserving-simplification-requirements.zh-CN.md)：唯一拥有
-  `GSP-P01`–`GSP-P08`、`GSP-A06` 与批准状态；当前仍将 S15 列为未批准 P2。
+  `GSP-P01`–`GSP-P08`、`GSP-A06` 与批准状态；当前已将 S15 限定批准为 reviewed SHA 对应的 exact target。
 - [Graph 语义保持型简化主实施方案](graph-semantics-preserving-simplification-implementation.zh-CN.md)：只拥有总账、阶段顺序
   和本文索引，不复制 S15 exact target。
 - [Graph Node I/O normative implementation](graph-node-input-output-contract-implementation.zh-CN.md)：唯一拥有当前 recovery
@@ -25,8 +25,9 @@
 - 未来 S15 review/response：只记录裁决和证据，不拥有 target shape 或批准状态。
 
 本文是 S15 exact target、nominal 输入/输出、结构净删除账本、等价证明、behavior/tamper evidence、planned manifest、
-门禁和停止条件的**唯一 owner**。主实施方案只保留链接；requirements 只记录批准状态；review 只记录裁决。S15 未取得
-requirements owner 对当前 reviewed SHA 的显式 `GSP-A06` 批准前，不得修改 production 或 tests。
+门禁和停止条件的**唯一 owner**。主实施方案只保留链接；requirements 只记录批准状态；review 只记录裁决；第 16 节记录
+批准后的 implementation-owner writeback。批准前不得修改 production 或 tests；当前批准范围、实际 manifest 与验证结果以第 16 节和独立
+[验收记录](graph-semantics-preserving-simplification-s15-implementation-acceptance.zh-CN.md)为准。
 
 ## 2. 结论
 
@@ -291,7 +292,8 @@ S15不增加 `try/except`、fallback、retry、logging side effect或错误映�
 
 隔离 exact-target feasibility diff为`19 insertions / 24 deletions`，production净删5行；行数只作补充，不替代上述结构账本。
 Probe已经通过single-file Pyright、Ruff check/format、53个recovery focused cases、10个active architecture contract cases和全部563个
-`tests/execution` cases。该probe证明target可编码，不是production implementation、T0通过、技术评审或`GSP-A06`批准。
+`tests/execution` cases。该段记录的是批准前的 feasibility probe；当时它不构成 production implementation、T0通过、技术评审或
+`GSP-A06`批准。实际 implementation 与验收结果已在第 16 节独立记录。
 
 零负债裁决同时要求：target不得把现有三个 expansion owner之一包装成single-use top-level helper，不得新增result DTO或callback，
 不得修改独立 complexity framework的Makefile、ratchet、baseline、limit或测试。Implementation actual diff若不能达到本表全部上限，
@@ -548,15 +550,86 @@ production/tests，不能冒充implementation gate。其exact命令同样使用`
 
 S15设计已闭合requirements要求的target function signature、nominal输入/输出、删除对象、新增上限、净复杂度证据、成功/失败/边界
 characterization、exact-shape/tamper evidence、no-State/no-persistence边界、错误恢复保持义务、one-file production manifest和无legacy
-gate口径。隔离feasibility probe已证明exact target通过typing/lint及current behavior，但不构成implementation或批准。
+gate口径。第 1–15 节保留实施前的 target/准入约束；第 16 节记录批准后的实际 implementation-owner writeback。
 
-当前状态仍是：
+当前状态已收口为：
 
 ```text
-DESIGN COMPLETE
-READY FOR INDEPENDENT TECHNICAL REVIEW
-GSP-A06 NOT APPROVED
-PRODUCTION / TESTS UNCHANGED
+IMPLEMENTED
+VERIFIED
+IMPLEMENTATION-OWNER WRITEBACK COMPLETE
+GSP-A06 APPROVED — reviewed exact target SHA only
+PRODUCTION COMMIT: 4b8f3727644687ffd63d6bdd7e0dc4159274b892
+PRODUCTION MANIFEST: recovery.py only
 ```
 
-下一合法步骤是独立技术评审绑定本文SHA；不是直接修改`recovery.py`、tests或requirements。
+完整验收证据见独立 [S15 implementation acceptance](graph-semantics-preserving-simplification-s15-implementation-acceptance.zh-CN.md)。
+
+## 16. Implementation owner writeback（2026-08-24）
+
+### 16.1 授权与实际 manifest
+
+requirements owner 已依据独立技术评审和用户原文授权，将 `GSP-A06` 限定批准到本方案 reviewed SHA256
+`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a`。本次 writeback 不改变该批准范围，也不重新解释
+requirements、review 或 target；它只记录实际实现结果。
+
+Production implementation 已作为独立 commit `4b8f3727644687ffd63d6bdd7e0dc4159274b892` 落地。
+
+实际 production manifest 与批准 manifest 完全一致：
+
+```text
+mote-kernel/src/mote_kernel/execution/engine/recovery.py
+```
+
+实际源码 SHA256 为 `40d0fff5240f8ce479006699e07f2a767ecfc533d889c86244e48589794e28df`；声明基线 SHA256 为
+`d77df79d3f94ca973b29945a3abddf3382b280ed8da7f208ad455757c1d9514e`。diff 为 `19 insertions / 24 deletions`，且只改变
+`_prove_scope()` 内的 local enqueue 与统一 successor/budget/dispatch 编排。没有 production/test/normative/State/Store/protocol/
+persistence 之外的 S15 文件变更。
+
+### 16.2 Actual structural ledger 与 source review
+
+按第 7 节口径对实际源码复算：
+
+| 结构项 | Before | Actual | 净变化 |
+| --- | ---: | ---: | ---: |
+| module-level function definitions | 23 | 23 | 0 |
+| `_prove_scope()` decision points | 13 | 11 | -2 |
+| `_prove_scope()` semantic AST nodes | 351 | 323 | -28 |
+| 去重后的 `ast.Name(Store)` identities | 14 | 13 | -1 |
+| enqueue 内部 batch loop | 1 | 0 | -1 |
+| non-initial / total budget admit sites | 3 / 4 | 1 / 2 | -2 / -2 |
+| enqueue call sites | 3 | 1 | -2 |
+| successor boundary discriminator sites | 2 | 1 | -1 |
+| existing expansion owner calls | 3 | 3 | 0 |
+| new owner/DTO/alias/protocol/field/cache/index/import/export | 0 | 0 | 0 |
+
+source review 确认：`enqueue` scalar 输入、两个成员 nominal successor tuple、single-pass dispatch、admit-before-dispatch、branch precedence、
+full-semantic seen、heap key/sequence/final sort均与 reviewed exact target一致；没有第二 worklist、第二事实源、类型擦除、错误捕获或
+自动 recovery policy。该一次性账本不构成永久 complexity/legacy/private-source-shape gate。
+
+### 16.3 Verification record
+
+在实际源码 SHA 上完成：
+
+```text
+focused recovery contract                         53 passed
+active architecture contract                      10 passed
+tests/execution                                   563 passed
+tests/state/graph_state                            206 passed
+all tests excluding complexity gate                826 passed
+pyright                                             0 errors, 0 warnings, 0 informations
+ruff check / ruff format --check                    passed
+build --no-isolation / twine check                  succeeded / both artifacts PASSED
+SKIP=kernel-complexity pre-commit (recovery.py)      passed
+git diff --check                                    passed
+```
+
+current behavior、strict typing、owner/dependency/source discipline、lint、format、build/package、no-State/no-persistence 与 scoped
+repository checks均为 required 且通过。automated complexity/health/baseline/ratchet/limit/hook 与 legacy/private-source-shape gate
+按用户授权排除；完整 `make check` 未运行，因为其 `check` 目标无条件包含被排除的 `complexity-ratchet`，不能将其记录为 S15 通过证据。
+
+### 16.4 交付与工作树状态
+
+S15 implementation 现为 `IMPLEMENTED / VERIFIED`。Production、独立验收记录与本 writeback 分属独立 change unit；本次只提交
+本文，不 amend production，也不累计 review/acceptance 历史 manifest。工作树中的其他用户既有变更保持未提交；提交过程没有执行
+reset、stash 或删除操作，也没有把其他文件纳入 S15 owner writeback。
