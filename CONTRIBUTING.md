@@ -17,14 +17,14 @@ make check
 For the local Rust Persistence implementation:
 
 ```bash
-cd mote-persistence/local
+cd mote-infra/persistence/local
 make check
 ```
 
 For the Cloudflare Python Persistence implementation:
 
 ```bash
-cd mote-persistence/cloudflare/python
+cd mote-infra/persistence/cloudflare/python
 uv sync --locked
 make check
 ```
@@ -32,7 +32,7 @@ make check
 For the Cloudflare TypeScript Persistence implementation:
 
 ```bash
-cd mote-persistence/cloudflare/ts
+cd mote-infra/persistence/cloudflare/ts
 pnpm install --frozen-lockfile
 pnpm run check
 ```
@@ -58,7 +58,7 @@ Install `cargo-deny` before running the dependency license, source, and advisory
 
 ```bash
 cargo install cargo-deny --version 0.19.7 --locked
-cd mote-persistence/local
+cd mote-infra/persistence/local
 make security
 ```
 

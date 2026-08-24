@@ -10,7 +10,7 @@
 - State that must survive eviction, restart, or deployment goes through the backend independently selected by Port configuration. Instance fields are caches only and must be reconstructible from durable state.
 - Cloudflare Container selection does not imply Cloudflare SQLite persistence. The Container may expose `ctx.storage` as a platform capability, while Port configuration may instead select a remote persistence backend.
 - New Durable Object classes declare the SQLite storage binding required by the Cloudflare deployment in `wrangler.jsonc`.
-- If selected, raw Cloudflare SQL, schema, and transaction code belong to `mote-persistence/cloudflare/ts`, not this Container project. Do not call `ctx.storage.sql` or `transactionSync()` here.
+- If selected, raw Cloudflare SQL, schema, and transaction code belong to `mote-infra/persistence/cloudflare/ts`, not this Container project. Do not call `ctx.storage.sql` or `transactionSync()` here.
 
 ## Engineering
 

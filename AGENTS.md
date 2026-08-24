@@ -5,6 +5,6 @@
 - Cross-language DTO and durable protocol changes MUST update `conformance/` and affected implementation runners in one change.
 - Do not create nested Git repositories.
 - Read the nearest child `AGENTS.md` before modifying a project. More specific child rules supplement these root rules.
-- Preserve strict owner boundaries: Python Kernel owns Agent flow semantics and persistence Port contracts, Go Control owns control-plane mechanisms, `mote-container` owns container registration/lookup/uniform invocation and platform capabilities, deployment-specific `mote-persistence` implementations own persistence and transaction mechanisms, and `conformance/` owns shared observable contracts.
+- Preserve strict owner boundaries: Python Kernel owns Agent flow semantics and persistence Port contracts, Go Control owns control-plane mechanisms, `mote-container` owns container registration/lookup/uniform invocation and platform capabilities, `mote-infra/persistence` owns persistence and transaction mechanisms, `mote-infra/rpc` owns reusable transport mechanics, and `conformance/` owns shared observable contracts.
 - Container choice and persistence-backend choice are orthogonal. Port configuration selects the persistence implementation; a Container may expose platform resources such as Durable Object storage but must not select or require that backend.
 - Do not copy implementation code between languages to simulate reuse. Reuse stable schemas and behavioral vectors.

@@ -12,7 +12,7 @@ The project is in its bootstrap phase. The Python Worker and Durable Object clas
 - Durable state will pass through the `Commit` backend selected by Port configuration. That backend may use object-local Cloudflare SQLite or a remote store.
 - The Worker currently returns `404`, and the Durable Object returns `501`, so the scaffold does not establish a provisional API.
 
-The Worker uses Cloudflare's `python_workers` compatibility flag and declarative Durable Object `exports` configuration with `storage: "sqlite"`. This setting exposes an optional platform storage capability; it does not select the persistence backend. If Port configuration selects object-local storage, SQL, schema, and transaction code come from `mote-persistence/cloudflare/python`. Python Workers are currently beta.
+The Worker uses Cloudflare's `python_workers` compatibility flag and declarative Durable Object `exports` configuration with `storage: "sqlite"`. This setting exposes an optional platform storage capability; it does not select the persistence backend. If Port configuration selects object-local storage, SQL, schema, and transaction code come from `mote-infra/persistence/cloudflare/python`. Python Workers are currently beta.
 
 ## Development
 
@@ -44,7 +44,7 @@ make deploy
 
 ## Kernel and persistence Port configuration
 
-The first vertical integration will add `mote-kernel` as a real Python dependency. Kernel Port configuration will independently resolve the `Commit` backend. When it selects `mote-persistence/cloudflare/python`, the resolver supplies the Durable Object storage capability; when it selects a remote backend, no local SQL path is used. This Container hosts Kernel and exposes platform capabilities, but it does not import, select, or construct a persistence implementation.
+The first vertical integration will add `mote-kernel` as a real Python dependency. Kernel Port configuration will independently resolve the `Commit` backend. When it selects `mote-infra/persistence/cloudflare/python`, the resolver supplies the Durable Object storage capability; when it selects a remote backend, no local SQL path is used. This Container hosts Kernel and exposes platform capabilities, but it does not import, select, or construct a persistence implementation.
 
 ## Package status
 

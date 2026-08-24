@@ -12,7 +12,7 @@ The project is in its bootstrap phase. The Durable Object class and binding are 
 - Durable state will pass through the `Commit` backend selected by Port configuration. That backend may use object-local Cloudflare SQLite or a remote store.
 - The default Worker currently returns `404`, and the Durable Object returns `501`, so the scaffold does not accidentally establish a Product API.
 
-The Durable Object namespace is declared with Cloudflare's current declarative `exports` configuration and `storage: "sqlite"`. This exposes an optional platform storage capability; it does not select the persistence backend. If Port configuration selects object-local storage, SQL, schema, and transaction code come from `mote-persistence/cloudflare/ts`. The older `migrations[].new_sqlite_classes` form is intentionally not used for this new Worker.
+The Durable Object namespace is declared with Cloudflare's current declarative `exports` configuration and `storage: "sqlite"`. This exposes an optional platform storage capability; it does not select the persistence backend. If Port configuration selects object-local storage, SQL, schema, and transaction code come from `mote-infra/persistence/cloudflare/ts`. The older `migrations[].new_sqlite_classes` form is intentionally not used for this new Worker.
 
 Container and persistence choices are orthogonal. This package hosts the selected Kernel runtime and exposes platform capabilities, but it does not import, select, or construct a persistence implementation.
 

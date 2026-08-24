@@ -7,7 +7,7 @@ Ownership remains explicit:
 - `mote-control` owns Agent identity, lineage, placement, and lifecycle authority.
 - `mote-container` owns container registration, lookup, and uniform invocation.
 - `mote-kernel` owns Agent creation and flow semantics inside a selected container.
-- `mote-persistence` owns concrete persistence and transaction mechanisms selected through Kernel Ports.
+- `mote-infra/persistence` owns concrete persistence and transaction mechanisms selected through Kernel Ports.
 - Product surfaces remain the user-facing boundary.
 
 Container placement and persistence placement are independent configuration axes. A Cloudflare Container may expose Durable Object storage to the Port resolver, but the same Container may use a remote persistence backend; `mote-container` neither selects nor implements `Commit`.
