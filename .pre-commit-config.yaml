@@ -46,19 +46,19 @@ repos:
         files: ^mote-infra/persistence/cloudflare/ts/
       - id: container-cloudflare-ts-static
         name: Cloudflare TypeScript Container static checks
-        entry: pnpm --dir mote-container/cloudflare/ts run check:static
+        entry: pnpm --dir mote-resource/container/cloudflare/ts run check:static
         language: system
         pass_filenames: false
-        files: ^mote-container/cloudflare/ts/
+        files: ^mote-resource/container/cloudflare/ts/
       - id: container-cloudflare-python-static
         name: Cloudflare Python Container static checks
-        entry: make -C mote-container/cloudflare/python static
+        entry: make -C mote-resource/container/cloudflare/python static
         language: system
         pass_filenames: false
-        files: ^mote-container/cloudflare/python/
+        files: ^mote-resource/container/cloudflare/python/
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-infra/persistence/cloudflare/ts/pnpm-lock\.yaml|mote-container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-infra/persistence/cloudflare/ts/pnpm-lock\.yaml|mote-resource/container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))

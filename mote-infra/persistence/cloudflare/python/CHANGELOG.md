@@ -9,6 +9,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - Renamed the package and import namespace to `mote-infra-persistence-cloudflare-python` and `mote_infra_persistence_cloudflare`.
-- Split Worker and Durable Object container hosting into `mote-container/cloudflare/python`.
+- Split Worker and Durable Object Container hosting into `mote-resource/container/cloudflare/python`.
 - Retained Cloudflare SQLite schema, serialization, and transaction ownership in this Persistence package.
 - Made persistence selection independent of the Cloudflare Container; Port configuration supplies storage only when this backend is selected.

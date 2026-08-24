@@ -2,7 +2,7 @@
 
 This directory is the reusable gRPC transport adapter for Mote infrastructure.
 
-It may provide gRPC clients, servers, channel setup, deadlines, metadata, and generated-code integration. It must not become the owner of Agent flow, lineage, persistence transactions, or Container placement semantics.
+It may provide gRPC clients, servers, channel setup, deadlines, metadata, and generated-code integration. It must not become the owner of Agent flow, lineage, persistence transactions, or Container/Embodiment placement semantics.
 
 Protocol ownership stays with the caller:
 

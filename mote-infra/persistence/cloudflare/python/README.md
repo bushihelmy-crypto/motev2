@@ -2,9 +2,9 @@
 
 This project is the Cloudflare Durable Object SQLite persistence adapter under `mote-infra/persistence`. It owns the concrete SQL, schema, serialization, migration, and transaction implementation behind Kernel persistence Ports.
 
-It is intentionally separate from `mote-container/cloudflare/python`:
+It is intentionally separate from `mote-resource/container/cloudflare/python`:
 
-- Container owns the Worker and Durable Object entry points, registration, lookup, invocation, and deployment bindings.
+- Container owns the Worker and Durable Object entry points, registration, lookup, invocation, and deployment bindings under `mote-resource/container`.
 - Kernel owns Agent flow semantics and the persistence Port contract.
 - This package implements that Port with the object-local Cloudflare SQLite storage API.
 

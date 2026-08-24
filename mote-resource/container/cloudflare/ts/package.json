@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bushihelmy-crypto/motev2.git",
-    "directory": "mote-container/cloudflare/ts"
+    "directory": "mote-resource/container/cloudflare/ts"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

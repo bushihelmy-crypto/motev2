@@ -6,7 +6,7 @@
 
 Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agent 与 Agent Swarm 的计算架构：
 
-> Product 声明 Agent，Control 管理并放置 Agent，Container 注册、定位并调用具体容器，Kernel 组装并驱动 Agent，Runtime Services 实现领域能力，Persistence 提供持久化与可靠执行机制。
+> Product 声明 Agent，Control 管理身份与分配，Resource 注册、发现并解析 Container/Embodiment 资源，Container 注入窄上下文并调用 Kernel，Kernel 组装并驱动 Agent，Runtime Services 实现领域能力，Persistence 提供持久化与可靠执行机制。
 
 六个职责边界按语义所有权划分，而不是按部署进程划分：
 
@@ -22,10 +22,10 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
 └──────────────────────────────┬──────────────────────────────────┘
                                │ 可信身份与放置结果
 ┌──────────────────────────────▼──────────────────────────────────┐
-│ Container                                                       │
-│ local / Docker / Cloudflare 注册 · 定位 · 统一调用 · 平台入口    │
+│ Resource                                                        │
+│ Container 宿主 + Embodiment 本体：注册 · 发现 · 句柄解析         │
 └──────────────────────────────┬──────────────────────────────────┘
-                               │ 调用所选容器内的 Kernel
+                               │ Container 注入窄 ctx / Embodiment handle
 ┌──────────────────────────────▼──────────────────────────────────┐
 │ Kernel · Python                                                 │
 │ Role 声明式组装 · Agent Flow · Graph/StateMachine · Typed Ports  │
@@ -45,7 +45,7 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
                  conformance/ 横跨所有语言边界
 ```
 
-这不是一条强制的同步调用链。Control、Container、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。
+这不是一条强制的同步调用链。Control、Resource、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。
 
 ## 2. 设计目标
 
@@ -57,7 +57,7 @@ Mote 要建立以下长期不变量：
 4. 状态转换与外部副作用分离，崩溃后可以判断“尚未执行、已经执行或结果未知”。
 5. 所有 Flow、Workflow、Failover、Think、Act 等语义复用同一 Graph 与 StateMachine 基础设施，不创建私有 runner。
 6. Rust 统一实现状态、事务、lease/fence、attempt 和工作空间等机械能力，但不解释 Agent 业务语义。
-7. Control 决定放置，Container 只执行该决定并统一调用具体容器；Container 不签发身份，也不拥有 Agent 生命周期。
+7. Control 决定 Agent assignment、authority、placement 与 lifecycle；Resource 只解析绑定并提供窄能力。Container 执行宿主调用，Embodiment 提供物理本体能力；两者共置只是 Control 约束，不实体化为 `robot-edge`。
 8. Agent 可以动态 Spawn Agent；Control 提供可信的群体协作机制，但不替模型决定协作语义。
 9. 模型可见能力最终可以收敛为熟悉、可组合、可持久执行的命令环境，而不是不断扩张的碎片化工具集合。
 
@@ -88,17 +88,36 @@ Control 是 Go 实现的控制面，负责：
 
 模型决定为什么 Spawn、委托什么任务以及何时收敛；Control 只保证这个决定被可信、可靠地执行。Agent 身份与 authority 必须由 Control 注入，不能由模型或 Runtime 自报。
 
-### 3.3 Container：注册、定位并调用具体容器
+### 3.3 Resource：提供宿主与本体资源
 
-Container 是 Control 放置结果与具体运行环境之间的窄边界，负责：
+`mote-resource` 是资源 provider umbrella，下设并列的
+`mote-resource/container` 与 `mote-resource/embodiment`。它只负责注册、发现、
+定位、能力描述和句柄解析，不拥有 Agent Flow、Runtime 领域状态或持久化事务。
 
-- 注册 local、Docker、Cloudflare 等具体容器实现；
-- 根据 Control 已决定的 placement 定位容器；
-- 以统一边界调用所选容器内的 Kernel；
+#### 3.3.1 Container：注册、定位并调用具体容器
+
+Container 是 Control assignment 与具体运行环境之间的窄边界，负责：
+
+- 注册 local、Docker、Cloudflare 等具体 Container 实现；
+- 根据 Control 已决定的 Container binding 定位宿主；
+- 以统一边界调用所选宿主内的 Kernel；
 - 提供运行平台要求的 Worker/DO 入口、binding 和 Kernel hosting glue；
 - 向 Port resolver 暴露平台能力，例如 Durable Object `ctx.storage`。
 
 Container 不签发 `AgentId`，不拥有 lineage、placement 决策或 lifecycle authority，也不解释 Kernel Flow。Container 与 Persistence 是两个正交的配置维度：Kernel Port 配置独立选择 `Commit` backend；Cloudflare Container 可以把 `ctx.storage` 作为可选平台能力提供给 resolver，也可以使用远端 Persistence。Container 可以声明 Cloudflare 要求的 `storage: "sqlite"` 部署 binding，但这不等于选中该 backend；SQL、schema、migration 和 transaction 实现始终归 Persistence。
+
+#### 3.3.2 Embodiment：解析物理本体能力
+
+Embodiment 表示物理身体资源，例如移动机器人、机械臂或无人机，负责：
+
+- 注册本体资源及其能力描述；
+- 根据 `EmbodimentBinding` 解析稳定句柄；
+- 向需要它的 Port/Runtime 注入最小、类型化的能力上下文。
+
+Embodiment 不拥有实时调度、传感器/驱动状态或动作循环；这些属于
+`mote-runtime` 的具体 provider。机器人是 Embodiment 的一种实现，不需要另设
+`robot` 或 `physical` 资源层。若要求脑和身体共置，由 Control 保存约束，不新增
+`robot-edge` 包。
 
 ### 3.4 Kernel：组装并驱动 Agent
 
@@ -155,7 +174,7 @@ Persistence 按 backend 实现持久化与可靠执行机制。本地实现以 R
 - SQLite、PostgreSQL 等存储适配器；
 - gRPC/Unix socket 等语言无关边界。
 
-Persistence 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。Persistence 是最低层实现，不 import Kernel、Container、Control 或 Product。Port 配置选择 backend：选中 Cloudflare SQLite 时向 Adapter 提供 `ctx.storage`；选中远端 backend 时则通过 `mote-infra/rpc` 提供相应 RPC client。Container 不选择、不构造 Persistence Adapter。
+Persistence 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。Persistence 是最低层实现，不 import Kernel、Resource、Control 或 Product。Port 配置选择 backend：选中 Cloudflare SQLite 时向 Adapter 提供 `ctx.storage`；选中远端 backend 时则通过 `mote-infra/rpc` 提供相应 RPC client。Resource 不选择、不构造 Persistence Adapter。
 
 ## 4. 调用关系与事实所有权
 
@@ -663,12 +682,14 @@ conformance/
 motev2/
 ├── mote-product/          TypeScript：Agent 定义、配置与 UI
 ├── mote-control/          Go：控制面
-├── mote-container/        容器注册、定位、统一调用与平台托管
-│   ├── local/
-│   ├── docker/
-│   └── cloudflare/
-│       ├── python/        Python Worker 与 Durable Object Container
-│       └── ts/            TypeScript Worker 与 Durable Object Container
+├── mote-resource/         资源注册、发现与句柄解析
+│   ├── container/         Agent/Kernel 容器宿主
+│   │   ├── local/
+│   │   ├── docker/
+│   │   └── cloudflare/
+│   │       ├── python/    Python Worker 与 Durable Object Container
+│   │       └── ts/        TypeScript Worker 与 Durable Object Container
+│   └── embodiment/        物理本体能力（机器人等）
 ├── mote-kernel/           Python：Agent Flow 语义
 ├── mote-runtime/
 │   ├── context/
@@ -690,7 +711,10 @@ motev2/
 └── conformance/           跨语言 observable contracts
 ```
 
-这是目标所有权图。Cloudflare Container 脚手架、`mote-infra/persistence` Adapter 边界和对应 CI 必须一起迁移；RPC transport 则按实际协议消费者逐步落地。空目录或单纯重命名不算完成分层。
+这是目标所有权图。Cloudflare Container 脚手架位于
+`mote-resource/container`，Embodiment provider 按实际消费者逐步落地；
+`mote-infra/persistence` Adapter 边界和对应 CI 必须保持独立。RPC transport
+则按实际协议消费者逐步落地。空目录或单纯重命名不算完成分层。
 
 ## 15. Persistence 的并行开发顺序
 
@@ -777,4 +801,4 @@ Python Kernel reducer
 
 ## 18. 一句话总结
 
-> Mote 允许能力与调用自由组合，但要求事实单点归属、状态统一提交、执行统一恢复；模型通过 Kernel 驱动 Agent，通过 Control 组成 Swarm，Container 执行放置并调用具体容器，Runtime 提供领域能力，Port 配置独立选择 Persistence backend 提供持久而可靠的计算基础。
+> Mote 允许能力与调用自由组合，但要求事实单点归属、状态统一提交、执行统一恢复；模型通过 Kernel 驱动 Agent，通过 Control 组成 Swarm，Resource 解析 Container/Embodiment 绑定，Container 提供宿主调用，Runtime 提供领域能力，Port 配置独立选择 Persistence backend 提供持久而可靠的计算基础。

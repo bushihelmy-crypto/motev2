@@ -2,9 +2,9 @@
 
 This project is the TypeScript Cloudflare Durable Object persistence implementation under `mote-infra/persistence`. It owns concrete `storage.sql`, schema, serialization, migration, and transaction behavior.
 
-It is intentionally separate from `mote-container/cloudflare/ts`:
+It is intentionally separate from `mote-resource/container/cloudflare/ts`:
 
-- Container owns Worker and Durable Object entry points, registration, lookup, invocation, and deployment bindings.
+- Container owns Worker and Durable Object entry points, registration, lookup, invocation, and deployment bindings under `mote-resource/container`.
 - Upper layers own Agent transition semantics and the observable persistence contract.
 - This package implements that contract with the object-local Cloudflare SQLite storage API.
 
