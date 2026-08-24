@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved / `GSP-A01`–`GSP-A05` 已闭合；批准当前 evidence matrix 中的 15 个 P1；`GSP-A06` 已对 S07、S01 单项闭合
-- 日期：2026-08-23
+- 状态：Approved / `GSP-A01`–`GSP-A05` 已闭合；批准当前 evidence matrix 中的 15 个 P1；`GSP-A06` 已对 S07、S01、S15 单项满足并批准
+- 日期：2026-08-24
 - 适用范围：`src/mote_kernel/execution/**` 的内部语义保持型简化
 - 公共边界：`mote_kernel.execution.Graph`
 - 对应实施方案：[Graph 执行代码语义保持型简化实施方案](graph-semantics-preserving-simplification-implementation.zh-CN.md)
@@ -115,6 +115,16 @@ S01 随后在 design/review commit `d34c117` 收口为实施方案第 3.1.2 节�
 四文件原子 manifest。用户于 2026-08-23 以原文“你做到让我可以交付一个直接实施的文档”明确要求把已通过技术评审的
 S01 收口为可直接实施状态；本 requirements owner 据此批准 S01，不把 review record 或本段变成第二份 target shape。
 
+S15 随后由独立的 [S15 Recovery worklist 分支结果归一化实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)
+收口为唯一 target；独立技术评审绑定该实施方案 SHA256
+`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a`，裁决为
+`PASS / READY FOR REQUIREMENTS OWNER APPROVAL`。用户于 2026-08-24 以原文“我授权执行S15”明确批准并要求开始实施；
+本 requirements owner 据此将 S15 记为 `GSP-A06 SATISFIED / APPROVED`，只授权上述 reviewed SHA、对应 existing behavior
+证据和 `src/mote_kernel/execution/engine/recovery.py` 单文件 production manifest。任何 target、baseline、manifest 或 SHA
+变化均不继承本次批准。automated complexity 与 legacy/private-source-shape gates 继续按用户范围排除；current recovery
+behavior、strict typing、active owner/dependency、lint、format、build/package、no-State/no-persistence 与 scoped repo checks
+仍为必须通过的实施条件。本文不复制 S15 算法、结构账本或 exact source shape。
+
 | 条件 | requirements owner 最终裁决 | 依据 |
 | --- | --- | --- |
 | `GSP-A01` | **CLOSED** | requirements、implementation、normative source、README 与 review 的 owner 分工已形成；architecture 全文治理和 non-normative 调用链整改不扩大 execution P1 范围 |
@@ -122,7 +132,7 @@ S01 收口为可直接实施状态；本 requirements owner 据此批准 S01，�
 | `GSP-A03` | **CLOSED** | 15/15 P1 均映射适用 `GSP-P01`–`GSP-P08`，具有当前成功/失败或边界 baseline，以及 `DESIGNED / PENDING IMPLEMENTATION` 的 exact T0 nodeid、断言和失败条件 |
 | `GSP-A04` | **CLOSED** | 接受每个 actual change unit 独立 manifest、owner writeback/review audit 分离且历史记录不累计的模型；文档门禁可复现 |
 | `GSP-A05` | **APPROVED — 仅限下列 15 个 P1** | A01–A04 evidence 已闭合；批准后 production、对应 target test 和实际受影响 normative source 按实施方案逐单元原子落地，T0 通过后才可交付 |
-| `GSP-A06` | **SATISFIED — 仅限 S07、S01** | S07 已按原批准链完成；S01 已提交 exact signature/nominal types、删除/新增上限、结构净删除、成功/失败/边界 characterization、existing exact-shape/owner evidence 与四文件 planned manifest，第四次评审通过且用户已明确授权直接实施；automated complexity gate 不适用于 S01 |
+| `GSP-A06` | **SATISFIED / APPROVED — 仅限 S07、S01、S15 当前 reviewed exact target** | S07、S01 已按各自批准链闭合；S15 独立实施方案 SHA `1e6629d…` 已闭合 exact nominal target、结构净删除、behavior/tamper、owner/typing、one-file manifest 与 no-State/no-persistence evidence，独立技术评审通过且用户已显式批准；批准均不延伸到其他 SHA |
 
 `GSP-A05` 本次明确且穷尽地只批准以下 15 个 P1：
 
@@ -130,20 +140,30 @@ S01 收口为可直接实施状态；本 requirements owner 据此批准 S01，�
 S03, S04, S05, S06, S08, S09, S10, S11, S13, S14, S17, S18, S20, S23A, S23B
 ```
 
-S07、S01 已于 2026-08-23 分别单项满足 `GSP-A06`；两项 target shape、证据和 planned manifests 分别由实施方案
-第 3.2.2、3.1.2 节唯一拥有，本文不复制。以下 7 个 P2 仍未获批准，须各自逐项满足 `GSP-A06`：
+S07、S01 已于 2026-08-23 分别单项满足 `GSP-A06`，S15 已于 2026-08-24 单项满足 `GSP-A06`。S07、S01 的 target
+shape、证据和 planned manifests 分别由主实施方案第 3.2.2、3.1.2 节唯一拥有；S15 由上述独立实施方案 SHA256
+`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a` 唯一拥有。本文只拥有批准状态，不复制 target。
+以下 6 个 P2 仍未获批准，须各自逐项满足 `GSP-A06`：
 
 ```text
-S02, S12, S15, S16, S19, S21, S22
+S02, S12, S16, S19, S21, S22
 ```
 
-因此 Phase 1/2 对上述 15 个 P1 开放，Phase 3 对 S01 开放；各单元必须遵循实施方案的原子顺序、per-change manifest
-和适用门禁。S01 不继承、等待或修改独立 complexity framework，其批准只覆盖实施方案第 3.1.2 节的 exact target。
+因此 Phase 1/2 对上述 15 个 P1 开放，Phase 3 对 S01、S15 开放；各单元必须遵循实施方案的原子顺序、per-change manifest
+和适用门禁。S15 已获实施授权，只允许按其独立实施方案第 11.4 节修改
+`src/mote_kernel/execution/engine/recovery.py`。S01、S15 均不继承、等待或修改独立 complexity framework，
+其批准分别只覆盖主实施方案第 3.1.2 节及上述 S15 exact target SHA。
 本次批准不授权修改 `src/mote_kernel/state/**`、`tests/state/**`、durable/conformance protocol，不授权新增
 Store、repository、journal、checkpoint、database、persistence port/backend 或任何第二执行/存储路径；State
 保持当前 shape，本轮继续不实现持久化。账本外方向也不继承本次批准。
 
 本次 S01 approval unit 的 exact actual manifest 只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
+本次 S15 approval unit 的 exact actual manifest 也只有：
 
 ```text
 mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
