@@ -66,7 +66,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: mote-persistence/local
+        working-directory: mote-infra/persistence/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
@@ -87,7 +87,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: mote-persistence/local
+        working-directory: mote-infra/persistence/local
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
@@ -101,7 +101,7 @@ jobs:
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: mote-persistence/cloudflare/python
+        working-directory: mote-infra/persistence/cloudflare/python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -111,7 +111,7 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
-          cache-dependency-glob: mote-persistence/cloudflare/python/uv.lock
+          cache-dependency-glob: mote-infra/persistence/cloudflare/python/uv.lock
       - run: uv sync --locked
       - run: make check
 
@@ -120,17 +120,17 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: mote-persistence/cloudflare/ts
+        working-directory: mote-infra/persistence/cloudflare/ts
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: mote-persistence/cloudflare/ts/package.json
+          package_json_file: mote-infra/persistence/cloudflare/ts/package.json
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: pnpm
-          cache-dependency-path: mote-persistence/cloudflare/ts/pnpm-lock.yaml
+          cache-dependency-path: mote-infra/persistence/cloudflare/ts/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
 

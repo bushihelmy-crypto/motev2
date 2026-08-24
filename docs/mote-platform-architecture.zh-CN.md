@@ -155,7 +155,7 @@ Persistence 按 backend 实现持久化与可靠执行机制。本地实现以 R
 - SQLite、PostgreSQL 等存储适配器；
 - gRPC/Unix socket 等语言无关边界。
 
-Persistence 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。Persistence 是最低层实现，不 import Kernel、Container、Control 或 Product。Port 配置选择 backend：选中 Cloudflare SQLite 时向 Adapter 提供 `ctx.storage`；选中远端 backend 时则提供相应 RPC client。Container 不选择、不构造 Persistence Adapter。
+Persistence 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。Persistence 是最低层实现，不 import Kernel、Container、Control 或 Product。Port 配置选择 backend：选中 Cloudflare SQLite 时向 Adapter 提供 `ctx.storage`；选中远端 backend 时则通过 `mote-infra/rpc` 提供相应 RPC client。Container 不选择、不构造 Persistence Adapter。
 
 ## 4. 调用关系与事实所有权
 
@@ -432,12 +432,12 @@ Mote 不需要重写 Linux 内核。Rust Agent 用户态层复用 Linux 的进�
 
 `ls` 等命令应看到授权命名空间中的一致视图。要实现“远端与本地对等”，依赖受控文件虚拟化和设备/应用 provider，而不是把远端机器伪装成拥有整个本地系统。
 
-## 10. Mote Local Persistence 分包
+## 10. Mote Infra Persistence 分包
 
 本地 Persistence 应是一个 Rust workspace。crate 按不变量和事实类型拆分，不按未来微服务数量拆分：
 
 ```text
-mote-persistence/local/
+mote-infra/persistence/local/
 ├── Cargo.toml
 ├── crates/
 │   ├── mote-state/
@@ -677,15 +677,20 @@ motev2/
 │   ├── approval/
 │   ├── eventbus/
 │   └── terminal/          Rust 为主，可含 provider adapters
-├── mote-persistence/            部署相关的持久化与可靠执行机制
-│   ├── local/             Rust：本地与宿主机原生实现
-│   └── cloudflare/        Cloudflare Durable Object SQLite Adapters
-│       ├── python/        Python persistence Adapter
-│       └── ts/            TypeScript persistence Adapter
+├── mote-infra/            基础设施适配器
+│   ├── persistence/       部署相关的持久化与可靠执行机制
+│   │   ├── local/         Rust：本地与宿主机原生实现
+│   │   └── cloudflare/    Cloudflare Durable Object SQLite Adapters
+│   │       ├── python/    Python persistence Adapter
+│   │       └── ts/         TypeScript persistence Adapter
+│   └── rpc/               RPC transport implementations
+│       ├── http/
+│       ├── grpc/
+│       └── websocket/
 └── conformance/           跨语言 observable contracts
 ```
 
-这是目标所有权图。Cloudflare Container 脚手架、Persistence Adapter 边界和对应 CI 必须一起迁移；空目录或单纯重命名不算完成分层。
+这是目标所有权图。Cloudflare Container 脚手架、`mote-infra/persistence` Adapter 边界和对应 CI 必须一起迁移；RPC transport 则按实际协议消费者逐步落地。空目录或单纯重命名不算完成分层。
 
 ## 15. Persistence 的并行开发顺序
 

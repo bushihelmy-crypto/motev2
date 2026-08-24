@@ -12,7 +12,7 @@
 - 持久状态通过 Port 配置选择的 `Commit` backend 写入；该 backend 可以使用对象私有的 Cloudflare SQLite，也可以使用远端存储。
 - 默认 Worker 当前返回 `404`，Durable Object 返回 `501`，避免脚手架无意中固定 Product API。
 
-Durable Object namespace 使用 Cloudflare 当前的声明式 `exports` 配置，并设置 `storage: "sqlite"`。它只暴露可选的平台存储能力，并不选择持久化 backend。只有 Port 配置选择对象私有存储时，SQL、schema 和事务代码才由 `mote-persistence/cloudflare/ts` 提供。这是一个全新的 Worker，因此不采用旧的 `migrations[].new_sqlite_classes` 形式。
+Durable Object namespace 使用 Cloudflare 当前的声明式 `exports` 配置，并设置 `storage: "sqlite"`。它只暴露可选的平台存储能力，并不选择持久化 backend。只有 Port 配置选择对象私有存储时，SQL、schema 和事务代码才由 `mote-infra/persistence/cloudflare/ts` 提供。这是一个全新的 Worker，因此不采用旧的 `migrations[].new_sqlite_classes` 形式。
 
 Container 与 Persistence 是两个正交选择。本包只承载选定的 Kernel runtime 并暴露平台能力，不 import、不选择、也不构造持久化实现。
 

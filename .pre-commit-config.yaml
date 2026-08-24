@@ -28,22 +28,22 @@ repos:
         files: ^mote-kernel/(pyproject\.toml|src/.*\.py|tests/.*\.py)$
       - id: rustfmt
         name: rustfmt
-        entry: cargo fmt --manifest-path mote-persistence/local/Cargo.toml --all -- --check
+        entry: cargo fmt --manifest-path mote-infra/persistence/local/Cargo.toml --all -- --check
         language: system
         pass_filenames: false
-        files: ^mote-persistence/local/.*\.rs$
+        files: ^mote-infra/persistence/local/.*\.rs$
       - id: persistence-cloudflare-python-static
         name: Cloudflare Python Persistence static checks
-        entry: make -C mote-persistence/cloudflare/python static
+        entry: make -C mote-infra/persistence/cloudflare/python static
         language: system
         pass_filenames: false
-        files: ^mote-persistence/cloudflare/python/
+        files: ^mote-infra/persistence/cloudflare/python/
       - id: persistence-cloudflare-ts-static
         name: Cloudflare TypeScript Persistence static checks
-        entry: pnpm --dir mote-persistence/cloudflare/ts run check:static
+        entry: pnpm --dir mote-infra/persistence/cloudflare/ts run check:static
         language: system
         pass_filenames: false
-        files: ^mote-persistence/cloudflare/ts/
+        files: ^mote-infra/persistence/cloudflare/ts/
       - id: container-cloudflare-ts-static
         name: Cloudflare TypeScript Container static checks
         entry: pnpm --dir mote-container/cloudflare/ts run check:static
@@ -61,4 +61,4 @@ repos:
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-persistence/local/third_party_licenses/|mote-persistence/cloudflare/ts/pnpm-lock\.yaml|mote-container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-infra/persistence/cloudflare/ts/pnpm-lock\.yaml|mote-container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))

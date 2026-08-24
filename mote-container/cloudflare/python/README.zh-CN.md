@@ -12,7 +12,7 @@
 - 持久状态通过 Port 配置选择的 `Commit` backend 写入；该 backend 可以使用对象私有的 Cloudflare SQLite，也可以使用远端存储。
 - Worker 当前返回 `404`，Durable Object 返回 `501`，避免脚手架无意中固定公共 API。
 
-Worker 使用 Cloudflare 的 `python_workers` compatibility flag，并通过声明式 Durable Object `exports` 配置声明 `storage: "sqlite"`。这个字段只暴露可选的平台存储能力，并不选择持久化 backend。只有 Port 配置选择对象私有存储时，SQL、schema 和事务代码才由 `mote-persistence/cloudflare/python` 提供。Python Workers 当前仍处于 Beta。
+Worker 使用 Cloudflare 的 `python_workers` compatibility flag，并通过声明式 Durable Object `exports` 配置声明 `storage: "sqlite"`。这个字段只暴露可选的平台存储能力，并不选择持久化 backend。只有 Port 配置选择对象私有存储时，SQL、schema 和事务代码才由 `mote-infra/persistence/cloudflare/python` 提供。Python Workers 当前仍处于 Beta。
 
 ## 开发
 
@@ -44,7 +44,7 @@ make deploy
 
 ## Kernel 与 Persistence Port 配置
 
-第一个纵向集成会把 `mote-kernel` 加入真实 Python 依赖。Kernel Port 配置独立解析 `Commit` backend：选择 `mote-persistence/cloudflare/python` 时，resolver 向它提供 Durable Object storage capability；选择远端 backend 时则完全不走本地 SQL。本 Container 只承载 Kernel 并暴露平台能力，不 import、不选择、也不构造持久化实现。
+第一个纵向集成会把 `mote-kernel` 加入真实 Python 依赖。Kernel Port 配置独立解析 `Commit` backend：选择 `mote-infra/persistence/cloudflare/python` 时，resolver 向它提供 Durable Object storage capability；选择远端 backend 时则完全不走本地 SQL。本 Container 只承载 Kernel 并暴露平台能力，不 import、不选择、也不构造持久化实现。
 
 ## 包状态
 
