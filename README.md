@@ -213,10 +213,11 @@ The monorepo is designed to support multiple languages without duplicating autho
 
 - **Python owns agent flow semantics.** `mote-kernel` defines how an agent interacts and advances.
 - **Go owns control-plane mechanisms.** Future Go components may implement Agent registration, lineage, communication, placement, leases, routing, and distributed ownership without defining Swarm collaboration or interpreting agent cognition.
-- **Infra owns execution and state mechanisms.** The local Rust implementation may provide host execution, isolation, durable state, and effect mechanisms. The Cloudflare Python and TypeScript implementations use Workers and Durable Objects for the same ownership tier. None decides what the agent should do.
+- **Container owns placement execution.** `mote-container` registers, locates, and invokes local, Docker, Cloudflare, and future Agent containers uniformly. It consumes Control-issued identity and placement without interpreting Agent flow.
+- **Persistence owns persistence and transaction mechanisms.** The local Rust and Cloudflare Python/TypeScript implementations provide deployment-specific durable state Adapters. None decides what the Agent should do.
 - **`conformance/` owns shared observable contracts.** No language implementation may privately reinterpret a released cross-language behavior.
 
-Go and the deployment-specific Infra implementations therefore extend deployment and implementation choices; they do not become co-owners of the Agent flow.
+Control, Container, and deployment-specific Persistence implementations therefore extend placement, hosting, and persistence choices; they do not become co-owners of the Agent flow. Container placement and persistence placement are orthogonal: Kernel Port configuration selects `Commit`, while a Container only exposes optional platform capabilities such as Durable Object storage.
 
 ## Conformance
 
@@ -240,12 +241,19 @@ Each language project owns its own runner. A cross-language DTO or durable proto
 ```text
 motev2/
 ├── conformance/       language-neutral schemas, vectors, scenarios, and traces
+├── mote-control/      planned Go control plane
 ├── mote-kernel/       Python Agent flow and state-machine semantics
-├── mote-infra/        deployment-specific execution and state mechanisms
-│   ├── local/         local Rust implementation
-│   └── cloudflare/    Cloudflare implementations
+├── mote-container/    container registration, lookup, invocation, and hosting glue
+│   ├── local/         reserved local container implementation
+│   ├── docker/        reserved Docker container implementation
+│   └── cloudflare/    Cloudflare Worker and Durable Object containers
 │       ├── python/    Python Worker and Durable Object implementation
 │       └── ts/        TypeScript Worker and Durable Object implementation
+├── mote-persistence/        deployment-specific persistence and transaction mechanisms
+│   ├── local/         local Rust implementation
+│   └── cloudflare/    Cloudflare SQLite persistence Adapters
+│       ├── python/    Python Adapter
+│       └── ts/        TypeScript Adapter
 ├── mote-runtime/      planned Runtime Port implementations
 │   ├── control-plane/
 │   ├── model-gateway/
@@ -257,7 +265,7 @@ motev2/
     └── ui/
 ```
 
-At present, `mote-kernel`, the conformance bootstrap, and the local and Cloudflare Infra scaffolds contain the substantive project structure. `mote-runtime` and `mote-product` are reserved ownership boundaries and do not yet represent delivered components.
+At present, `mote-kernel`, the conformance bootstrap, local Persistence, and the Cloudflare Container and Persistence Adapter scaffolds contain the substantive project structure. `mote-control`, `mote-runtime`, and `mote-product` are reserved ownership boundaries and do not yet represent delivered components.
 
 Each child project owns its implementation, dependencies, build configuration, local tests, and release artifact. The repository root owns coordinated architecture, conformance contracts, and cross-project CI. Nested Git repositories are not permitted.
 
@@ -314,8 +322,8 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-infra/local/README.md`](mote-infra/local/README.md), [`mote-infra/cloudflare/python/README.md`](mote-infra/cloudflare/python/README.md), [`mote-infra/cloudflare/ts/README.md`](mote-infra/cloudflare/ts/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-container/README.md`](mote-container/README.md), [`mote-persistence/README.md`](mote-persistence/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details. Each concrete Container and Persistence implementation also has a local README.
 
 ## License
 
-The implemented Python Kernel and Infra projects are licensed under the Apache License 2.0. Each child project owns and declares the license of its release artifact.
+The implemented Kernel, Container, and Persistence projects are licensed under the Apache License 2.0. Each child project owns and declares the license of its release artifact.

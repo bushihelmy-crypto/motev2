@@ -6,9 +6,9 @@
 
 Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agent 与 Agent Swarm 的计算架构：
 
-> Product 声明 Agent，Control 管理 Agent，Kernel 组装并驱动 Agent，Runtime Services 实现并持久化领域能力，Infra 提供统一状态与可靠执行机制。
+> Product 声明 Agent，Control 管理并放置 Agent，Container 注册、定位并调用具体容器，Kernel 组装并驱动 Agent，Runtime Services 实现领域能力，Persistence 提供持久化与可靠执行机制。
 
-五层按语义所有权划分，而不是按部署进程划分：
+六个职责边界按语义所有权划分，而不是按部署进程划分：
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -20,7 +20,12 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
 │ Control · Go                                                    │
 │ Agent 身份 · Spawn · lineage · authority · 通信 · 生命周期 · 放置 │
 └──────────────────────────────┬──────────────────────────────────┘
-                               │ 可信身份、控制请求、事件
+                               │ 可信身份与放置结果
+┌──────────────────────────────▼──────────────────────────────────┐
+│ Container                                                       │
+│ local / Docker / Cloudflare 注册 · 定位 · 统一调用 · 平台入口    │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ 调用所选容器内的 Kernel
 ┌──────────────────────────────▼──────────────────────────────────┐
 │ Kernel · Python                                                 │
 │ Role 声明式组装 · Agent Flow · Graph/StateMachine · Typed Ports  │
@@ -32,15 +37,15 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
 └──────────────────────────────┬──────────────────────────────────┘
                                │ 状态、执行、事务、工作空间机制
 ┌──────────────────────────────▼──────────────────────────────────┐
-│ Infra · Rust                                                    │
+│ Persistence · deployment-specific                              │
 │ CAS · atomic commit · operation receipt · lease/fence · attempt │
-│ durable execution · workspace · storage adapters                │
+│ durable execution · workspace · SQLite/storage adapters         │
 └─────────────────────────────────────────────────────────────────┘
 
                  conformance/ 横跨所有语言边界
 ```
 
-这不是一条强制的同步调用链。Control、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。
+这不是一条强制的同步调用链。Control、Container、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。
 
 ## 2. 设计目标
 
@@ -52,10 +57,11 @@ Mote 要建立以下长期不变量：
 4. 状态转换与外部副作用分离，崩溃后可以判断“尚未执行、已经执行或结果未知”。
 5. 所有 Flow、Workflow、Failover、Think、Act 等语义复用同一 Graph 与 StateMachine 基础设施，不创建私有 runner。
 6. Rust 统一实现状态、事务、lease/fence、attempt 和工作空间等机械能力，但不解释 Agent 业务语义。
-7. Agent 可以动态 Spawn Agent；Control 提供可信的群体协作机制，但不替模型决定协作语义。
-8. 模型可见能力最终可以收敛为熟悉、可组合、可持久执行的命令环境，而不是不断扩张的碎片化工具集合。
+7. Control 决定放置，Container 只执行该决定并统一调用具体容器；Container 不签发身份，也不拥有 Agent 生命周期。
+8. Agent 可以动态 Spawn Agent；Control 提供可信的群体协作机制，但不替模型决定协作语义。
+9. 模型可见能力最终可以收敛为熟悉、可组合、可持久执行的命令环境，而不是不断扩张的碎片化工具集合。
 
-## 3. 五层职责
+## 3. 六个职责边界
 
 ### 3.1 Product：声明和呈现 Agent
 
@@ -82,7 +88,19 @@ Control 是 Go 实现的控制面，负责：
 
 模型决定为什么 Spawn、委托什么任务以及何时收敛；Control 只保证这个决定被可信、可靠地执行。Agent 身份与 authority 必须由 Control 注入，不能由模型或 Runtime 自报。
 
-### 3.3 Kernel：组装并驱动 Agent
+### 3.3 Container：注册、定位并调用具体容器
+
+Container 是 Control 放置结果与具体运行环境之间的窄边界，负责：
+
+- 注册 local、Docker、Cloudflare 等具体容器实现；
+- 根据 Control 已决定的 placement 定位容器；
+- 以统一边界调用所选容器内的 Kernel；
+- 提供运行平台要求的 Worker/DO 入口、binding 和 Kernel hosting glue；
+- 向 Port resolver 暴露平台能力，例如 Durable Object `ctx.storage`。
+
+Container 不签发 `AgentId`，不拥有 lineage、placement 决策或 lifecycle authority，也不解释 Kernel Flow。Container 与 Persistence 是两个正交的配置维度：Kernel Port 配置独立选择 `Commit` backend；Cloudflare Container 可以把 `ctx.storage` 作为可选平台能力提供给 resolver，也可以使用远端 Persistence。Container 可以声明 Cloudflare 要求的 `storage: "sqlite"` 部署 binding，但这不等于选中该 backend；SQL、schema、migration 和 transaction 实现始终归 Persistence。
+
+### 3.4 Kernel：组装并驱动 Agent
 
 Kernel 是 Agent 语义中心，负责：
 
@@ -94,11 +112,11 @@ Kernel 是 Agent 语义中心，负责：
 - 决定继续、分支、循环、中断、恢复、跳过、取消或完成；
 - 通过窄 typed Port 请求外部能力。
 
-Kernel 不直接操作数据库、journal、CAS、文件系统或远程 worker。它产生合法的状态变化和执行请求，由 Infra 提交或执行。Kernel 可以持有当前不可变内存快照，但持久状态始终权威；只有 durable commit 确认后才能替换内存快照。
+Kernel 不直接操作数据库、journal、CAS、文件系统或远程 worker。它产生合法的状态变化和执行请求，由 Port 配置选择的 Persistence backend 提交或执行。Kernel 可以持有当前不可变内存快照，但持久状态始终权威；只有 durable commit 确认后才能替换内存快照。
 
 Kernel 的装配语义归 Kernel 所有，但本文不推导当前尚未设计的默认公共 composition entry point。
 
-### 3.4 Runtime Services：实现领域能力
+### 3.5 Runtime Services：实现领域能力
 
 Runtime 不是单体进程，也不是 Agent Host。它是一组可以独立部署、扩缩和演进的领域能力服务，例如：
 
@@ -116,16 +134,16 @@ Device Runtime      Android、桌面或其他设备能力
 每个 Runtime：
 
 - 拥有自身领域类型与领域不变量；
-- 通过 Infra 持久化自己的权威状态；
+- 通过 Persistence Port 持久化自己的权威状态；
 - 在 durable 结果建立之后才返回成功；
 - 使用稳定 `OperationId` 支持查询、重放与幂等；
 - 不能直接修改 Kernel 的 `GraphState` 或替 Kernel 决定流程。
 
 Runtime 服务可以互相调用。禁止的是多份权威事实，而不是服务间调用。
 
-### 3.5 Infra：统一可靠机制
+### 3.6 Persistence：统一可靠机制
 
-Infra 由 Rust 实现，提供跨 Kernel、Control 和 Runtime 可复用的机制：
+Persistence 按 backend 实现持久化与可靠执行机制。本地实现以 Rust 为主；Cloudflare 的 Python 与 TypeScript Adapter 使用各自运行时提供的 Durable Object SQLite API：
 
 - revisioned aggregate state 与 CAS；
 - 原子 commit；
@@ -137,7 +155,7 @@ Infra 由 Rust 实现，提供跨 Kernel、Control 和 Runtime 可复用的机�
 - SQLite、PostgreSQL 等存储适配器；
 - gRPC/Unix socket 等语言无关边界。
 
-Infra 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。
+Persistence 只能理解机制类型和 opaque/versioned payload，不能理解 `Think`、`Act`、`Context`、`GraphFrontier`、`BrowserClick` 或“是否应该 Spawn”之类的业务语义。Persistence 是最低层实现，不 import Kernel、Container、Control 或 Product。Port 配置选择 backend：选中 Cloudflare SQLite 时向 Adapter 提供 `ctx.storage`；选中远端 backend 时则提供相应 RPC client。Container 不选择、不构造 Persistence Adapter。
 
 ## 4. 调用关系与事实所有权
 
@@ -148,8 +166,8 @@ Infra 只能理解机制类型和 opaque/versioned payload，不能理解 `Think
 ```text
 Kernel ──▶ Runtime A ──▶ Runtime B
 
-Runtime A ─────────────▶ Infra Commit
-Runtime B ─────────────▶ Infra Commit
+Runtime A ─────────────▶ Persistence Commit
+Runtime B ─────────────▶ Persistence Commit
 ```
 
 Runtime A 可以调用 Runtime B；Kernel 也可以分别调用 A、B。调用拓扑可以根据性能、延迟和封装需要变化，不应成为事实所有权的依据。
@@ -199,7 +217,7 @@ AgentState
 └── DomainState    已建立的 Agent 业务事实
 ```
 
-Kernel 拥有其语义和纯转换，Infra 拥有其 durable commit 机制。`GraphState` 与对应 `DomainState` 变化必须作为一个 `AgentState` 原子提交。
+Kernel 拥有其语义和纯转换，Persistence 拥有其 durable commit 机制。`GraphState` 与对应 `DomainState` 变化必须作为一个 `AgentState` 原子提交。
 
 节点完成时，提交的不是“把 Python 对象记在内存里”，而是：
 
@@ -225,11 +243,11 @@ TerminalSession / CommandReceipt
 ApprovalDecision
 ```
 
-Kernel 通过 Port 获取所需的不可变值或 projection，不直接加载其数据库内部模型。Runtime 状态的语义由相应 Runtime 拥有，持久化机制复用 Infra。
+Kernel 通过 Port 获取所需的不可变值或 projection，不直接加载其数据库内部模型。Runtime 状态的语义由相应 Runtime 拥有，持久化机制复用 Persistence。
 
 ### 5.3 Control State
 
-Control 拥有 Agent identity、lineage、mailbox、authority、placement 和 lifecycle 等控制面事实。它可以复用 Infra 状态机制，但 Rust Infra 不解释这些事实的控制面含义。
+Control 拥有 Agent identity、lineage、mailbox、authority、placement 和 lifecycle 等控制面事实。它可以复用 Persistence 状态机制，但 Rust Persistence 不解释这些事实的控制面含义。
 
 ## 6. 节点边界
 
@@ -299,7 +317,7 @@ Terminal 返回已有 durable receipt，不重复副作用
 结算 Act node
 ```
 
-Kernel Graph 提供恢复位置，Runtime receipt 证明领域结果，Infra fencing 排除旧执行者。三者缺一不可。
+Kernel Graph 提供恢复位置，Runtime receipt 证明领域结果，Persistence fencing 排除旧执行者。三者缺一不可。
 
 ## 8. Runtime 调用协议
 
@@ -339,7 +357,7 @@ Conflict(existing_fingerprint)
 
 ### 9.1 定位
 
-Mote Terminal 是 Runtime 中的持久化命令环境。它可以单独通过 MCP 等适配器服务其他 Harness，但在 Mote 内部通过 typed protocol 和 Infra 工作。
+Mote Terminal 是 Runtime 中的持久化命令环境。它可以单独通过 MCP 等适配器服务其他 Harness，但在 Mote 内部通过 typed protocol 和 Persistence 工作。
 
 模型侧能力可以最终收敛为一个熟悉的 Terminal 表面：
 
@@ -414,12 +432,12 @@ Mote 不需要重写 Linux 内核。Rust Agent 用户态层复用 Linux 的进�
 
 `ls` 等命令应看到授权命名空间中的一致视图。要实现“远端与本地对等”，依赖受控文件虚拟化和设备/应用 provider，而不是把远端机器伪装成拥有整个本地系统。
 
-## 10. Mote Infra 分包
+## 10. Mote Local Persistence 分包
 
-Infra 应是一个 Rust workspace。crate 按不变量和事实类型拆分，不按未来微服务数量拆分：
+本地 Persistence 应是一个 Rust workspace。crate 按不变量和事实类型拆分，不按未来微服务数量拆分：
 
 ```text
-mote-infra/
+mote-persistence/local/
 ├── Cargo.toml
 ├── crates/
 │   ├── mote-state/
@@ -431,7 +449,7 @@ mote-infra/
 │   ├── mote-store-sqlite/
 │   └── mote-protocol/
 └── apps/
-    └── mote-infrad/
+    └── mote-persistenced/
 ```
 
 ### 10.1 `mote-state`
@@ -507,7 +525,7 @@ settle execution attempt
 - crash 后重新领取；
 - 机械 retry/reconcile 调度。
 
-它不拥有 Graph topology、frontier、routing、Think/Act 或业务 retry 决策。Kernel 决定“下一步是什么”，Infra 只可靠推进已经声明的 attempt。
+它不拥有 Graph topology、frontier、routing、Think/Act 或业务 retry 决策。Kernel 决定“下一步是什么”，Persistence 只可靠推进已经声明的 attempt。
 
 当前 Python `execution` 中属于 Graph 语义的部分继续归 Kernel；可语言无关化的 claim、lease、fence、resource、attempt 等机制逐步迁到 Rust。迁移期间不能长期保留两套 authoritative runner，切换行为必须由 `conformance/` 固定并完成旧路径删除。
 
@@ -544,9 +562,9 @@ settle execution attempt
 - wire version、错误码和兼容拒绝；
 - internal type 与 wire type 的显式转换。
 
-wire DTO 不得直接渗入核心 crate。PyO3 可以作为局部优化，但不应成为唯一主边界，否则 Infra 会重新绑定 Python 进程。
+wire DTO 不得直接渗入核心 crate。PyO3 可以作为局部优化，但不应成为唯一主边界，否则 Persistence 会重新绑定 Python 进程。
 
-### 10.9 `mote-infrad`
+### 10.9 `mote-persistenced`
 
 唯一组合根负责：
 
@@ -571,7 +589,7 @@ mote-state       mote-operation       mote-coordination
 mote-workspace ───────▶ commit/state/operation（按需）
 mote-store-sqlite ────▶ 实现统一 query/commit ports
 mote-protocol ────────▶ 边界映射，不成为领域 owner
-mote-infrad ──────────▶ 最终装配
+mote-persistenced ──────────▶ 最终装配
 ```
 
 禁止出现 owner 不明的 `common`、`shared`、`utils`、`helpers` 或万能 `models` crate。若多个包需要一个类型，应找到它表达的不变量并放到唯一 owner，而不是建立杂物包。
@@ -587,7 +605,7 @@ Kernel Graph
 Terminal Shell AST
   拥有命令组合、pipe、process/effect 依赖语义
 
-Infra execution
+Persistence execution
   统一提供 attempt、resource、lease/fence 与 durable receipt
 ```
 
@@ -645,6 +663,12 @@ conformance/
 motev2/
 ├── mote-product/          TypeScript：Agent 定义、配置与 UI
 ├── mote-control/          Go：控制面
+├── mote-container/        容器注册、定位、统一调用与平台托管
+│   ├── local/
+│   ├── docker/
+│   └── cloudflare/
+│       ├── python/        Python Worker 与 Durable Object Container
+│       └── ts/            TypeScript Worker 与 Durable Object Container
 ├── mote-kernel/           Python：Agent Flow 语义
 ├── mote-runtime/
 │   ├── context/
@@ -653,19 +677,19 @@ motev2/
 │   ├── approval/
 │   ├── eventbus/
 │   └── terminal/          Rust 为主，可含 provider adapters
-├── mote-infra/            部署相关的状态与可靠执行机制
+├── mote-persistence/            部署相关的持久化与可靠执行机制
 │   ├── local/             Rust：本地与宿主机原生实现
-│   └── cloudflare/        Cloudflare 平台实现
-│       ├── python/        Python：Workers、Durable Objects 与 Kernel 同运行时实现
-│       └── ts/            TypeScript：Workers 与 Durable Objects 实现
+│   └── cloudflare/        Cloudflare Durable Object SQLite Adapters
+│       ├── python/        Python persistence Adapter
+│       └── ts/            TypeScript persistence Adapter
 └── conformance/           跨语言 observable contracts
 ```
 
-这是目标所有权图，不要求立即移动当前占位目录。目录迁移必须与真实实现和 CI 一起发生，不能只重命名制造空架构。
+这是目标所有权图。Cloudflare Container 脚手架、Persistence Adapter 边界和对应 CI 必须一起迁移；空目录或单纯重命名不算完成分层。
 
-## 15. Infra 的并行开发顺序
+## 15. Persistence 的并行开发顺序
 
-Infra 可以独立于上层具体业务并行开发，但应从不变量开始，不从完整 Terminal 或重写 Graph 开始。
+Persistence 可以独立于上层具体业务并行开发，但应从不变量开始，不从完整 Terminal 或重写 Graph 开始。
 
 ### Phase 0：协议与故障矩阵
 
@@ -718,7 +742,7 @@ Python Kernel reducer
 
 ## 16. 明确不做
 
-当前 Infra 初期不应同时追求：
+当前 Persistence 初期不应同时追求：
 
 - Rust 重写 Kernel Graph reducer；
 - 任意 Linux 程序任意指令级无感恢复；
@@ -748,4 +772,4 @@ Python Kernel reducer
 
 ## 18. 一句话总结
 
-> Mote 允许能力与调用自由组合，但要求事实单点归属、状态统一提交、执行统一恢复；模型通过 Kernel 驱动 Agent，通过 Control 组成 Swarm，通过 Runtime 使用世界，并由 Rust Infra 获得持久而可靠的计算基础。
+> Mote 允许能力与调用自由组合，但要求事实单点归属、状态统一提交、执行统一恢复；模型通过 Kernel 驱动 Agent，通过 Control 组成 Swarm，Container 执行放置并调用具体容器，Runtime 提供领域能力，Port 配置独立选择 Persistence backend 提供持久而可靠的计算基础。

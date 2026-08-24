@@ -1,0 +1,20 @@
+{
+    "$schema": "./node_modules/wrangler/config-schema.json",
+    "name": "mote-container-cloudflare",
+    "main": "src/index.ts",
+    "compatibility_date": "2026-08-20",
+    "durable_objects": {
+        "bindings": [
+            {
+                "name": "AGENT_OBJECTS",
+                "class_name": "AgentDurableObject",
+            },
+        ],
+    },
+    "exports": {
+        "AgentDurableObject": {
+            "type": "durable-object",
+            "storage": "sqlite",
+        },
+    },
+}

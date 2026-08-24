@@ -14,26 +14,42 @@ python -m pip install -e '.[dev]'
 make check
 ```
 
-For the Rust Infra:
+For the local Rust Persistence implementation:
 
 ```bash
-cd mote-infra/local
+cd mote-persistence/local
 make check
 ```
 
-For the Cloudflare Python Infra:
+For the Cloudflare Python Persistence implementation:
 
 ```bash
-cd mote-infra/cloudflare/python
+cd mote-persistence/cloudflare/python
+uv sync --locked
+make check
+```
+
+For the Cloudflare TypeScript Persistence implementation:
+
+```bash
+cd mote-persistence/cloudflare/ts
+pnpm install --frozen-lockfile
+pnpm run check
+```
+
+For the Cloudflare Python Container:
+
+```bash
+cd mote-container/cloudflare/python
 uv sync --locked
 pnpm install --frozen-lockfile
 make check
 ```
 
-For the Cloudflare TypeScript Infra:
+For the Cloudflare TypeScript Container:
 
 ```bash
-cd mote-infra/cloudflare/ts
+cd mote-container/cloudflare/ts
 pnpm install --frozen-lockfile
 pnpm run check
 ```
@@ -42,7 +58,7 @@ Install `cargo-deny` before running the dependency license, source, and advisory
 
 ```bash
 cargo install cargo-deny --version 0.19.7 --locked
-cd mote-infra/local
+cd mote-persistence/local
 make security
 ```
 

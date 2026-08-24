@@ -1,0 +1,38 @@
+{
+    "name": "@mote/persistence-cloudflare",
+    "version": "0.1.0",
+    "description": "Cloudflare Durable Object SQLite persistence adapter for Mote.",
+    "private": true,
+    "type": "module",
+    "license": "Apache-2.0",
+    "author": "Mote contributors",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/bushihelmy-crypto/motev2.git",
+        "directory": "mote-persistence/cloudflare/ts"
+    },
+    "engines": {
+        "node": "^22.19.0 || >=24.0.0"
+    },
+    "packageManager": "pnpm@10.30.3",
+    "scripts": {
+        "check": "pnpm run check:static && pnpm run test",
+        "check:static": "pnpm run format:check && pnpm run lint && pnpm run types:check && pnpm run typecheck",
+        "format": "prettier --write . --ignore-unknown",
+        "format:check": "prettier --check . --ignore-unknown",
+        "lint": "oxlint --deny-warnings src tests vitest.config.ts",
+        "test": "vitest run",
+        "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tests/tsconfig.json",
+        "types": "wrangler types tests/worker-configuration.d.ts --config wrangler.test.jsonc --include-runtime false",
+        "types:check": "wrangler types tests/worker-configuration.d.ts --config wrangler.test.jsonc --include-runtime false --check"
+    },
+    "devDependencies": {
+        "@cloudflare/vitest-plugin": "1.0.0",
+        "@cloudflare/workers-types": "5.20260820.1",
+        "oxlint": "1.79.0",
+        "prettier": "3.9.6",
+        "typescript": "7.0.2",
+        "vitest": "4.1.11",
+        "wrangler": "4.125.0"
+    }
+}
