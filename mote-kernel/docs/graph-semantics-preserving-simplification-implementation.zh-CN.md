@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07、S01 已分别单项完成；S01 implementation commit 为 `0f34aa2`
-- 日期：2026-08-23（S01 complexity gate 明确排除；target 已收口为四文件 production/behavior 原子实施）
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；S07、S01 已分别单项完成；S15 单项设计已完成，待独立技术评审与批准
+- 日期：2026-08-24（S15 docs-only exact target 已独立收口；complexity/legacy gate 明确排除，production/tests 未修改）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
 - 唯一公共门面：`mote_kernel.execution.Graph`
@@ -32,6 +32,7 @@
 - [S01 单项重新设计第三次评审](graph-semantics-preserving-simplification-s01-implementation-third-review.zh-CN.md)
 - [S01 第三次评审回复](graph-semantics-preserving-simplification-s01-implementation-third-review-response.zh-CN.md)
 - [S01 单项重新设计第四次评审](graph-semantics-preserving-simplification-s01-implementation-fourth-review.zh-CN.md)
+- [S15 单项实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)
 - [Execution / State / Frontier 调用链（非规范性草稿）](execution-state-frontier-call-chain.zh-CN.md)
 - [历史两提交调研](../example/graph-two-commits-simplification-review.zh-CN.md)
 
@@ -725,7 +726,7 @@ change unit 必须按以下顺序独立提交，manifest 互不混合；本次 G
 | S12 | 候选方向是 resume-input presence 只由 `RecoveryAvailabilityCoordinates`/frame availability 拥有；字段删除前必须闭合 valid-domain equality、action ↔ availability 和 malformed 行为 | 候选删除 `resume_input_availability`，并同时移除 `AdmittedResumeFact`、`_RecoveryFamily` 的 phantom generic | 不新增 runtime field/cache；若选择 fail closed，至多一个窄 seed invariant validator且须单项批准 | `engine/recovery.py`、`invocation.py`、recovery/generic tests、Node I/O normative | P2 |
 | S13 | `_initial_children()` 只接收实际使用的参数 | 未使用的 `availability` 参数和全部实参 | 无 | `engine/recovery.py` | P1 |
 | S14 | `_NestedOutcome` exact shape 为 `(node_id: GraphNodeId, boundary: _ScopeBoundary[GraphValueT])`；`kind`/`availability` 直接读 `boundary`，child disposition 从 equality-participating `boundary.control` 投影 | `kind`、`availability`、`disposition` 三个重复字段 | 一个精确签名 `_child_disposition_from_control(control: ScopeControlStateCoordinate) -> ChildRecoveryDisposition`；要求 `control.parent is not None` 后逐字段构造 `ChildControlStateCoordinate`，不得读取 `boundary.state`（`compare=False`）重建 identity | `engine/recovery.py` | P1 |
-| S15 | `_prove_scope()` 保留 worklist、seen、enqueue、budget 和 branch precedence 的单一 loop owner；只有 branch 能以窄 nominal result 降低净分支/变量时才提取 | 经证明独立的 branch-local mechanics | terminal/active/settled/executable 至多各一个 handler；不得搬走 queue/budget | `engine/recovery.py` | P2 |
+| S15 | [S15 独立实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)是 exact target、nominal successor、等价证明、结构账本、behavior/tamper evidence、manifest 和门禁的唯一 owner；本表只保留索引 | 由独立方案唯一拥有 | 由独立方案唯一拥有；`DESIGN COMPLETE / GSP-A06 NOT APPROVED` | 独立方案第 5、7、11 节 | P2 |
 
 S12 当前不获准随 P1 实施。proof-local constancy 只能证明一次 `_prove_scope()` 内 `family.admitted_actions` 对 transfer state 固定，不能替代完整结构语义设计。S12 单项再评审前必须同时提交：
 
@@ -740,6 +741,11 @@ S12 禁止用 `compare=False`、phantom TypeVar、第二 availability field 或 
 这里的 `RecoveryTransferState` 是 execution-local、invocation-bounded 的 pure proof value，不是
 `GraphRunState`、持久化 schema 或 checkpoint；S12 即使未来通过 P2 单项评审，也不获得修改 State/protocol
 或增加 persistence owner 的权限。
+
+S15 exact target 已迁移到独立实施方案。该文档唯一拥有 worklist branch-result target、等价证明、结构净删除、
+behavior/tamper evidence 与 one-file planned production manifest；当前待独立技术评审且未获 `GSP-A06`，
+production/tests 不得修改。State/protocol、persistence owner、error-recovery/failover policy、automated complexity 与
+legacy/private-shape gate 边界均不改变。
 
 ### 3.4 Invocation、resume admission 与 executor（S16–S20）
 
@@ -872,6 +878,8 @@ S20 的 `2 → 0` 只统计 failed-retry materialization 分支中的一对 repl
 - S17 后 resume candidate 只保存 exact command 与 substitutions，不保存 skip/pure-skip 镜像事实；
 - S20 后 `materialize_node_input` 是 pending execution 与 failed retry 的唯一 compiled materializer；
 - S12 若获单项批准，runtime/recovery 仍共用同一 transition 与 input interpretation；
+- S15 已完成 docs-only 单项设计但未获 `GSP-A06`；其 exact target、结构账本、behavior/tamper evidence 和 planned manifest
+  只由 [S15 独立实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)拥有，production/tests 保持现状；
 - 所有单元遵守 2.3 的原子迁移和净复杂度约束；类型、import 与依赖纪律直接引用 `GSP-P08`，不在本文重写。
 
 ### 5.1 本轮最小 source precedence 与 evidence anchors
@@ -962,7 +970,8 @@ Review 只记录裁决来源；上述规则回写后由本文拥有 target/实�
 6. 用第 3.6 节逐项核对 P1 的 before→after 计数、nominal signature、index/cache 生命周期和错误顺序；不能
    用 baseline 或 full-suite 绿色替代净复杂度证明；
 7. Phase 0 只登记 P2 单元、owner、候选方向和未批准状态；P2 在 Phase 3/4 逐项满足 `GSP-A06`，S12 另需
-   equality、malformed seed 和 generic migration 证明；
+   equality、malformed seed 和 generic migration 证明；S15 已在独立实施方案完成 docs-only exact target、结构账本、
+   behavior/tamper evidence 和 planned manifest，仍待独立技术评审及 requirements owner 显式批准；
 8. 每个 owner 文档回写与 review audit 分别按第 7.3 节生成自己的 actual changed-file manifest。requirements
    第 7 节已接受上述 evidence 和 per-change manifest，并只对当前 15 个 P1 明确批准 `GSP-A05`；T0 尚未编码
    是批准后的正常起点。
@@ -996,8 +1005,9 @@ normative 文档和 exact-shape tests 迁移；S05、S06 不得再拆成两个 i
 
 ### Phase 3：engine 内部 P2
 
-S07 已按 3.2.2 完成；S01 已按 3.1.2 完成 implementation。S02、S12、S15、S16、S19 仍须单项满足
-`GSP-A06` 并通过设计复审；未通过的单元保持现状。S12 不继承 S01、S07 或 P1 的批准状态。
+S07 已按 3.2.2 完成；S01 已按 3.1.2 完成 implementation。S15 已提交独立完整设计，仍待独立技术评审和 requirements
+owner 的 `GSP-A06` 显式批准；S02、S12、S16、S19 仍须单项满足 `GSP-A06` 并通过设计复审。未通过的单元保持现状，
+且不继承 S01、S07 或 P1 的批准状态。
 
 ### Phase 4：facade/transaction P2
 
@@ -2238,9 +2248,13 @@ architecture 双语 parity/canonical 治理是独立文档工作，不是全部 
 Phase 0 和各 delivery change unit 中仍必须完成：
 
 1. 维护唯一 requirements 文件 `docs/graph-semantics-preserving-simplification-requirements.zh-CN.md` 及 `README.zh-CN.md`、`README.md` 的稳定链接/owner 导航；requirements 不复制具体 target shape，README 不枚举动态增长的 review 列表；requirements 独立拥有准入状态，本文只提交 evidence；
-2. 本文是 target shape、原子迁移账本、实施顺序、复杂度账本和 characterization 计划的唯一 owner，不创建第二份 target-shape proposal；各轮 review/response 只记录裁决、异议和整改，不拥有 requirements、当前行为或目标 shape；
+2. 本文是总账、实施顺序及未显式委托单元 target 的唯一 owner；S15 exact target、原子账本和 characterization 已明确委托
+   给链接的独立实施方案，本文不复制。任何单元仍只能有一个 target owner；各轮 review/response 只记录裁决、异议和整改，
+   不拥有 requirements、当前行为或目标 shape；
 3. S03–S07、S09–S12、S14、S17 所在的 delivery change unit 必须同时修订对应 frozen internal shape 的 normative implementation；S05+S06 在同一联合单元中同步一次。S09/S10/S11/S17 必须同步 `skip-failed-output-implementation.zh-CN.md`，S03/S04/S05/S06/S07/S12/S14 必须同步 `graph-node-input-output-contract-implementation.zh-CN.md`；不得先形成 production-only 或 docs-only 的长期中间状态；
-4. P2 单元各自补充 target-shape 评审记录；S12 还必须补充 action ↔ availability、malformed seed、valid-domain equality 和 `_RecoveryFamily` 泛型迁移记录。
+4. P2 单元各自补充 target-shape 评审记录；S12 还必须补充 action ↔ availability、malformed seed、valid-domain equality 和
+   `_RecoveryFamily` 泛型迁移记录；S15 独立实施方案已完成 exact branch-result target、等价证明、零新增负债账本和
+   one-file planned implementation manifest，当前只具备提交独立技术评审的资格，不拥有批准或 implementation 状态。
 5. 上述 normative 同步只能描述 execution-owned internal shape 的变化；`state/graph_state/**`、State tests、
    durable/conformance protocol 与持久化能力均保持当前状态，不建立对应实施条目或“顺便同步”的 schema 修改。
 
@@ -2251,7 +2265,8 @@ Phase 0 和各 delivery change unit 中仍必须完成：
 | 文档/产物 | 唯一 owner | exact path | 当前状态与边界 |
 | --- | --- | --- | --- |
 | 本轮 requirement ID、行为保持义务、非目标、外部语义停止条件、阶段准入条件 | requirements 文档 | `docs/graph-semantics-preserving-simplification-requirements.zh-CN.md` | Phase 0 最终裁决已完成；A05 只批准当前 15 个 P1；只链接具体 normative truth，不写第二套 target shape |
-| target shape、原子迁移账本、实施顺序、复杂度账本、characterization 计划和实施门禁 | 本实施方案 | `docs/graph-semantics-preserving-simplification-implementation.zh-CN.md` | 本文唯一拥有；不复制 requirements 的行为清单 |
+| 总账、实施顺序及未显式委托单元的 target shape、原子迁移账本、复杂度账本、characterization 和实施门禁 | 本实施方案 | `docs/graph-semantics-preserving-simplification-implementation.zh-CN.md` | 本文唯一拥有总账；不复制 requirements 行为清单或 S15 exact target |
+| S15 exact target、branch/budget/queue 等价证明、结构账本、behavior/tamper evidence、planned manifest 与未来 writeback | S15 独立实施方案 | `docs/graph-semantics-preserving-simplification-s15-implementation.zh-CN.md` | `DESIGN COMPLETE / GSP-A06 NOT APPROVED`；production/tests 未修改；主方案只保留索引 |
 | 当前架构行为 | architecture normative source | `docs/architecture.zh-CN.md`、`docs/architecture.md` | 按 5.1 最小 precedence 保持当前行为；全文 parity/canonical 治理独立进行，不生成本轮 State/Store target |
 | 当前 Node I/O shape | Node I/O normative source | `docs/graph-node-input-output-contract-implementation.zh-CN.md` | 已随 S05+S06 联合单元同步 graph-input canonical descriptor/direct compiled transition，随 S14 同步 boundary-owned nested outcome/control projection，并随 S07 同步三类 nominal-source coordinate constructor owner |
 | 当前 skip-output shape | skip-output normative source | `docs/skip-failed-output-implementation.zh-CN.md` | 已随 S09 同步唯一 facts → command projection、随 S10 同步 canonical output diagnostic/单次 full scan、随 S11 同步 target 单次 typed scan/三字段 fact/invocation-local cache，并随 S17 同步六字段 candidate 与 typed pure-skip coordinate 差集 |
@@ -2351,5 +2366,6 @@ writeback；其余 7 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no
 Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S05+S06、S08–S11、S14、S17、S20 与
 S23B 的 production/scoped gate 已完成，但在独立 complexity unit 与各 implementation manifest 分离并重跑完整
 门禁前，不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03、S04、S05+S06、S14 也已完成；
-当前没有剩余的已批准 P1 delivery change unit；S01 这一已批准 P2 也已完成。其余 7 个未获批 P2 仍须逐项满足
-`GSP-A06`，不得重新发现第 25 个简化点、提前实施其余 P2、把独立文档治理放回关键路径，或触及 State/持久化。
+当前没有剩余的已批准 P1 delivery change unit；S01 这一已批准 P2 也已完成。S15 已提交完整独立设计但仍待技术评审与
+requirements owner 批准；其他未获批 P2 仍须各自提交完整设计。不得重新发现第 25 个简化点、提前实施未批准 P2、
+把独立文档治理放回关键路径，或触及 State/持久化。
