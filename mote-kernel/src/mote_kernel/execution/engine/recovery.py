@@ -1012,18 +1012,17 @@ def _prove_scope(
         (recovery_traversal_key(_transfer_state(scope_run, initial, family)), sequence, initial)
     ]
 
-    def enqueue(items: tuple[_RecoveryWorkItem[GraphValueT], ...]) -> None:
+    def enqueue(candidate: _RecoveryWorkItem[GraphValueT]) -> None:
         nonlocal sequence
-        for candidate in items:
-            sequence += 1
-            heappush(
-                pending,
-                (
-                    recovery_traversal_key(_transfer_state(scope_run, candidate, family)),
-                    sequence,
-                    candidate,
-                ),
-            )
+        sequence += 1
+        heappush(
+            pending,
+            (
+                recovery_traversal_key(_transfer_state(scope_run, candidate, family)),
+                sequence,
+                candidate,
+            ),
+        )
 
     seen: set[RecoveryTransferState[GraphValueT]] = set()
     boundaries: set[_ScopeBoundary[GraphValueT]] = set()
@@ -1061,28 +1060,24 @@ def _prove_scope(
                 )
             )
             continue
+        successors: tuple[
+            _RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT],
+            ...,
+        ]
         if current.execution is not None:
             if not item.live:
                 raise SnapshotMismatchError("recovery simulated execution has no legal live task")
             successors = _expand_live(graph, item, scope_run, family)
-            family.budget.admit(len(successors))
-            enqueue(successors)
-            continue
-        if status is GraphFrontierStatus.SETTLED:
-            successor = _resolve_quiescent(graph, item, scope_run, family)
-            family.budget.admit(1)
-            if isinstance(successor, _ScopeBoundary):
-                boundaries.add(successor)
-            else:
-                enqueue((successor,))
-            continue
-        successors = _expand_quiescent_executable(graph, item, scope_run, family)
+        elif status is GraphFrontierStatus.SETTLED:
+            successors = (_resolve_quiescent(graph, item, scope_run, family),)
+        else:
+            successors = _expand_quiescent_executable(graph, item, scope_run, family)
         family.budget.admit(len(successors))
         for successor in successors:
             if isinstance(successor, _ScopeBoundary):
                 boundaries.add(successor)
             else:
-                enqueue((successor,))
+                enqueue(successor)
     return tuple(
         sorted(
             boundaries,
