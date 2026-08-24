@@ -28,7 +28,7 @@
     },
     "devDependencies": {
         "@cloudflare/vitest-plugin": "1.0.0",
-        "@cloudflare/workers-types": "5.20260820.1",
+        "@cloudflare/workers-types": "5.20260821.1",
         "oxlint": "1.79.0",
         "prettier": "3.9.6",
         "typescript": "7.0.2",
