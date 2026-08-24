@@ -129,6 +129,24 @@ class _Codec:
         return Graph.values(value=payload.decode())
 
 
+class _TrackingCodec:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.tamper: str | None = None
+
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        self.events.append("encode")
+        return value["value"].encode()
+
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        self.events.append("decode")
+        if self.tamper == "name":
+            return Graph.values(other="input")
+        if self.tamper == "type":
+            return cast(Graph.Values[str], Graph.values(value=True))
+        return Graph.values(value=payload.decode())
+
+
 def node(
     node_id: str,
     operation: NodeCallable[str] = echo,
@@ -985,6 +1003,157 @@ async def test_resume_projection_covers_override_default_skip_and_interrupt_inpu
         )
     )
     assert len(prepared_interrupt.inputs) == 1
+
+
+async def test_override_resume_admission_preserves_validation_and_codec_order() -> None:
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.failure("failed")
+
+    codec = _TrackingCodec()
+    graph = graph_with_nodes(
+        node("a", fail),
+        definition_id="resume.admission.order",
+        resume_input=ResumeInputBinding(
+            GraphResumeInputCodecId("input.v1"),
+            1,
+            codec,
+            codec,
+        ),
+    )
+    executor = GraphExecutor(graph)
+    initial = started(executor)
+    initial_request = string_request(graph, initial, "input")
+    with pytest.raises(SnapshotMismatchError, match="failure resume"):
+        executor.resume(
+            ResumeRequest(
+                initial,
+                initial_request.scope_run,
+                initial_request.frames,
+                (
+                    ResumeFailedNodeRequest(
+                        (),
+                        GraphNodeId("a"),
+                        OverrideNodeInput(Graph.values(value="retry")),
+                    ),
+                ),
+            )
+        )
+    assert codec.events == []
+
+    failed, _results = await run_frontier(executor, graph, initial, "input")
+    failed_request = string_request(graph, failed, "input")
+    failed_resume_request = ResumeRequest(
+        failed,
+        failed_request.scope_run,
+        failed_request.frames,
+        (
+            ResumeFailedNodeRequest(
+                (),
+                GraphNodeId("a"),
+                OverrideNodeInput(Graph.values(value="retry")),
+            ),
+        ),
+    )
+    codec.events.clear()
+    failed_prepared = executor.resume(failed_resume_request)
+    assert codec.events == ["encode", "decode"]
+    assert failed_prepared.command.actions[0].node_id == GraphNodeId("a")
+    assert len(failed_prepared.inputs) == 1
+    assert failed_prepared.inputs[0].frame.entries[0] == NamedValue("value", "retry")
+    resumed = reduce_graph_run(failed, failed_prepared.command)
+    assert isinstance(resumed.frontier.nodes[0].settlement, PendingGraphNode)
+
+    codec.tamper = "name"
+    codec.events.clear()
+    tampered_name_request = replace(failed_resume_request)
+    name_state = tampered_name_request.state
+    name_frames = tampered_name_request.frames
+    with pytest.raises(GraphValueAdmissionError) as name_error:
+        executor.resume(tampered_name_request)
+    assert str(name_error.value) == (
+        "node input names do not match the compiled descriptor: expected ('value',), got ('other',)"
+    )
+    assert name_error.value.__cause__ is None
+    assert codec.events == ["encode", "decode"]
+    assert tampered_name_request.state is name_state
+    assert tampered_name_request.frames is name_frames
+
+    codec.tamper = "type"
+    codec.events.clear()
+    tampered_type_request = replace(failed_resume_request)
+    type_state = tampered_type_request.state
+    type_frames = tampered_type_request.frames
+    with pytest.raises(GraphValueAdmissionError) as type_error:
+        executor.resume(tampered_type_request)
+    assert str(type_error.value) == "node input value for 'value' does not have its exact declared type"
+    assert type_error.value.__cause__ is None
+    assert codec.events == ["encode", "decode"]
+    assert tampered_type_request.state is type_state
+    assert tampered_type_request.frames is type_frames
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"question")
+
+    interrupt_codec = _TrackingCodec()
+    interrupted_graph = graph_with_nodes(
+        node("a", interrupt),
+        definition_id="resume.admission.interrupt.order",
+        resume_input=ResumeInputBinding(
+            GraphResumeInputCodecId("input.v1"),
+            1,
+            interrupt_codec,
+            interrupt_codec,
+        ),
+    )
+    interrupt_executor = GraphExecutor(interrupted_graph)
+    interrupt_initial = started(interrupt_executor)
+    interrupted, _results = await run_frontier(interrupt_executor, interrupted_graph, interrupt_initial, "input")
+    interrupt_request = string_request(interrupted_graph, interrupted, "input")
+    interrupt_settlement = interrupted.frontier.nodes[0].settlement
+    assert isinstance(interrupt_settlement, InterruptedGraphNode)
+    identity = interrupt_settlement.interrupt.identity
+    stale_request = ResumeRequest(
+        interrupted,
+        interrupt_request.scope_run,
+        interrupt_request.frames,
+        (
+            ResumeInterruptedNodeRequest(
+                (),
+                GraphNodeId("a"),
+                GraphInterruptId("stale"),
+                OverrideNodeInput(Graph.values(value="answer")),
+            ),
+        ),
+    )
+    with pytest.raises(SnapshotMismatchError, match="does not match"):
+        interrupt_executor.resume(stale_request)
+    assert interrupt_codec.events == []
+
+    interrupt_id = graph_interrupt_id(
+        identity.run_id,
+        identity.superstep,
+        identity.node_id,
+        identity.execution_generation,
+    )
+    interrupt_codec.events.clear()
+    interrupt_prepared = interrupt_executor.resume(
+        ResumeRequest(
+            interrupted,
+            interrupt_request.scope_run,
+            interrupt_request.frames,
+            (
+                ResumeInterruptedNodeRequest(
+                    (),
+                    GraphNodeId("a"),
+                    interrupt_id,
+                    OverrideNodeInput(Graph.values(value="answer")),
+                ),
+            ),
+        )
+    )
+    assert interrupt_codec.events == ["encode", "decode"]
+    assert len(interrupt_prepared.inputs) == 1
+    assert interrupt_prepared.inputs[0].frame.entries[0] == NamedValue("value", "answer")
 
 
 async def test_prepare_rejects_an_empty_resource_admission_projection(

@@ -17,7 +17,7 @@ from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches
 from mote_kernel.execution.engine.superstep import prepare_superstep, validate_execution_session_request
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.graph.values import _make_node_output_frame
+from mote_kernel.execution.graph.values import NodeInputFrame, _make_node_output_frame
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.request import (
@@ -47,6 +47,7 @@ from mote_kernel.state.graph_state import (
     GraphRunStatus,
     GraphSkipReason,
     InterruptedGraphNode,
+    OverrideGraphNodeInput,
     PendingGraphNode,
     ResumeFailedNode,
     ResumeGraphNodes,
@@ -94,6 +95,15 @@ class GraphExecutor(Generic[GraphValueT]):
         if scope_run.scope != self._graph.definition_scope or state.run_id != scope_run.graph_run_id:
             raise SnapshotMismatchError("request scope does not match its compiled graph run")
 
+    def _admit_override_resume_input(
+        self,
+        node_id: GraphNodeId,
+        override: OverrideNodeInput[GraphValueT],
+    ) -> tuple[OverrideGraphNodeInput, NodeInputFrame[GraphValueT]]:
+        binding = encode_resume_input(self._graph, override.values)
+        frame = decode_resume_input(self._graph, node_id, bytes(binding.payload))
+        return binding, frame
+
     async def prepare(self, request: StepRequest[GraphValueT]) -> PrepareDisposition[GraphValueT]:
         self.validate_state(request.state)
         self._validate_scope_run(request.state, request.scope_run)
@@ -140,8 +150,7 @@ class GraphExecutor(Generic[GraphValueT]):
                     if not isinstance(current.settlement, FailedGraphNode):
                         raise SnapshotMismatchError("failure resume requires a failed node")
                     if isinstance(requested.input, OverrideNodeInput):
-                        binding = encode_resume_input(self._graph, requested.input.values)
-                        frame = decode_resume_input(self._graph, requested.node_id, bytes(binding.payload))
+                        binding, frame = self._admit_override_resume_input(requested.node_id, requested.input)
                     else:
                         binding = UseStepRequestInput()
                         frame = materialize_node_input(
@@ -165,8 +174,7 @@ class GraphExecutor(Generic[GraphValueT]):
                         identity.execution_generation,
                     ):
                         raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
-                    binding = encode_resume_input(self._graph, requested.input.values)
-                    frame = decode_resume_input(self._graph, requested.node_id, bytes(binding.payload))
+                    binding, frame = self._admit_override_resume_input(requested.node_id, requested.input)
                     actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
                     replacements[requested.node_id] = PendingGraphNode(binding)
                 admitted_inputs.append(
