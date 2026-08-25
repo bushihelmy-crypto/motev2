@@ -14,7 +14,6 @@ from mote_kernel.execution.graph.values import (
     _admit_graph_output_view,
     _admit_node_input_frame,
     _admit_node_output_frame,
-    _frame_entries,
     _frame_value,
     _make_graph_input_frame,
     _make_node_input_frame,
@@ -83,7 +82,7 @@ def test_frame_helpers_preserve_entries_and_find_later_named_values() -> None:
     )
     frame = _make_graph_input_frame(Graph.values(first=1, second=2), declarations)
 
-    assert tuple(entry.name for entry in _frame_entries(frame)) == ("first", "second")
+    assert tuple(entry.name for entry in frame.entries) == ("first", "second")
     assert _frame_value(frame, "second") == 2
 
 

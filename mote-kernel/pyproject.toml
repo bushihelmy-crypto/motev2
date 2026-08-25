@@ -98,6 +98,93 @@ ignore = ["ANN401"]
 docstring-code-format = true
 quote-style = "double"
 
+# The ratchet keeps legacy debt from growing. It is not a health target.
+[tool.mote_kernel.complexity_ratchet]
+top_level_definitions = 504
+type_definitions = 288
+dataclass_types = 178
+dataclass_fields = 500
+decision_points = 1327
+logical_clone_pairs = 12
+record_shape_clone_pairs = 21
+thin_single_use_helpers = 17
+single_use_private_dataclasses = 1
+test_only_private_definitions = 0
+
+# Unreviewed structural-smell targets are zero. `make complexity` checks these
+# targets; `make complexity-ratchet` is the non-regression CI gate.
+[tool.mote_kernel.complexity_health]
+logical_clone_pairs = 0
+record_shape_clone_pairs = 0
+thin_single_use_helpers = 0
+single_use_private_dataclasses = 0
+test_only_private_definitions = 0
+
+# These identities are reviewed, intentional nominal-owner boundaries. The
+# health gate fails for any new identity and for stale entries that no longer
+# exist, so this list cannot silently become a second complexity baseline.
+[tool.mote_kernel.complexity_reviewed]
+logical_clone_pairs = [
+  "[branch] execution/engine/resume_input.py:160:node_inputs_available <-> execution/engine/routing.py:136:graph_outputs_available",
+  "[branch] execution/engine/resume_input.py:166:node_inputs_available <-> execution/engine/routing.py:142:graph_outputs_available",
+  "[function] execution/engine/admission.py:38:admit_graph_input <-> execution/engine/admission.py:46:admit_child_graph_input",
+  "[function] execution/graph/ports.py:202:normalize_input_bindings <-> execution/graph/ports.py:230:normalize_graph_output_declarations",
+  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:184:_admit_node_input_frame",
+  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:194:_admit_node_output_frame",
+  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
+  "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:194:_admit_node_output_frame",
+  "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
+  "[function] execution/graph/values.py:194:_admit_node_output_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
+  "[function] execution/result.py:207:StartMissingChildren.__post_init__ <-> execution/result.py:221:WaitForActiveChildren.__post_init__",
+  "[function] state/graph_state/resource_reducer.py:19:_require_identity <-> state/graph_state/validation.py:26:_require_identity",
+]
+record_shape_clone_pairs = [
+  "execution/engine/recovery.py:129:ExecutionControlCoordinate <-> state/graph_state/model.py:32:GraphExecutionToken",
+  "execution/engine/recovery.py:170:RecoveryAvailabilityCoordinates <-> execution/run_context.py:171:ScopedFrameIndex",
+  "execution/facade.py:149:_NestedNodeCandidate <-> execution/graph/definition.py:17:NestedGraphNodeDefinition",
+  "execution/graph/ports.py:43:GraphInputRef <-> execution/graph/ports.py:98:OutputDeclaration",
+  "execution/graph/ports.py:150:ResolvedInputBinding <-> execution/graph/ports.py:163:GraphOutputBinding",
+  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:87:GraphInputFrame",
+  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:97:NodeInputFrame",
+  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:107:NodeOutputFrame",
+  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:117:GraphOutputView",
+  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:97:NodeInputFrame",
+  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:107:NodeOutputFrame",
+  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:117:GraphOutputView",
+  "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:107:NodeOutputFrame",
+  "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:117:GraphOutputView",
+  "execution/graph/values.py:107:NodeOutputFrame <-> execution/graph/values.py:117:GraphOutputView",
+  "execution/result.py:175:ActiveChild <-> execution/result.py:188:AbortedChild",
+  "execution/run_context.py:31:PublicationAvailabilityCoordinate <-> execution/run_context.py:37:ResumeInputAvailabilityCoordinate",
+  "execution/run_context.py:49:AdmittedGraphInput <-> execution/run_context.py:97:AdmittedResumeInput",
+  "execution/run_context.py:49:AdmittedGraphInput <-> execution/run_context.py:106:ConfirmedChildBoundary",
+  "execution/run_context.py:97:AdmittedResumeInput <-> execution/run_context.py:106:ConfirmedChildBoundary",
+  "execution/run_context.py:321:_CompleteContinuationSnapshot <-> execution/run_context.py:329:_RecoveredContinuationSnapshot",
+]
+thin_single_use_helpers = [
+  "execution/engine/recovery.py:601:_claim",
+  "execution/engine/resume_input.py:67:_require_decoded_values",
+  "execution/engine/routing.py:102:_success_routes",
+  "execution/engine/scheduler.py:80:_capture",
+  "execution/family_driver.py:150:_request",
+  "execution/graph/values.py:214:_make_graph_input_frame",
+  "execution/graph/values.py:222:_graph_input_from_node_input",
+  "execution/graph/values.py:246:_node_output_from_view",
+  "execution/graph/values.py:254:_make_graph_output_view",
+  "execution/graph/values.py:262:_public_values",
+  "execution/graph/values.py:267:_public_node_output",
+  "execution/graph/values.py:272:_public_node_input",
+  "execution/result.py:364:_completed_result",
+  "execution/result.py:377:_aborted_result",
+  "execution/result.py:390:_awaiting_result",
+  "execution/run_context.py:432:_new_family_identity",
+  "execution/run_context.py:452:_context_from_continuation",
+]
+single_use_private_dataclasses = [
+  "execution/facade.py:169:_ResumeCodec",
+]
+test_only_private_definitions = []
+
 [tool.pyright]
 include = ["src", "tests"]
 exclude = ["tests/typing_negative"]

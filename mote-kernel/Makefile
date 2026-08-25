@@ -1,4 +1,4 @@
-.PHONY: install format lint test typecheck security build package-check check
+.PHONY: install format lint complexity complexity-ratchet complexity-report test typecheck security build package-check check
 
 install:
 	python -m pip install -e '.[dev]'
@@ -10,6 +10,15 @@ format:
 lint:
 	python -m ruff check src tests
 	python -m ruff format --check src tests
+
+complexity:
+	python -m tests.architecture.complexity_rules --check-health
+
+complexity-ratchet:
+	python -m pytest -q tests/architecture/test_complexity_gate.py
+
+complexity-report:
+	python -m tests.architecture.complexity_rules
 
 test:
 	python -m pytest --cov=mote_kernel --cov-report=term-missing
@@ -27,4 +36,4 @@ build:
 package-check: build
 	python -m twine check dist/*
 
-check: lint typecheck test package-check
+check: lint typecheck complexity-ratchet complexity test package-check
