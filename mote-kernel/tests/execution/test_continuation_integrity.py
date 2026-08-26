@@ -963,6 +963,7 @@ async def test_complete_continuation_validates_a_parked_ordinary_input_source() 
         outputs={},
     )
     parent.add_edge("producer", "child")
+    parent.add_edge("producer", "consumer")
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)

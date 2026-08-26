@@ -330,6 +330,7 @@ async def test_active_recovery_rejects_a_lost_pending_input_before_fence(input_s
             inputs={"value": Graph.node_output("producer", "value")},
             outputs={},
         )
+        graph.add_edge("producer", "consumer")
         values = Graph.values()
     else:
         graph.add_node(

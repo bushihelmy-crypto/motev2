@@ -292,7 +292,6 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": set(),
         "conditional_targets": set(),
         "joins_by_source": set(),
-        "data_triggers": set(),
     }
     for relative, tree in _production_modules():
         for node in ast.walk(tree):
@@ -303,7 +302,6 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": {"execution/engine/routing.py"},
         "conditional_targets": {"execution/engine/routing.py"},
         "joins_by_source": {"execution/engine/routing.py"},
-        "data_triggers": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
     forbidden = {"materializations", "graph_outputs"}
@@ -505,7 +503,6 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
-        "data_triggers": "FrozenMap[GraphNodeId, DataTriggerPlan]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",

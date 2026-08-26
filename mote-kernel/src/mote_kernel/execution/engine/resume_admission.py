@@ -116,7 +116,7 @@ def admit_resume_candidates(
             sorted(
                 {
                     (target.node_id, target.unavailable_inputs)
-                    for target in (*facts.control_targets, *facts.completed_join_targets, *facts.data_targets)
+                    for target in (*facts.control_targets, *facts.completed_join_targets)
                     if target.unavailable_inputs
                 }
             )
@@ -144,7 +144,6 @@ def admit_resume_candidates(
                     facts.control_targets,
                     facts.completed_join_targets,
                     facts.remaining_join_progress,
-                    facts.data_targets,
                 )
             )
             and facts.unavailable_graph_outputs

@@ -19,6 +19,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
@@ -103,16 +104,18 @@ def callable_node(
 def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = False) -> CompiledGraph[str]:
     source = callable_node("source", {"value": Graph.graph_input("value", str)})
     nodes = (source,)
+    edges: tuple[DirectEdge, ...] = ()
     if data_dependency:
         consumer = callable_node("consumer", {"value": Graph.node_output("source", "value")})
         nodes = (source, consumer)
+        edges = (DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),)
     resume_input = None if codec is None else ResumeInputBinding(GraphResumeInputCodecId("text.v1"), 1, codec, codec)
     return compile_graph(
         GraphDefinition(
             GraphDefinitionId("test.graph"),
             GraphDefinitionVersion(1),
             nodes,
-            (),
+            edges,
             (),
             normalize_graph_output_declarations({}),
             resume_input=resume_input,

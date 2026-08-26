@@ -6,7 +6,6 @@ import pytest
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
     DuplicateBoundaryError,
-    DuplicateEdgeError,
     GraphValidationError,
     UnknownNodeError,
 )
@@ -86,7 +85,12 @@ def test_compiler_resolves_a_later_named_output_declaration() -> None:
         outputs={},
     )
 
-    compiled = compile_graph(definition((source, consumer)))
+    compiled = compile_graph(
+        definition(
+            (source, consumer),
+            edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),),
+        )
+    )
 
     binding = compiled.transition.materializations[GraphNodeId("consumer")].bindings.entries[0]
     assert isinstance(binding.source, NodeOutputPort)
@@ -163,7 +167,27 @@ def test_compiler_rejects_an_ordinary_data_cycle() -> None:
         compile_graph(definition((left, right)))
 
 
-def test_compiler_rejects_duplicate_data_and_direct_control_pair() -> None:
+def test_compiler_requires_explicit_control_for_node_output_consumers() -> None:
+    alpha = node("alpha", inputs={}, outputs={"first": str, "second": str})
+    zeta = node("zeta", inputs={}, outputs={"value": str})
+    consumer = node(
+        "consumer",
+        inputs={
+            "first": Graph.node_output("alpha", "first"),
+            "second": Graph.node_output("alpha", "second"),
+            "zeta": Graph.node_output("zeta", "value"),
+        },
+        outputs={},
+    )
+
+    with pytest.raises(
+        GraphValidationError,
+        match=r"node 'consumer' consumes node outputs from \('alpha', 'zeta'\) but has no incoming control edge",
+    ):
+        compile_graph(definition((zeta, consumer, alpha)))
+
+
+def test_compiler_accepts_data_binding_and_direct_control_for_the_same_pair() -> None:
     source = node(
         "source",
         inputs={"value": Graph.graph_input("value", str)},
@@ -175,13 +199,16 @@ def test_compiler_rejects_duplicate_data_and_direct_control_pair() -> None:
         outputs={},
     )
 
-    with pytest.raises(DuplicateEdgeError, match="duplicate"):
-        compile_graph(
-            definition(
-                (source, target),
-                edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
-            )
+    compiled = compile_graph(
+        definition(
+            (source, target),
+            edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
         )
+    )
+
+    assert compiled.transition.direct_targets[GraphNodeId("source")] == (GraphNodeId("target"),)
+    binding = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0]
+    assert binding.source == NodeOutputPort((), GraphNodeId("source"), "value")
 
 
 def test_compiler_rejects_explicit_start_that_duplicates_automatic_entry() -> None:
@@ -238,6 +265,47 @@ def test_compiler_rejects_control_gate_without_required_producer_guarantee() -> 
         )
 
 
+def test_compiler_accepts_a_coordinator_gate_after_the_required_producer() -> None:
+    source = node("source", inputs={}, outputs={"value": str})
+    coordinator = node("coordinator", inputs={}, outputs={})
+    target = node(
+        "target",
+        inputs={"value": Graph.node_output("source", "value")},
+        outputs={},
+    )
+
+    compiled = compile_graph(
+        definition(
+            (target, coordinator, source),
+            edges=(
+                DirectEdge(GraphNodeId("source"), GraphNodeId("coordinator")),
+                DirectEdge(GraphNodeId("coordinator"), GraphNodeId("target")),
+            ),
+        )
+    )
+
+    assert compiled.transition.direct_targets[GraphNodeId("coordinator")] == (GraphNodeId("target"),)
+
+
+def test_compiler_accepts_a_join_gate_for_all_required_producers() -> None:
+    left = node("left", inputs={}, outputs={"value": str})
+    right = node("right", inputs={}, outputs={"value": str})
+    target = node(
+        "target",
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={},
+    )
+    edge = JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("target"))
+
+    compiled = compile_graph(definition((target, right, left), edges=(edge,)))
+
+    assert compiled.transition.joins_by_source[GraphNodeId("left")] == (edge,)
+    assert len(compiled.transition.materializations[GraphNodeId("target")].bindings.entries) == 2
+
+
 def test_compiler_requires_nested_inputs_to_match_child_boundary_exactly() -> None:
     child_step = node(
         "child-step",
@@ -255,7 +323,7 @@ def test_compiler_requires_nested_inputs_to_match_child_boundary_exactly() -> No
         compile_graph(definition((nested,)))
 
 
-def test_compiler_uses_relative_selection_for_loop_producer_data_trigger() -> None:
+def test_compiler_uses_relative_selection_for_loop_producer_with_direct_activation() -> None:
     source = node(
         "source",
         inputs={"value": Graph.graph_input("value", str)},
@@ -269,7 +337,10 @@ def test_compiler_uses_relative_selection_for_loop_producer_data_trigger() -> No
     compiled = compile_graph(
         definition(
             (source, target),
-            edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("source")),),
+            edges=(
+                DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
+                DirectEdge(GraphNodeId("source"), GraphNodeId("target")),
+            ),
             entries=("source",),
         )
     )

@@ -280,6 +280,90 @@ async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_o
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outgoing", ["conditional", "end"])
+async def test_missing_control_fails_before_side_effects_and_leaves_the_builder_mutable(outgoing: str) -> None:
+    calls: list[str] = []
+
+    async def source(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("source")
+        return Graph.success(
+            Graph.values(value="published"),
+            route="go" if outgoing == "conditional" else None,
+        )
+
+    async def hidden(values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append(f"hidden:{values['value']}")
+        return Graph.values()
+
+    async def visible(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("visible")
+        return Graph.values()
+
+    graph = Graph[str](f"public.explicit-activation.{outgoing}")
+    graph.add_node("source", source, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "hidden",
+        hidden,
+        inputs={"value": Graph.node_output("source", "value")},
+        outputs={},
+    )
+    if outgoing == "conditional":
+        graph.add_node("visible", visible, inputs={}, outputs={})
+        graph.add_conditional_edge("source", "go", "visible")
+    else:
+        graph.add_edge("source", Graph.END)
+    graph.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(
+        Graph.ValidationError,
+        match=r"node 'hidden' consumes node outputs from \('source',\) but has no incoming control edge",
+    ):
+        await graph.run(Graph.values(), commit=commits)
+
+    assert calls == []
+    assert commits.transitions == []
+    assert _GraphOwnerView.read(graph) is None
+
+    graph.add_edge("source", "hidden")
+    completed = await graph.run(Graph.values())
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert calls.count("source") == 1
+    assert calls.count("hidden:published") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("route", "expected"), [("go", ["published"]), ("stop", [])])
+async def test_conditional_control_alone_selects_a_node_output_consumer(route: str, expected: list[str]) -> None:
+    consumed: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(Graph.values(value="published"), route=route)
+
+    async def consume(values: Graph.Values[str]) -> Graph.Values[str]:
+        consumed.append(values["value"])
+        return Graph.values()
+
+    graph = Graph[str](f"public.explicit-conditional.{route}")
+    graph.add_node("choose", choose, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "consume",
+        consume,
+        inputs={"value": Graph.node_output("choose", "value")},
+        outputs={},
+    )
+    graph.add_conditional_edge("choose", "go", "consume")
+    graph.add_conditional_edge("choose", "stop", Graph.END)
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert consumed == expected
+
+
+@pytest.mark.asyncio
 async def test_one_compiled_facade_runs_independent_states_concurrently() -> None:
     async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
         await asyncio.sleep(0)
@@ -671,6 +755,7 @@ async def test_skip_failed_substitution_publishes_exact_output_for_downstream_ma
         inputs={"value": Graph.node_output("review", "value")},
         outputs={"result": str},
     )
+    graph.add_edge("review", "consume")
     graph.set_outputs({"result": Graph.node_output("consume", "result")})
     failed = await graph.run(Graph.values(value="input"), run_id="skip-substitution-run")
     assert isinstance(failed, Graph.AwaitingResumeResult)
@@ -761,6 +846,7 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
             inputs={"value": Graph.node_output("leaf", "value")},
             outputs={},
         )
+        graph.add_edge("leaf", "consume")
         graph.set_outputs({})
         return graph
 
@@ -1431,6 +1517,7 @@ async def test_pure_skip_future_proof_accepts_a_substitution_candidate_path() ->
         inputs={"value": Graph.node_output("source", "value")},
         outputs={"result": str},
     )
+    graph.add_edge("source", "consumer")
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
@@ -1582,16 +1669,16 @@ async def test_state_only_recovery_fails_closed_after_confirmed_substitution_con
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("continuation_mode", ["complete", "state-only"])
-async def test_skip_failed_substitution_rejects_triggered_data_target_with_missing_required_input_before_commit(
+async def test_skip_failed_substitution_rejects_completed_join_with_missing_required_input_before_commit(
     continuation_mode: str,
 ) -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
     async def consume(_values: Graph.Values[str]) -> Graph.Values[str]:
-        pytest.fail("unavailable data target must not execute")
+        pytest.fail("unavailable join target must not execute")
 
-    graph = Graph[str](f"public.skip-substitution-unavailable-data.{continuation_mode}")
+    graph = Graph[str](f"public.skip-substitution-unavailable-join.{continuation_mode}")
     graph.add_node("missing", fail, inputs={}, outputs={"value": str})
     graph.add_node("review", fail, inputs={}, outputs={"value": str})
     graph.add_node(
@@ -1603,6 +1690,7 @@ async def test_skip_failed_substitution_rejects_triggered_data_target_with_missi
         },
         outputs={},
     )
+    graph.add_join(("missing", "review"), "consume")
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
@@ -1738,20 +1826,20 @@ async def test_pure_skip_rejects_a_completed_join_with_missing_input_before_comm
 
 
 @pytest.mark.asyncio
-async def test_pure_skip_allows_unselected_branch_and_untriggered_data_dependency() -> None:
+async def test_pure_skip_allows_an_unselected_branch() -> None:
     calls: list[str] = []
 
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
     async def forbidden(_values: Graph.Values[str]) -> Graph.Values[str]:
-        pytest.fail("unselected/untriggered consumer must not execute")
+        pytest.fail("unselected consumer must not execute")
 
     async def selected(_values: Graph.Values[str]) -> Graph.Values[str]:
         calls.append("selected")
         return Graph.values()
 
-    graph = Graph[str]("public.skip-unselected-and-untriggered")
+    graph = Graph[str]("public.skip-unselected")
     graph.add_node("source", fail, inputs={}, outputs={"value": str})
     graph.add_node(
         "unselected",
@@ -1760,12 +1848,6 @@ async def test_pure_skip_allows_unselected_branch_and_untriggered_data_dependenc
         outputs={},
     )
     graph.add_node("selected", selected, inputs={}, outputs={})
-    graph.add_node(
-        "data-only",
-        forbidden,
-        inputs={"value": Graph.node_output("source", "value")},
-        outputs={},
-    )
     graph.add_conditional_edge("source", "unselected", "unselected")
     graph.add_conditional_edge("source", "selected", "selected")
     graph.set_outputs({})

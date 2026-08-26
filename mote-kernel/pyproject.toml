@@ -100,11 +100,11 @@ quote-style = "double"
 
 # The ratchet keeps legacy debt from growing. It is not a health target.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 503
-type_definitions = 287
-dataclass_types = 177
-dataclass_fields = 499
-decision_points = 1326
+top_level_definitions = 502
+type_definitions = 286
+dataclass_types = 176
+dataclass_fields = 496
+decision_points = 1312
 logical_clone_pairs = 12
 record_shape_clone_pairs = 21
 thin_single_use_helpers = 17
@@ -125,8 +125,8 @@ test_only_private_definitions = 0
 # exist, so this list cannot silently become a second complexity baseline.
 [tool.mote_kernel.complexity_reviewed]
 logical_clone_pairs = [
-  "[branch] execution/engine/resume_input.py:160:node_inputs_available <-> execution/engine/routing.py:136:graph_outputs_available",
-  "[branch] execution/engine/resume_input.py:166:node_inputs_available <-> execution/engine/routing.py:142:graph_outputs_available",
+  "[branch] execution/engine/resume_input.py:160:node_inputs_available <-> execution/engine/routing.py:134:graph_outputs_available",
+  "[branch] execution/engine/resume_input.py:166:node_inputs_available <-> execution/engine/routing.py:140:graph_outputs_available",
   "[function] execution/engine/admission.py:38:admit_graph_input <-> execution/engine/admission.py:46:admit_child_graph_input",
   "[function] execution/graph/ports.py:202:normalize_input_bindings <-> execution/graph/ports.py:230:normalize_graph_output_declarations",
   "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:184:_admit_node_input_frame",
@@ -164,7 +164,7 @@ record_shape_clone_pairs = [
 thin_single_use_helpers = [
   "execution/engine/recovery.py:601:_claim",
   "execution/engine/resume_input.py:67:_require_decoded_values",
-  "execution/engine/routing.py:102:_success_routes",
+  "execution/engine/routing.py:100:_success_routes",
   "execution/engine/scheduler.py:80:_capture",
   "execution/family_driver.py:150:_request",
   "execution/graph/values.py:214:_make_graph_input_frame",

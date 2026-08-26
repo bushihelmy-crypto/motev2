@@ -965,7 +965,6 @@ def _resolve_quiescent(
                     facts.control_targets,
                     facts.completed_join_targets,
                     facts.remaining_join_progress,
-                    facts.data_targets,
                 )
             )
             and facts.unavailable_graph_outputs

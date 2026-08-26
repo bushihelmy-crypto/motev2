@@ -268,6 +268,7 @@ def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
             nodes=tuple(nodes),
             edges=(
                 DirectEdge(GraphNodeId("nested"), GraphNodeId("controller")),
+                DirectEdge(GraphNodeId("nested"), GraphNodeId("consumer")),
                 ConditionalEdge(GraphNodeId("controller"), GraphRouteId("repeat"), GraphNodeId("nested")),
                 ConditionalEdge(GraphNodeId("controller"), GraphRouteId("done"), END),
             )

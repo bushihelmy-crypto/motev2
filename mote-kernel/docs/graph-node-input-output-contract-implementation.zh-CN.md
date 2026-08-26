@@ -1,11 +1,11 @@
 # Graph 节点显式多端口输入/输出与参数绑定实施方案
 
-> 核心原则：public declaration 在调用边界规范化为 immutable nominal definition，builder 只提交完整 candidate；compiler 一次性拥有 reference、exact type、data/control topology 与 shared `FrontierTransitionPlan`。Runtime 只 materialize 已 admission、已确认的 frames，`GraphRunState` 是 control truth，`ScopeRunCoordinate` 是 concrete frame identity。State-only/recovered invocation 在任何 mutation 前沿 shared plan 做 bounded availability proof：既有 settlement/concrete skip 只走确定 route，ordinary callable 只展开 canonical success projection，failure/interrupt 由 awaiting quiescence invariant 闭合，nested proof 不做 Cartesian product。四类 frame、三类 Outcome/Result 与 complete/recovered continuation 保持需求规定的 nominal separation；所有 public values/outcomes/results/transitions 都由唯一 owner factory/seal 构造。`Graph` 是唯一 public facade，不新增 legacy、第二 runner、value truth、limits truth、persistence 或 State 扩张。
+> 核心原则：public declaration 在调用边界规范化为 immutable nominal definition，builder 只提交完整 candidate；`inputs=` 唯一拥有 value source/readiness，direct、conditional 与 join declaration 唯一拥有 activation。Compiler 一次性拥有 reference、exact type、value proof、显式 control topology 与 shared `FrontierTransitionPlan`；`NodeOutputRef` 不创建执行边。Runtime 只 materialize 已 admission、已确认的 frames，`GraphRunState` 是 control truth，`ScopeRunCoordinate` 是 concrete frame identity。State-only/recovered invocation 在任何 mutation 前沿 shared plan 做 bounded availability proof：既有 settlement/concrete skip 只走确定 route，ordinary callable 只展开 canonical success projection，failure/interrupt 由 awaiting quiescence invariant 闭合，nested proof 不做 Cartesian product。四类 frame、三类 Outcome/Result 与 complete/recovered continuation 保持需求规定的 nominal separation；所有 public values/outcomes/results/transitions 都由唯一 owner factory/seal 构造。`Graph` 是唯一 public facade，不新增 legacy、第二 runner、value truth、limits truth、persistence 或 State 扩张。
 
 ## 1. 文档信息与当前判定
 
 - 状态：**Implemented / normative source**
-- 日期：2026-08-17
+- 日期：2026-08-26
 - 所属项目：Mote Kernel
 - 目标目录：`mote-kernel/src/mote_kernel`
 - 唯一公共门面：`mote_kernel.execution.Graph`
@@ -21,14 +21,14 @@
 ### 2.1 本次必须交付
 
 1. callable node 通过 `add_node()` 显式声明具名 input source bindings 和 output type declarations。
-2. input binding 是 named value source/readiness 的唯一事实源；调用方不重复维护同一条普通 data edge。
-3. compiler 收集完整 immutable definition 后校验 source、scope、方向、类型解析、执行前后关系、data/control 合成和 activation gate。
+2. input binding 是 named value source/readiness 的唯一事实源；direct、conditional 与 join declaration 是 activation 的唯一事实源，二者职责正交。
+3. compiler 收集完整 immutable definition 后校验 source、scope、方向、类型解析、执行前后关系、value/control 合成和 activation gate。
 4. runtime 为每次 activation 建立 destination-local input frame，把 producer 的具名 output 实值交给 consumer 的对应 input。
 5. graph input、ordinary callable、nested graph boundary 和 graph result 使用同一个 parameterized immutable frame ABI；逐端口 exact type 由 compiled descriptor 约束。
 6. graph input、continuation、materialization 和 output 分别在其最早可观察时点 admission；不同阶段拥有不同 side-effect guarantee。
 7. failure、interrupt、skip、conditional、join、control loop、nested 和同进程 continuation 有确定、可测试的 value 语义。
-8. compiler 拒绝真实执行上尚未产生、方向错误、越 scope、形成 data cycle 或不能 guaranteed-before 的 output reference；`add_node()` 文本顺序不决定 data/control topology，但按第 3.7 节唯一地决定 resource first-seen order。
-9. `add_edge()`、`add_conditional_edge()` 和 `add_join()` 的 endpoint、方向、重复/冲突、data-cycle/control-loop 合法性、entry/completion 与 data/control 合成只在收集完整图后由 compiler 校验；builder 不以当前声明顺序提前判定 node 不存在。
+8. compiler 拒绝真实执行上尚未产生、方向错误、越 scope、形成 data cycle、缺少 incoming control 或不能 guaranteed-before 的 output reference；`add_node()` 文本顺序不决定 value/control topology，但按第 3.7 节唯一地决定 resource first-seen order。
+9. `add_edge()`、`add_conditional_edge()` 和 `add_join()` 的 endpoint、方向、重复、data-cycle/control-loop 合法性、entry/completion 与 value/control 合成只在收集完整图后由 compiler 校验；同一 source/target 的 value binding 与 direct edge 合法且分别拥有 value/control 事实，builder 不以当前声明顺序提前判定 node 不存在。
 10. completed/aborted/awaiting-resume Result 使用 invariant closed nominal variants，全部携带 non-optional invariant opaque continuation；state-only lineage 使用独立 sealed recovered snapshot 和 whole-invocation availability preflight。
 11. nested success 的 parent routing、nested conditional-source 禁令和 terminal aborted-child recovery 在 compiler/resume preflight 有唯一 owner。
 12. graph output projection 按 compiled source binding 从 admitted graph-input frame 或 confirmed node publication 读取，包括 root input passthrough 与 child input passthrough。
@@ -111,6 +111,7 @@ graph.add_node(
     outputs={"html": Html},
 )
 
+graph.add_edge("normalize", "render")
 graph.set_outputs({"html": Graph.node_output("render", "html")})
 
 passthrough.set_outputs(
@@ -142,6 +143,7 @@ Python 在函数调用前已经求值 mapping。重复字面量 key 可能被覆
 - `Graph.graph_input(name, value_type)` 建立 graph input boundary 的 canonical typed reference。
 - 同一个 graph input 被多处使用时复用同一个 reference value，不重复声明 type。
 - `Graph.node_output(node_id, parameter_name)` 只保存 source node ID 和 source output name；type 由 compiler 从 source `outputs=` declaration 解析。
+- `Graph.node_output()` 只声明 consumer 激活后读取哪个 value；它不创建 direct/conditional/join edge，也不使 consumer reachable。
 - source ref 不携带某次运行的 concrete value。
 - reference 可以指向文本上稍后调用 `add_node()` 声明的 node；compiler 在完整收集后解析。
 - compiler 拒绝 unknown node/port、input/output wrong direction、self reference、nested scope escape、data cycle 和真实执行上不能 guaranteed-before 的 source。
@@ -156,8 +158,10 @@ Python 在函数调用前已经求值 mapping。重复字面量 key 可能被覆
 2. builder 在 detached candidate 中复用并构造现有 frozen `DirectEdge`、`ConditionalEdge` 或 `JoinEdge`，不保存调用方 container；
 3. 全部 local normalization 成功后才由第 3.1 节 transaction primitive 一次性提交 replacement `_GraphBuilderState`；失败 edge 调用不留下 edge、entry 或其他 builder mutation；
 4. builder 不检查 endpoint node 当下是否已添加，因此 edge 可以引用文本上稍后声明的 node；
-5. compiler 收集完整 node/edge/boundary definition 后，统一校验 unknown endpoint、START/END 位置与方向、route/join source、nested conditional source、重复 declaration、data/direct same-pair 冲突、data cycle、control-loop activation 坐标、scope、entry 与 completion；
+5. compiler 收集完整 node/edge/boundary definition 后，统一校验 unknown endpoint、START/END 位置与方向、route/join source、nested conditional source、重复 control declaration、data cycle、node-output consumer 的 incoming control、control-loop activation 坐标、scope、entry 与 completion；
 6. 任一 edge 语义错误均在 compiled cache、atomic freeze、`StartGraphRun`、commit、resource claim 和 node call 之前返回 stable `GraphValidationError`。
+
+同一 `(source, target)` 的 `NodeOutputRef` binding 与 `DirectEdge` 是合法的两条正交 declaration：前者声明 value contract，后者声明 activation contract；只有重复 control edge 仍是 duplicate error。含 `NodeOutputRef` 的 consumer 若没有 incoming direct/conditional/join gate，compiler 以现有 `GraphValidationError` fail closed。显式 START target 依赖 node output 的既有错误优先于该 missing-control 错误；unknown/self source、unknown output 与 ordinary data cycle 也保持更高优先级。
 
 `add_edge(Graph.START, target)` 在 builder 边界继续规范化到现有 `GraphDefinition.entries`，这是 START edge 的唯一 internal canonical representation；不增加 `set_entry()` 或并行 entry truth。`add_edge(source, Graph.END)` 继续使用现有 `DirectEdge` terminal target。Builder 不检查 target/source 存在性或 duplicate entry/edge；它们与 automatic entry、graph output completion 的合成只由第 7 节 compiler lowering 定义。
 
@@ -647,7 +651,7 @@ Global resource order 的唯一规则是 successful-builder-transaction first-se
 | outcome/resume factory normalization | canonical outcome/resume owners | concrete action/outcome fields、frame variant acceptance | value entry normalization、callable route legality、第二 frame DTO |
 | owner-sealed construction | values owner / outcome owner / settlement-result owner / family driver | exact private construction token/seal identity、factory/driver-only canonical nominal construction | public alternate constructor、wrapper DTO、global seal registry |
 | execution-limits normalization | existing `ExecutionLimits` owner | 两个 public keyword 的 exact integer/positive validation，构造本 invocation 唯一 effective limits | graph compile、State、recovery-specific limit |
-| graph compilation | graph compiler | canonical identity、全部 edge endpoint、source、scope、direction、exact type resolution、nested conditional-source prohibition、data/control、entry/completion、shared frontier transition/recovery/output-projection plans | callable 签名反射、concrete value |
+| graph compilation | graph compiler | canonical identity、全部 edge endpoint、source、scope、direction、exact type resolution、nested conditional-source prohibition、value/control、entry/completion、shared frontier transition/recovery/output-projection plans | callable 签名反射、concrete value |
 | graph-input admission | public run facade + values owner | boundary key/type、root `ScopeRunCoordinate` 与 continuation invocation shape | node output、descriptor-only frame key |
 | continuation/resume admission | public family facade + target compiled graph | family/direct root-state value equality、complete/recovered snapshot invariant、exact root/child `ScopeRunCoordinate`、codec identity、override encode/decode、aborted-child restart prohibition、target input frame | commit 或 latest-snapshot authority、按 path 隐式补 run identity |
 | recovery availability preflight | public family facade + compiled graph 的直接 `transition: FrontierTransitionPlan[GraphValueT]` | exact State settlements、effective limits、admitted resume/skip semantics、完整 frontier quiescence、parallel/resource/nested barrier、Result/limit boundary、scoped-run frame coordinates、full control/availability/child/action equality、canonical success-route requirements 与 failure/interrupt awaiting invariant | 预测 callable concrete output、shortened dedup identity、concrete-value comparison、descriptor/path-only runtime key、另建 routing/join/session/limits 解释器 |
@@ -721,7 +725,7 @@ Callable 必须满足统一 parameterized async frame ABI，但 runtime compiler
 - `Graph.node_output("normalize", "text")` 的 exact type 来自 `normalize.outputs["text"]`；
 - `inputs={"local": source_ref}` 的 local name 与 source type 关系来自该 node 的 canonical binding；
 - `set_outputs({"html": source_ref})` 的 result type 来自 source declaration；
-- source 是否 guaranteed-before、是否越 scope、是否被 control path 绕过只能在完整 data/control topology 上判定。
+- source 是否 guaranteed-before、是否越 scope、是否被 control path 绕过只能在完整 value/control topology 上判定。
 
 因此 exact port contract 的唯一权威是 compiled descriptor，不是 Python annotation、callable 签名或表面泛型。`NodeOutputRef` 保持非泛型；`Graph.Values[GraphValueT]["raw"]` 和 `Graph.CompletedResult[GraphValueT].outputs["html"]` 在静态上只返回 graph-wide `GraphValueT`，不伪造 `str`/`Html` 的逐键推导。
 
@@ -846,13 +850,14 @@ Compiler 从 canonical declaration 构建每个 port 的唯一 exact descriptor 
 3. 为 ordinary callable 的每个 destination input 生成带 source exact descriptor 的 `ResolvedInputBinding`；`inputs` mapping 本身就是该 callable 的 input schema，不比较不存在的第二份 callable schema；
 4. 对 nested child，将 parent 每个 resolved source descriptor 与 child compiled graph-input boundary 做 missing/extra/exact-type 比较；
 5. 对 `set_outputs()`，解析每个 source descriptor 并建立 graph-output boundary，明确保存 `GraphInputPort | NodeOutputPort` source variant，拒绝缺失、方向错误或无法 guaranteed-before-completion 的 source；
-6. 拒绝 nested node 作为 conditional-edge source；nested success 的 `ContinueGraphRouting`、direct/join eligibility 在同一 topology plan 中冻结；
-7. 为每个 ordinary node 固定唯一 outcome-admission rules：conditional source 只接收 declared `SelectGraphRoute`，non-conditional source 只接收 `ContinueGraphRouting`，failure/interrupt 不伪造 route；这些规则不另存为第二 DTO；
-8. 保留 successful builder transactions 已提交的 resource first-seen order，验证 unique IDs/order 与 exact node requirements，不在 compiler 中 lexical re-sort；
-9. 将 frontier settlement、routing/join resolution、resource waiter、nested barrier/family driving、planner-limit boundary 与 completion 统一 lowering 为一个 immutable `FrontierTransitionPlan`，供 runtime concrete execution 与 recovery proof 共同使用；
-10. Recovery evaluator 只在 `CompiledGraph.transition` 引用的 shared transition/materialization/publication plans 与同一 outcome-admission rules 上附加 availability transfer：current State 中已有的 settlement 与已 admission 的 concrete skip 使用唯一 contribution；resume 后重新成为 Pending 的 conditional callable 与其他尚未执行的 conditional callable 一样，其 canonical success projection 包含全部 declared route branches；
-11. 将 exact schema descriptors 写入 immutable materialization、outcome/output-admission 和 graph-output projection plans；每类 nominal plan 同时固定它在 runtime 调用 identity owner 构造 `GraphInputAvailabilityCoordinate`、`PublicationAvailabilityCoordinate`、`ResumeInputAvailabilityCoordinate` 或 `ChildBoundaryAvailabilityCoordinate` 的唯一位置，不保存或猜测 invocation run ID，runtime 也不重新解析 declaration；
-12. 同时完成第 3.3 节 edge semantics 和第 7 节 data/control availability 校验。
+6. ordinary data cycle 校验后构建 direct/conditional/join control indexes；先拒绝依赖 node output 的 explicit START target，再拒绝没有 incoming control gate 的 node-output consumer；
+7. 拒绝 nested node 作为 conditional-edge source；nested success 的 `ContinueGraphRouting`、direct/join eligibility 在同一 topology plan 中冻结；
+8. 为每个 ordinary node 固定唯一 outcome-admission rules：conditional source 只接收 declared `SelectGraphRoute`，non-conditional source 只接收 `ContinueGraphRouting`，failure/interrupt 不伪造 route；这些规则不另存为第二 DTO；
+9. 保留 successful builder transactions 已提交的 resource first-seen order，验证 unique IDs/order 与 exact node requirements，不在 compiler 中 lexical re-sort；
+10. 将 frontier settlement、routing/join resolution、resource waiter、nested barrier/family driving、planner-limit boundary 与 completion 统一 lowering 为一个 immutable `FrontierTransitionPlan`，供 runtime concrete execution 与 recovery proof 共同使用；
+11. Recovery evaluator 只在 `CompiledGraph.transition` 引用的 shared transition/materialization/publication plans 与同一 outcome-admission rules 上附加 availability transfer：current State 中已有的 settlement 与已 admission 的 concrete skip 使用唯一 contribution；resume 后重新成为 Pending 的 conditional callable 与其他尚未执行的 conditional callable 一样，其 canonical success projection 包含全部 declared route branches；
+12. 将 exact schema descriptors 写入 immutable materialization、outcome/output-admission 和 graph-output projection plans；每类 nominal plan 同时固定它在 runtime 调用 identity owner 构造 `GraphInputAvailabilityCoordinate`、`PublicationAvailabilityCoordinate`、`ResumeInputAvailabilityCoordinate` 或 `ChildBoundaryAvailabilityCoordinate` 的唯一位置，不保存或猜测 invocation run ID，runtime 也不重新解析 declaration；
+13. 同时完成第 3.3 节 edge semantics 和第 7 节 value/control availability 校验。
 
 任一失败都是 deterministic `GraphValidationError`，不安装 partial compiled cache，不冻结 partial graph family，不产生 `StartGraphRun`、commit、resource claim 或 node call。Concrete graph input 与 callable output 在 compile 时尚不存在，仍分别由 run admission 和 output admission 按同一 compiled exact descriptor 检查；不将这两类 runtime value error 伪称为 compile-time 可证明事实。
 
@@ -890,7 +895,6 @@ OutputDeclaration[GraphValueT_co]
 OutputDeclarations[GraphValueT]
 GraphOutputBinding[GraphValueT]
 GraphOutputBindings[GraphValueT]
-DataTriggerPlan
 MaterializationPlan[GraphValueT]
 FrontierTransitionPlan[GraphValueT]
 RecoveryTransferState[GraphValueT]
@@ -940,7 +944,6 @@ _GraphTransition[GraphValueT]
 _TransitionSeal
 
 SettledFrontierCoordinate       # derived from the current GraphRunState; never persisted
-InitialActivationOrigin | DataActivationOrigin | ControlActivationOrigin
 _CompiledFamilyIdentity
 GraphRunState                         # exact immutable root state value from State owner
 _ContinuationSeal
@@ -963,7 +966,7 @@ Public `Graph.Values`、`Graph.SuccessOutcome`/`FailureOutcome`/`InterruptOutcom
 
 `CompiledGraph` 的 graph-input declaration 只存在于 `graph_input_descriptor.declarations`；它不再存储 `graph_inputs` mirror。其 compiled topology 直接以 `transition: FrontierTransitionPlan[GraphValueT]`、graph input/output descriptors、nodes、nested graphs、resources 与 resume binding 组成，不保留 `recovery` wrapper 或 entries/materializations/graph-output/resource-order forwarding property。
 
-`FrontierTransitionPlan` 是 runtime/recovery 共用的唯一 control-transfer definition，具体持有 entries、routing/join/data maps、materialization、每个 node 的 publication `FrameDescriptor`、graph completion 与 resource order，并由 `CompiledGraph.transition` 直接拥有；callable 分类只由 `CompiledGraph.nodes` 中的 `CallableNodeDefinition` nominal variant 派生，nested 分类只由 `CompiledGraph.nested_graphs` keys 派生，不在 transition 中存储镜像集合。`RecoveryTransferState` 是 invocation-preflight worklist 中的 immutable transient abstract state，其 dataclass/nominal equality 与 hash 覆盖 exact frontier control/resource/live-task positions、effective `ExecutionLimits`、全部 scoped-run availability coordinates、child dispositions、admitted actions 与 invocation-new-child identities；route 已由 State settlement/action 拥有，不复制 future outcome/route 或 unpublished facts。Seen set 直接使用完整 state identity，不另造缩短 dedup tuple。`RecoveryTraversalKey` 是单独的 canonical ordering projection，即使 key collision 也不允许合并 unequal states。`FrameDescriptorIdentity` 只拥有 schema；`ScopeRunCoordinate` 只拥有 runtime graph-run scope；`StableActivation(scope_run, superstep, node_id)` 在二者之上拥有一次 activation。Graph-input/publication/resume-input/child-boundary availability 必须分别组合 exact runtime coordinate 与 descriptor，不能按 path/definition/descriptor 隐式补 generation。Concrete frames 继续由 run context/continuation 持有，绝不进入 abstract equality/hash/sort/repr。`InitialActivationOrigin`、`DataActivationOrigin` 和 `ControlActivationOrigin` 仅是当前 compiler/runtime candidate 的局部元数据，不进入 State、continuation 或任何 history index。Activation/resolution 不在 run context 中建立第二组 nominal ledger；它们由当前 authoritative `GraphRunState` 派生。Public `Graph.Values[GraphValueT]` 是 values owner 中这些具体 frames 的唯一 facade ABI，internal nominal scope 不因此丢失。Public `Graph.Continuation[GraphValueT]` 只指向 seal-constructed `_GraphContinuation[GraphValueT]` 的只读类型表面，不暴露 seal、snapshot variant 或第二 implementation。`NodeOutputRef` 必须保持非泛型，禁止再添加一个无法由公共参数推导的表面 `ValueT`。
+`FrontierTransitionPlan` 是 runtime/recovery 共用的唯一 control-transfer definition，具体持有 entries、direct/conditional/join indexes、materialization、每个 node 的 publication `FrameDescriptor`、graph completion 与 resource order，并由 `CompiledGraph.transition` 直接拥有；它不保存 data trigger 或 reverse binding index。Callable 分类只由 `CompiledGraph.nodes` 中的 `CallableNodeDefinition` nominal variant 派生，nested 分类只由 `CompiledGraph.nested_graphs` keys 派生，不在 transition 中存储镜像集合。`RecoveryTransferState` 是 invocation-preflight worklist 中的 immutable transient abstract state，其 dataclass/nominal equality 与 hash 覆盖 exact frontier control/resource/live-task positions、effective `ExecutionLimits`、全部 scoped-run availability coordinates、child dispositions、admitted actions 与 invocation-new-child identities；route 已由 State settlement/action 拥有，不复制 future outcome/route 或 unpublished facts。Seen set 直接使用完整 state identity，不另造缩短 dedup tuple。`RecoveryTraversalKey` 是单独的 canonical ordering projection，即使 key collision 也不允许合并 unequal states。`FrameDescriptorIdentity` 只拥有 schema；`ScopeRunCoordinate` 只拥有 runtime graph-run scope；`StableActivation(scope_run, superstep, node_id)` 在二者之上拥有一次 activation。Graph-input/publication/resume-input/child-boundary availability 必须分别组合 exact runtime coordinate 与 descriptor，不能按 path/definition/descriptor 隐式补 generation。Concrete frames 继续由 run context/continuation 持有，绝不进入 abstract equality/hash/sort/repr。Activation/resolution 不在 run context 中建立第二组 nominal ledger；它们由当前 authoritative `GraphRunState` 与 compiled explicit control topology 派生。Public `Graph.Values[GraphValueT]` 是 values owner 中这些具体 frames 的唯一 facade ABI，internal nominal scope 不因此丢失。Public `Graph.Continuation[GraphValueT]` 只指向 seal-constructed `_GraphContinuation[GraphValueT]` 的只读类型表面，不暴露 seal、snapshot variant 或第二 implementation。`NodeOutputRef` 必须保持非泛型，禁止再添加一个无法由公共参数推导的表面 `ValueT`。
 
 `_GraphBuilderState` 是 Graph builder 的唯一 assembly truth，frozen 保存 node definitions、edges、entries、graph-output declaration、按 first-seen 排列的 resource definitions 与 resume codec declaration；next resource order 只由 ordered resource tuple 长度派生，不保存第二 counter。Compiled family/cache/frozen flag 仍由 Graph owner 单独持有，但 builder transaction 不修改它们。每个 public mutator 从 current state 纯推导完整 replacement 并单次 assignment，禁止暴露 mutable list/dict、分步 append 或 rollback ledger。
 
@@ -977,10 +980,12 @@ snapshot one committed immutable _GraphBuilderState per family member
     -> validate all edge endpoints, START/END positions, nested conditional sources and duplicate/conflict declarations
     -> resolve graph input and node output refs into exact descriptor bindings
     -> assign schema-only FrameDescriptorIdentity and attach each descriptor to its nominal graph-input/publication/resume-input/child-boundary coordinate-construction plan; no runtime run ID is guessed
-    -> build data-readiness and independent control graphs
-    -> validate scope/direction/exact type/data cycles and control-loop coordinates
-    -> lower initial entries and frontier-local producer-to-target data trigger plans
-    -> lower control eligibility/data readiness/completion gates
+    -> validate scope/direction/exact type and ordinary data cycles
+    -> build direct/conditional/join control indexes
+    -> reject explicit START targets with node-output dependencies
+    -> reject node-output consumers without incoming control gates
+    -> derive automatic/explicit entries and validate control reachability
+    -> prove control eligibility, guaranteed-before, publication coordinates and completion
     -> retain successful-builder-transaction resource first-seen order and validate exact requirements
     -> lower one shared frontier/session/routing/resource/nested/planner-limit transition plan
     -> lower graph-input/node-publication output source projections
@@ -1000,7 +1005,7 @@ Compiler 证明的是：
 
 - source candidate/producer 在 consumer 可能 activation 前存在合法 guaranteed-before path；
 - consumer 只有在全部 required sources confirmed publication 后才可 materialize/call；
-- data-driven target 只能被包含其 required producer 的某个 settled frontier 触发，不需要也不允许 runtime 重扫全部历史 ledger；
+- 每个 node-output consumer 都由 direct/selected conditional/completed join 显式激活，value binding 只参与 required producer guarantee 与 materialization，不发现 runtime target；
 - control route、join 或 loop 不会绕过 data readiness gate；current State 中已有的 settlement contribution 与 admitted concrete skip 使用唯一 route，resume 后重新成为 Pending 的 conditional callable 与其他尚未执行 conditional callable 的 canonical success projection 才产生 declared route branch set；
 - nested success 只产生 parent `ContinueGraphRouting`，nested node 不会进入 conditional-source plan；
 - graph terminal path 只能在每个 declared output binding 可从 matching `ScopeRunCoordinate` 的 graph-input frame 或 exact scoped activation 的 node-publication frame 投影时成功完成；
@@ -1030,18 +1035,18 @@ Recovery worklist 明确分离 traversal ordering 与 semantic dedup：
 
 - data binding 唯一拥有 named source 和 required readiness。
 - direct/conditional/join/START/END 唯一拥有纯 control eligibility/order。
-- activation 必须同时满足 control eligibility（若存在）与全部 data readiness。
-- 初始 frontier 候选只来自 compiled automatic/explicit entries；zero-input node 不得因历史扫描在后续 superstep 重复成为 entry。
-- 没有显式 incoming control 的 node 采用 frontier-local data-driven eligibility：只有当前 authoritative settled `GraphRunState.frontier` 包含至少一个 required producer，且该 producer 的 success publication 已 confirmed 时才发起一次 readiness 检查；全部 required sources 在该时点 confirmed 才生成 candidate。
-- 有显式 incoming control 的 node 只有在 direct/selected conditional/completed join/START gate 到达后才有资格 activation；data 尚未 ready 时不得进入 target frontier，更不能 claim。
-- data/control 在同一 resolution 选中同一 target 时按 `StableActivation` 合并为一个 candidate；同一 authoritative State transition 最多发出一个该 coordinate，后续是否仍可执行由 successor State 的 frontier/status 和现有 reducer 校验，不建立第二份 activation ledger。
+- 每个含 `NodeOutputRef` 的 consumer 都必须有 incoming direct/conditional/join gate；缺失时 compiler fail closed，binding 不能自行提供 eligibility。
+- activation 必须同时满足显式 control eligibility 与全部 data readiness。
+- 初始 frontier 候选只来自 compiled automatic/explicit entries；zero-input 或 graph-input-only root 可以 automatic entry，node-output consumer 不能 automatic entry。
+- direct/selected conditional/completed join gate 到达后才产生 target candidate；data 尚未 ready 时不得进入 target frontier，更不能 claim。
+- 同一 authoritative State transition 对同一 control target 最多发出一个 `StableActivation` coordinate，后续是否仍可执行由 successor State 的 frontier/status 和现有 reducer 校验，不建立第二份 activation ledger。
 
-同一 `(source_node, target_node)` 已有 data binding 时，重复普通 direct `add_edge(source, target)` 是确定的 `GraphValidationError`，不 coalesce，也不 lowering 为第二份 edge truth。Conditional/join 可以与 data source 涉及同一 node pair，因为它们表达独立 eligibility；compiled plan 仍只有一个 publication 和一个 activation。
+同一 `(source_node, target_node)` 的 data binding 与普通 direct `add_edge(source, target)` 合法共存：binding 声明 value contract，edge 声明 activation contract；它们不是 duplicate truth。真正重复的两个 direct edge declaration 继续由 validation 拒绝。Conditional/join 同样可以与 data source 涉及同一 node pair；compiled plan 仍只有一个 publication 和一个 activation。
 
 ### 7.2 Entry
 
 - 没有 incoming node-output dependency、也没有 incoming control declaration 的 node 是 automatic entry；其 inputs 只能来自 graph boundary 或为空。
-- 显式 `Graph.START -> node` 只用于声明纯 control root。
+- 显式 `Graph.START -> node` 只用于声明纯 control root；START target 依赖 node output 时保持既有 compile error，且该错误先于 missing-control。
 - automatic entry 又被显式 START 指向是 duplicate entry error。
 - 有其他 incoming control 的 graph-input-only node 不是 automatic entry，必须等待对应 control gate。
 - graph 至少有一个 automatic 或 explicit entry；否则 compile 拒绝。
@@ -1055,11 +1060,9 @@ Recovery worklist 明确分离 traversal ordering 与 semantic dedup：
 derive ScopeRunCoordinate from exact GraphRunState + admitted family scope
     -> derive SettledFrontierCoordinate(scope_run, superstep, frontier, revision)
     -> collect settled node outcomes/routing contributions in this current frontier
-    -> derive control candidates from this frontier routing contributions
-    -> look up data targets only from compiled triggers of those current-frontier producers
-    -> for each data target, require all compiled sources confirmed; otherwise it is not a candidate
-    -> for each control target, require all compiled sources confirmed; otherwise choose scoped abort
-    -> merge origins and canonicalize candidates as StableActivation(scope_run, superstep + 1, node_id)
+    -> derive direct, selected conditional and completed join targets from this frontier contributions
+    -> for each explicit control target, require all compiled sources confirmed; otherwise choose scoped abort
+    -> canonicalize targets as StableActivation(scope_run, superstep + 1, node_id)
     -> consult the current State frontier/status and existing reducer rules; never rescan historical frontiers
     -> AdvanceGraphFrontier / CompleteGraphFrontier / AbortGraphRun
     -> after exact successor acknowledgement, successor State becomes the sole activation/resolution authority
@@ -1069,9 +1072,9 @@ derive ScopeRunCoordinate from exact GraphRunState + admitted family scope
 
 Family driver 在一个 invocation 的确定性控制流中只消费一次当前 settled State；该局部控制流约束不写入 State/run context，也不承诺拒绝调用方再次提交同值 State。再次提交同值 pair 仍是 caller-owned branch，不能借此推导旧快照的 latestness。
 
-一个 current-frontier producer 的 success 可以来自上一 invocation 中已确认的 sibling；resume 后仍按当前 frontier 的 canonical node set 收集，不按“本次新返回的值”收集。这保证 partial success + failure/resume 时可以使用早已确认的 sibling publication，同时不会让更早 superstep 的任意历史值重新触发 target。
+一个 explicit control target 所需的 producer success 可以来自上一 invocation 中已确认的 sibling；resume 后仍按 compiled publication selection 读取 exact coordinate，不按“本次新返回的值”猜测。这保证 partial success + failure/resume 时可以使用早已确认的 sibling publication，同时 publication 本身不会激活 target。
 
-多个 producers 在同一 frontier 触发同一 target 时，先按 target coordinate 去重，再做一次 AND readiness。不同 frontier 产生 required sources 时，只有包含最后一个使全部 sources ready 的 producer frontier 能生成 target。`AdvanceGraphFrontier` 的 acknowledged successor 已将 State 推进到下一 frontier，因此同一 accepted branch 不会再次解析旧 frontier；commit mismatch/exception 不安装 successor，也不产生新的 activation authority。
+多个 direct/conditional/join control contribution 在同一 frontier 指向同一 target 时，先按 target coordinate 去重，再做一次 required-value readiness。`AdvanceGraphFrontier` 的 acknowledged successor 已将 State 推进到下一 frontier，因此同一 accepted branch 不会再次解析旧 frontier；commit mismatch/exception 不安装 successor，也不产生新的 activation authority。
 
 Continuation 不保存 activation/resolution history。调用方重放一个更早但结构自洽的 State/continuation pair 仍属于第 3.5 节的 caller-owned branch 边界；runtime 不伪称可以判定其 latestness，也不以缺失的 history 将合法 state-only recovery 判为 malformed。
 
@@ -1096,7 +1099,7 @@ Graph 成功 completion 同时要求：
 
 Root scope 直接返回 `Graph.AbortedResult`；child scope 经现有 `AbortedChild -> TaskFailure` 投影为 parent nested failure，并保留当前 complete/recovered lineage 的 root continuation。Recovery availability proof 在 invocation 的任何 State mutation 前发现历史 graph-input/publication/child snapshot 缺失时返回 `GraphValueUnavailableError`；只有不可由 preflight 预测的已确认 dynamic outcome 才进入上述 abort path。
 
-纯 data-driven consumer 因某个 source skip/failure 没有 publication 时根本不成为 candidate；若没有 control gate 要求它执行，且所有 join/nested/completion/output 条件都已满足，graph 可以正常 completion。若其 output 属于 required graph boundary，则按上述规则 abort，不得无限重试该 consumer。
+不存在纯 data-driven consumer：缺少 incoming control 的 node-output consumer 在 compile 阶段已被拒绝。若显式 control 选中 consumer，而某个 required source 因 skip/failure 没有 publication，则按上述规则 abort，不得无限重试该 consumer。
 
 ### 7.5 Conditional、join、skip 与 control loop
 
@@ -1105,7 +1108,7 @@ Root scope 直接返回 `Graph.AbortedResult`；child scope 经现有 `AbortedCh
 - ordinary callable success 可以贡献 declared routing variant；nested success 永远贡献 `ContinueGraphRouting`，因此 nested node 作为 conditional source 在 compile 时拒绝。Nested success 仍可触发 direct edge 或作为 join arrival。
 - 需要按 child output 路由时，child output 先 materialize 给显式 ordinary router node，由该 router 唯一产生 parent conditional route。
 - success 即使声明/返回空 output frame，仍在 exact settlement acknowledgement 后产生该 `StableActivation` 的完整 confirmed publication；它证明 activation success，不伪造 output port。
-- skip 保留现有 routing contribution，但不 publication，也不作为 data trigger。纯 data consumer 不会成为 candidate；若 skip routing 通过 control 选中一个依赖缺失 output 的 target，按第 7.4 节 abort 当前 scope。
+- skip 保留现有 routing contribution，但不 publication；若 skip routing 通过显式 control 选中一个依赖缺失 output 的 target，按第 7.4 节 abort 当前 scope。
 - ordinary data graph 必须 acyclic。
 - explicit control loop 可以进入下一 `superstep`；stable activation coordinate 因 superstep 不同而不同，并在每次下一 frontier planning 时受本 invocation effective `max_supersteps` 约束。
 - 当 concrete loop branch 的 State 在 existing planner coordinate 满足 `state.superstep >= max_supersteps` 时，统一抛出 `Graph.ExecutionLimitError`；不提前 abort State，不投影 Result，也不为 recovery 建立另一 loop counter。
@@ -1375,7 +1378,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 | `execution/graph/values.py` | ADD 唯一 canonical value/frame owner：`NamedValue`、`_ValuesConstruction`、`_ValuesSeal`、`_GraphValues`、`GraphInputFrame`、`NodeInputFrame`、`NodeOutputFrame`、`GraphOutputView` 与 `_make_graph_values`/shared immutable factories | `Graph.Values` exact alias `_GraphValues`；`Graph.values()` 是唯一 public constructor；construction/value dataclass 都 keyword-only，stored entries `init=False`，private token/seal construction；不导出 entries/internal frames，不依赖 facade/outcome/resume/request/result/run-context/engine/State |
 | `execution/graph/node.py`、`definition.py` | REPLACE homogeneous node contract 为 callable/nested closed definitions | 不修改 callable，不保留旧 overload |
 | `execution/graph/outcome.py` | REPLACE node return ABI 为 canonical `Graph.Values[GraphValueT] | Graph.Outcome[GraphValueT]` closed model；ADD `_OutcomeSeal` owner factories | 只从 `graph.values` 导入 public frame implementation/`FactoryValueT`；outcome variants/factories 只保留一份，public alias 无独立合法 constructor，删除 public `NodeOutcome` |
-| `execution/graph/compiler.py`、`validation.py`、`topology.py` | ADD frontier-local data triggers、control eligibility、entry/completion、outcome validation/materialization/publication descriptors、planner-limit、resource-order、`FrontierTransitionPlan`、graph-output projection 与 recovery availability view | compiler 统一拒绝非法 edge/source/type/topology；生成 schema descriptor 与 runtime-coordinate construction plan，但不猜 run ID；frontier/session/routing/resource/nested/limits lowering 只生成一次；保留 committed resource first-seen order |
+| `execution/graph/compiler.py`、`validation.py`、`topology.py` | ADD explicit control eligibility、missing-control validation、entry/completion、outcome validation/materialization/publication descriptors、planner-limit、resource-order、`FrontierTransitionPlan`、graph-output projection 与 recovery availability view | compiler 统一拒绝非法 edge/source/type/topology；value binding 不生成 control target；生成 schema descriptor 与 runtime-coordinate construction plan，但不猜 run ID；frontier/session/routing/resource/nested/limits lowering 只生成一次；保留 committed resource first-seen order |
 | `execution/graph/resume_input.py` | MIGRATE graph-local codec generic payload 为 canonical `Graph.Values[GraphValueT]` | 从 `graph.values` 直接导入唯一 carrier；保留现有 codec identity/version owner；不建 output codec |
 | `execution/identity.py` | EXTEND existing execution identity owner with `ScopeRunCoordinate`、`StableActivation` 与 root/child canonical derivation functions | 复用 State `GraphRunId`、`ParentGraphActivation`、existing `child_graph_run_id()`；不保存 concrete value，不写 State，不允许 caller-provided arbitrary child run ID |
 | `execution/errors.py` | EXTEND existing hierarchy with port/reference/type admission、unavailable-value 与 publication invariant errors | 不建第二 error hierarchy；错误只携带 stable coordinates |
@@ -1388,7 +1391,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 | `execution/engine/admission.py`、`superstep.py`、`planner.py` | REPLACE shared input 为 compiled materialization preflight，并消费 shared frontier transition/limits plan | `planner.py` 保持 `state.superstep >= limits.max_supersteps` 的唯一 concrete check coordinate；required value 缺失先于 claim/resource/node；prepare 的 Result/limit disposition 是 runtime/recovery 共同 boundary |
 | `execution/engine/session.py`、`scheduler.py`、`settlement.py` | MIGRATE callable frame ABI、outcome/output admission、acknowledged publication candidate 与 shared quiescence transfer | typed failure/interrupt 不截断 remaining Pending、started completion 或 resource waiter；`max_parallel_tasks - live_count` 与 resource selector 唯一决定 legal starts/completions |
 | `execution/engine/frontier.py`、nested projection path | MIGRATE exact child-scope-run input/boundary、`CompletedChild -> TaskSuccess(..., ContinueGraphRouting)`、`AbortedChild` failure 与 public family driving | parent activation 唯一派生/校验 child coordinate；同一路径 repeated child frames 不碰撞；同一 limits 进入每个 scope；parent ack 后才 publication |
-| `execution/engine/routing.py` | MIGRATE current-frontier control candidates、data-trigger merge、nested fixed routing、completion/abort projection | State-owned settled/concrete-skip contribution 只解析一次；resume-to-Pending/future branch set 来自 compiler；recovery 不复制 resolver |
+| `execution/engine/routing.py` | MIGRATE current-frontier direct/conditional/join candidates、nested fixed routing、completion/abort projection | publication 只验证 value availability，不发现 target；State-owned settled/concrete-skip contribution 只解析一次；resume-to-Pending/future branch set 来自 compiler；recovery 不复制 resolver |
 | `execution/engine/resume_input.py` | MIGRATE scoped codec selection、node-local frame encode/decode/admission/re-materialization | 每个 override/materialization 使用 target `StableActivation` coordinate；State 只见 existing opaque binding；失败先于 fence/resume/claim |
 | `state/graph_state/**` | KEEP | 不修改、不导入 execution、不保存 value |
 
@@ -1416,7 +1419,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 - Outcome、commit result 与 transition canonical classes 一次性加入各 owner private identity seal；删除任何 public-valid constructor、unsealed dataclass prototype 或 global/shared seal helper，public aliases 保持原 class narrowing。
 - 所有 run/commit call sites 一次性迁移到第 3.5 节三个 closed overload 与 scoped `Graph.Transition`；删除旧 `next_state` 字段/alias，调用方只返回 exact `candidate_state` successor。
 - Graph builder assembly 一次性迁移为 immutable `_GraphBuilderState` replacement transactions；删除各 mutator 对 nodes/edges/entries/resources/outputs/codec 的分步 append、rollback 或 hidden tombstone。
-- 删除与 binding 重复的 direct data edges；保留真正的 pure control edges。
+- 为每个 node-output consumer 按业务意图声明 direct、conditional、join 或 coordinator control gate；同一 source/target 的 binding 与 direct edge 合法共存，不从 data producer 机械生成 OR edges。
 - 旧 `TaskSuccess.output`/`CompletedChild.output` 迁移为 admitted frame，但仍不进入 State。
 - 旧 shared graph input fallback、compile-only requirement 和“skip 后下游照常读取输入”测试全部替换为真实 dataflow behavior。
 - frontier/session/routing/resource/nested/planner-limit control lowering 一次性抽取为 runtime/recovery 共用的 `FrontierTransitionPlan`；不得保留 recovery-only all-route、immediate-failure-boundary、独立 limits 或不受 selector 约束的 completion path。
@@ -1434,7 +1437,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 2. wrong position、mixed ref/type/concrete value、非法 port name 在 public normalizer 精确拒绝。
 3. Python mapping duplicate-key 不承诺自定义错误；canonical identity/type conflict 仍拒绝。
 4. ordinary zero-input 合法；ordinary input 不虚构 missing/extra schema；nested input 相对 child boundary exact completeness。
-5. edge builder 允许文本 forward declaration；compiler 统一拒绝 unknown endpoint、非法 START/END 方向、duplicate declaration、非法 route/join source、data/direct same-pair 冲突、data cycle 与不合法 control loop。
+5. edge builder 允许文本 forward declaration；compiler 统一拒绝 unknown endpoint、非法 START/END 方向、duplicate control declaration、非法 route/join source、data cycle、node-output consumer 缺失 incoming control 与不合法 control loop；data/direct same-pair 合法且只产生一份 control target。
 6. unknown node/output port、wrong direction、self output reference、scope escape、真实 downstream reference 和无法 guaranteed-before 的 source 在 compile 阶段拒绝；文本 forward ref 若语义合法则接受。
 7. nested node 作为 conditional source 在 compile 阶段稳定拒绝；nested success 作为 direct-edge source 和 join source 成功，基于 child output 的 route 只能经 ordinary router node。
 8. compile/freeze 是 atomic 且 deterministic；任一错误不安装 partial cache、不冻结部分 family。不同 mapping/edge declaration order，以及不改变 successful-node resource first-seen sequence 的 node 重排，产生 canonical structural equality 和稳定错误；已提交 node/resource tuple 左到右首次出现产生 exact `ResourceDefinition.order`，改变该 sequence 的 node 重排明确产生非等价 compiled structure，compiler 不 lexical re-sort。
@@ -1454,14 +1457,14 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 22. multi-input/multi-output ordinary node 使用真实 named materialization；consumer 不收到 shared raw input。
 23. node output missing/extra/wrong exact type 在 success settlement/publication 前拒绝，同时允许 existing cleanup。
 24. publication 只在 exact settlement successor 确认后按 `PublicationAvailabilityCoordinate(StableActivation(scope_run, ...), descriptor)` 进入 run context；Start/Advance/Complete/Abort successor 的 `GraphRunState.frontier/status/superstep/revision` 继续是唯一 activation/resolution authority；commit mismatch/cancel/fence 不留伪事实。
-25. initial/zero-input node 只由 acknowledged State frontier 驱动；data target 只由 current settled frontier 的 required producer 触发，不重扫 historical ledger，不建立独立 activation/resolution history。
-26. multi-source 同 frontier/跨 frontier 只在最后一个 source ready 时生成一个 target coordinate；success empty frame 是 publication，skip 不是 publication/data trigger。
+25. initial/zero-input node 只由 acknowledged State frontier 驱动；后续 target 只由 direct/selected conditional/completed join control contribution 产生，publication 不触发 target，也不建立独立 activation/resolution history。
+26. multi-source required values 由 explicit join/coordinator gate 与 guaranteed-before proof 约束；同一 resolution 对同一 control target 只生成一个 coordinate，success empty frame 是 publication，skip 不是 publication。
 27. partial success + sibling failure/resume 保留成功 publication；同一 scope 的 authoritative frontier 只生成一个 reducer successor，repeated invocation 不读取旧 history；重放旧但自洽 pair 的分支责任属于调用方。
 28. `StableActivation` 嵌入 exact `ScopeRunCoordinate` 并与 attempt token 分离；parallel sibling/child-generation frame 隔离，snapshot canonical sorting，same-coordinate duplicate/different publication 拒绝，State 是唯一 activation/resolution owner。
-29. conditional/join control gate 与 data readiness 正确合成；control 和 data 同时选中 target 时只有一个 activation。
+29. conditional/join control gate 与 data readiness 正确合成；多个显式 control contribution 同时选中 target 时只有一个 activation。
 30. automatic entry、explicit START、duplicate entry、natural terminal、END、graph-input/node-output completion boundary 均有独立 behavior case。
 31. State-owned settled/concrete-skip branch 的 historical value/child snapshot 缺失在 mutation 前返回 `GraphValueUnavailableError`；已确认 settlement 后才由不可预测 concrete output outcome 导致的 target/completion 缺值提交 `AbortGraphRun` 并返回携带 same-lineage continuation 的 `AbortedResult`，两者互斥。
-32. 纯 data consumer 因 skip 不成为 candidate；若 completion/output 不依赖它则正常完成，若 boundary 依赖它则 abort；skip control 选中缺值 target 同样 abort。
+32. missing-control consumer 在 compile 阶段零副作用拒绝；skip control 选中缺值 target 时按现有 dynamic abort 语义处理。
 33. control loop 只用新 superstep/parent coordinate 生成下一轮 activation，不串 value；ordinary data feedback cycle 拒绝。
 34. atomic parent/child freeze；compile failure 不 partial freeze；frozen child 可独立运行但不可 mutation。
 35. 同一 `StartMissingChildren` 的全部 invocation-new children 按 canonical order start；每个 `MissingChild` 先由 parent activation 派生/校验 child `ScopeRunCoordinate`，active children 按 child scope-run/parent activation round-robin，每个 scope 的 quantum 只使用其 `max_parallel_tasks`/resource selector 允许的 legal order，commit order deterministic，ordinary parent siblings 遵守 child barrier。
@@ -1507,7 +1510,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 1. 实现 immutable `_GraphBuilderState` 与全部 mutator detached-candidate/single-assignment transaction；node/resource replacement 同时提交，local failure 保持 builder/cache/frozen state 原样，不实现 rollback/tombstone。
 2. 新建低层 `execution/graph/values.py`，一次性实现 `NamedValue`、`_GraphValues`、四类 internal frame、module-level `FactoryValueT`/`GraphValueT_co`、shared normalization、`_make_graph_values` 与 keyword-only `_ValuesConstruction + _ValuesSeal`；`Graph.Values` exact alias，facade 直接声明 zero/variadic 两个 `Graph.values()` static overload 且只有该 typed delegation 可 public 构造，先以 strict Pyright spike 与 import architecture tests 固定签名和无回环 owner DAG。
 3. 实现 direct mapping、structured refs、callable/nested definitions、dual-source `GraphOutputBinding` 与 graph-wide generic carrier；empty factory 固定 `Values[Never]`；冻结 `_OutcomeSeal`/`_CommitResultSeal`/`_TransitionSeal` owner-only construction，以及三个 run overload、Resume/Commit/Transition/Result/continuation 的 invariant surface。
-4. 实现全部 edge endpoint、START/END、route/join source、nested conditional-source prohibition、重复/冲突、data/control、entry/completion、scope/direction/exact-type/guaranteed-before validation；所有完整边语义只由 graph compiler 裁决。
+4. 实现全部 edge endpoint、START/END、route/join source、nested conditional-source prohibition、重复 control declaration、missing-control、value/control、entry/completion、scope/direction/exact-type/guaranteed-before validation；所有完整边语义只由 graph compiler 裁决。
 5. 实现 plain/routed/failure/interrupt outcome branch admission 与 route requirements；只保留 successful node transaction/resource tuple 的 first-seen order 并写入 canonical definition/plan，compiler 只验证 exact requirements，禁止 lexical re-sort。
 6. 在 `execution/identity.py` 实现唯一 `ScopeRunCoordinate`/embedded `StableActivation` derivation；compiler 只生成 schema descriptors/runtime-coordinate construction plan。将 frontier/session/resource/routing/nested/limits/completion lowering 为 shared `FrontierTransitionPlan`，定义四类 scoped-run availability、full-semantic `RecoveryTransferState` 与 separate `RecoveryTraversalKey`。
 7. 实现 deterministic atomic graph-family compile/freeze；mapping/edge 与不改变 successful first-seen sequence 的 node 重排要求 structural equal，改变 resource first-seen sequence 明确非等价；任一步失败均不安装 partial cache 或冻结部分 family。
@@ -1518,7 +1521,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 2. 实现 graph-input admission、compiled materialization preflight、owner-sealed plain/conditional/failure/interrupt callable outcome 与 child output admission，以及从 matching scoped-run graph-input frame/confirmed node publication 的 graph-output projection；new-run root input 只在 exact Start successor 确认后按 final run coordinate 安装，child input 对称地只在 child Start successor 确认后安装；route error 固定在 call 后、settlement/publication 前。
 3. 建立 invocation-scoped run context，以四类 typed records 和唯一 immutable `ScopedFrameIndex` 保存 exact runtime + descriptor coordinate 到 canonical values-owner frame；child State snapshot 与未确认 candidate 保持独立职责，candidate 不进入 index。Same coordinate/different frame fail closed，不同 child run frames 并存；index replacement 保留其他 typed segments，不建 object/Any/bare-dict 或第二 frame map。实现 seal-constructed complete/recovered continuation snapshot union，不建立 activation/resolution index，也不把 concrete entry 投入 recovery state。
 4. 只在 exact node settlement successor acknowledgement 后安装 concrete frame 与 publication coordinate；root/child 每次 commit 都由 owner seals 投影第 3.5 节 exact result/`Graph.Transition`，acknowledged successor 直接更新 State-owned activation/resolution facts。Commit mismatch、exception、cancellation 或 fence 不留伪事实。
-5. Session 在 typed failure/interrupt 后按 shared `max_parallel_tasks`/resource/nested barrier 继续 started completion、runnable ordinary sibling、resource waiter 和 precomputed nested completion，直到同 frontier 无 Pending；以 current authoritative State frontier 的 compiled trigger/routing plan 解析下一 disposition，不提前返回 AWAITING。
+5. Session 在 typed failure/interrupt 后按 shared `max_parallel_tasks`/resource/nested barrier 继续 started completion、runnable ordinary sibling、resource waiter 和 precomputed nested completion，直到同 frontier 无 Pending；以 current authoritative State frontier 的 compiled explicit routing plan 解析下一 disposition，不提前返回 AWAITING。
 6. 删除 shared-input fallback；node 只接收 destination-local admitted frame。Graph output、Result output view 与 child boundary 不复制第二份 value truth；run context 不挂到 Graph、executor、State 或 global。
 
 ### Phase 3：Failure、loop、nested 与 continuation
@@ -1552,7 +1555,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 - 全部 builder mutators 从 immutable `_GraphBuilderState` 纯推导 replacement 并 single-commit；任一 local failure 后 builder value/identity、compiled cache/frozen state 完全不变。Resource global order 只由 successful `add_node()` transaction order 与每个 resource tuple 左到右的 first-seen sequence 决定，失败 node 不登记 resource；compiler 不 lexical re-sort；
 - `GraphOutputBinding` 只保留 `GraphInputPort | NodeOutputPort` source variant；root/child graph-input passthrough 与 confirmed node-publication output 走同一 compiled projection，不建立 publication-only 假设或第二 value map；
 - `FrameDescriptorIdentity` 只表示 schema；root/child concrete frames 统一使用 `ScopeRunCoordinate(scope, graph_run_id)`，`StableActivation` 嵌入该 coordinate。Graph-input/publication/resume-input/child-boundary keys 都组合 exact runtime coordinate 与 descriptor，不存在 definition/path-only key、implicit child-run lookup 或 old/new dual path；new-run root/child graph-input candidate 只在 matching `StartGraphRun` successor 确认后按同一 final coordinate 安装；
-- initial candidate 只来自 automatic/explicit entry；后续 data candidate 只来自 current authoritative settled State frontier 的 compiled producer trigger；同一 State transition 最多生成一次 target coordinate，success empty frame 与 skip、resume、multi-source、loop/repeated `run()` 的一次性语义均有独立行为证据，且不依赖 history receipt；
+- initial candidate 只来自 automatic/explicit entry；后续 candidate 只来自 current authoritative settled State frontier 的 direct/selected conditional/completed join control contribution；同一 State transition 最多生成一次 target coordinate，success empty frame 与 skip、resume、multi-source、loop/repeated `run()` 的一次性语义均有独立行为证据，且不依赖 history receipt；
 - publication 只在 exact node settlement successor acknowledgement 后安装；`StartGraphRun`/`AdvanceGraphFrontier`/`CompleteGraphFrontier`/`AbortGraphRun` 的 successor State 直接拥有 activation/resolution，commit mismatch、cancellation、fence 和重复旧-frontier lowering 均不留下 transient control truth；
 - `CompletedResult`、`AbortedResult`、`AwaitingResumeResult`、`Result` 与 continuation 都使用 invariant `GraphValueT`，每个 Result 有 non-optional State/continuation；只有 completed variant 有 covariant immutable `Graph.Values[GraphValueT]` outputs，不能借此 widening Result；
 - continuation 与 Result 共享结构相等的 immutable direct root-state value 并携带 execution-private compiled-family identity；complete snapshot 保留全部 distinct scoped-run historical frames，same path repeated child runs 不覆盖。Required frame 缺失、same-coordinate different frame 与所有 extra/inconsistent/malformed snapshot 拒绝；recovered 的合法历史缺失不误判但新增 frame 仍用 exact coordinate；
@@ -1560,12 +1563,12 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 - `RecoveryTransferState` equality/hash/dedup 覆盖所有 scoped-run control、availability、child 与 admitted-action semantic fields；same path/definition/descriptor 下不同 child run IDs 不合并，seen 不使用 shortened tuple。`RecoveryTraversalKey` 只排序且 collision 不合并；concrete frames 只在 run context/continuation coordinate mapping，worklist 不调用 user value ordering/hash/repr；
 - state-only/recovered invocation 从 exact State/resume branch 推进到首个 Result 或 exact planner limit boundary：current State 已有 settlement 与 concrete skip 只沿唯一 route，resume-to-Pending/尚未执行 conditional callable 的 canonical success projection 才枚举 declared routes；全部 current-frontier callable input admission 后，typed failure/interrupt 由无 publication/control contribution 的 quiescence invariant 证明只能到 AWAITING，不展开 sibling outcome 或 completion-order 状态；limit branch 立即终止且不检查其后的 availability；
 - parked child 不阻断其他 runnable child，parent ordinary sibling 遵守 existing child barrier；每个 child 在自己的 State/superstep 复用同一 planner check，limit 直接以原 `Graph.ExecutionLimitError` 终止 root invocation，不转成 `AbortedChild`/parent failure/Result；任一真实可达 branch 在首个 Result/limit boundary 前的 required history/child snapshot 缺失均在 fence/resume/claim/child-start/resource/node call 前返回 `GraphValueUnavailableError`；
-- pre-mutation unavailable 与 post-settlement dynamic missing 的 `AbortGraphRun`/`AbortedResult` 严格互斥；root/child projection 保留 exact successor State 与 same-lineage continuation，纯 data consumer 的非触发 completion 边界有明确测试；
+- pre-mutation unavailable 与 post-settlement dynamic missing 的 `AbortGraphRun`/`AbortedResult` 严格互斥；root/child projection 保留 exact successor State 与 same-lineage continuation，missing-control definition 在二者之前以零副作用 compile error 闭合；
 - resume codec 的唯一 ABI 是 graph-local `Graph.Values[GraphValueT] <-> bytes`；root/child scope selection、codec identity/version、override admission、compiled re-materialization、`ResumeGraphNodes` ack 后安装、State-owned opaque override 与 RUNNING/AWAITING child scoped resume 均闭合；
 - invocation admission 时已有 nested Pending 却无 matching derived child `ScopeRunCoordinate`/snapshot 必须 fail closed；只有本 invocation acknowledged transition 新产生的 nested activation 可派生 expected child run、start 并按该 coordinate 记录 snapshot。同一路径 repeated activation 的 frames 并存，且 current parent 只选择其 child run；active children 按 scope-run/parent-activation round-robin 驱动；
 - nested success 固定投影 `TaskSuccess(output_frame, ContinueGraphRouting)`，direct/join 合法；`AbortedChild -> parent FailedGraphNode` 后 parent retry/restart 拒绝、`skip_failed()` 允许；child boundary 只在 parent settlement ack 后 publication；
 - whole-invocation proof 通过时，state-only Pending zero-input、完整 State-owned opaque override、active fence recovery、settled empty-output completion 与 current root ABORTED/AWAITING projection 可执行；到达 Result 才返回 recovered continuation，到达 limit 则不返回 Result/continuation。无 continuation 的 child-only progress 明确不可执行；
-- data/control、entry/completion、values module/factory、generic、sealed construction、builder transaction、scoped-run/recovery identity、outcome/commit、limits、resource order、publication/ack、family driving 与 State owner 边界均只有一个定义；文件与测试迁移账本完整，无 compatibility、第二 runner/value/frame/limits truth 或 persistence 扩张。
+- value binding/explicit control、entry/completion、values module/factory、generic、sealed construction、builder transaction、scoped-run/recovery identity、outcome/commit、limits、resource order、publication/ack、family driving 与 State owner 边界均只有一个定义；文件与测试迁移账本完整，无 compatibility、第二 runner/value/frame/limits truth 或 persistence 扩张。
 
 ### 13.2 必须停止并回到需求/架构复审
 
@@ -1591,7 +1594,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 
 ## 14. 结论
 
-本方案已经按最新参数绑定删除 `Graph.fields()`，固定 callable direct `inputs`/`outputs` mapping 与 structured refs。`add_edge()`、conditional edge、join 和 data binding 都先收集 immutable declaration，再由完整 graph compiler 统一校验 endpoint、方向、scope、exact type、data/control topology、entry/completion 与 guaranteed-before；mapping/edge declaration order 不形成另一份真相。Resource 是明确的例外：global order 唯一按 successful node builder transaction 与 resource tuple 左到右 first-seen 形成，改变该 sequence 就是改变图语义，compiler 不 lexical re-sort。
+本方案已经按最新参数绑定删除 `Graph.fields()`，固定 callable direct `inputs`/`outputs` mapping 与 structured refs。`add_edge()`、conditional edge、join 和 value binding 都先收集 immutable declaration，再由完整 graph compiler 统一校验 endpoint、方向、scope、exact type、value/control topology、entry/completion、missing-control 与 guaranteed-before；mapping/edge declaration order 不形成另一份真相。Binding 与 control edge 分别是 value/activation 的唯一 owner，同一 source/target 合法共存。Resource 是明确的例外：global order 唯一按 successful node builder transaction 与 resource tuple 左到右 first-seen 形成，改变该 sequence 就是改变图语义，compiler 不 lexical re-sort。
 
 Builder mutation boundary 已闭合：`add_node()`、`set_outputs()`、edge builders 与 resume-codec builder 全部从 immutable `_GraphBuilderState` 构造 detached complete replacement，成功后 single assignment；local failure 不改变 definition、resource order、compiled cache 或 frozen state。特别是失败 `add_node()` 从未登记 resource，后续 order 与失败调用不存在时完全一致，不使用 rollback、tombstone 或兼容路径。
 
@@ -1609,7 +1612,7 @@ Graph output 不再假设 publication-only：compiled binding 明确保留 `Grap
 
 Nested terminal boundary 同样闭合：`CompletedChild` 固定成为 parent `TaskSuccess(output_frame, ContinueGraphRouting)`，nested conditional source 在 compile 阶段拒绝，direct edge/join 保留，按 child output 路由必须增加 ordinary router。`AbortedChild` 只投影 typed parent failure；成为 parent `FailedGraphNode` 后禁止用 parent `resume_failed*()` 复用同一 child identity restart，只允许 `skip_failed()` 或终止。多个 children 由唯一 family driver 按 child scope-run/parent activation canonical start、round-robin 推进，每个 scope 在自己的 State/superstep 使用同一 limits/planner/selector；child limit 原样终止 root invocation。Child graph-input passthrough 与 output boundary 只使用 matching child run coordinate，且只在 parent settlement acknowledgement 后 publication。
 
-Data-driven activation 只由 current authoritative State frontier 的 compiled trigger 一次性生成，不重扫历史 frontier，也不复制 activation/resolution truth；已提交 skip/settlement 后的动态缺值复用 `AbortGraphRun`，并返回携带 exact successor same-lineage continuation 的 `AbortedResult`。Resume codec 唯一迁移到 scoped graph-local `Graph.Values` frame，新 override 仅在 `ResumeGraphNodes` acknowledgement 后安装，State-owned opaque override 不伪造 ack。
+Runtime activation 只由 current authoritative State frontier 的 compiled direct/conditional/join control contribution 一次性生成；publication 与 `NodeOutputRef` binding 只提供 value/readiness，不发现 target。已提交 skip/settlement 后的动态缺值复用 `AbortGraphRun`，并返回携带 exact successor same-lineage continuation 的 `AbortedResult`。Resume codec 唯一迁移到 scoped graph-local `Graph.Values` frame，新 override 仅在 `ResumeGraphNodes` acknowledgement 后安装，State-owned opaque override 不伪造 ack。
 
 逐端口类型责任已最终裁决：Pyright 不从 runtime string key 推导 exact type，只保持 parameterized graph-wide value universe 与 Python API shape；graph compiler 从唯一 canonical declarations 解析 exact descriptors，并在任何 compiled cache、freeze、`StartGraphRun`、commit、resource claim 或 node call 前严格拒绝非法 node/output reference、nested boundary、`add_edge()`/conditional/join topology 与无法 guaranteed-before 的值。Concrete input/output 则在各自最早可观察的 admission 点按同一 descriptor exact check。
 

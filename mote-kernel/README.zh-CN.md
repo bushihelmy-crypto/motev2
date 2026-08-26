@@ -26,7 +26,10 @@ assert isinstance(result, Graph.CompletedResult)
 assert result.outputs["text"] == "mote"
 ```
 
-Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名输出类型。输入绑定是 data dependency 的唯一事实源；edge 与 join 只声明 control flow。`Graph.values()` 构造 immutable concrete frame，`set_outputs()` 将图结果边界绑定到已 admission 的 graph input 或已确认的 node publication。
+Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名输出类型。输入绑定是 value source/readiness
+的唯一事实源；direct、conditional 与 join edge 是 activation 的唯一事实源。`Graph.node_output()` 绑定不会创建
+执行边，因此每个 node-output consumer 还必须声明 incoming control edge。仅依赖 graph input 或没有输入的 root
+仍是 automatic entry；`set_outputs()` 只投影结果，不激活节点。`Graph.values()` 构造 immutable concrete frame。
 
 `Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
 

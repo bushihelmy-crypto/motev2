@@ -45,17 +45,11 @@ class FrozenMap(Mapping[KeyT, ValueT_co], Generic[KeyT, ValueT_co]):
 
 
 @dataclass(frozen=True, slots=True)
-class DataTriggerPlan:
-    targets: tuple[GraphNodeId, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
     joins_by_source: FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]
-    data_triggers: FrozenMap[GraphNodeId, DataTriggerPlan]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]

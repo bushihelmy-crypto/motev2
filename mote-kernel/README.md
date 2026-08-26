@@ -26,7 +26,11 @@ assert isinstance(result, Graph.CompletedResult)
 assert result.outputs["text"] == "mote"
 ```
 
-Callable nodes declare named input bindings and exact named output types directly on `add_node()`. Input bindings are the sole data-dependency truth; edges and joins declare control flow only. `Graph.values()` creates immutable concrete frames, and `set_outputs()` binds the graph result boundary to admitted graph inputs or confirmed node publications.
+Callable nodes declare named input bindings and exact named output types directly on `add_node()`. Input bindings are
+the sole value-source/readiness truth; direct, conditional, and join edges are the sole activation truth. A
+`Graph.node_output()` binding never creates an execution edge, so every node-output consumer also needs an incoming
+control edge. Graph-input-only and zero-input roots remain automatic entries, while `set_outputs()` is only a result
+projection and never activates a node. `Graph.values()` creates immutable concrete frames.
 
 `Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
 

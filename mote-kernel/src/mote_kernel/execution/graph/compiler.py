@@ -4,7 +4,6 @@ from typing import TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import (
     DuplicateBoundaryError,
-    DuplicateEdgeError,
     GraphValidationError,
     MissingEntryError,
     UnknownNodeError,
@@ -39,7 +38,6 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.topology import (
     CompiledGraph,
-    DataTriggerPlan,
     FrontierTransitionPlan,
     frozen_map,
 )
@@ -193,7 +191,6 @@ def _guaranteed_sets(
     node_ids: tuple[GraphNodeId, ...],
     entries: tuple[GraphNodeId, ...],
     activation_gates: dict[GraphNodeId, list[ActivationGate]],
-    data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
 ) -> dict[GraphNodeId, frozenset[GraphNodeId]]:
     guarantees = {node_id: frozenset((node_id,)) for node_id in node_ids}
     entry_set = frozenset(entries)
@@ -210,12 +207,6 @@ def _guaranteed_sets(
                     for source, _route in gate:
                         guaranteed.update(guarantees[source])
                     alternatives.append(frozenset(guaranteed))
-            elif data_dependencies[node_id]:
-                guaranteed = set()
-                for source in data_dependencies[node_id]:
-                    guaranteed.update(guarantees[source])
-                    guaranteed.add(source)
-                alternatives.append(frozenset(guaranteed))
             common: set[GraphNodeId] = set(alternatives[0]) if alternatives else set()
             for alternative in alternatives[1:]:
                 common.intersection_update(alternative)
@@ -368,16 +359,13 @@ def _validate_joint_activation_paths(
             requirements,
             conditional_targets,
         )
-        if data_dependencies[node_id]:
-            if alternatives:
-                alternatives = [
-                    None
-                    if alternative is None or data_requirement is None
-                    else _merge_route_requirements((alternative, data_requirement))
-                    for alternative in alternatives
-                ]
-            else:
-                alternatives.append(data_requirement)
+        if data_dependencies[node_id] and alternatives:
+            alternatives = [
+                None
+                if alternative is None or data_requirement is None
+                else _merge_route_requirements((alternative, data_requirement))
+                for alternative in alternatives
+            ]
         requirement = _alternative_route_requirements(tuple(alternatives))
         if requirement is None:
             raise GraphValidationError(f"node {node_id!r} has no jointly satisfiable activation path")
@@ -449,16 +437,11 @@ def _input_publication_selection(
     target: GraphNodeId,
     absolute_levels: dict[GraphNodeId, int],
     activation_gates: dict[GraphNodeId, list[ActivationGate]],
-    data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
 ) -> PublicationSelection:
     absolute = absolute_levels.get(source.node_id)
     if absolute is not None:
         return PublicationSelection(PublicationSelectionKind.ABSOLUTE, absolute)
-    gates = activation_gates[target]
-    directly_causal = _all_single_source_gates(source.node_id, gates) or (
-        not gates and data_dependencies[target] == {source.node_id}
-    )
-    if directly_causal:
+    if _all_single_source_gates(source.node_id, activation_gates[target]):
         return PublicationSelection(PublicationSelectionKind.RELATIVE, 1)
     raise GraphValidationError(
         f"node output {source.node_id!r} has no unique activation coordinate for consumer {target!r}"
@@ -564,25 +547,25 @@ def _compile_graph(
                 activation_gates[edge.target].append(tuple((source, None) for source in normalized.sources))
             for source in edge.sources:
                 joins_by_source[source].append(normalized)
-    for target, sources in data_dependencies.items():
-        for source in sources:
-            if target in direct_targets[source]:
-                raise DuplicateEdgeError(f"node output binding and direct edge duplicate {source!r} -> {target!r}")
-
     explicit_entries = tuple(sorted(definition.entries))
+    if any(data_dependencies[node_id] for node_id in explicit_entries):
+        raise GraphValidationError("an explicit START target cannot require a node output")
+    for target, sources in data_dependencies.items():
+        if sources and not activation_gates[target]:
+            raise GraphValidationError(
+                f"node {target!r} consumes node outputs from {tuple(sorted(sources))!r} "
+                "but has no incoming control edge"
+            )
     automatic_entries = tuple(
         node_id for node_id in node_ids if not data_dependencies[node_id] and not activation_gates[node_id]
     )
     duplicates = set(explicit_entries).intersection(automatic_entries)
     if duplicates:
         raise DuplicateBoundaryError(f"automatic entry is also declared from START: {tuple(sorted(duplicates))!r}")
-    if any(data_dependencies[node_id] for node_id in explicit_entries):
-        raise GraphValidationError("an explicit START target cannot require a node output")
     entries = tuple(sorted((*explicit_entries, *automatic_entries)))
     if not entries:
         raise MissingEntryError("graph definition requires at least one automatic or explicit entry")
 
-    data_targets = {node_id: set[GraphNodeId]() for node_id in node_ids}
     successors = {node_id: set(targets) for node_id, targets in direct_targets.items()}
     for source, routes in conditional_targets.items():
         successors[source].update(target for target in routes.values() if target != END)
@@ -593,16 +576,11 @@ def _compile_graph(
                 successors[source].add(join.target)
     for target, sources in data_dependencies.items():
         for source in sources:
-            if activation_gates[target]:
-                directly_causal = _all_single_source_gates(source, activation_gates[target])
-                if target == source or (_can_reach(target, source, successors) and not directly_causal):
-                    raise GraphValidationError(
-                        f"node output {source!r} is not guaranteed before controlled node {target!r}"
-                    )
-            else:
-                data_targets[source].add(target)
-                successors[source].add(target)
-                reachability_successors[source].add(target)
+            directly_causal = _all_single_source_gates(source, activation_gates[target])
+            if target == source or (_can_reach(target, source, successors) and not directly_causal):
+                raise GraphValidationError(
+                    f"node output {source!r} is not guaranteed before controlled node {target!r}"
+                )
     reached = _reachable(entries, reachability_successors, tuple(joins))
     unreachable = set(node_ids) - reached
     if unreachable:
@@ -617,9 +595,9 @@ def _compile_graph(
         tuple(joins),
     )
 
-    guarantees = _guaranteed_sets(node_ids, entries, activation_gates, data_dependencies)
+    guarantees = _guaranteed_sets(node_ids, entries, activation_gates)
     for target, sources in data_dependencies.items():
-        if activation_gates[target] and not sources <= guarantees[target]:
+        if not sources <= guarantees[target]:
             missing = tuple(sorted(sources - guarantees[target]))
             raise GraphValidationError(f"controlled node {target!r} can activate before required producers {missing!r}")
     terminal_gates = _terminal_gates(
@@ -643,7 +621,6 @@ def _compile_graph(
                         node_id,
                         absolute_levels,
                         activation_gates,
-                        data_dependencies,
                     ),
                 )
                 for binding in bindings.entries
@@ -704,7 +681,6 @@ def _compile_graph(
                 for node_id, edges in joins_by_source.items()
             }
         ),
-        frozen_map({node_id: DataTriggerPlan(tuple(sorted(targets))) for node_id, targets in data_targets.items()}),
         frozen_map(materializations),
         frozen_map(publications),
         graph_outputs,
