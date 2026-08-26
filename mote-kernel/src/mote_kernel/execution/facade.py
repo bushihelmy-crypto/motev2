@@ -693,7 +693,7 @@ class Graph(Generic[GraphValueT]):
                 except Exception as cause:
                     if confirmed_prefix:
                         raise _partial_commit_error(
-                            context.root_binding.state,
+                            context.root_state,
                             _continuation(context),
                             cause,
                             tuple(fence.scope_run.scope),
@@ -721,7 +721,7 @@ class Graph(Generic[GraphValueT]):
                 except Exception as cause:
                     if confirmed_prefix:
                         raise _partial_commit_error(
-                            context.root_binding.state,
+                            context.root_state,
                             _continuation(context),
                             cause,
                             tuple(planned_resume.scope_run.scope),

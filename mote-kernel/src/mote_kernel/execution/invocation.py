@@ -201,7 +201,7 @@ def _replace_planned_state(
 
 
 def lineage_states(context: GraphRunContext[GraphValueT]) -> tuple[_PlannedState, ...]:
-    root_state = context.root_binding.state
+    root_state = context.root_state
     values = [_PlannedState(root_scope_run(root_state.run_id), root_state, None)]
     values.extend(
         _PlannedState(binding.coordinate, binding.state, binding.parent_activation) for binding in context.child_states

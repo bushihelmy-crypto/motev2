@@ -16,7 +16,7 @@ from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import project_graph_result
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.execution.identity import ScopeRunCoordinate
+from mote_kernel.execution.identity import ScopeRunCoordinate, root_scope_run
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     AwaitingResume,
@@ -783,6 +783,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     original_install = facade_module.install_confirmed_resume_frames
+    original_replace = facade_module.GraphRunContext[str].replace_state
     installed_scopes: list[tuple[GraphNodeId, ...]] = []
     installed_indexes: list[ScopedFrameIndex[str]] = []
     replaced_states: list[tuple[tuple[GraphNodeId, ...], GraphRunState, ScopedFrameIndex[str]]] = []
@@ -805,12 +806,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
         state: GraphRunState,
     ) -> None:
         replaced_states.append((coordinate.scope, state, context.frames))
-        if not coordinate.scope:
-            context.replace_root(state)
-            return
-        child = context.child_state(coordinate)
-        assert child is not None
-        context.replace_child(ChildStateBinding(coordinate, child.parent_activation, state))
+        original_replace(context, coordinate, state)
 
     monkeypatch.setattr(facade_module.GraphRunContext, "replace_state", record_replace)
     transitions: list[Graph.Transition[str]] = []
@@ -1105,7 +1101,7 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
         "_snapshot",
         replace(
             original_snapshot,
-            root_binding=replace(original_snapshot.root_binding, state=root_failed),
+            root_state=root_failed,
             child_states=child_states,
         ),
     )
@@ -1141,7 +1137,7 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
     owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
     assert owner is not None
     handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
-    assert handed_off.root_binding.state == partial.state
+    assert handed_off.root_state == partial.state
     child_binding = next(
         binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("child"),)
     )
@@ -1358,7 +1354,7 @@ async def test_normal_resume_never_mutates_the_input_continuation_snapshot() -> 
     owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
     assert owner is not None
     restored = _context_from_continuation(owner.family_identity, paused.state, paused.continuation)
-    assert restored.root_binding.state == paused.state
+    assert restored.root_state == paused.state
 
 
 @pytest.mark.asyncio
@@ -2484,7 +2480,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
     assert owner is not None
     context = _context_from_continuation(owner.family_identity, result.state, result.continuation)
-    context.replace_root(root_state)
+    context.replace_state(root_scope_run(root_state.run_id), root_state)
     result = project_graph_result(owner.graph, context, AwaitingResume((), ()))
 
     assert isinstance(result, Graph.AwaitingResumeResult)

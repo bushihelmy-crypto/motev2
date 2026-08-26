@@ -439,7 +439,7 @@ async def drive_root(
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
 ) -> GraphBoundary:
-    scope_run = root_scope_run(context.root_binding.state.run_id)
+    scope_run = root_scope_run(context.root_state.run_id)
     while True:
         disposition = await _advance_scope_quantum(
             graph,
@@ -457,7 +457,7 @@ def _scoped_states(
     context: GraphRunContext[GraphValueT],
 ) -> tuple[tuple[tuple[str, ...], GraphRunState], ...]:
     return (
-        ((), context.root_binding.state),
+        ((), context.root_state),
         *((tuple(binding.coordinate.scope), binding.state) for binding in context.child_states),
     )
 
@@ -495,7 +495,7 @@ def project_graph_result(
     context: GraphRunContext[GraphValueT],
     disposition: GraphBoundary,
 ) -> GraphResult[GraphValueT]:
-    state = context.root_binding.state
+    state = context.root_state
     continuation = _continuation(context)
     if isinstance(disposition, CompletedGraph):
         view = project_graph_outputs(

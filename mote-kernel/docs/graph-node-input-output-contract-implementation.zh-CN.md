@@ -440,12 +440,12 @@ _CompleteContinuationSnapshot[GraphValueT]
     | _RecoveredContinuationSnapshot[GraphValueT]
 ```
 
-- 新 run 建立 complete snapshot；它保存该 logical graph family 已 admission 的全部 root/child graph-input frames、全部 scoped confirmed publications、nested child state/frame snapshots 和 exact root-state value binding。以该 snapshot 继续时始终保持 complete variant。
+- 新 run 建立 complete snapshot；它保存该 logical graph family 已 admission 的全部 root/child graph-input frames、全部 scoped confirmed publications、nested child state/frame snapshots 和 exact immutable root `GraphRunState` value。以该 snapshot 继续时始终保持 complete variant。
 - control-only recovery 在 State definition identity/version 与当前 compiled graph 匹配后建立 recovered snapshot。它只保存从 authoritative State 可 admission 的 frame，以及从本次 state-only lineage 开始新产生的 graph-input/publication/child snapshots；历史 frame 缺失是该 nominal variant 的合法语义，不叫 partial，也不伪造缺失值。Recovered lineage 不 opportunistically 升级为 complete variant。
 - 每个 completed/aborted/awaiting-resume Result 都必须携带上述两种合法 continuation 之一；不存在“state-only Result 没有 continuation”的分支。
 - complete snapshot 缺少其应有 frame，或任一 variant 含 extra/inconsistent frame，属于 malformed continuation；recovered snapshot 合法缺少历史 frame，是否足够执行由 compiled availability preflight 裁决，不能按 complete-snapshot completeness 规则拒绝。
 - 每次 atomic graph-family compile 成功时生成一个 execution-private immutable `_CompiledFamilyIdentity`；两种 snapshot 都携带该 exact token，不仅比较可重复的 definition ID/version。Token 不进入 State、error text、serialization 或 persistence protocol。
-- result/continuation 共享一个 immutable `_RootStateBinding` value；三个 Result variants 的 `state` 都只从该 binding 投影。后续 invocation 必须传入与 binding 结构相等的 state value 与同一 continuation：相同 revision 但任一字段不同、foreign family 或交叉配对在任何 fence/resume/claim commit 前拒绝；完全相等的 frozen copy 必须接受，不要求对象 identity。
+- result/continuation 共享同一个 immutable root `GraphRunState` value；三个 Result variants 的 `state` 都直接投影该 value。后续 invocation 必须传入与 snapshot `root_state` 结构相等的 state value 与同一 continuation：相同 revision 但任一字段不同、foreign family 或交叉配对在任何 fence/resume/claim commit 前拒绝；完全相等的 frozen copy 必须接受，不要求对象 identity。
 - continuation 只能由 `Graph.Result` 产生；其 final private implementation 的构造必须提供 module-private seal singleton，public `Graph.Continuation` 仅作为类型命名空间，调用方无法构造合法实例。它没有 encode/decode、copy/pickle contract、Store path 或跨进程协议。
 - 可实现的“stale”只指 family token、结构不相等的 root/child state value、scope snapshot 或 canonical frame 不匹配，以及 foreign、extra 或 malformed continuation。不使用 Store/global mutable flag 时，runtime 无法判定一个自洽的旧 state/continuation pair 是否已被新快照取代；最新性和单 driver 责任属于调用方/authoritative commit owner。
 - 有 matching continuation 时，child-only progress 可以保持 root state value/revision 不变，但必须返回新 continuation snapshot。没有 continuation 的 state-only invocation 若 current root State 含 Pending nested activation，就无法区分其 child 是 Missing/Active/Completed/Aborted；必须在任何 fence/start/claim 前返回 `GraphValueUnavailableError`，不得把它列为可执行的 child-only recovery。
@@ -649,7 +649,7 @@ Global resource order 的唯一规则是 successful-builder-transaction first-se
 | execution-limits normalization | existing `ExecutionLimits` owner | 两个 public keyword 的 exact integer/positive validation，构造本 invocation 唯一 effective limits | graph compile、State、recovery-specific limit |
 | graph compilation | graph compiler | canonical identity、全部 edge endpoint、source、scope、direction、exact type resolution、nested conditional-source prohibition、data/control、entry/completion、shared frontier transition/recovery/output-projection plans | callable 签名反射、concrete value |
 | graph-input admission | public run facade + values owner | boundary key/type、root `ScopeRunCoordinate` 与 continuation invocation shape | node output、descriptor-only frame key |
-| continuation/resume admission | public family facade + target compiled graph | family/root-state value equality、complete/recovered snapshot invariant、exact root/child `ScopeRunCoordinate`、codec identity、override encode/decode、aborted-child restart prohibition、target input frame | commit 或 latest-snapshot authority、按 path 隐式补 run identity |
+| continuation/resume admission | public family facade + target compiled graph | family/direct root-state value equality、complete/recovered snapshot invariant、exact root/child `ScopeRunCoordinate`、codec identity、override encode/decode、aborted-child restart prohibition、target input frame | commit 或 latest-snapshot authority、按 path 隐式补 run identity |
 | recovery availability preflight | public family facade + compiled graph 的直接 `transition: FrontierTransitionPlan[GraphValueT]` | exact State settlements、effective limits、admitted resume/skip semantics、完整 frontier quiescence、parallel/resource/nested barrier、Result/limit boundary、scoped-run frame coordinates、full control/availability/child/action equality、canonical success-route requirements 与 failure/interrupt awaiting invariant | 预测 callable concrete output、shortened dedup identity、concrete-value comparison、descriptor/path-only runtime key、另建 routing/join/session/limits 解释器 |
 | materialization admission | run context + compiled plan + current authoritative State frontier | confirmed source、current frontier eligibility、exact `ScopeRunCoordinate`/activation、port、type | node return value |
 | outcome/output admission | session completion projection + shared routing validator | public outcome variant、declared output key/type/frame identity、conditional missing/unknown route、non-conditional unexpected route | 回滚已经发生的 node/resource side effect |
@@ -702,7 +702,7 @@ Callable 必须满足统一 parameterized async frame ABI，但 runtime compiler
 
 - `GraphValidationError`：builder/compile definition、reference、scope、direction、type resolution、topology、entry/completion。
 - `ExecutionLimitError`：public limits 不是 exact positive integer，或 runtime/recovery shared planner 在 exact scope/state coordinate 观察到 `state.superstep >= effective_limits.max_supersteps`；不是 Result 或 graph abort。
-- `SnapshotMismatchError`：continuation family/root-state binding、scope state/definition、graph/state resume codec identity/version 不匹配，或试图以同一 child identity restart terminal `AbortedChild`。
+- `SnapshotMismatchError`：continuation family/direct root-state value、scope state/definition、graph/state resume codec identity/version 不匹配，或试图以同一 child identity restart terminal `AbortedChild`。
 - `GraphValueAdmissionError`：graph input、resume codec encode/decode、override frame 或 node output 的 concrete key/type/frame mismatch。
 - existing `RoutingError` family：node success 在 outcome admission 阶段 missing/unknown/unexpected route；发生在 node call 之后、settlement/publication 之前，通过 `Graph.Error` public base 传播。
 - `GraphValueUnavailableError`：shared whole-invocation recovery transfer 发现从 current exact State 与 admitted resume/skip action 形成的 branch 在首个 Result disposition 或 exact planner limit boundary 之前需要缺失的 graph input/publication/child snapshot；必须早于任何 fence/resume/claim/child-start mutation。Same State 下 availability/child coordinates 不同的 transfer states 不合并，因此存在 coordinate 的 branch 不会被 false reject，缺失 coordinate 的 branch 也不会被 false accept。State-owned settled route 或 admitted concrete skip 已排除的 route 不是 reachable path，limit boundary 之后的 requirement 也不再 reachable，二者都不能触发该错误；已确认 settlement 后才由不可预测 concrete output outcome 导致的 dynamic missing 仍进入 abort Result，不裸抛该异常。
@@ -942,7 +942,7 @@ _TransitionSeal
 SettledFrontierCoordinate       # derived from the current GraphRunState; never persisted
 InitialActivationOrigin | DataActivationOrigin | ControlActivationOrigin
 _CompiledFamilyIdentity
-_RootStateBinding
+GraphRunState                         # exact immutable root state value from State owner
 _ContinuationSeal
 _CompleteContinuationSnapshot[GraphValueT]
 _RecoveredContinuationSnapshot[GraphValueT]
@@ -1092,7 +1092,7 @@ Graph 成功 completion 同时要求：
 1. 不生成 target `AdvanceGraphFrontier`、claim、resource acquisition 或 node call；
 2. 根据 stable coordinates 构造 state-owned `GraphAbortReason`，对当前 quiescent root/child state 投影现有 `AbortGraphRun`；
 3. 经同一 `Graph.Transition` callback 确认 exact aborted successor；
-4. 将 exact aborted successor 投影到 root binding 和 child scope snapshot，然后返回可观察 `Graph.AbortedResult`；不写入 activation/resolution history。
+4. 将 exact aborted successor 投影到 direct root state value 和 child scope snapshot，然后返回可观察 `Graph.AbortedResult`；不写入 activation/resolution history。
 
 Root scope 直接返回 `Graph.AbortedResult`；child scope 经现有 `AbortedChild -> TaskFailure` 投影为 parent nested failure，并保留当前 complete/recovered lineage 的 root continuation。Recovery availability proof 在 invocation 的任何 State mutation 前发现历史 graph-input/publication/child snapshot 缺失时返回 `GraphValueUnavailableError`；只有不可由 preflight 预测的已确认 dynamic outcome 才进入上述 abort path。
 
@@ -1226,7 +1226,7 @@ _CompleteContinuationSnapshot[GraphValueT]
 两个 snapshot variants 共享同一个 immutable envelope：
 
 - exact execution-private `_CompiledFamilyIdentity`、definition ID/version 与 root run ID；
-- 与 Result `state` 共享的 exact immutable `_RootStateBinding` value；
+- 与 Result `state` 共享的 exact immutable root `GraphRunState` value；
 - snapshot variant 自己真实持有的 canonical `ScopeRunCoordinate -> child State binding`、唯一 immutable `ScopedFrameIndex` 与 child snapshots；
 - module-private `_ContinuationSeal`，不提供 public constructor、copy/pickle、codec、Store 或 serialization contract。
 
@@ -1234,9 +1234,9 @@ _CompleteContinuationSnapshot[GraphValueT]
 
 `_RecoveredContinuationSnapshot` 只由合法 state-only invocation 建立。它保存从 authoritative State/codec 能实际 admission 的 frame，以及该 recovered lineage 从本次 invocation 起新产生并已确认的 graph-input/publication/child snapshots；所有新增 frame 同样使用 exact `ScopeRunCoordinate`，不能因 recovered variant 缺历史 frame 而退化为 scope/definition key。它可以合法缺少 state-only admission 之前的 root input、historical publication 或 historical child frame。该缺失是 recovered variant 的领域语义，不叫 partial，不允许填充 sentinel，也不能通过后续偶然重新获得部分值而升级为 complete variant。
 
-Continuation admission 先验证 exact family token、definition/root run、结构相等的 root-state binding、snapshot variant invariant、已有 child scope State、frame descriptor 与 canonical index。Facade 从 root State 构造 exact root `ScopeRunCoordinate`，并对每个 child snapshot 从完整 scope path、child State run ID 和 parent activation 重新构造/验证同一 coordinate；任何 frame key 的 scope/run/descriptor 与 owner State 不一致都作为 malformed 拒绝，绝不按 path 或 `ChildControlStateCoordinate` 隐式补 run ID。Complete snapshot 的 required frame 缺失在 admission 阶段作为 `SnapshotMismatchError` 拒绝；recovered snapshot 的合法历史缺失不在此阶段误判，而交给第 8.6 节基于 `CompiledGraph.transition` 的 recovery availability proof 判断本次 invocation 是否可运行。两个 variants 的 extra、foreign、scope/state 不一致、same-coordinate different frame 或 malformed entry 都在任何 active-state fence、resume、claim 或 child start 前拒绝。
+Continuation admission 先验证 exact family token、definition/root run、结构相等的 direct root-state value、snapshot variant invariant、已有 child scope State、frame descriptor 与 canonical index。Facade 从 root State 构造 exact root `ScopeRunCoordinate`，并对每个 child snapshot 从完整 scope path、child State run ID 和 parent activation 重新构造/验证同一 coordinate；任何 frame key 的 scope/run/descriptor 与 owner State 不一致都作为 malformed 拒绝，绝不按 path 或 `ChildControlStateCoordinate` 隐式补 run ID。Complete snapshot 的 required frame 缺失在 admission 阶段作为 `SnapshotMismatchError` 拒绝；recovered snapshot 的合法历史缺失不在此阶段误判，而交给第 8.6 节基于 `CompiledGraph.transition` 的 recovery availability proof 判断本次 invocation 是否可运行。两个 variants 的 extra、foreign、scope/state 不一致、same-coordinate different frame 或 malformed entry 都在任何 active-state fence、resume、claim 或 child start 前拒绝。
 
-`CompletedResult.outputs` 不是 continuation 内的第二份存储；它只按 compiled `GraphOutputBindings` 从 result 对应 root/child `ScopeRunCoordinate` 已持有的 admitted graph-input frame 或 confirmed node publication 投影，child completion 另形成 exact `ChildBoundaryAvailabilityCoordinate`。`AbortedResult` 与 `AwaitingResumeResult` 不暴露 `outputs`。所有 Result 的 `state` 都是同一 `_RootStateBinding` 的投影。
+`CompletedResult.outputs` 不是 continuation 内的第二份存储；它只按 compiled `GraphOutputBindings` 从 result 对应 root/child `ScopeRunCoordinate` 已持有的 admitted graph-input frame 或 confirmed node publication 投影，child completion 另形成 exact `ChildBoundaryAvailabilityCoordinate`。`AbortedResult` 与 `AwaitingResumeResult` 不暴露 `outputs`。所有 Result 的 `state` 都直接投影 snapshot 持有的同一个 immutable root `GraphRunState` value。
 
 Admission 不记录“已使用”标志，也不承诺检测一个结构自洽的旧 pair 是否已被取代。完全相等的 immutable State copy 合法；相同 revision 但字段不相等的 State 拒绝。调用方/authoritative commit owner 必须保证同一 logical run 使用最新 pair 且没有并发 driver；本需求不增加 multi-worker arbitration 或 hidden mutable linear-capability flag。有 matching continuation 的 child-only progress 必须返回同 lineage variant 的新 continuation，即使 root State value/revision 未变。
 
@@ -1327,7 +1327,7 @@ construct/validate one effective ExecutionLimits before compile/cache or mutatio
          retain CompletedChild/AbortedChild as terminal canonical projections
          propagate a child ExecutionLimitError directly out of the root family invocation
     -> if no runnable child remains and at least one child is parked:
-         return AwaitingResumeResult(state=root binding, continuation=updated same-variant snapshot, scoped views)
+         return AwaitingResumeResult(state=direct root state value, continuation=updated same-variant snapshot, scoped views)
     -> otherwise, when every child is terminal:
          pass the exact canonical projection vector back to existing parent prepare
          for each CompletedChild:
@@ -1382,7 +1382,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 | `execution/limits.py` | HARDEN exact-positive-integer validation in the existing sole `ExecutionLimits` owner；KEEP defaults | `type(value) is int` 且大于零，统一抛 existing `ExecutionLimitError`；三个 public `run()` overload 立即构造同一 effective value，不公开 `limits=`，不建 recovery/nested limits |
 | `execution/resource/definition.py` | KEEP canonical resource identity/order model | `_graph.py` 只在完整 `add_node()` replacement commit 中按 successful node order 与 resource tuple 左到右 first-seen 登记；失败 candidate 零污染，compiler 只验证/消费，不另排序 |
 | `execution/_graph.py` | REPLACE public builder/run/outcome/resume surface；ADD immutable `_GraphBuilderState` transactions、`Graph.Values = _GraphValues` alias、直接声明的两个 `Graph.values()` static overload 与 owner factory delegation、`_TransitionSeal`、exact scoped commit projection、atomic family freeze、limits-first dispatch、recovery preflight、closed Result projection 与 multi-child driving | 不定义/normalize concrete entries，不用 `staticmethod(factory)` assignment/cast 转接 overload；从 exact values/identity owners 导入；root scope 仅 `()`；preflight 覆盖 full scoped-run availability identity 与首个 Result/limit boundary；同一 limits 传入全部 scopes；不保存 live run context |
-| `execution/request.py`、`result.py` | REPLACE typed frame request/result；ADD `_CommitResultSeal` canonical factories、exact root-state binding、completed/aborted/awaiting-resume closed variants、opaque continuation view 与 canonical commit result aliases | 直接依赖 `graph.values` 唯一 frames；三个 Result/union/continuation 都 invariant；`CompletedResult` 独占 covariant Values outputs；无 optional 宽字段、frame DTO 或 facade wrapper |
+| `execution/request.py`、`result.py` | REPLACE typed frame request/result；ADD `_CommitResultSeal` canonical factories、exact direct root-state value、completed/aborted/awaiting-resume closed variants、opaque continuation view 与 canonical commit result aliases | 直接依赖 `graph.values` 唯一 frames；三个 Result/union/continuation 都 invariant；`CompletedResult` 独占 covariant Values outputs；无 optional 宽字段、frame DTO 或 facade wrapper |
 | `execution/run_context.py` | ADD private family/continuation seal、四类 scoped-run availability coordinates、四个 typed frame records、唯一 immutable `ScopedFrameIndex`、complete/recovered snapshot union | 每个 record 组合 exact `ScopeRunCoordinate`/`StableActivation`、descriptor 与 values-owner frame；typed segments 不擦除为 object/Any/bare dict，不建第二 frame map；不同 child runs 并存、same-coordinate different frame fail closed；不挂 Graph/executor/global，不进入 State，不作 activation/resolution authority |
 | `execution/engine/recovery.py` | ADD immutable full-semantic `RecoveryTransferState` evaluator、separate `RecoveryTraversalKey` over compiled shared plans | equality/hash/dedup 覆盖 scoped-run control/availability/child/action facts；同 path different child run 不合并；sort key 只排序且不触碰 concrete value；禁止自建 edge/routing/session/resource/limits/nested semantics |
 | `execution/engine/admission.py`、`superstep.py`、`planner.py` | REPLACE shared input 为 compiled materialization preflight，并消费 shared frontier transition/limits plan | `planner.py` 保持 `state.superstep >= limits.max_supersteps` 的唯一 concrete check coordinate；required value 缺失先于 claim/resource/node；prepare 的 Result/limit disposition 是 runtime/recovery 共同 boundary |
@@ -1555,7 +1555,7 @@ RUNNING/AWAITING_RESUME child 保持原 deterministic child run，并只通过 s
 - initial candidate 只来自 automatic/explicit entry；后续 data candidate 只来自 current authoritative settled State frontier 的 compiled producer trigger；同一 State transition 最多生成一次 target coordinate，success empty frame 与 skip、resume、multi-source、loop/repeated `run()` 的一次性语义均有独立行为证据，且不依赖 history receipt；
 - publication 只在 exact node settlement successor acknowledgement 后安装；`StartGraphRun`/`AdvanceGraphFrontier`/`CompleteGraphFrontier`/`AbortGraphRun` 的 successor State 直接拥有 activation/resolution，commit mismatch、cancellation、fence 和重复旧-frontier lowering 均不留下 transient control truth；
 - `CompletedResult`、`AbortedResult`、`AwaitingResumeResult`、`Result` 与 continuation 都使用 invariant `GraphValueT`，每个 Result 有 non-optional State/continuation；只有 completed variant 有 covariant immutable `Graph.Values[GraphValueT]` outputs，不能借此 widening Result；
-- continuation 与 Result 共享结构相等的 immutable root-state binding 并携带 execution-private compiled-family identity；complete snapshot 保留全部 distinct scoped-run historical frames，same path repeated child runs 不覆盖。Required frame 缺失、same-coordinate different frame 与所有 extra/inconsistent/malformed snapshot 拒绝；recovered 的合法历史缺失不误判但新增 frame 仍用 exact coordinate；
+- continuation 与 Result 共享结构相等的 immutable direct root-state value 并携带 execution-private compiled-family identity；complete snapshot 保留全部 distinct scoped-run historical frames，same path repeated child runs 不覆盖。Required frame 缺失、same-coordinate different frame 与所有 extra/inconsistent/malformed snapshot 拒绝；recovered 的合法历史缺失不误判但新增 frame 仍用 exact coordinate；
 - `FrontierTransitionPlan` 是 runtime/recovery 共用的唯一 frontier/session/resource/routing/join/nested/planner-limit/completion lowering，并由 `CompiledGraph.transition` 直接持有；它持有 entries、materialization、publication descriptor map、graph completion 与 resource order；callable/nested classification 分别从 `CompiledGraph.nodes` nominal definitions 与 `nested_graphs` keys 派生，不重复存储；recovery evaluator 只传播 canonical availability coordinates，不自建 edge map、resolver、scheduler、barrier 或 limits policy；recovery 使用 canonical completion、linear child proof 与 4096-state pre-mutation safety budget；
 - `RecoveryTransferState` equality/hash/dedup 覆盖所有 scoped-run control、availability、child 与 admitted-action semantic fields；same path/definition/descriptor 下不同 child run IDs 不合并，seen 不使用 shortened tuple。`RecoveryTraversalKey` 只排序且 collision 不合并；concrete frames 只在 run context/continuation coordinate mapping，worklist 不调用 user value ordering/hash/repr；
 - state-only/recovered invocation 从 exact State/resume branch 推进到首个 Result 或 exact planner limit boundary：current State 已有 settlement 与 concrete skip 只沿唯一 route，resume-to-Pending/尚未执行 conditional callable 的 canonical success projection 才枚举 declared routes；全部 current-frontier callable input admission 后，typed failure/interrupt 由无 publication/control contribution 的 quiescence invariant 证明只能到 AWAITING，不展开 sibling outcome 或 completion-order 状态；limit branch 立即终止且不检查其后的 availability；

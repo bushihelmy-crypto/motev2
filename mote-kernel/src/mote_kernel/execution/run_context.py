@@ -306,11 +306,6 @@ class _CompiledFamilyIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class _RootStateBinding:
-    state: GraphRunState
-
-
-@dataclass(frozen=True, slots=True)
 class ChildStateBinding:
     coordinate: ScopeRunCoordinate
     parent_activation: StableActivation
@@ -320,7 +315,7 @@ class ChildStateBinding:
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class _CompleteContinuationSnapshot(Generic[GraphValueT]):
     family_identity: _CompiledFamilyIdentity
-    root_binding: _RootStateBinding
+    root_state: GraphRunState
     child_states: tuple[ChildStateBinding, ...]
     frames: ScopedFrameIndex[GraphValueT]
 
@@ -328,7 +323,7 @@ class _CompleteContinuationSnapshot(Generic[GraphValueT]):
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class _RecoveredContinuationSnapshot(Generic[GraphValueT]):
     family_identity: _CompiledFamilyIdentity
-    root_binding: _RootStateBinding
+    root_state: GraphRunState
     child_states: tuple[ChildStateBinding, ...]
     frames: ScopedFrameIndex[GraphValueT]
 
@@ -364,11 +359,11 @@ class _GraphContinuation(Generic[GraphValueT]):
         if _seal is not _CONTINUATION_SEAL:
             raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
         snapshot = self._snapshot
-        if snapshot.family_identity is not family_identity or snapshot.root_binding.state != state:
+        if snapshot.family_identity is not family_identity or snapshot.root_state != state:
             raise SnapshotMismatchError("state and continuation do not belong to the same compiled graph lineage")
         return GraphRunContext(
             family_identity,
-            snapshot.root_binding,
+            snapshot.root_state,
             snapshot.frames,
             snapshot.child_states,
             recovered=isinstance(snapshot, _RecoveredContinuationSnapshot),
@@ -384,32 +379,29 @@ class _GraphContinuation(Generic[GraphValueT]):
 class GraphRunContext(Generic[GraphValueT]):
     """Mutable invocation envelope around immutable acknowledged snapshots."""
 
-    __slots__ = ("child_states", "family_identity", "frames", "recovered", "root_binding")
+    __slots__ = ("child_states", "family_identity", "frames", "recovered", "root_state")
 
     def __init__(
         self,
         family_identity: _CompiledFamilyIdentity,
-        root_binding: _RootStateBinding,
+        root_state: GraphRunState,
         frames: ScopedFrameIndex[GraphValueT],
         child_states: tuple[ChildStateBinding, ...],
         *,
         recovered: bool,
     ) -> None:
         self.family_identity = family_identity
-        self.root_binding = root_binding
+        self.root_state = root_state
         self.frames = frames
         self.child_states = child_states
         self.recovered = recovered
-
-    def replace_root(self, state: GraphRunState) -> None:
-        self.root_binding = _RootStateBinding(state)
 
     def child_state(self, coordinate: ScopeRunCoordinate) -> ChildStateBinding | None:
         return next((item for item in self.child_states if item.coordinate == coordinate), None)
 
     def state_at(self, coordinate: ScopeRunCoordinate) -> GraphRunState:
         if not coordinate.scope:
-            return self.root_binding.state
+            return self.root_state
         binding = self.child_state(coordinate)
         if binding is None:
             raise GraphValueUnavailableError(f"child state is unavailable at {coordinate!r}")
@@ -417,7 +409,7 @@ class GraphRunContext(Generic[GraphValueT]):
 
     def replace_state(self, coordinate: ScopeRunCoordinate, state: GraphRunState) -> None:
         if not coordinate.scope:
-            self.replace_root(state)
+            self.root_state = state
             return
         existing = self.child_state(coordinate)
         if existing is None:
@@ -442,7 +434,7 @@ def _new_context(
 ) -> GraphRunContext[GraphValueT]:
     return GraphRunContext(
         family_identity,
-        _RootStateBinding(state),
+        state,
         frames,
         (),
         recovered=recovered,
@@ -461,13 +453,13 @@ def _snapshot(context: GraphRunContext[GraphValueT]) -> ContinuationSnapshot[Gra
     if context.recovered:
         return _RecoveredContinuationSnapshot(
             context.family_identity,
-            context.root_binding,
+            context.root_state,
             context.child_states,
             context.frames,
         )
     return _CompleteContinuationSnapshot(
         context.family_identity,
-        context.root_binding,
+        context.root_state,
         context.child_states,
         context.frames,
     )
