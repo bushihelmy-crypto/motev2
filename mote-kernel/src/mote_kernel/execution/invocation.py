@@ -98,7 +98,7 @@ class _PlannedFence:
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedResume(Generic[GraphValueT]):
+class PlannedResume(Generic[GraphValueT]):
     scope_run: ScopeRunCoordinate
     successor: GraphRunState
     prepared: PreparedResume[GraphValueT]
@@ -107,7 +107,7 @@ class _PlannedResume(Generic[GraphValueT]):
 
 def install_confirmed_resume_frames(
     frames: ScopedFrameIndex[GraphValueT],
-    planned: _PlannedResume[GraphValueT],
+    planned: PlannedResume[GraphValueT],
     confirmed: GraphRunState,
 ) -> ScopedFrameIndex[GraphValueT]:
     if confirmed != planned.successor:
@@ -340,7 +340,7 @@ def plan_resumes(
 ) -> tuple[
     tuple[_PlannedState, ...],
     CandidateFrameAvailability[GraphValueT],
-    tuple[_PlannedResume[GraphValueT], ...],
+    tuple[PlannedResume[GraphValueT], ...],
     tuple[AdmittedResumeFact, ...],
 ]:
     if not resume:
@@ -364,7 +364,7 @@ def plan_resumes(
         )
     planned_states = states
     candidate_frames = frames
-    plans: list[_PlannedResume[GraphValueT]] = []
+    plans: list[PlannedResume[GraphValueT]] = []
     facts: list[AdmittedResumeFact] = []
     candidates: list[ScopedResumeCandidate[GraphValueT]] = []
     scopes = tuple(dict.fromkeys(action.scope for action in canonical))
@@ -387,7 +387,7 @@ def plan_resumes(
             )
             for prepared_substitution in prepared.substitutions
         )
-        plans.append(_PlannedResume(scope_run, candidate, prepared, substitutions))
+        plans.append(PlannedResume(scope_run, candidate, prepared, substitutions))
         candidates.append(
             ScopedResumeCandidate(
                 executors[scope].graph,

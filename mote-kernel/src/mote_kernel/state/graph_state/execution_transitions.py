@@ -152,11 +152,11 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
         raise GraphStateTransitionError("only a running graph execution can settle a node")
     require_execution_lease(state, command.execution)
     outcome = command.outcome
-    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-        outcome,
-        SucceededGraphNodeOutcome | FailedGraphNodeOutcome | InterruptedGraphNodeOutcome,
-    ):
-        raise GraphStateTransitionError("settlement outcome has an unsupported variant")
+    match outcome:
+        case SucceededGraphNodeOutcome() | FailedGraphNodeOutcome() | InterruptedGraphNodeOutcome():
+            pass
+        case _:
+            raise GraphStateTransitionError("settlement outcome has an unsupported variant")
     node_id = outcome.node_id
     current = frontier_node(state.frontier, node_id)
     if current is None or not isinstance(current.settlement, PendingGraphNode):

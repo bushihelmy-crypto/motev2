@@ -1,7 +1,6 @@
 """Single dispatch entry point for pure graph-run state transitions."""
 
 from dataclasses import replace
-from typing import assert_never
 
 from mote_kernel.state.graph_state.command import (
     AbortGraphRun,
@@ -38,17 +37,19 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
     if state is None:
         raise GraphStateTransitionError("a graph run must be started before it can transition")
     validate_graph_run_state(state)
-    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-        command,
-        ClaimGraphExecution
-        | FenceGraphExecution
-        | SettleGraphNode
-        | ResumeGraphNodes
-        | AdvanceGraphFrontier
-        | CompleteGraphFrontier
-        | AbortGraphRun,
-    ):
-        raise GraphStateTransitionError("graph command has an unsupported variant")
+    match command:
+        case (
+            ClaimGraphExecution()
+            | FenceGraphExecution()
+            | SettleGraphNode()
+            | ResumeGraphNodes()
+            | AdvanceGraphFrontier()
+            | CompleteGraphFrontier()
+            | AbortGraphRun()
+        ):
+            pass
+        case _:
+            raise GraphStateTransitionError("graph command has an unsupported variant")
     if command.expected_revision != state.revision:
         raise GraphStateTransitionError("graph command was based on a stale revision")
     if isinstance(command, ClaimGraphExecution):
@@ -63,10 +64,8 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
         updated = advance_graph_frontier(state, command)
     elif isinstance(command, CompleteGraphFrontier):
         updated = complete_graph_frontier(state, command)
-    elif isinstance(command, AbortGraphRun):  # pyright: ignore[reportUnnecessaryIsInstance]
+    else:
         updated = abort_graph_run(state, command)
-    else:  # pragma: no cover - the runtime union guard above makes this statically exhaustive
-        assert_never(command)
     return replace(updated, revision=state.revision + 1)
 
 

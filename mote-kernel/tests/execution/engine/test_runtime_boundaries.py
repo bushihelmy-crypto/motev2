@@ -74,7 +74,7 @@ from mote_kernel.execution.identity import (
     root_scope_run,
 )
 from mote_kernel.execution.invocation import (
-    _PlannedResume,  # pyright: ignore[reportPrivateUsage]
+    PlannedResume,
     install_confirmed_resume_frames,
 )
 from mote_kernel.execution.limits import ExecutionLimits
@@ -1152,7 +1152,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
     with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
         install_confirmed_resume_frames(
             request(graph, parent).frames,
-            _PlannedResume(
+            PlannedResume(
                 scope_run,
                 successor,
                 PreparedResume(command, (), ()),
@@ -1164,7 +1164,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
     assert availability.has_publication(substitution.coordinate)
     installed = install_confirmed_resume_frames(
         request(graph, parent).frames,
-        _PlannedResume(
+        PlannedResume(
             scope_run,
             successor,
             PreparedResume(command, (), ()),
@@ -1240,7 +1240,7 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
         )
         installed = install_confirmed_resume_frames(
             installed,
-            _PlannedResume(
+            PlannedResume(
                 scope_run,
                 candidate.successor,
                 PreparedResume(candidate.command, (), ()),
@@ -1338,7 +1338,7 @@ def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         )
     )
 
-    projections = family_driver_module._child_projections(graph, parent, scope_run, context)  # pyright: ignore[reportPrivateUsage]
+    projections = family_driver_module.child_projections(graph, parent, scope_run, context)
 
     assert len(projections) == 1
     assert isinstance(projections[0], AbortedChild)

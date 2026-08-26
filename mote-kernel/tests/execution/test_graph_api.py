@@ -7,6 +7,7 @@ from typing import Protocol, cast
 import pytest
 
 import mote_kernel.execution as public_execution
+import mote_kernel.execution.facade as facade_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.claim_stage import project_claim_command
@@ -14,9 +15,11 @@ from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.errors import FrameInstallationInvariantError, GraphValuePublicationError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import project_graph_result
+from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, root_scope_run
+from mote_kernel.execution.invocation import PlannedResume
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     AwaitingResume,
@@ -28,8 +31,10 @@ from mote_kernel.execution.result import (
 from mote_kernel.execution.run_context import (
     ChildStateBinding,
     ConfirmedPublication,
+    ContinuationSnapshot,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
+    _CompiledFamilyIdentity,
     _context_from_continuation,
 )
 from mote_kernel.state.graph_state import (
@@ -108,6 +113,43 @@ class _RuntimeRun(Protocol):
         resume: tuple[Graph.ResumeAction[str], ...] = (),
         run_id: str | None = None,
     ) -> Graph.Result[str]: ...
+
+
+class _CompiledOwnerView(Protocol):
+    graph: CompiledGraph[str]
+    family_identity: _CompiledFamilyIdentity
+
+
+class _GraphOwnerView(Protocol):
+    _compiled_owner: _CompiledOwnerView | None
+
+    @staticmethod
+    def read(graph: Graph[str]) -> _CompiledOwnerView | None:
+        return cast(_GraphOwnerView, graph)._compiled_owner
+
+
+class _ContinuationView(Protocol):
+    _snapshot: ContinuationSnapshot[str]
+
+    @staticmethod
+    def read(continuation: Graph.Continuation[str]) -> ContinuationSnapshot[str]:
+        return cast(_ContinuationView, continuation)._snapshot
+
+
+def _require_compiled_owner(graph: Graph[str]) -> _CompiledOwnerView:
+    owner = _GraphOwnerView.read(graph)
+    assert owner is not None
+    return owner
+
+
+def _continuation_snapshot(continuation: Graph.Continuation[str]) -> ContinuationSnapshot[str]:
+    return _ContinuationView.read(continuation)
+
+
+def _require_partial_commit(error: Graph.Error) -> Graph.PartialCommitError[str]:
+    if not isinstance(error, Graph.PartialCommitError):
+        raise AssertionError("expected a partial commit error")
+    return cast(Graph.PartialCommitError[str], error)
 
 
 def encode_text(value: Graph.Values[str]) -> bytes:
@@ -531,9 +573,6 @@ async def test_failure_resume_actions_are_canonicalized_and_share_run() -> None:
 async def test_same_scope_resume_input_and_substitution_install_as_one_frame_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     attempts = 0
 
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -556,7 +595,7 @@ async def test_same_scope_resume_input_and_substitution_install_as_one_frame_sna
 
     def capture(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
+        planned: PlannedResume[str],
         confirmed: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         installed = original(frames, planned, confirmed)
@@ -692,8 +731,7 @@ async def test_loop_substitutions_keep_the_same_node_isolated_by_superstep() -> 
 
     assert isinstance(completed, Graph.CompletedResult)
     assert completed.outputs["value"] == "second"
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(graph)
     context = _context_from_continuation(owner.family_identity, completed.state, completed.continuation)
     substitutions = tuple(
         record for record in context.frames.publications if isinstance(record.provenance, SkipSubstitutionProvenance)
@@ -744,8 +782,7 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 
     assert isinstance(completed, Graph.CompletedResult)
     assert sorted(observed) == [("left", "L"), ("right", "R")]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(parent)
     context = _context_from_continuation(owner.family_identity, completed.state, completed.continuation)
     substitutions = tuple(
         record for record in context.frames.publications if isinstance(record.provenance, SkipSubstitutionProvenance)
@@ -761,9 +798,6 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     class SecondScopeCommitError(RuntimeError):
         pass
 
@@ -790,7 +824,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
 
     def record_install(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
+        planned: PlannedResume[str],
         confirmed: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         installed = original_install(frames, planned, confirmed)
@@ -811,7 +845,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     monkeypatch.setattr(facade_module.GraphRunContext, "replace_state", record_replace)
     transitions: list[Graph.Transition[str]] = []
 
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
     original_error = SecondScopeCommitError()
 
     async def fail_second_scope(transition: Graph.Transition[str], /) -> Graph.State:
@@ -835,14 +869,14 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
             ),
             commit=fail_second_scope,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second scope failure must produce an explicit partial handoff")
     assert partial.cause is original_error
     assert partial.__cause__ is original_error
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
 
     assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
     assert installed_scopes == [(GraphNodeId("left"),)]
@@ -866,8 +900,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     assert tuple(item[0] for item in resume_replacements) == ((GraphNodeId("left"),),)
     assert resume_replacements[0][2].publications == ()
 
-    compiled_owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert compiled_owner is not None
+    compiled_owner = _require_compiled_owner(parent)
     checkpoint = _context_from_continuation(
         compiled_owner.family_identity,
         partial.state,
@@ -898,9 +931,6 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
 async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_is_non_exact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
@@ -921,7 +951,7 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
 
     def record_install(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
+        planned: PlannedResume[str],
         confirmed: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         result = original_install(frames, planned, confirmed)
@@ -935,7 +965,7 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
             return replace(transition.candidate_state, revision=transition.candidate_state.revision + 1)
         return transition.candidate_state
 
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
     try:
         await parent.run(
             state=paused.state,
@@ -951,15 +981,15 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
             ),
             commit=non_exact_second,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("non-exact second scope must produce an explicit partial handoff")
     assert isinstance(partial.cause, Graph.SnapshotMismatchError)
     assert "exact authoritative" in str(partial.cause)
     assert partial.__cause__ is partial.cause
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
 
     assert len(installed) == 1
     assert tuple(record.coordinate.activation.scope_run.scope for record in installed[0].publications) == (
@@ -977,9 +1007,6 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
 async def test_second_scope_frame_install_failure_hands_off_only_the_first_installed_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
@@ -995,15 +1022,14 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    old_snapshot = _continuation_snapshot(paused.continuation)
+    owner = _require_compiled_owner(parent)
     original_install = facade_module.install_confirmed_resume_frames
     transitions: list[Graph.Transition[str]] = []
 
     def reject_right_install(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
+        planned: PlannedResume[str],
         confirmed: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         if planned.scope_run.scope == (GraphNodeId("right"),):
@@ -1025,14 +1051,14 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
             ),
             commit=record,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second scope frame installation failure must explicitly hand off the first scope")
 
     assert isinstance(partial.cause, FrameInstallationInvariantError)
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
     assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
     handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
     left_publication = next(
@@ -1067,7 +1093,7 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    original_snapshot = _continuation_snapshot(paused.continuation)
     root_failed = replace(
         paused.state,
         frontier=GraphFrontierState(
@@ -1105,7 +1131,7 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
             child_states=child_states,
         ),
     )
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
     original = RuntimeError("child commit failed")
     transitions: list[Graph.Transition[str]] = []
 
@@ -1125,17 +1151,16 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
             ),
             commit=fail_child,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("child failure after root confirmation must explicitly hand off the latest root snapshot")
 
     assert partial.cause is original
     assert partial.failed_scope == ("child",)
     assert partial.state == transitions[0].candidate_state
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
+    owner = _require_compiled_owner(parent)
     handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
     assert handed_off.root_state == partial.state
     child_binding = next(
@@ -1203,7 +1228,7 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    snapshot = _continuation_snapshot(paused.continuation)
     active_children: list[ChildStateBinding] = []
     for binding in snapshot.child_states:
         pending = replace(
@@ -1240,16 +1265,15 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
             continuation=paused.continuation,
             commit=fail_second_fence,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second fence failure must hand off the first confirmed fence")
 
     assert [type(transition.command) for transition in transitions] == [FenceGraphExecution, FenceGraphExecution]
     assert partial.cause is original
     assert partial.failed_scope == ("right",)
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(graph)
     handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
     left = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("left"),))
     right = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("right"),))
@@ -1340,7 +1364,7 @@ async def test_normal_resume_never_mutates_the_input_continuation_snapshot() -> 
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
 
     completed = await graph.run(
         state=paused.state,
@@ -1349,10 +1373,9 @@ async def test_normal_resume_never_mutates_the_input_continuation_snapshot() -> 
     )
 
     assert isinstance(completed, Graph.CompletedResult)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
     assert completed.continuation is not paused.continuation
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(graph)
     restored = _context_from_continuation(owner.family_identity, paused.state, paused.continuation)
     assert restored.root_state == paused.state
 
@@ -1367,7 +1390,7 @@ async def test_shared_input_continuation_is_not_modified_by_independent_invocati
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
 
     first, second = await asyncio.gather(
         graph.run(
@@ -1384,7 +1407,7 @@ async def test_shared_input_continuation_is_not_modified_by_independent_invocati
 
     assert isinstance(first, Graph.CompletedResult)
     assert isinstance(second, Graph.CompletedResult)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
     assert first.continuation is not second.continuation
 
 
@@ -1882,8 +1905,7 @@ async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_
         )
 
     assert isinstance(commits.transitions[0].command, ResumeGraphNodes)
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(graph)
     context = _context_from_continuation(
         owner.family_identity,
         paused.state,
@@ -2477,8 +2499,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
             )
         ),
     )
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
+    owner = _require_compiled_owner(parent)
     context = _context_from_continuation(owner.family_identity, result.state, result.continuation)
     context.replace_state(root_scope_run(root_state.run_id), root_state)
     result = project_graph_result(owner.graph, context, AwaitingResume((), ()))

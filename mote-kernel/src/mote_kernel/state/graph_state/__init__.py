@@ -1,7 +1,5 @@
 """Recoverable graph runtime state and pure transitions."""
 
-# pyright: reportUnusedImport=false
-
 from mote_kernel.state.graph_state.command import (
     AbortGraphRun,
     AdvanceGraphFrontier,

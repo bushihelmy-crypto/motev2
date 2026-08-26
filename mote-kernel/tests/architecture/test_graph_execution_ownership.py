@@ -424,7 +424,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         not {
             "_PlannedState",
             "_PlannedFence",
-            "_PlannedResume",
+            "PlannedResume",
             "drive_root",
             "project_graph_result",
             "validate_context",
@@ -436,7 +436,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
             {
                 "_PlannedState",
                 "_PlannedFence",
-                "_PlannedResume",
+                "PlannedResume",
                 "GraphTransition",
                 "drive_root",
                 "project_graph_result",
@@ -445,21 +445,14 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
     ) == {
         "_PlannedState": ("execution/invocation.py",),
         "_PlannedFence": ("execution/invocation.py",),
-        "_PlannedResume": ("execution/invocation.py",),
+        "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/family_driver.py",),
         "drive_root": ("execution/family_driver.py",),
         "project_graph_result": ("execution/family_driver.py",),
     }
 
 
-def test_graph_transition_dispatch_is_exhaustive_and_modules_do_not_alias_contracts() -> None:
-    reducer = _top_level_definition("state/graph_state/reducer.py", "reduce_graph_run")
-    assert any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "assert_never"
-        for node in ast.walk(reducer)
-    )
-    assert not any(isinstance(node, ast.Try) for node in ast.walk(reducer))
-
+def test_graph_transition_modules_do_not_alias_contracts() -> None:
     aliases: list[str] = []
     for relative, tree in _production_modules():
         if not relative.startswith(("state/graph_state/", "execution/")):

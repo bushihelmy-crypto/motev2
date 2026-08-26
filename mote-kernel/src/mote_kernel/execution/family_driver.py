@@ -180,7 +180,7 @@ def _ensure_child_boundary(
     context.frames = context.frames.add_child_boundary(ConfirmedChildBoundary(availability, view))
 
 
-def _child_projections(
+def child_projections(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
     scope_run: ScopeRunCoordinate,
@@ -339,7 +339,7 @@ async def _advance_scope_quantum(
     commit: GraphCommit[GraphValueT] | None,
 ) -> GraphBoundary | None:
     state = context.state_at(scope_run)
-    projections = _child_projections(
+    projections = child_projections(
         graph,
         state,
         scope_run,
@@ -403,7 +403,7 @@ async def _drive_children(
         )
     while True:
         parent_state = context.state_at(parent_scope_run)
-        projections = _child_projections(
+        projections = child_projections(
             parent_graph,
             parent_state,
             parent_scope_run,

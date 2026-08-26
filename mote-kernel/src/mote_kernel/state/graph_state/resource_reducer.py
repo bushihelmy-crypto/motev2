@@ -152,15 +152,14 @@ def _release(snapshot: ResourceSnapshot, node_id: GraphNodeId) -> ResourceSnapsh
 
 
 def _apply_command(snapshot: ResourceSnapshot, command: ResourceCommand) -> ResourceSnapshot:
-    if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-        command, AcquireResources | ReleaseResources
-    ):
-        raise ResourceTransitionError("resource command has an unsupported variant")
-    if isinstance(command, AcquireResources):
-        result = _acquire(snapshot, command)
-    else:
-        _require_identity(command.node_id, "node")
-        result = _release(snapshot, command.node_id)
+    match command:
+        case AcquireResources():
+            result = _acquire(snapshot, command)
+        case ReleaseResources():
+            _require_identity(command.node_id, "node")
+            result = _release(snapshot, command.node_id)
+        case _:
+            raise ResourceTransitionError("resource command has an unsupported variant")
     _validate_snapshot(result)
     return result
 
