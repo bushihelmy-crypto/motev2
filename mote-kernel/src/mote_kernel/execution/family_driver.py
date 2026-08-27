@@ -495,6 +495,8 @@ def project_graph_result(
     context: GraphRunContext[GraphValueT],
     disposition: GraphBoundary,
 ) -> GraphResult[GraphValueT]:
+    if type(disposition) not in (CompletedGraph, AbortedGraph, AwaitingResume):
+        raise SnapshotMismatchError("graph driver returned an unsupported boundary")
     state = context.root_state
     continuation = _continuation(context)
     if isinstance(disposition, CompletedGraph):

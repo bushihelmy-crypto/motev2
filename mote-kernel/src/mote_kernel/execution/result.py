@@ -146,6 +146,8 @@ GraphCommitResult: TypeAlias = _GraphSuccessResult[GraphValueT] | _GraphFailureR
 
 
 def _commit_result(result: TaskResult[GraphValueT]) -> GraphCommitResult[GraphValueT]:
+    if type(result) not in (TaskSuccess, TaskFailure, TaskInterrupt):
+        raise NodeExecutionContractError("task result has an unsupported variant")
     if isinstance(result, TaskSuccess):
         return _GraphSuccessResult(
             node_id=result.task.node_id,
