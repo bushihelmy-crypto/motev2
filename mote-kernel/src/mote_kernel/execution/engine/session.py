@@ -85,6 +85,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         "_errors",
         "_graph",
         "_next_in_progress",
+        "_node_origin_cancellation",
         "_parent_nodes",
         "_preparation",
         "_queued_results",
@@ -114,7 +115,8 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         self._next_in_progress = False
         self._close_lock = asyncio.Lock()
         self._disposition = _SessionDisposition.OPEN
-        self._errors: list[tuple[GraphTask, Exception]] = []
+        self._errors: list[tuple[GraphTask, BaseException]] = []
+        self._node_origin_cancellation: asyncio.CancelledError | None = None
 
     @property
     def quiescent(self) -> bool:
@@ -229,10 +231,18 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             executables.append(ExecutableTask(task, effective))
         return tuple(executables)
 
-    def _record_error(self, task: GraphTask, error: Exception) -> None:
+    def _record_error(self, task: GraphTask, error: BaseException) -> None:
         self._errors.append((task, error))
         self._errors.sort(key=lambda item: item[0].sort_key)
+        first = self._errors[0][1]
+        self._node_origin_cancellation = first if isinstance(first, asyncio.CancelledError) else None
         self._disposition = _SessionDisposition.ERROR_DRAINING
+
+    def consume_node_origin(self, error: asyncio.CancelledError) -> bool:
+        if self._node_origin_cancellation is not error:
+            return False
+        self._node_origin_cancellation = None
+        return True
 
     async def _next_event(self) -> TaskResult[GraphValueT] | TaskRaised:
         return await self._scheduler.next_completion()
@@ -277,6 +287,10 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             self._ensure_preparation()
             while True:
                 self._drain_scheduler_events()
+                if self._node_origin_cancellation is not None:
+                    cancellation = self._node_origin_cancellation
+                    await self.aclose()
+                    raise cancellation
                 if self._queued_results:
                     queued = self._queued_results.popleft()
                     projected = self._project(queued.result)
@@ -317,6 +331,15 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             self._queued_results.clear()
             self._awaiting_ack = None
             self._disposition = _SessionDisposition.CLOSED
+
+
+def consume_node_origin_cancellation(
+    session: GraphExecutionSession[GraphValueT],
+    error: asyncio.CancelledError,
+) -> bool:
+    if not isinstance(session, _GraphExecutionSession):
+        raise ResultCollectionError("execution session was not issued by the graph executor")
+    return session.consume_node_origin(error)
 
 
 def issue_execution_session(

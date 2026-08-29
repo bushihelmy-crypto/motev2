@@ -31,7 +31,14 @@ NodeReturn: TypeAlias = (
 @dataclass(frozen=True, slots=True)
 class TaskRaised:
     task: GraphTask
-    error: Exception
+    error: BaseException
+
+
+_SCHEDULER_CLOSE_CANCEL = object()
+
+
+def cancel_scheduler_task(task: asyncio.Task[TaskResult[GraphValueT] | TaskRaised]) -> None:
+    task.cancel(_SCHEDULER_CLOSE_CANCEL)
 
 
 def _project_outcome(
@@ -82,6 +89,10 @@ async def _capture(
 ) -> TaskResult[GraphValueT] | TaskRaised:
     try:
         return await _execute_task(graph, executable)
+    except asyncio.CancelledError as error:
+        if error.args and error.args[0] is _SCHEDULER_CLOSE_CANCEL:
+            raise
+        return TaskRaised(executable.task, error)
     except Exception as error:
         return TaskRaised(executable.task, error)
 
@@ -150,7 +161,7 @@ class TaskScheduler(Generic[GraphValueT]):
     async def aclose(self) -> None:
         handles = tuple(handle for _executable, handle in self._live.values())
         for handle in handles:
-            handle.cancel()
+            cancel_scheduler_task(handle)
         if handles:
             await asyncio.gather(*handles, return_exceptions=True)
         self._live.clear()

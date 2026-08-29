@@ -3,9 +3,12 @@ from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.errors import NodeExecutionContractError, SnapshotMismatchError
-from mote_kernel.execution.family_driver import project_graph_result
+from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.family_driver import admit_root, project_graph_result
+from mote_kernel.execution.identity import root_scope_run
+from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import AwaitingResume, TaskFailure, _commit_result
-from mote_kernel.execution.run_context import ScopedFrameIndex, _new_context, _new_family_identity
+from mote_kernel.execution.run_context import ScopedFrameIndex, _new_family_identity
 from mote_kernel.state.graph_state import GraphNodeId, GraphRunId
 
 
@@ -24,13 +27,25 @@ def test_commit_result_rejects_a_task_result_subclass() -> None:
         _commit_result(TaskFailureSubclass(task, "failed"))
 
 
-def test_graph_result_projection_rejects_a_boundary_subclass() -> None:
-    context = _new_context(
-        _new_family_identity(),
-        running_state(),
+@pytest.mark.asyncio
+async def test_graph_result_projection_rejects_a_boundary_subclass() -> None:
+    graph = compiled_graph("a")
+    state = running_state()
+    root = await admit_root(
+        graph,
+        state,
+        (),
         ScopedFrameIndex(),
-        recovered=True,
+        ((root_scope_run(state.run_id), GraphExecutor(graph)),),
+        ExecutionLimits(),
+        None,
     )
 
     with pytest.raises(SnapshotMismatchError, match="unsupported boundary"):
-        project_graph_result(compiled_graph("a"), context, AwaitingResumeSubclass((), ()))
+        project_graph_result(
+            graph,
+            _new_family_identity(),
+            root,
+            AwaitingResumeSubclass((), ()),
+            recovered=True,
+        )

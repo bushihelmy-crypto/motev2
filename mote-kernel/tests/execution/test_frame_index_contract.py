@@ -1,8 +1,4 @@
-import pytest
-from tests.execution.engine.factories import running_state
-
 from mote_kernel.execution import Graph
-from mote_kernel.execution.errors import GraphValueUnavailableError, SnapshotMismatchError
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
 from mote_kernel.execution.graph.values import (
     NamedValue,
@@ -10,7 +6,7 @@ from mote_kernel.execution.graph.values import (
     _make_graph_output_view,
     _make_node_output_frame,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
+from mote_kernel.execution.identity import StableActivation, root_scope_run
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedSubstitution,
@@ -22,8 +18,6 @@ from mote_kernel.execution.run_context import (
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
-    _new_context,
-    _new_family_identity,
 )
 from mote_kernel.state.graph_state import GraphNodeId, GraphRunId
 
@@ -50,23 +44,6 @@ def test_child_boundary_lookup_distinguishes_repeated_scoped_runs() -> None:
 
     assert index.child_boundaries == (first, second)
     assert index.lookup(second_coordinate) is second
-
-
-def test_run_context_rejects_access_or_replacement_before_child_start_acknowledgement() -> None:
-    root = running_state()
-    context = _new_context(
-        _new_family_identity(),
-        root,
-        ScopedFrameIndex(),
-        recovered=False,
-    )
-    missing = ScopeRunCoordinate((GraphNodeId("child"),), GraphRunId("missing-child-run"))
-
-    assert context.state_at(root_scope_run(root.run_id)) is root
-    with pytest.raises(GraphValueUnavailableError, match="child state is unavailable"):
-        context.state_at(missing)
-    with pytest.raises(SnapshotMismatchError, match="before its acknowledged start"):
-        context.replace_state(missing, root)
 
 
 def test_candidate_availability_delegates_non_publication_segments_and_overlays_publications() -> None:

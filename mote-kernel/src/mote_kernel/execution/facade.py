@@ -1,6 +1,8 @@
 """Single public graph composition and execution facade."""
 
+import asyncio
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
 from uuid import uuid4
@@ -21,12 +23,16 @@ from mote_kernel.execution.errors import (
     RoutingError,
     SnapshotMismatchError,
 )
+from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
+    admit_root,
     commit_transition,
     drive_root,
+    fresh_root,
     project_graph_result,
+    scoped_commit,
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END, START
@@ -73,6 +79,7 @@ from mote_kernel.execution.invocation import (
     plan_fences,
     plan_resumes,
     recovery_seed,
+    replace_planned_state,
     validate_context,
 )
 from mote_kernel.execution.limits import ExecutionLimits
@@ -97,18 +104,17 @@ from mote_kernel.execution.result import (
     _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
-    AdmittedGraphInput,
-    GraphInputAvailabilityCoordinate,
-    GraphRunContext,
+    ChildStateBinding,
     ScopedFrameIndex,
+    _admit_continuation,
     _CompiledFamilyIdentity,
-    _context_from_continuation,
-    _continuation,
+    _continuation_recovered,
     _GraphContinuation,
-    _new_context,
+    _make_continuation,
     _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
+    GraphAbortReason,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphInterruptId,
@@ -623,24 +629,29 @@ class Graph(Generic[GraphValueT]):
             raise SnapshotMismatchError("state runs require state, forbid run_id, and do not accept values")
         owner = self._compile()
         graph = owner.graph
-        executors = executors_for(graph)
+        recovered = False
         if isinstance(invocation, _GraphValues):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
             input_candidate = admit_graph_input(graph, invocation)
-            command = executors[()].start_command(effective_run_id)
-            current = await commit_transition(scope_run, None, command, None, commit)
-            context: GraphRunContext[GraphValueT] = _new_context(
-                owner.family_identity,
-                current,
-                ScopedFrameIndex(),
-                recovered=False,
-            )
-            coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
+            executor = GraphExecutor(graph)
+            command = executor.start_command(effective_run_id)
+            current = await commit_transition(
                 scope_run,
-                graph.graph_input_descriptor.identity,
+                None,
+                command,
+                None,
+                scoped_commit(scope_run, commit),
             )
-            context.frames = context.frames.add_graph_input(AdmittedGraphInput(coordinate, input_candidate))
+            root = await fresh_root(
+                graph,
+                scope_run,
+                current,
+                input_candidate,
+                executor,
+                limits,
+                commit,
+            )
         else:
             resumed_scopes = {action.scope for action in resume}
             substitution_actions = tuple(
@@ -653,26 +664,27 @@ class Graph(Generic[GraphValueT]):
                     f"publication checkpoint before commit; actions={identities!r}"
                 )
             if continuation is None:
-                context = _new_context(
-                    owner.family_identity,
-                    invocation,
-                    ScopedFrameIndex(),
-                    recovered=True,
-                )
+                child_states: tuple[ChildStateBinding, ...] = ()
+                frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
+                recovered = True
             else:
-                context = _context_from_continuation(owner.family_identity, invocation, continuation)
-            validate_context(graph, context)
-            lineage = lineage_states(context)
-            planned_states, fences = plan_fences(graph, lineage, executors)
+                snapshot = _admit_continuation(owner.family_identity, invocation, continuation)
+                child_states = snapshot.child_states
+                frames = snapshot.frames
+                recovered = _continuation_recovered(snapshot)
+            lineage = lineage_states(invocation, child_states)
+            validate_context(graph, lineage, frames, recovered=recovered)
+            executors = executors_for(graph, lineage)
+            planned_states, fences = plan_fences(graph, lineage)
             planned_states, candidate_frames, planned_resumes, facts = plan_resumes(
                 graph,
                 planned_states,
-                context.frames,
+                frames,
                 resume,
                 executors,
             )
             admit_state_owned_overrides(graph, planned_states, candidate_frames.confirmed)
-            if context.recovered or any(
+            if recovered or any(
                 action.output is None for action in resume if isinstance(action, SkipFailedNodeRequest)
             ):
                 preflight_recovery(
@@ -680,62 +692,139 @@ class Graph(Generic[GraphValueT]):
                     recovery_seed(planned_states, candidate_frames, limits, facts),
                 )
             confirmed_prefix = False
+            confirmed_states = lineage
+            confirmed_frames = frames
+
+            def partial_continuation() -> _GraphContinuation[GraphValueT]:
+                root_binding = next(binding for binding in confirmed_states if not binding.scope_run.scope)
+                confirmed_children = tuple(
+                    ChildStateBinding(binding.scope_run, binding.parent_activation, binding.state)
+                    for binding in confirmed_states
+                    if binding.parent_activation is not None
+                )
+                return _make_continuation(
+                    owner.family_identity,
+                    root_binding.state,
+                    confirmed_children,
+                    confirmed_frames,
+                    recovered=recovered,
+                )
+
             for fence in fences:
-                current = context.state_at(fence.scope_run)
+                binding = next(item for item in confirmed_states if item.scope_run == fence.scope_run)
                 try:
                     confirmed = await commit_transition(
                         fence.scope_run,
-                        current,
+                        binding.state,
                         fence.command,
                         None,
-                        commit,
+                        scoped_commit(fence.scope_run, commit),
                     )
                 except Exception as cause:
                     if confirmed_prefix:
+                        root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
                         raise _partial_commit_error(
-                            context.root_state,
-                            _continuation(context),
+                            root_binding.state,
+                            partial_continuation(),
                             cause,
                             tuple(fence.scope_run.scope),
                         ) from cause
                     raise
-                context.replace_state(fence.scope_run, confirmed)
+                confirmed_states = replace_planned_state(confirmed_states, replace(binding, state=confirmed))
                 confirmed_prefix = True
             for planned_resume in planned_resumes:
-                current = context.state_at(planned_resume.scope_run)
+                binding = next(item for item in confirmed_states if item.scope_run == planned_resume.scope_run)
                 try:
                     confirmed = await commit_transition(
                         planned_resume.scope_run,
-                        current,
+                        binding.state,
                         planned_resume.prepared.command,
                         None,
-                        commit,
+                        scoped_commit(planned_resume.scope_run, commit),
                     )
                     installed_frames = install_confirmed_resume_frames(
-                        context.frames,
+                        confirmed_frames,
                         planned_resume,
                         confirmed,
                     )
-                    context.replace_state(planned_resume.scope_run, confirmed)
-                    context.frames = installed_frames
+                    confirmed_states = replace_planned_state(
+                        confirmed_states,
+                        replace(binding, state=confirmed),
+                    )
+                    confirmed_frames = installed_frames
                 except Exception as cause:
                     if confirmed_prefix:
+                        root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
                         raise _partial_commit_error(
-                            context.root_state,
-                            _continuation(context),
+                            root_binding.state,
+                            partial_continuation(),
                             cause,
                             tuple(planned_resume.scope_run.scope),
                         ) from cause
                     raise
                 confirmed_prefix = True
-        disposition = await drive_root(
-            graph,
-            context,
-            executors,
-            limits,
-            commit,
-        )
-        return project_graph_result(graph, context, disposition)
+            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
+            confirmed_children = tuple(
+                ChildStateBinding(item.scope_run, item.parent_activation, item.state)
+                for item in confirmed_states
+                if item.parent_activation is not None
+            )
+            root = await admit_root(
+                graph,
+                root_binding.state,
+                confirmed_children,
+                confirmed_frames,
+                executors,
+                limits,
+                commit,
+            )
+
+        async def finish(abort_reason: GraphAbortReason | None) -> None:
+            async def cleanup() -> None:
+                primary: BaseException | None = None
+                if abort_reason is not None:
+                    try:
+                        await root.abort(abort_reason)
+                    except BaseException as error:
+                        primary = error
+                try:
+                    await root.release()
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+                if primary is not None:
+                    raise primary
+
+            cleanup_task = asyncio.create_task(cleanup())
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+            cleanup_task.result()
+
+        try:
+            disposition = await drive_root(root)
+            result = project_graph_result(
+                graph,
+                owner.family_identity,
+                root,
+                disposition,
+                recovered=recovered,
+            )
+        except asyncio.CancelledError as error:
+            if root.consume_node_origin_cancellation(error):
+                with suppress(BaseException):
+                    await finish(None)
+                raise
+            await finish(GraphAbortReason("graph invocation was cancelled"))
+            raise
+        except BaseException:
+            with suppress(BaseException):
+                await finish(None)
+            raise
+        await finish(None)
+        return result
 
 
 __all__ = ["Graph"]

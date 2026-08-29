@@ -5,7 +5,8 @@ import pytest
 from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.family_driver import project_graph_result
+from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.family_driver import admit_root, project_graph_result
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
@@ -15,7 +16,8 @@ from mote_kernel.execution.graph.values import (
     _make_node_input_frame,
     _make_node_output_frame,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
+from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import AbortedGraph
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
@@ -27,10 +29,12 @@ from mote_kernel.execution.run_context import (
     ExecutionPublicationProvenance,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
-    _new_context,
+    _admit_continuation,
     _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
+    AbortGraphRun,
+    GraphAbortReason,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
@@ -38,8 +42,8 @@ from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphRunId,
     GraphRunState,
-    GraphRunStatus,
     SettleGraphNode,
+    reduce_graph_run,
 )
 
 
@@ -73,12 +77,20 @@ class ForeignFamily:
 
 
 class ContinuationAdmission(Protocol):
-    def admit(
+    def admit_snapshot(
         self,
         seal: ForeignSeal,
         family: ForeignFamily,
         state: Graph.State,
     ) -> None: ...
+
+
+def test_continuation_adapter_rejects_a_foreign_runtime_value() -> None:
+    state = running_state()
+    continuation = cast(Graph.Continuation[str], object())
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="admitted by their Graph owner"):
+        _admit_continuation(_new_family_identity(), state, continuation)
 
 
 class LostSettlementError(RuntimeError):
@@ -207,20 +219,27 @@ async def test_continuation_admission_rejects_a_foreign_seal() -> None:
     admission = cast(ContinuationAdmission, completed.continuation)
 
     with pytest.raises(Graph.SnapshotMismatchError, match="admitted by their Graph owner"):
-        admission.admit(ForeignSeal(), ForeignFamily(), completed.state)
+        admission.admit_snapshot(ForeignSeal(), ForeignFamily(), completed.state)
 
 
-def test_result_projection_rejects_an_aborted_boundary_without_canonical_abort() -> None:
-    malformed = replace(running_state(), status=GraphRunStatus.ABORTED)
-    context = _new_context(
-        _new_family_identity(),
-        malformed,
+@pytest.mark.asyncio
+async def test_result_projection_rejects_an_aborted_boundary_without_canonical_abort() -> None:
+    graph = compiled_graph("a")
+    running = running_state()
+    aborted = reduce_graph_run(running, AbortGraphRun(running.revision, GraphAbortReason("aborted")))
+    root = await admit_root(
+        graph,
+        aborted,
+        (),
         ScopedFrameIndex(),
-        recovered=True,
+        ((root_scope_run(aborted.run_id), GraphExecutor(graph)),),
+        ExecutionLimits(),
+        None,
     )
+    object.__setattr__(root.state, "abort", None)
 
     with pytest.raises(Graph.SnapshotMismatchError, match="missing its canonical abort"):
-        project_graph_result(compiled_graph("a"), context, AbortedGraph())
+        project_graph_result(graph, _new_family_identity(), root, AbortedGraph(), recovered=True)
 
 
 @pytest.mark.asyncio
@@ -1079,6 +1098,34 @@ async def test_recovered_continuation_rejects_duplicate_child_run_coordinates() 
 
     with pytest.raises(Graph.SnapshotMismatchError, match="repeats one scoped graph run"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_noncanonical_child_binding_order() -> None:
+    parent, completed = await _completed_parallel_children("continuation.child-binding-order")
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    layout.install(replace(snapshot, child_states=tuple(reversed(snapshot.child_states))))
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="canonical scoped order"):
+        await parent.run(state=completed.state, continuation=completed.continuation)
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_duplicate_parent_activation() -> None:
+    parent, completed = await _completed_parallel_children("continuation.duplicate-parent-activation")
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    left, right = snapshot.child_states
+    layout.install(
+        replace(
+            snapshot,
+            child_states=(left, replace(right, parent_activation=left.parent_activation)),
+        )
+    )
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="repeats one parent graph activation"):
+        await parent.run(state=completed.state, continuation=completed.continuation)
 
 
 @pytest.mark.asyncio

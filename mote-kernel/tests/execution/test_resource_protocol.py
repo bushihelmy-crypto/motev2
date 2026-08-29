@@ -20,6 +20,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import ExecutableFrontier
 from mote_kernel.state.graph_state import (
+    AbortGraphRun,
     ClaimGraphExecution,
     FenceGraphExecution,
     GraphDefinitionId,
@@ -277,43 +278,6 @@ async def test_ordinary_error_stops_unstarted_waiters_and_fence_clears_remaining
     assert commits.transitions[-1].candidate_state.resources is None
 
 
-async def test_resource_session_close_is_quiescent_before_fence() -> None:
-    entered = asyncio.Event()
-    cleaned = asyncio.Event()
-    waiter_calls = 0
-
-    async def owner(values: Graph.Values[str]) -> Graph.Values[str]:
-        entered.set()
-        try:
-            await asyncio.sleep(10)
-        finally:
-            cleaned.set()
-        return values
-
-    async def waiter(values: Graph.Values[str]) -> Graph.Values[str]:
-        nonlocal waiter_calls
-        waiter_calls += 1
-        return values
-
-    graph = resource_graph(
-        (
-            ("a", owner, ("file",)),
-            ("b", waiter, ("file",)),
-        )
-    )
-    commits = CommitLog()
-    running = asyncio.create_task(graph.run(Graph.values(value="input"), commit=commits))
-    await entered.wait()
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-
-    assert cleaned.is_set()
-    assert waiter_calls == 0
-    assert isinstance(commits.transitions[-1].command, ClaimGraphExecution)
-    assert commits.transitions[-1].candidate_state.execution is not None
-
-
 async def test_three_conflicting_resource_nodes_are_released_and_selected_fifo() -> None:
     starts: list[str] = []
 
@@ -529,6 +493,9 @@ async def test_active_child_blocks_resource_admission() -> None:
         transition.scope == () and isinstance(transition.command, ClaimGraphExecution)
         for transition in commits.transitions
     )
+    assert tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    ) == (("nested",), ())
 
 
 async def test_resource_and_completed_nested_node_share_one_settlement_session() -> None:

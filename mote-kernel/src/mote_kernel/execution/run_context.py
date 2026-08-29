@@ -5,7 +5,6 @@ from typing import Generic, Never, Protocol, SupportsIndex, TypeAlias, TypeVar, 
 
 from mote_kernel.execution.errors import (
     GraphValuePublicationError,
-    GraphValueUnavailableError,
     SnapshotMismatchError,
 )
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity
@@ -350,24 +349,18 @@ class _GraphContinuation(Generic[GraphValueT]):
         if _seal is not _CONTINUATION_SEAL:
             raise SnapshotMismatchError("continuations can only be produced by a Graph result")
 
-    def admit(
+    def admit_snapshot(
         self,
         _seal: _ContinuationSeal,
         family_identity: _CompiledFamilyIdentity,
         state: GraphRunState,
-    ) -> "GraphRunContext[GraphValueT]":
+    ) -> ContinuationSnapshot[GraphValueT]:
         if _seal is not _CONTINUATION_SEAL:
             raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
         snapshot = self._snapshot
         if snapshot.family_identity is not family_identity or snapshot.root_state != state:
             raise SnapshotMismatchError("state and continuation do not belong to the same compiled graph lineage")
-        return GraphRunContext(
-            family_identity,
-            snapshot.root_state,
-            snapshot.frames,
-            snapshot.child_states,
-            recovered=isinstance(snapshot, _RecoveredContinuationSnapshot),
-        )
+        return snapshot
 
     def __copy__(self) -> Never:
         raise SnapshotMismatchError("continuations do not provide a copy contract")
@@ -376,104 +369,45 @@ class _GraphContinuation(Generic[GraphValueT]):
         raise SnapshotMismatchError("continuations do not provide a serialization contract")
 
 
-class GraphRunContext(Generic[GraphValueT]):
-    """Mutable invocation envelope around immutable acknowledged snapshots."""
-
-    __slots__ = ("child_states", "family_identity", "frames", "recovered", "root_state")
-
-    def __init__(
-        self,
-        family_identity: _CompiledFamilyIdentity,
-        root_state: GraphRunState,
-        frames: ScopedFrameIndex[GraphValueT],
-        child_states: tuple[ChildStateBinding, ...],
-        *,
-        recovered: bool,
-    ) -> None:
-        self.family_identity = family_identity
-        self.root_state = root_state
-        self.frames = frames
-        self.child_states = child_states
-        self.recovered = recovered
-
-    def child_state(self, coordinate: ScopeRunCoordinate) -> ChildStateBinding | None:
-        return next((item for item in self.child_states if item.coordinate == coordinate), None)
-
-    def state_at(self, coordinate: ScopeRunCoordinate) -> GraphRunState:
-        if not coordinate.scope:
-            return self.root_state
-        binding = self.child_state(coordinate)
-        if binding is None:
-            raise GraphValueUnavailableError(f"child state is unavailable at {coordinate!r}")
-        return binding.state
-
-    def replace_state(self, coordinate: ScopeRunCoordinate, state: GraphRunState) -> None:
-        if not coordinate.scope:
-            self.root_state = state
-            return
-        existing = self.child_state(coordinate)
-        if existing is None:
-            raise SnapshotMismatchError("cannot replace a child state before its acknowledged start")
-        self.replace_child(ChildStateBinding(coordinate, existing.parent_activation, state))
-
-    def replace_child(self, binding: ChildStateBinding) -> None:
-        retained = tuple(item for item in self.child_states if item.coordinate != binding.coordinate)
-        self.child_states = tuple(sorted((*retained, binding), key=lambda item: item.coordinate))
-
-
 def _new_family_identity() -> _CompiledFamilyIdentity:
     return _CompiledFamilyIdentity()
 
 
-def _new_context(
-    family_identity: _CompiledFamilyIdentity,
-    state: GraphRunState,
-    frames: ScopedFrameIndex[GraphValueT],
-    *,
-    recovered: bool,
-) -> GraphRunContext[GraphValueT]:
-    return GraphRunContext(
-        family_identity,
-        state,
-        frames,
-        (),
-        recovered=recovered,
-    )
-
-
-def _context_from_continuation(
+def _admit_continuation(
     family_identity: _CompiledFamilyIdentity,
     state: GraphRunState,
     continuation: _GraphContinuation[GraphValueT],
-) -> GraphRunContext[GraphValueT]:
-    return continuation.admit(_CONTINUATION_SEAL, family_identity, state)
+) -> ContinuationSnapshot[GraphValueT]:
+    if type(continuation) is not _GraphContinuation:
+        raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
+    return continuation.admit_snapshot(_CONTINUATION_SEAL, family_identity, state)
 
 
-def _snapshot(context: GraphRunContext[GraphValueT]) -> ContinuationSnapshot[GraphValueT]:
-    if context.recovered:
-        return _RecoveredContinuationSnapshot(
-            context.family_identity,
-            context.root_state,
-            context.child_states,
-            context.frames,
-        )
-    return _CompleteContinuationSnapshot(
-        context.family_identity,
-        context.root_state,
-        context.child_states,
-        context.frames,
-    )
+def _continuation_recovered(snapshot: ContinuationSnapshot[GraphValueT]) -> bool:
+    return isinstance(snapshot, _RecoveredContinuationSnapshot)
 
 
-def _continuation(context: GraphRunContext[GraphValueT]) -> _GraphContinuation[GraphValueT]:
-    return _GraphContinuation(_snapshot=_snapshot(context), _seal=_CONTINUATION_SEAL)
+def _make_continuation(
+    family_identity: _CompiledFamilyIdentity,
+    root_state: GraphRunState,
+    child_states: tuple[ChildStateBinding, ...],
+    frames: ScopedFrameIndex[GraphValueT],
+    *,
+    recovered: bool,
+) -> _GraphContinuation[GraphValueT]:
+    snapshot: ContinuationSnapshot[GraphValueT]
+    if recovered:
+        snapshot = _RecoveredContinuationSnapshot(family_identity, root_state, child_states, frames)
+    else:
+        snapshot = _CompleteContinuationSnapshot(family_identity, root_state, child_states, frames)
+    return _GraphContinuation(_snapshot=snapshot, _seal=_CONTINUATION_SEAL)
 
 
 __all__ = [
     "_CompiledFamilyIdentity",
     "_GraphContinuation",
-    "_context_from_continuation",
-    "_continuation",
-    "_new_context",
+    "_admit_continuation",
+    "_continuation_recovered",
+    "_make_continuation",
     "_new_family_identity",
 ]

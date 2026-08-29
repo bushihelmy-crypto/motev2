@@ -6,7 +6,6 @@ from typing import Generic, TypeAlias, TypeVar, final
 from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractError, SnapshotMismatchError
-from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
     NodeOutputFrame,
@@ -18,13 +17,13 @@ from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
     CompleteGraphFrontier,
+    GraphAbortReason,
     GraphInterruptId,
     GraphNodeId,
     GraphRunState,
     ParentGraphActivation,
     ResumeGraphNodes,
     SettleGraphNode,
-    StartGraphRun,
 )
 
 GraphValueT = TypeVar("GraphValueT")
@@ -176,66 +175,34 @@ class MissingChild:
 @dataclass(frozen=True, slots=True)
 class ActiveChild:
     parent: ParentGraphActivation
-    child_state: GraphRunState
 
 
 @dataclass(frozen=True, slots=True)
 class CompletedChild(Generic[GraphValueT]):
     parent: ParentGraphActivation
-    child_state: GraphRunState
     output: GraphOutputView[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
 class AbortedChild:
     parent: ParentGraphActivation
-    child_state: GraphRunState
+    reason: GraphAbortReason
 
 
 ChildProjection: TypeAlias = MissingChild | ActiveChild | CompletedChild[GraphValueT] | AbortedChild
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedNestedRun(Generic[GraphValueT]):
-    parent: ParentGraphActivation
-    graph: CompiledGraph[GraphValueT]
-    command: StartGraphRun
-
-
-@dataclass(frozen=True, slots=True)
-class StartMissingChildren(Generic[GraphValueT]):
-    children: tuple[PreparedNestedRun[GraphValueT], ...]
-
-    def __post_init__(self) -> None:
-        parents = tuple(child.parent for child in self.children)
-        if (
-            not parents
-            or len(parents) != len(set(parents))
-            or parents != tuple(sorted(parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
-        ):
-            raise ValueError("children to start must be non-empty and canonical")
-
-
-@dataclass(frozen=True, slots=True)
-class WaitForActiveChildren:
-    children: tuple[ActiveChild, ...]
-
-    def __post_init__(self) -> None:
-        parents = tuple(child.parent for child in self.children)
-        if (
-            not parents
-            or len(parents) != len(set(parents))
-            or parents != tuple(sorted(parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
-        ):
-            raise ValueError("active children must be non-empty and canonical")
-
-
-ChildWaitAction: TypeAlias = StartMissingChildren[GraphValueT] | WaitForActiveChildren
-
-
-@dataclass(frozen=True, slots=True)
 class WaitingForChildren(Generic[GraphValueT]):
-    action: ChildWaitAction[GraphValueT]
+    missing: tuple[MissingChild, ...]
+    active: tuple[ActiveChild, ...]
+
+    def __post_init__(self) -> None:
+        projections: tuple[MissingChild | ActiveChild, ...] = (*self.missing, *self.active)
+        parents = tuple(projection.parent for projection in projections)
+        canonical = tuple(sorted(parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
+        if not parents or len(parents) != len(set(parents)) or parents != canonical:
+            raise ValueError("children to drive must be non-empty, distinct, and canonical")
 
 
 @dataclass(frozen=True, slots=True)

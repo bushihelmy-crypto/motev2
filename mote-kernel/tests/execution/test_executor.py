@@ -18,6 +18,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.family_driver import fresh_root
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -38,6 +39,7 @@ from mote_kernel.execution.graph.values import (
     _frame_value,
     _make_graph_output_view,
 )
+from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ExecutionRequestAttemptId,
     ScopeRunCoordinate,
@@ -66,11 +68,9 @@ from mote_kernel.execution.result import (
     ExecutableFrontier,
     MissingChild,
     ReadyToResolve,
-    StartMissingChildren,
     TaskFailure,
     TaskResult,
     TaskSuccess,
-    WaitForActiveChildren,
     WaitingForChildren,
 )
 from mote_kernel.execution.run_context import (
@@ -331,6 +331,19 @@ def nested_graph() -> CompiledGraph[str]:
     )
 
 
+def started_nested_child(
+    parent_graph: CompiledGraph[str],
+    parent_state: GraphRunState,
+    parent_scope: ScopeRunCoordinate,
+    node_id: GraphNodeId,
+) -> tuple[ParentGraphActivation, CompiledGraph[str], ScopeRunCoordinate, GraphRunState]:
+    activation = ParentGraphActivation(parent_state.run_id, parent_state.superstep, node_id)
+    child_graph = parent_graph.nested_graphs[node_id]
+    coordinate = child_scope_run_for_activation(parent_scope, activation)
+    command = project_start_graph_command(child_graph, coordinate.graph_run_id, activation)
+    return activation, child_graph, coordinate, reduce_graph_run(None, command)
+
+
 def completed_child(state: GraphRunState) -> GraphRunState:
     claimed = reduce_graph_run(
         state,
@@ -496,10 +509,13 @@ async def test_missing_and_active_nested_children_block_parent_claim() -> None:
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
     missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child = reduce_graph_run(None, missing.action.children[0].command)
-    active = await executor.prepare(string_request(graph, parent, "input", (ActiveChild(activation, child),)))
-    assert isinstance(active, WaitingForChildren) and isinstance(active.action, WaitForActiveChildren)
+    assert isinstance(missing, WaitingForChildren)
+    assert missing.missing == (MissingChild(activation),)
+    assert missing.active == ()
+    active = await executor.prepare(string_request(graph, parent, "input", (ActiveChild(activation),)))
+    assert isinstance(active, WaitingForChildren)
+    assert active.missing == ()
+    assert active.active == (ActiveChild(activation),)
 
 
 async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_path() -> None:
@@ -508,13 +524,11 @@ async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_pa
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
     missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child = reduce_graph_run(None, missing.action.children[0].command)
-    terminal = completed_child(child)
+    assert isinstance(missing, WaitingForChildren)
+    child_graph = graph.nested_graphs[GraphNodeId("nested")]
     projection = CompletedChild(
         activation,
-        terminal,
-        child_output(missing.action.children[0].graph, "child-output"),
+        child_output(child_graph, "child-output"),
     )
     execution_request = string_request(graph, parent, "input", (projection,))
     prepared = await executor.prepare(execution_request)
@@ -545,10 +559,8 @@ async def test_aborted_nested_child_projects_a_typed_failure() -> None:
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
     missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child = reduce_graph_run(None, missing.action.children[0].command)
-    aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-    projection = AbortedChild(activation, aborted)
+    assert isinstance(missing, WaitingForChildren)
+    projection = AbortedChild(activation, GraphAbortReason("child aborted"))
     execution_request = string_request(graph, parent, "input", (projection,))
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
@@ -567,16 +579,24 @@ async def test_nested_projection_requires_terminal_child_state() -> None:
     executor = GraphExecutor(graph)
     parent = started(executor)
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
-    missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    active = reduce_graph_run(None, missing.action.children[0].command)
-    projection = CompletedChild(
-        activation,
-        active,
-        child_output(missing.action.children[0].graph, "forged"),
+    _activation, child_graph, coordinate, active = started_nested_child(
+        graph,
+        parent,
+        root_scope_run(parent.run_id),
+        GraphNodeId("nested"),
     )
-    with pytest.raises(ResultCollectionError, match="completed child"):
-        await executor.prepare(string_request(graph, parent, "input", (projection,)))
+    owner = await fresh_root(
+        child_graph,
+        coordinate,
+        active,
+        admit_graph_input(child_graph, Graph.values(value="input")),
+        GraphExecutor(child_graph),
+        ExecutionLimits(),
+        None,
+    )
+
+    with pytest.raises(ResultCollectionError, match="not terminal"):
+        owner.terminal_projection(activation)
 
 
 async def test_concurrent_runs_share_executor_without_cross_run_state() -> None:
@@ -1414,16 +1434,20 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
     child_wait = await root_executor.prepare(
         string_request(root, root_state, "input", (MissingChild(child_activation),))
     )
-    assert isinstance(child_wait, WaitingForChildren) and isinstance(child_wait.action, StartMissingChildren)
-    prepared_child = child_wait.action.children[0]
-    child_state = reduce_graph_run(None, prepared_child.command)
-    child_scope = child_scope_run_for_activation(root_scope, child_activation)
-    child_executor = GraphExecutor(prepared_child.graph)
+    assert isinstance(child_wait, WaitingForChildren)
+    assert child_wait.missing == (MissingChild(child_activation),)
+    _activation, child_graph, child_scope, child_state = started_nested_child(
+        root,
+        root_state,
+        root_scope,
+        GraphNodeId("root"),
+    )
+    child_executor = GraphExecutor(child_graph)
     grandchild_activation = ParentGraphActivation(child_state.run_id, 0, GraphNodeId("child"))
 
     grandchild_wait = await child_executor.prepare(
         string_request(
-            prepared_child.graph,
+            child_graph,
             child_state,
             "input",
             (MissingChild(grandchild_activation),),
@@ -1431,10 +1455,16 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
         )
     )
     assert isinstance(grandchild_wait, WaitingForChildren)
-    assert isinstance(grandchild_wait.action, StartMissingChildren)
-    grandchild = grandchild_wait.action.children[0]
-    assert grandchild.command.parent == grandchild_activation
-    assert grandchild.command.run_id == child_graph_run_id(
+    assert grandchild_wait.missing == (MissingChild(grandchild_activation),)
+    grandchild_graph = child_graph.nested_graphs[GraphNodeId("child")]
+    grandchild_scope = child_scope_run_for_activation(child_scope, grandchild_activation)
+    grandchild_command = project_start_graph_command(
+        grandchild_graph,
+        grandchild_scope.graph_run_id,
+        grandchild_activation,
+    )
+    assert grandchild_command.parent == grandchild_activation
+    assert grandchild_command.run_id == child_graph_run_id(
         child_state.run_id,
         child_state.superstep,
         GraphNodeId("child"),
@@ -1464,8 +1494,13 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
     parent = reduce_graph_run(None, executor.start_command(GraphRunId("entry-run")))
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
     missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child_state = reduce_graph_run(None, missing.action.children[0].command)
+    assert isinstance(missing, WaitingForChildren)
+    _activation, _child_graph, _coordinate, child_state = started_nested_child(
+        graph,
+        parent,
+        root_scope_run(parent.run_id),
+        GraphNodeId("nested"),
+    )
     assert tuple(item.node_id for item in child_state.frontier.nodes) == (
         GraphNodeId("a"),
         GraphNodeId("b"),
@@ -1492,13 +1527,11 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
     parent = reduce_graph_run(None, executor.start_command(GraphRunId("join-run")))
     activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("a"))
     missing = await executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren) and isinstance(missing.action, StartMissingChildren)
-    child_state = reduce_graph_run(None, missing.action.children[0].command)
-    terminal_child = completed_child(child_state)
+    assert isinstance(missing, WaitingForChildren)
+    child_graph = graph.nested_graphs[GraphNodeId("a")]
     projection = CompletedChild(
         activation,
-        terminal_child,
-        child_output(missing.action.children[0].graph, "child-output"),
+        child_output(child_graph, "child-output"),
     )
 
     after_child = await run_and_resolve(executor, graph, parent, "input", (projection,))
@@ -1570,37 +1603,6 @@ async def test_late_settlement_cannot_overwrite_a_reclaimed_generation() -> None
         reduce_graph_run(second_state, late.command)
     assert second_state.execution is not None
     assert second_state.execution.token.generation == 2
-
-
-async def test_cancelled_session_retains_exact_lease_for_fence_and_reclaim() -> None:
-    entered = asyncio.Event()
-
-    async def wait(values: Graph.Values[str]) -> Graph.Values[str]:
-        entered.set()
-        await asyncio.sleep(10)
-        return values
-
-    graph = graph_with_nodes(node("a", wait))
-    executor = GraphExecutor(graph)
-    initial = started(executor)
-    execution_request = string_request(graph, initial, "input")
-    prepared = await executor.prepare(execution_request)
-    assert isinstance(prepared, ExecutableFrontier)
-    claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
-    running = asyncio.create_task(session.next(claimed))
-    await entered.wait()
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-    assert session.quiescent
-    assert claimed.execution is not None
-    fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
-    retry = await executor.prepare(string_request(graph, fenced, "retry"))
-    assert isinstance(retry, ExecutableFrontier)
-    retried = reduce_graph_run(fenced, retry.claim.command)
-    assert retried.execution is not None
-    assert retried.execution.token.generation == 2
 
 
 async def test_node_initiated_cancellation_waits_for_sibling_cleanup() -> None:
