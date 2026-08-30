@@ -46,6 +46,8 @@ artifacts = ["src/mote_kernel/py.typed"]
 include = [
   "/src",
   "/tests",
+  "/example/__init__.py",
+  "/example/graph",
   "/docs",
   "/third_party_licenses",
   "/AGENTS.md",
@@ -82,8 +84,9 @@ exclude_also = [
 ]
 
 [tool.ruff]
+extend-exclude = ["example/**/*.md"]
 line-length = 120
-src = ["src", "tests"]
+src = ["src", "tests", "example"]
 target-version = "py311"
 
 [tool.ruff.lint]
@@ -92,6 +95,8 @@ ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN", "S101"]
+"tests/execution/test_graph_examples.py" = ["RUF001"]
+"example/**/*.py" = ["RUF001", "RUF002", "T201"]
 "src/mote_kernel/logging/__init__.py" = ["A005"]
 
 [tool.ruff.format]
@@ -183,7 +188,7 @@ single_use_private_dataclasses = [
 test_only_private_definitions = []
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "example"]
 exclude = ["tests/typing_negative"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"

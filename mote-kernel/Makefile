@@ -4,12 +4,12 @@ install:
 	python -m pip install -e '.[dev]'
 
 format:
-	python -m ruff check --fix src tests
-	python -m ruff format src tests
+	python -m ruff check --fix src tests example
+	python -m ruff format src tests example
 
 lint:
-	python -m ruff check src tests
-	python -m ruff format --check src tests
+	python -m ruff check src tests example
+	python -m ruff format --check src tests example
 
 complexity:
 	python -m tests.architecture.complexity_rules --check-health

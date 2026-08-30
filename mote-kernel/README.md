@@ -40,6 +40,7 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 
 ## Documentation
 
+- [Runnable graph examples](example/graph/README.md) cover linear, conditional, parallel, nested, and state-only resume flows through the public `Graph` facade.
 - [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
 - [Graph Node I/O implementation](docs/graph-node-input-output-contract-implementation.zh-CN.md) owns the current Node I/O, compiled topology, frame, continuation, and recovery shape.
 - [`skip_failed` requirements](docs/skip-failed-output-requirements.zh-CN.md) and [implementation](docs/skip-failed-output-implementation.zh-CN.md) own current skip-output behavior.

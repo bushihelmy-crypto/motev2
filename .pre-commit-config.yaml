@@ -15,9 +15,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-        files: ^mote-kernel/(src|tests)/.*\.py$
+        files: ^mote-kernel/(src|tests|example)/.*\.py$
       - id: ruff-format
-        files: ^mote-kernel/(src|tests)/.*\.py$
+        files: ^mote-kernel/(src|tests|example)/.*\.py$
   - repo: local
     hooks:
       - id: kernel-complexity
