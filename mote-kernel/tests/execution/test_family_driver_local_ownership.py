@@ -13,7 +13,7 @@ from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.engine.task import GraphTask, TaskId
-from mote_kernel.execution.errors import ResultCollectionError, SnapshotMismatchError
+from mote_kernel.execution.errors import FrameInstallationInvariantError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import (
     GraphCommit,
@@ -65,6 +65,7 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphFrontierState,
     GraphNodeId,
+    GraphRunCommand,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -229,6 +230,29 @@ async def test_scoped_commit_rejects_a_transition_for_another_owner() -> None:
 
     with pytest.raises(SnapshotMismatchError, match="different scoped graph run"):
         await scoped_commit(foreign, None)(transitions[0])
+
+
+@pytest.mark.asyncio
+async def test_resume_transition_rejects_an_unadmitted_successor_before_commit() -> None:
+    state = running_state()
+    scope_run = root_scope_run(state.run_id)
+    commits: list[GraphTransition[str]] = []
+
+    async def capture(transition: GraphTransition[str], /) -> GraphRunState:
+        commits.append(transition)
+        return transition.candidate_state
+
+    with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
+        await commit_transition(
+            scope_run,
+            state,
+            AbortGraphRun(state.revision, GraphAbortReason("abort")),
+            None,
+            capture,
+            admitted_successor=state,
+        )
+
+    assert commits == []
 
 
 @pytest.mark.asyncio
@@ -656,6 +680,36 @@ async def test_child_owner_completes_resume_before_opaque_handle_handoff(
     assert isinstance(completed, Graph.CompletedResult)
     assert events.index(("owner", ("nested",))) < events.index(("resume", ("nested",)))
     assert events.index(("resume", ("nested",))) < events.index(("handoff", ("nested",)))
+
+
+@pytest.mark.asyncio
+async def test_resume_transition_is_reduced_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail(_values: Graph.Values[str]) -> Graph.FailureOutcome:
+        return Graph.failure("retry")
+
+    graph = Graph[str]("ownership.single-resume-reduction")
+    graph.add_node("leaf", fail, inputs={}, outputs={})
+    graph.set_outputs({})
+    awaiting = await graph.run(Graph.values())
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+    original_reduce = family_driver.reduce_graph_run
+    resume_reductions = 0
+
+    def count_reduce(state: GraphRunState | None, command: GraphRunCommand) -> GraphRunState:
+        nonlocal resume_reductions
+        if isinstance(command, ResumeGraphNodes):
+            resume_reductions += 1
+        return original_reduce(state, command)
+
+    monkeypatch.setattr(family_driver, "reduce_graph_run", count_reduce)
+    completed = await graph.run(
+        state=awaiting.state,
+        continuation=awaiting.continuation,
+        resume=(graph.skip_failed("leaf", "skip"),),
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert resume_reductions == 1
 
 
 @pytest.mark.asyncio

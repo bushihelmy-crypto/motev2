@@ -110,10 +110,7 @@ class PlannedResume(Generic[GraphValueT]):
 def project_resume_frames(
     frames: ScopedFrameIndex[GraphValueT],
     planned: PlannedResume[GraphValueT],
-    candidate: GraphRunState,
 ) -> ScopedFrameIndex[GraphValueT]:
-    if candidate != planned.successor:
-        raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     installed = frames
     try:
         for admitted in planned.prepared.inputs:

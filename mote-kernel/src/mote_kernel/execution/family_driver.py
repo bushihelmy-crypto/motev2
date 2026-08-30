@@ -5,22 +5,21 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
-from dataclasses import InitVar, dataclass, replace
+from dataclasses import InitVar, dataclass
 from typing import Generic, Protocol, TypeAlias, TypeVar, cast, final
-from uuid import uuid4
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.engine.admission import admit_child_graph_input, project_graph_outputs
 from mote_kernel.execution.engine.resume_input import materialize_node_input
 from mote_kernel.execution.engine.session import GraphExecutionSession, consume_node_origin_cancellation
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
-from mote_kernel.execution.errors import ResultCollectionError, SnapshotMismatchError
+from mote_kernel.execution.engine.superstep import ExecutableFrontier
+from mote_kernel.execution.errors import FrameInstallationInvariantError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import GraphInputFrame, _public_values
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
-    ExecutionRequestAttemptId,
     ScopeRunCoordinate,
     StableActivation,
     child_scope_run_for_activation,
@@ -41,7 +40,6 @@ from mote_kernel.execution.result import (
     AwaitingResume,
     CompletedChild,
     CompletedGraph,
-    ExecutableFrontier,
     GraphAbortView,
     GraphBoundary,
     GraphCommitResult,
@@ -131,10 +129,14 @@ async def commit_transition(
     command: GraphRunCommand,
     result: TaskResult[GraphValueT] | None,
     commit: GraphCommit[GraphValueT],
+    *,
+    admitted_successor: GraphRunState | None = None,
 ) -> GraphRunState:
     """Reduce, expose, and confirm one authoritative state transition."""
 
     candidate = reduce_graph_run(previous_state, command)
+    if admitted_successor is not None and candidate != admitted_successor:
+        raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     admitted = _commit_result(result) if result is not None else None
     transition = GraphTransition(
         scope=tuple(scope_run.scope),
@@ -444,7 +446,6 @@ class _GraphRun(Generic[GraphValueT]):
             self._state,
             self._scope_run,
             self._frames,
-            ExecutionRequestAttemptId(str(uuid4())),
             self._child_projections(),
             self._limits,
         )
@@ -461,11 +462,19 @@ class _GraphRun(Generic[GraphValueT]):
         command: GraphRunCommand,
         result: TaskResult[GraphValueT] | None = None,
         *,
+        admitted_successor: GraphRunState | None = None,
         confirmed_frames: ScopedFrameIndex[GraphValueT] | None = None,
         handoff_evidence: bool = False,
     ) -> GraphRunState:
         commit_task = asyncio.create_task(
-            commit_transition(self._scope_run, self._state, command, result, self._commit)
+            commit_transition(
+                self._scope_run,
+                self._state,
+                command,
+                result,
+                self._commit,
+                admitted_successor=admitted_successor,
+            )
         )
         confirmed, cancellation = await wait_for_owner_task(
             commit_task,
@@ -484,10 +493,10 @@ class _GraphRun(Generic[GraphValueT]):
         await self._transition(command, handoff_evidence=True)
 
     async def apply_admission_resume(self, planned: PlannedResume[GraphValueT]) -> None:
-        candidate = reduce_graph_run(self._state, planned.prepared.command)
-        confirmed_frames = project_resume_frames(self._frames, planned, candidate)
+        confirmed_frames = project_resume_frames(self._frames, planned)
         await self._transition(
             planned.prepared.command,
+            admitted_successor=planned.successor,
             confirmed_frames=confirmed_frames,
             handoff_evidence=True,
         )
@@ -645,14 +654,12 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def _execute_frontier(
         self,
-        prepared: ExecutableFrontier,
-        request: StepRequest[GraphValueT],
+        prepared: ExecutableFrontier[GraphValueT],
     ) -> None:
         claimed = await self._transition(prepared.claim.command)
-        claimed_request = replace(request, state=claimed)
         execution = cast(GraphExecutionLease, claimed.execution)
         try:
-            session = await self._executor.execute(prepared.claim, claimed_request)
+            session = await self._executor.execute(prepared.claim, claimed)
         except Exception:
             await self._fence(execution.token)
             raise
@@ -670,7 +677,7 @@ class _GraphRun(Generic[GraphValueT]):
                 await self._transition(disposition.command)
                 continue
             if isinstance(disposition, ExecutableFrontier):
-                await self._execute_frontier(disposition, request)
+                await self._execute_frontier(disposition)
                 continue
             if isinstance(disposition, WaitingForChildren):
                 if disposition.missing:

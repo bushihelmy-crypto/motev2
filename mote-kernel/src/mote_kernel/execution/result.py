@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import InitVar, dataclass
 from typing import Generic, TypeAlias, TypeVar, final
 
-from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractError, SnapshotMismatchError
 from mote_kernel.execution.graph.values import (
@@ -215,11 +214,6 @@ class WaitingForChildren(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutableFrontier:
-    claim: PreparedExecutionClaim
-
-
-@dataclass(frozen=True, slots=True)
 class ReadyToResolve:
     command: AdvanceGraphFrontier | CompleteGraphFrontier | AbortGraphRun
 
@@ -241,16 +235,6 @@ class AbortedGraph:
 
 
 GraphBoundary: TypeAlias = AwaitingResume | CompletedGraph | AbortedGraph
-
-
-PrepareDisposition: TypeAlias = (
-    ExecutableFrontier
-    | WaitingForChildren[GraphValueT]
-    | ReadyToResolve
-    | AwaitingResume
-    | CompletedGraph
-    | AbortedGraph
-)
 
 
 @dataclass(frozen=True, slots=True)

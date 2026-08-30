@@ -1,12 +1,9 @@
-"""Execution-owned request and scoped graph-run identities."""
+"""Execution-owned scoped graph-run identities."""
 
 from dataclasses import dataclass
-from typing import NewType
 
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.state.graph_state import GraphNodeId, GraphRunId, ParentGraphActivation, child_graph_run_id
-
-ExecutionRequestAttemptId = NewType("ExecutionRequestAttemptId", str)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -53,7 +50,6 @@ def child_scope_run_for_activation(
 
 
 __all__ = [
-    "ExecutionRequestAttemptId",
     "ScopeRunCoordinate",
     "StableActivation",
     "child_scope_run",

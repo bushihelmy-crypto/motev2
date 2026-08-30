@@ -6,11 +6,15 @@ from typing import TypeAlias, TypeVar, cast
 import pytest
 
 import mote_kernel.execution.engine.admission as admission_module
+import mote_kernel.execution.engine.frontier as frontier_module
+import mote_kernel.execution.engine.superstep as superstep_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_input
+from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.resume_admission import prepare_resume
 from mote_kernel.execution.engine.session import GraphExecutionSession
-from mote_kernel.execution.engine.task import GraphTask
+from mote_kernel.execution.engine.superstep import ExecutableFrontier
+from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.errors import (
     GraphValidationError,
     GraphValueAdmissionError,
@@ -37,12 +41,12 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
     NamedValue,
+    NodeInputFrame,
     _frame_value,
     _make_graph_output_view,
 )
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
-    ExecutionRequestAttemptId,
     ScopeRunCoordinate,
     child_scope_run_for_activation,
     root_scope_run,
@@ -66,7 +70,6 @@ from mote_kernel.execution.result import (
     ChildProjection,
     CompletedChild,
     CompletedGraph,
-    ExecutableFrontier,
     MissingChild,
     ReadyToResolve,
     TaskFailure,
@@ -113,8 +116,6 @@ from mote_kernel.state.graph_state import (
 pytestmark = pytest.mark.asyncio
 
 GraphValueT = TypeVar("GraphValueT")
-REQUEST_ID = ExecutionRequestAttemptId("request")
-OTHER_REQUEST_ID = ExecutionRequestAttemptId("other-request")
 DEFAULT_LIMITS = ExecutionLimits()
 
 
@@ -194,7 +195,6 @@ def request_with_values(
     values: Graph.Values[GraphValueT],
     projections: tuple[ChildProjection[GraphValueT], ...] = (),
     *,
-    request_id: ExecutionRequestAttemptId = REQUEST_ID,
     limits: ExecutionLimits = DEFAULT_LIMITS,
 ) -> StepRequest[GraphValueT]:
     frame = admit_graph_input(graph, values)
@@ -205,7 +205,7 @@ def request_with_values(
             frame,
         )
     )
-    return StepRequest(state, scope_run, frames, request_id, projections, limits)
+    return StepRequest(state, scope_run, frames, projections, limits)
 
 
 def string_request(
@@ -215,7 +215,6 @@ def string_request(
     projections: tuple[ChildProjection[str], ...] = (),
     *,
     scope_run: ScopeRunCoordinate | None = None,
-    request_id: ExecutionRequestAttemptId = REQUEST_ID,
     limits: ExecutionLimits = DEFAULT_LIMITS,
 ) -> StepRequest[str]:
     coordinate = root_scope_run(state.run_id) if scope_run is None else scope_run
@@ -225,7 +224,6 @@ def string_request(
         coordinate,
         Graph.values(value=value),
         projections,
-        request_id=request_id,
         limits=limits,
     )
 
@@ -262,7 +260,7 @@ async def run_frontier(
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     current = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=current))
+    session = await executor.execute(prepared.claim, current)
     results: list[TaskResult[str]] = []
     try:
         while current.execution is not None:
@@ -376,7 +374,7 @@ async def test_executor_exposes_state_acknowledged_node_stream() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         first = await session.next(claimed)
         assert isinstance(first.result, TaskSuccess)
@@ -389,6 +387,49 @@ async def test_executor_exposes_state_acknowledged_node_stream() -> None:
         assert calls == ["input", "input"]
     finally:
         await session.aclose()
+
+
+async def test_frontier_preparation_and_inputs_are_reused_by_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    prepare_calls = 0
+    materialize_calls = 0
+    original_prepare = superstep_module.prepare_frontier
+    original_materialize = frontier_module.materialize_node_input
+
+    def track_prepare(graph: CompiledGraph[str], request: StepRequest[str]) -> FrontierPreparation[str]:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(graph, request)
+
+    def track_materialize(
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+        frames: ScopedFrameIndex[str],
+        node_id: GraphNodeId,
+    ) -> NodeInputFrame[str]:
+        nonlocal materialize_calls
+        materialize_calls += 1
+        return original_materialize(graph, state, scope_run, frames, node_id)
+
+    monkeypatch.setattr(superstep_module, "prepare_frontier", track_prepare)
+    monkeypatch.setattr(frontier_module, "materialize_node_input", track_materialize)
+    graph = graph_with_nodes(node("a"))
+    initial = started(graph)
+    execution_request = string_request(graph, initial, "input")
+    executor = GraphExecutor(graph)
+
+    prepared = await executor.prepare(execution_request)
+    assert isinstance(prepared, ExecutableFrontier)
+    claimed = reduce_graph_run(initial, prepared.claim.command)
+    session = await executor.execute(prepared.claim, claimed)
+    try:
+        completed = await session.next(claimed)
+        assert isinstance(completed.result, TaskSuccess)
+    finally:
+        await session.aclose()
+
+    assert prepare_calls == 1
+    assert materialize_calls == 1
 
 
 async def test_prepare_rejects_wrong_scope_or_graph_run_identity() -> None:
@@ -412,16 +453,12 @@ async def test_execute_scope_rejection_does_not_consume_prepared_claim() -> None
     prepared = await executor.prepare(request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    claimed_request = replace(request, state=claimed)
-    wrong_run = replace(
-        claimed_request,
-        scope_run=root_scope_run(GraphRunId("other-run")),
-    )
+    wrong_run = replace(claimed, run_id=GraphRunId("other-run"))
 
     with pytest.raises(SnapshotMismatchError, match="scope-run coordinate"):
         await executor.execute(prepared.claim, wrong_run)
 
-    session = await executor.execute(prepared.claim, claimed_request)
+    session = await executor.execute(prepared.claim, claimed)
     await session.aclose()
 
 
@@ -453,7 +490,7 @@ async def test_ordinary_exception_leaves_pending_node_for_exact_fence() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     with pytest.raises(RuntimeError, match="boom"):
         await session.next(claimed)
     await session.aclose()
@@ -472,13 +509,36 @@ async def test_claim_is_one_shot_and_bound_to_committed_state() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     with pytest.raises(ResultCollectionError, match="committed"):
-        await executor.execute(prepared.claim, execution_request)
+        await executor.execute(prepared.claim, initial)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    claimed_request = replace(execution_request, state=claimed)
-    session = await executor.execute(prepared.claim, claimed_request)
+    session = await executor.execute(prepared.claim, claimed)
     await session.aclose()
     with pytest.raises(ResultCollectionError, match="already"):
-        await executor.execute(prepared.claim, claimed_request)
+        await executor.execute(prepared.claim, claimed)
+
+
+async def test_claim_rejects_a_forged_prepared_task_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = graph_with_nodes(node("a"))
+    initial = started(graph)
+    original_plan = frontier_module.plan_tasks
+
+    def forge_task_identity(
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        limits: ExecutionLimits,
+    ) -> tuple[GraphTask, ...]:
+        tasks = original_plan(graph, state, limits)
+        return (replace(tasks[0], task_id=TaskId("forged")),)
+
+    monkeypatch.setattr(frontier_module, "plan_tasks", forge_task_identity)
+    executor = GraphExecutor(graph)
+    prepared = await executor.prepare(string_request(graph, initial, "input"))
+    assert isinstance(prepared, ExecutableFrontier)
+    claimed = reduce_graph_run(initial, prepared.claim.command)
+
+    with pytest.raises(ResultCollectionError, match="committed graph state"):
+        await executor.execute(prepared.claim, claimed)
+    assert not prepared.claim.consumed
 
 
 async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winner() -> None:
@@ -489,11 +549,10 @@ async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winne
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    claimed_request = replace(execution_request, state=claimed)
 
     outcomes = await asyncio.gather(
-        executor.execute(prepared.claim, claimed_request),
-        executor.execute(prepared.claim, claimed_request),
+        executor.execute(prepared.claim, claimed),
+        executor.execute(prepared.claim, claimed),
         return_exceptions=True,
     )
     sessions = tuple(outcome for outcome in outcomes if isinstance(outcome, GraphExecutionSession))
@@ -538,7 +597,7 @@ async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_pa
     assert resources is not None
     assert tuple(item.node_id for item in resources.acquisitions) == (GraphNodeId("ordinary"),)
     claimed = reduce_graph_run(parent, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         result = await session.next(claimed)
         assert isinstance(result.result, TaskSuccess)
@@ -566,7 +625,7 @@ async def test_aborted_nested_child_projects_a_typed_failure() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(parent, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         result = await session.next(claimed)
         assert isinstance(result.result, TaskFailure)
@@ -611,8 +670,8 @@ async def test_concurrent_runs_share_executor_without_cross_run_state() -> None:
     first_claimed = reduce_graph_run(first, first_p.claim.command)
     second_claimed = reduce_graph_run(second, second_p.claim.command)
     first_session, second_session = await asyncio.gather(
-        executor.execute(first_p.claim, replace(first_request, state=first_claimed)),
-        executor.execute(second_p.claim, replace(second_request, state=second_claimed)),
+        executor.execute(first_p.claim, first_claimed),
+        executor.execute(second_p.claim, second_claimed),
     )
     try:
         one, two = await asyncio.gather(
@@ -643,7 +702,7 @@ async def test_context_and_input_identity_are_isolated_per_task() -> None:
         prepared = await executor.prepare(execution_request)
         assert isinstance(prepared, ExecutableFrontier)
         claimed = reduce_graph_run(state, prepared.claim.command)
-        session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+        session = await executor.execute(prepared.claim, claimed)
         try:
             first = await session.next(claimed)
             assert isinstance(first.result, TaskSuccess)
@@ -666,7 +725,7 @@ async def test_node_output_contract_error_is_not_forged_into_settlement() -> Non
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         with pytest.raises(GraphValueAdmissionError, match="names do not match"):
             await session.next(claimed)
@@ -685,10 +744,7 @@ async def test_node_contract_error_is_not_forged_into_settlement() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        replace(execution_request, state=claimed),
-    )
+    session = await executor.execute(prepared.claim, claimed)
     try:
         with pytest.raises(NodeExecutionContractError, match="unsupported outcome"):
             await session.next(claimed)
@@ -707,7 +763,7 @@ async def test_prepare_reports_terminal_and_settled_dispositions_without_claimin
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         result = await session.next(claimed)
         settled = reduce_graph_run(claimed, result.command)
@@ -923,7 +979,7 @@ async def test_resume_projection_covers_override_default_skip_and_interrupt_inpu
                 (),
             ),
         )
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         result = await session.next(claimed)
         failed = reduce_graph_run(claimed, result.command)
@@ -992,7 +1048,7 @@ async def test_resume_projection_covers_override_default_skip_and_interrupt_inpu
     interrupt_claimed = reduce_graph_run(interrupt_initial, interrupt_prepared.claim.command)
     interrupt_session = await interrupt_executor.execute(
         interrupt_prepared.claim,
-        replace(interrupt_request, state=interrupt_claimed),
+        interrupt_claimed,
     )
     try:
         interrupt_result = await interrupt_session.next(interrupt_claimed)
@@ -1251,7 +1307,7 @@ async def test_nested_invalid_completion_enters_error_draining() -> None:
     assert commits == []
 
 
-async def test_prepared_claim_remains_bound_to_executor_and_request_identity() -> None:
+async def test_prepared_claim_remains_bound_to_executor_and_prepared_input() -> None:
     calls = 0
 
     async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -1267,19 +1323,13 @@ async def test_prepared_claim_remains_bound_to_executor_and_request_identity() -
     prepared = await owner.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    claimed_request = replace(execution_request, state=claimed)
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await other.execute(prepared.claim, claimed_request)
-    with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await owner.execute(
-            prepared.claim,
-            replace(claimed_request, request_attempt_id=OTHER_REQUEST_ID),
-        )
+        await other.execute(prepared.claim, claimed)
     assert not prepared.claim.consumed
     assert calls == 0
 
-    session = await owner.execute(prepared.claim, claimed_request)
+    session = await owner.execute(prepared.claim, claimed)
     try:
         completed = await session.next(claimed)
         assert isinstance(completed.result, TaskSuccess)
@@ -1309,7 +1359,7 @@ async def test_fenced_unstarted_claim_cannot_start_or_be_consumed() -> None:
     fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, replace(execution_request, state=fenced))
+        await executor.execute(prepared.claim, fenced)
     assert not prepared.claim.consumed
     assert calls == 0
 
@@ -1369,7 +1419,7 @@ async def test_parallel_context_mutations_are_isolated_and_request_input_is_froz
         prepared = await executor.prepare(execution_request)
         assert isinstance(prepared, ExecutableFrontier)
         current = reduce_graph_run(initial, prepared.claim.command)
-        session = await executor.execute(prepared.claim, replace(execution_request, state=current))
+        session = await executor.execute(prepared.claim, current)
         outputs: list[str] = []
         try:
             for _ in range(2):
@@ -1553,7 +1603,7 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
     assert after_b.join_progress == ()
 
 
-async def test_claim_scope_uses_canonical_node_order_for_different_lengths() -> None:
+async def test_execution_uses_canonical_node_order_for_different_lengths() -> None:
     barrier = asyncio.Barrier(2)
 
     async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -1566,9 +1616,8 @@ async def test_claim_scope_uses_canonical_node_order_for_different_lengths() -> 
     execution_request = string_request(graph, initial, "input")
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
-    assert prepared.claim.snapshot.node_ids == (GraphNodeId("aa"), GraphNodeId("z"))
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
     try:
         first = await session.next(claimed)
         after_first = reduce_graph_run(claimed, first.command)
@@ -1590,7 +1639,7 @@ async def test_late_settlement_cannot_overwrite_a_reclaimed_generation() -> None
     first = await executor.prepare(execution_request)
     assert isinstance(first, ExecutableFrontier)
     first_state = reduce_graph_run(initial, first.claim.command)
-    first_session = await executor.execute(first.claim, replace(execution_request, state=first_state))
+    first_session = await executor.execute(first.claim, first_state)
     late = await first_session.next(first_state)
     await first_session.aclose()
     assert first_state.execution is not None
@@ -1632,7 +1681,7 @@ async def test_node_initiated_cancellation_waits_for_sibling_cleanup() -> None:
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, replace(execution_request, state=claimed))
+    session = await executor.execute(prepared.claim, claimed)
 
     with pytest.raises(asyncio.CancelledError):
         await session.next(claimed)
@@ -1663,5 +1712,5 @@ async def test_claim_guard_rejects_a_forged_committed_attempt_token() -> None:
     )
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, replace(execution_request, state=forged))
+        await executor.execute(prepared.claim, forged)
     assert not prepared.claim.consumed

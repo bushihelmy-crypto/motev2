@@ -10,15 +10,13 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.claim import ConsumedExecutionClaim, ExecutionClaimSnapshot
 from mote_kernel.execution.engine.admission import select_executable_tasks
-from mote_kernel.execution.engine.frontier import FrontierPreparation, prepare_frontier
-from mote_kernel.execution.engine.resume_input import materialize_node_input
+from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import GraphDefinitionKey, require_snapshot_matches_graph
-from mote_kernel.execution.engine.task import ExecutableTask, GraphTask
+from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import ExecutedGraphNode, TaskResult
 from mote_kernel.state.graph_state import (
     FailedGraphNode,
@@ -85,12 +83,12 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         "_disposition",
         "_errors",
         "_graph",
+        "_limits",
         "_next_in_progress",
         "_node_origin_cancellation",
         "_parent_nodes",
         "_preparation",
         "_queued_results",
-        "_request",
         "_scheduler",
         "_started",
         "_state",
@@ -99,18 +97,22 @@ class _GraphExecutionSession(Generic[GraphValueT]):
     def __init__(
         self,
         graph: CompiledGraph[GraphValueT],
-        request: StepRequest[GraphValueT],
+        state: GraphRunState,
         claim_snapshot: ExecutionClaimSnapshot,
+        preparation: FrontierPreparation[GraphValueT],
         parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
     ) -> None:
         self._graph = graph
-        self._request = request
+        self._limits = preparation.request.limits
         self._claim_snapshot = claim_snapshot
-        self._state = request.state
+        self._state = state
         self._parent_nodes = parent_nodes
-        self._preparation: FrontierPreparation[GraphValueT] | None = None
+        self._preparation = preparation
         self._queued_results: deque[_QueuedCompletion[GraphValueT]] = deque()
         self._started: set[GraphNodeId] = set()
+        for result in preparation.nested_results:
+            self._started.add(result.task.node_id)
+            self._queued_results.append(_QueuedCompletion(result))
         self._scheduler = TaskScheduler(graph)
         self._awaiting_ack: SettleGraphNode | None = None
         self._next_in_progress = False
@@ -198,39 +200,26 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         self._state = state
         self._awaiting_ack = None
 
-    def _ensure_preparation(self) -> FrontierPreparation[GraphValueT]:
-        if self._preparation is None:
-            self._preparation = prepare_frontier(self._graph, self._request)
-            for result in self._preparation.nested_results:
-                self._started.add(result.task.node_id)
-                self._queued_results.append(_QueuedCompletion(result))
-        return self._preparation
-
     def _select_ordinary(self) -> tuple[ExecutableTask[GraphValueT], ...]:
-        preparation = self._ensure_preparation()
         if self._disposition is not _SessionDisposition.OPEN:
             return ()
         pending = frozenset(pending_node_ids(self._state.frontier))
-        tasks = tuple(task for task, _definition in preparation.executable_definitions if task.node_id in pending)
+        executables = tuple(
+            executable for executable in self._preparation.executables if executable.task.node_id in pending
+        )
+        tasks = tuple(executable.task for executable in executables)
         selected = select_executable_tasks(
             self._graph,
             tasks,
             self._state.resources,
-            self._request.limits,
+            self._limits,
             active_count=self._scheduler.live_count,
             started_node_ids=frozenset(self._started),
         )
-        executables: list[ExecutableTask[GraphValueT]] = []
-        for task in selected:
-            effective = materialize_node_input(
-                self._graph,
-                self._state,
-                self._request.scope_run,
-                self._request.frames,
-                task.node_id,
-            )
-            executables.append(ExecutableTask(task, effective))
-        return tuple(executables)
+        by_task_id: dict[TaskId, ExecutableTask[GraphValueT]] = {
+            executable.task.task_id: executable for executable in executables
+        }
+        return tuple(by_task_id[task.task_id] for task in selected)
 
     def _record_error(self, task: GraphTask, error: BaseException) -> None:
         self._errors.append((task, error))
@@ -280,7 +269,6 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         self._next_in_progress = True
         try:
             self._acknowledge(state)
-            self._ensure_preparation()
             while True:
                 self._drain_scheduler_events()
                 if self._node_origin_cancellation is not None:
@@ -340,16 +328,17 @@ def consume_node_origin_cancellation(
 
 def issue_execution_session(
     graph: CompiledGraph[GraphValueT],
-    request: StepRequest[GraphValueT],
-    claim: ConsumedExecutionClaim,
+    claim: ConsumedExecutionClaim[GraphValueT],
     parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
 ) -> GraphExecutionSession[GraphValueT]:
     """Issue the sole concrete session authorized by a consumed claim receipt."""
 
+    snapshot, state, preparation = claim.issue()
     return _GraphExecutionSession(
         graph,
-        request,
-        claim.issue(request.state, request.request_attempt_id),
+        state,
+        snapshot,
+        preparation,
         parent_nodes,
     )
 

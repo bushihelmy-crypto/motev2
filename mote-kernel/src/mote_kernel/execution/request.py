@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.graph.values import _GraphValues
-from mote_kernel.execution.identity import ExecutionRequestAttemptId, ScopeRunCoordinate
+from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import ChildProjection
 from mote_kernel.execution.run_context import ScopedFrameIndex
@@ -18,7 +18,6 @@ class StepRequest(Generic[GraphValueT]):
     state: GraphRunState
     scope_run: ScopeRunCoordinate
     frames: ScopedFrameIndex[GraphValueT]
-    request_attempt_id: ExecutionRequestAttemptId
     child_projections: tuple[ChildProjection[GraphValueT], ...]
     limits: ExecutionLimits
 

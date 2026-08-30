@@ -6,6 +6,7 @@ from tests.execution.driver import step_request
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
+from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.compiler import compile_graph
@@ -19,7 +20,6 @@ from mote_kernel.execution.graph.ports import (
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.resource import ResourceDefinition
-from mote_kernel.execution.result import ExecutableFrontier
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ClaimGraphExecution,
@@ -163,7 +163,7 @@ def internal_resource_graph(
 
 async def claimed_internal_state(
     graph: CompiledGraph[str],
-) -> tuple[GraphExecutor[str], Graph.State, ExecutableFrontier]:
+) -> tuple[GraphExecutor[str], Graph.State, ExecutableFrontier[str]]:
     executor = GraphExecutor(graph)
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     prepared = await executor.prepare(step_request(graph, state, "input").execution_request())
@@ -605,10 +605,8 @@ async def test_claimed_resource_session_revalidates_exact_participants() -> None
     )
     executor, claimed, prepared = await claimed_internal_state(graph)
     forged = replace(claimed, resources=None)
-    execution_request = step_request(graph, forged, "input").execution_request()
-
     with pytest.raises(InvalidExecutionSnapshotError, match="compiled resource"):
-        await executor.execute(prepared.claim, execution_request)
+        await executor.execute(prepared.claim, forged)
     assert not prepared.claim.consumed
 
 

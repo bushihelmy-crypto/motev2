@@ -7,6 +7,7 @@ from tests.execution.driver import step_request
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.session import GraphExecutionSession
+from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import ExecutableTask
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
@@ -26,7 +27,6 @@ from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
-from mote_kernel.execution.result import ExecutableFrontier
 from mote_kernel.state.graph_state import (
     FailedGraphNode,
     GraphDefinitionId,
@@ -141,10 +141,7 @@ async def claim_session(
     prepared = await executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        replace(execution_request, state=claimed),
-    )
+    session = await executor.execute(prepared.claim, claimed)
     return executor, claimed, session
 
 

@@ -105,11 +105,11 @@ quote-style = "double"
 
 # The ratchet keeps legacy debt from growing. It is not a health target.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 511
-type_definitions = 292
+top_level_definitions = 506
+type_definitions = 291
 dataclass_types = 173
-dataclass_fields = 490
-decision_points = 1432
+dataclass_fields = 487
+decision_points = 1430
 logical_clone_pairs = 11
 record_shape_clone_pairs = 20
 thin_single_use_helpers = 16
@@ -175,10 +175,10 @@ thin_single_use_helpers = [
   "execution/graph/values.py:262:_public_values",
   "execution/graph/values.py:267:_public_node_output",
   "execution/graph/values.py:272:_public_node_input",
-  "execution/result.py:65:_partial_commit_error",
-  "execution/result.py:342:_completed_result",
-  "execution/result.py:355:_aborted_result",
-  "execution/result.py:368:_awaiting_result",
+  "execution/result.py:64:_partial_commit_error",
+  "execution/result.py:326:_completed_result",
+  "execution/result.py:339:_aborted_result",
+  "execution/result.py:352:_awaiting_result",
   "execution/run_context.py:372:_new_family_identity",
   "execution/run_context.py:386:_continuation_recovered",
 ]
