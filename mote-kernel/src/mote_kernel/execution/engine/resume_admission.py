@@ -192,16 +192,17 @@ def admit_resume_candidates(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> CandidateFrameAvailability[GraphValueT]:
     substitutions = tuple(substitution for candidate in candidates for substitution in candidate.substitutions)
-    candidate_skip_actions: list[tuple[SkipFailedNode, ...]] = []
-    for candidate in candidates:
+    candidate_skip_actions = tuple(
+        tuple(action for action in candidate.command.actions if isinstance(action, SkipFailedNode))
+        for candidate in candidates
+    )
+    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
         if candidate.previous.run_id != candidate.scope_run.graph_run_id or candidate.successor.run_id != (
             candidate.scope_run.graph_run_id
         ):
             raise SnapshotMismatchError("resume candidate states do not match their scoped graph run")
         if reduce_graph_run(candidate.previous, candidate.command) != candidate.successor:
             raise SnapshotMismatchError("resume candidate successor is not the exact command reduction")
-        skip_actions = tuple(action for action in candidate.command.actions if isinstance(action, SkipFailedNode))
-        candidate_skip_actions.append(skip_actions)
         for substitution in candidate.substitutions:
             activation = substitution.coordinate.activation
             try:
@@ -228,18 +229,18 @@ def admit_resume_candidates(
                 raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
     canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
     publication_counts: dict[PublicationAvailabilityCoordinate[GraphValueT], int] = {}
-    duplicate_coordinates: list[PublicationAvailabilityCoordinate[GraphValueT]] = []
+    duplicate_nodes: set[GraphNodeId] = set()
     collision_nodes: list[GraphNodeId] = []
     for substitution in canonical:
         coordinate = substitution.coordinate
         count = publication_counts.get(coordinate, 0) + 1
         publication_counts[coordinate] = count
         if count == 2:
-            duplicate_coordinates.append(coordinate)
+            duplicate_nodes.add(coordinate.activation.node_id)
         if frames.has_publication(coordinate):
             collision_nodes.append(coordinate.activation.node_id)
-    if duplicate_coordinates:
-        duplicates = tuple(sorted({coordinate.activation.node_id for coordinate in duplicate_coordinates}))
+    if duplicate_nodes:
+        duplicates = tuple(sorted(duplicate_nodes))
         raise GraphValuePublicationError(
             f"resume substitution nodes {duplicates!r} supplied duplicate publication coordinates"
         )

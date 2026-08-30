@@ -9,6 +9,7 @@ from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import ExecutionError, GraphValidationError
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
 GraphValueT_co = TypeVar("GraphValueT_co", covariant=True)
@@ -19,7 +20,7 @@ DefinitionScope: TypeAlias = tuple[GraphNodeId, ...]
 def canonical_port_name(name: str, *, kind: str = "port") -> str:
     """Return one stable user-facing port name or fail at its call boundary."""
 
-    if type(name) is not str or not name or name.strip() != name or "\n" in name or "\r" in name:
+    if not is_canonical_identity(name):
         raise GraphValidationError(f"{kind} name must be a non-empty trimmed string")
     return name
 

@@ -20,6 +20,7 @@ from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, N
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
+from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -36,7 +37,7 @@ class _DefinitionVisit:
 
 
 def require_graph_identity(value: str, *, kind: str) -> None:
-    if type(value) is not str or not value or value.strip() != value or "\n" in value or "\r" in value:
+    if not is_canonical_identity(value):
         raise InvalidGraphIdentityError(f"{kind} identity must be a non-empty trimmed string")
 
 

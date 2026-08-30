@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from mote_kernel.state.graph_state.identity import GraphNodeId
+from mote_kernel.state.graph_state.identity import GraphNodeId, is_canonical_identity
 from mote_kernel.state.graph_state.resource_command import AcquireResources, ReleaseResources, ResourceCommand
 from mote_kernel.state.graph_state.resource_model import (
     ResourceAcquisition,
@@ -17,7 +17,7 @@ class ResourceTransitionError(ValueError):
 
 
 def _require_identity(value: str, kind: str) -> None:
-    if not value or value != value.strip() or "\n" in value or "\r" in value:
+    if not is_canonical_identity(value):
         raise ResourceTransitionError(f"{kind} identity must be non-empty and trimmed")
 
 
