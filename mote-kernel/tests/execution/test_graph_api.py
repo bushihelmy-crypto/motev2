@@ -55,6 +55,7 @@ from mote_kernel.state.graph_state import (
     ResumeGraphNodes,
     SettleGraphNode,
     StartGraphRun,
+    SucceededGraphNode,
     UseStepRequestInput,
     derive_graph_node_interrupt_identity,
     reduce_graph_run,
@@ -2436,6 +2437,54 @@ async def test_waiter_cancellation_aborts_standalone_root_after_quiescence() -> 
     assert isinstance(commits.transitions[-2].command, FenceGraphExecution)
     assert isinstance(commits.transitions[-1].command, AbortGraphRun)
     assert commits.transitions[-1].scope == ()
+
+
+@pytest.mark.asyncio
+async def test_waiter_cancellation_preserves_a_committed_sibling_settlement() -> None:
+    slow_started = asyncio.Event()
+    slow_cleaned = asyncio.Event()
+    fast_committed = asyncio.Event()
+    never = asyncio.Event()
+    transitions: list[Graph.Transition[str]] = []
+
+    async def fast(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await slow_started.wait()
+        return Graph.values()
+
+    async def slow(_values: Graph.Values[str]) -> Graph.Values[str]:
+        slow_started.set()
+        try:
+            await never.wait()
+        finally:
+            slow_cleaned.set()
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        if isinstance(transition.command, SettleGraphNode) and transition.command.outcome.node_id == GraphNodeId(
+            "fast"
+        ):
+            fast_committed.set()
+        return transition.candidate_state
+
+    graph = Graph[str]("public.partial-settlement-cancellation")
+    graph.add_node("fast", fast, inputs={}, outputs={})
+    graph.add_node("slow", slow, inputs={}, outputs={})
+    graph.set_outputs({})
+    running = asyncio.create_task(graph.run(Graph.values(), commit=commit))
+    await asyncio.wait_for(fast_committed.wait(), timeout=1)
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert slow_cleaned.is_set()
+    assert isinstance(transitions[-2].command, FenceGraphExecution)
+    assert isinstance(transitions[-1].command, AbortGraphRun)
+    fast_frontier = next(
+        node for node in transitions[-1].candidate_state.frontier.nodes if node.node_id == GraphNodeId("fast")
+    )
+    assert isinstance(fast_frontier.settlement, SucceededGraphNode)
 
 
 @pytest.mark.asyncio

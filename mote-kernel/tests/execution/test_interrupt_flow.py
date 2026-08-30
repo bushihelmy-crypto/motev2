@@ -309,6 +309,162 @@ async def test_multiple_interrupts_can_be_resumed_one_at_a_time_by_exact_identit
     assert calls == {"a": 2, "b": 2}
 
 
+async def test_doubly_nested_interrupt_resumes_by_exact_scope() -> None:
+    calls: list[str] = []
+
+    async def leaf(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        calls.append(values["value"])
+        if len(calls) == 1:
+            return Graph.interrupt(b"question")
+        return values
+
+    grandchild = Graph[str]("interrupt.doubly-nested.grandchild")
+    codec = Codec()
+    grandchild.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
+    grandchild.add_node(
+        "leaf",
+        leaf,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    grandchild.set_outputs({"value": Graph.node_output("leaf", "value")})
+
+    child = Graph[str]("interrupt.doubly-nested.child")
+    child.add_node(
+        "grandchild",
+        grandchild,
+        inputs={"value": Graph.graph_input("value", str)},
+    )
+    child.set_outputs({"value": Graph.node_output("grandchild", "value")})
+
+    root = Graph[str]("interrupt.doubly-nested.root")
+    root.add_node(
+        "child",
+        child,
+        inputs={"value": Graph.graph_input("value", str)},
+    )
+    root.set_outputs({"value": Graph.node_output("child", "value")})
+
+    paused = await root.run(Graph.values(value="initial"))
+
+    assert isinstance(paused, Graph.AwaitingResumeResult)
+    assert tuple((view.scope, view.node_id, view.request_payload) for view in paused.interrupts) == (
+        (("child", "grandchild"), "leaf", b"question"),
+    )
+
+    completed = await root.run(
+        state=paused.state,
+        continuation=paused.continuation,
+        resume=(
+            root.resume_interrupted(
+                "leaf",
+                paused.interrupts[0].interrupt_id,
+                Graph.values(value="answer"),
+                scope=("child", "grandchild"),
+            ),
+        ),
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs["value"] == "answer"
+    assert calls == ["initial", "answer"]
+
+
+async def test_reused_child_interrupts_remain_isolated_by_sibling_scope() -> None:
+    calls: list[str] = []
+
+    async def leaf(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        value = values["value"]
+        calls.append(value)
+        if value.startswith("initial-"):
+            return Graph.interrupt(value.encode())
+        return values
+
+    child = Graph[str]("interrupt.reused-child.child")
+    codec = Codec()
+    child.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
+    child.add_node(
+        "leaf",
+        leaf,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    child.set_outputs({"value": Graph.node_output("leaf", "value")})
+
+    async def finish(values: Graph.Values[str]) -> Graph.Values[str]:
+        return values
+
+    root = Graph[str]("interrupt.reused-child.root")
+    root.add_node(
+        "left",
+        child,
+        inputs={"value": Graph.graph_input("left", str)},
+    )
+    root.add_node(
+        "right",
+        child,
+        inputs={"value": Graph.graph_input("right", str)},
+    )
+    root.add_node(
+        "finish",
+        finish,
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={"left": str, "right": str},
+    )
+    root.add_join(("left", "right"), "finish")
+    root.set_outputs(
+        {
+            "left": Graph.node_output("finish", "left"),
+            "right": Graph.node_output("finish", "right"),
+        }
+    )
+
+    first = await root.run(Graph.values(left="initial-left", right="initial-right"))
+
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    assert tuple((view.scope, view.node_id) for view in first.interrupts) == (
+        (("left",), "leaf"),
+        (("right",), "leaf"),
+    )
+    assert first.interrupts[0].interrupt_id != first.interrupts[1].interrupt_id
+
+    after_left = await root.run(
+        state=first.state,
+        continuation=first.continuation,
+        resume=(
+            root.resume_interrupted(
+                "leaf",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="left-answer"),
+                scope=("left",),
+            ),
+        ),
+    )
+
+    assert isinstance(after_left, Graph.AwaitingResumeResult)
+    assert tuple((view.scope, view.node_id) for view in after_left.interrupts) == ((("right",), "leaf"),)
+
+    completed = await root.run(
+        state=after_left.state,
+        continuation=after_left.continuation,
+        resume=(
+            root.resume_interrupted(
+                "leaf",
+                after_left.interrupts[0].interrupt_id,
+                Graph.values(value="right-answer"),
+                scope=("right",),
+            ),
+        ),
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs.items() == (("left", "left-answer"), ("right", "right-answer"))
+    assert calls == ["initial-left", "initial-right", "left-answer", "right-answer"]
+
+
 async def test_interrupt_round_trip_keeps_request_and_resume_payloads_distinct() -> None:
     received: list[str] = []
 
@@ -671,6 +827,79 @@ async def test_interrupt_resume_applies_retained_sibling_join_arrival_once() -> 
     assert isinstance(completed, Graph.CompletedResult)
     assert completed.outputs["value"] == "answer|input"
     assert a_calls == 2
+
+
+async def test_falsy_sibling_output_survives_interrupt_resume_and_join() -> None:
+    producer_calls = 0
+    pause_calls = 0
+    finish_calls = 0
+
+    def encode_bool(values: Graph.Values[bool]) -> bytes:
+        return b"1" if values["value"] else b"0"
+
+    def decode_bool(payload: bytes) -> Graph.Values[bool]:
+        return Graph.values(value=payload == b"1")
+
+    async def produce(_values: Graph.Values[bool]) -> Graph.Values[bool]:
+        nonlocal producer_calls
+        producer_calls += 1
+        return Graph.values(value=False)
+
+    async def pause(values: Graph.Values[bool]) -> Graph.Values[bool] | Graph.Outcome[bool]:
+        nonlocal pause_calls
+        pause_calls += 1
+        if pause_calls == 1:
+            return Graph.interrupt(b"question")
+        return values
+
+    async def finish(values: Graph.Values[bool]) -> Graph.Values[bool]:
+        nonlocal finish_calls
+        finish_calls += 1
+        assert values["producer"] is False
+        assert values["pause"] is True
+        return Graph.values(value=values["producer"])
+
+    graph = Graph[bool]("interrupt.falsy-join")
+    graph.set_resume_codec("bool.v1", 1, encode_bool, decode_bool)
+    graph.add_node("producer", produce, inputs={}, outputs={"value": bool})
+    graph.add_node(
+        "pause",
+        pause,
+        inputs={"value": Graph.graph_input("value", bool)},
+        outputs={"value": bool},
+    )
+    graph.add_node(
+        "finish",
+        finish,
+        inputs={
+            "producer": Graph.node_output("producer", "value"),
+            "pause": Graph.node_output("pause", "value"),
+        },
+        outputs={"value": bool},
+    )
+    graph.add_join(("producer", "pause"), "finish")
+    graph.set_outputs({"value": Graph.node_output("finish", "value")})
+
+    paused = await graph.run(Graph.values(value=False))
+
+    assert isinstance(paused, Graph.AwaitingResumeResult)
+    assert producer_calls == 1
+
+    completed = await graph.run(
+        state=paused.state,
+        continuation=paused.continuation,
+        resume=(
+            graph.resume_interrupted(
+                "pause",
+                paused.interrupts[0].interrupt_id,
+                Graph.values(value=True),
+            ),
+        ),
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert completed.outputs["value"] is False
+    assert (producer_calls, pause_calls, finish_calls) == (1, 2, 1)
 
 
 async def test_multiple_interrupts_can_be_resumed_together_by_exact_ids() -> None:
