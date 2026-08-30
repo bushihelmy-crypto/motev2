@@ -42,12 +42,7 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 
 - [Runnable graph examples](example/graph/README.md) cover linear, conditional, parallel, nested, and state-only resume flows through the public `Graph` facade.
 - [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
-- [Graph Node I/O implementation](docs/graph-node-input-output-contract-implementation.zh-CN.md) owns the current Node I/O, compiled topology, frame, continuation, and recovery shape.
-- [`skip_failed` requirements](docs/skip-failed-output-requirements.zh-CN.md) and [implementation](docs/skip-failed-output-implementation.zh-CN.md) own current skip-output behavior.
-- [Semantics-preserving simplification requirements](docs/graph-semantics-preserving-simplification-requirements.zh-CN.md) own only this refactor's preservation obligations, non-goals, and phase admission conditions.
-- [Semantics-preserving simplification implementation plan](docs/graph-semantics-preserving-simplification-implementation.zh-CN.md) owns only the target shape, atomic migration ledger, ordering, and verification plan.
-
-The implementation plan maintains the review and historical-research index; this README does not duplicate that evolving list or normative text.
+- [Execution/state frontier call chain](docs/execution-state-frontier-call-chain.zh-CN.md) explains the current command, reducer, commit, and frontier flow.
 
 ## Design principles
 
