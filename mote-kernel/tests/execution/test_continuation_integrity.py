@@ -6,7 +6,7 @@ from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.family_driver import admit_root, project_graph_result
+from mote_kernel.execution.family_driver import admit_continued_root, project_graph_result
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
@@ -227,7 +227,8 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
     graph = compiled_graph("a")
     running = running_state()
     aborted = reduce_graph_run(running, AbortGraphRun(running.revision, GraphAbortReason("aborted")))
-    root, evidence_reader = await admit_root(
+    identity = _new_family_identity()
+    root, evidence_reader = await admit_continued_root(
         graph,
         aborted,
         (),
@@ -235,13 +236,17 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
         ((root_scope_run(aborted.run_id), GraphExecutor(graph)),),
         ExecutionLimits(),
         None,
+        (),
+        (),
+        identity,
+        recovered=True,
     )
     object.__setattr__(root.state, "abort", None)
 
     with pytest.raises(Graph.SnapshotMismatchError, match="missing its canonical abort"):
         project_graph_result(
             graph,
-            _new_family_identity(),
+            identity,
             root,
             evidence_reader,
             AbortedGraph(),

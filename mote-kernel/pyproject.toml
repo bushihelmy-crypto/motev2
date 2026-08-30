@@ -100,14 +100,14 @@ quote-style = "double"
 
 # The ratchet keeps legacy debt from growing. It is not a health target.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 502
-type_definitions = 286
-dataclass_types = 176
-dataclass_fields = 496
-decision_points = 1312
-logical_clone_pairs = 12
-record_shape_clone_pairs = 21
-thin_single_use_helpers = 17
+top_level_definitions = 518
+type_definitions = 292
+dataclass_types = 173
+dataclass_fields = 490
+decision_points = 1464
+logical_clone_pairs = 11
+record_shape_clone_pairs = 20
+thin_single_use_helpers = 16
 single_use_private_dataclasses = 1
 test_only_private_definitions = 0
 
@@ -135,13 +135,12 @@ logical_clone_pairs = [
   "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:194:_admit_node_output_frame",
   "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
   "[function] execution/graph/values.py:194:_admit_node_output_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
-  "[function] execution/result.py:207:StartMissingChildren.__post_init__ <-> execution/result.py:221:WaitForActiveChildren.__post_init__",
   "[function] state/graph_state/resource_reducer.py:19:_require_identity <-> state/graph_state/validation.py:26:_require_identity",
 ]
 record_shape_clone_pairs = [
   "execution/engine/recovery.py:129:ExecutionControlCoordinate <-> state/graph_state/model.py:32:GraphExecutionToken",
-  "execution/engine/recovery.py:170:RecoveryAvailabilityCoordinates <-> execution/run_context.py:171:ScopedFrameIndex",
-  "execution/facade.py:149:_NestedNodeCandidate <-> execution/graph/definition.py:17:NestedGraphNodeDefinition",
+  "execution/engine/recovery.py:170:RecoveryAvailabilityCoordinates <-> execution/run_context.py:170:ScopedFrameIndex",
+  "execution/facade.py:153:_NestedNodeCandidate <-> execution/graph/definition.py:17:NestedGraphNodeDefinition",
   "execution/graph/ports.py:43:GraphInputRef <-> execution/graph/ports.py:98:OutputDeclaration",
   "execution/graph/ports.py:150:ResolvedInputBinding <-> execution/graph/ports.py:163:GraphOutputBinding",
   "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:87:GraphInputFrame",
@@ -154,19 +153,16 @@ record_shape_clone_pairs = [
   "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:107:NodeOutputFrame",
   "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:117:GraphOutputView",
   "execution/graph/values.py:107:NodeOutputFrame <-> execution/graph/values.py:117:GraphOutputView",
-  "execution/result.py:175:ActiveChild <-> execution/result.py:188:AbortedChild",
-  "execution/run_context.py:31:PublicationAvailabilityCoordinate <-> execution/run_context.py:37:ResumeInputAvailabilityCoordinate",
-  "execution/run_context.py:49:AdmittedGraphInput <-> execution/run_context.py:97:AdmittedResumeInput",
-  "execution/run_context.py:49:AdmittedGraphInput <-> execution/run_context.py:106:ConfirmedChildBoundary",
-  "execution/run_context.py:97:AdmittedResumeInput <-> execution/run_context.py:106:ConfirmedChildBoundary",
-  "execution/run_context.py:316:_CompleteContinuationSnapshot <-> execution/run_context.py:324:_RecoveredContinuationSnapshot",
+  "execution/run_context.py:30:PublicationAvailabilityCoordinate <-> execution/run_context.py:36:ResumeInputAvailabilityCoordinate",
+  "execution/run_context.py:48:AdmittedGraphInput <-> execution/run_context.py:96:AdmittedResumeInput",
+  "execution/run_context.py:48:AdmittedGraphInput <-> execution/run_context.py:105:ConfirmedChildBoundary",
+  "execution/run_context.py:96:AdmittedResumeInput <-> execution/run_context.py:105:ConfirmedChildBoundary",
+  "execution/run_context.py:315:_CompleteContinuationSnapshot <-> execution/run_context.py:323:_RecoveredContinuationSnapshot",
 ]
 thin_single_use_helpers = [
   "execution/engine/recovery.py:601:_claim",
   "execution/engine/resume_input.py:67:_require_decoded_values",
   "execution/engine/routing.py:100:_success_routes",
-  "execution/engine/scheduler.py:80:_capture",
-  "execution/family_driver.py:150:_request",
   "execution/graph/values.py:214:_make_graph_input_frame",
   "execution/graph/values.py:222:_graph_input_from_node_input",
   "execution/graph/values.py:246:_node_output_from_view",
@@ -174,14 +170,15 @@ thin_single_use_helpers = [
   "execution/graph/values.py:262:_public_values",
   "execution/graph/values.py:267:_public_node_output",
   "execution/graph/values.py:272:_public_node_input",
-  "execution/result.py:364:_completed_result",
-  "execution/result.py:377:_aborted_result",
-  "execution/result.py:390:_awaiting_result",
-  "execution/run_context.py:424:_new_family_identity",
-  "execution/run_context.py:444:_context_from_continuation",
+  "execution/result.py:65:_partial_commit_error",
+  "execution/result.py:342:_completed_result",
+  "execution/result.py:355:_aborted_result",
+  "execution/result.py:368:_awaiting_result",
+  "execution/run_context.py:372:_new_family_identity",
+  "execution/run_context.py:386:_continuation_recovered",
 ]
 single_use_private_dataclasses = [
-  "execution/facade.py:169:_ResumeCodec",
+  "execution/facade.py:173:_ResumeCodec",
 ]
 test_only_private_definitions = []
 

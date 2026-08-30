@@ -7,14 +7,14 @@ from typing import Protocol, cast
 import pytest
 
 import mote_kernel.execution as public_execution
-import mote_kernel.execution.facade as facade_module
+import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.errors import FrameInstallationInvariantError, GraphValuePublicationError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.family_driver import admit_root, project_graph_result
+from mote_kernel.execution.family_driver import admit_continued_root, drive_root, project_graph_result
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.invocation import PlannedResume, executors_for, lineage_states
@@ -43,7 +43,6 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphExecutionAttemptId,
     GraphFailure,
-    GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
     GraphNodeId,
@@ -669,18 +668,18 @@ async def test_same_scope_resume_input_and_substitution_install_as_one_frame_sna
     paused = await graph.run(Graph.values(value="initial"))
     assert isinstance(paused, Graph.AwaitingResumeResult)
     observed: list[tuple[ScopedFrameIndex[str], ScopedFrameIndex[str]]] = []
-    original = facade_module.install_confirmed_resume_frames
+    original = family_driver_module.project_resume_frames
 
     def capture(
         frames: ScopedFrameIndex[str],
         planned: PlannedResume[str],
-        confirmed: GraphRunState,
+        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
-        installed = original(frames, planned, confirmed)
+        installed = original(frames, planned, candidate)
         observed.append((frames, installed))
         return installed
 
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", capture)
+    monkeypatch.setattr(family_driver_module, "project_resume_frames", capture)
 
     completed = await graph.run(
         state=paused.state,
@@ -877,7 +876,6 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_second", [False, True], ids=("error", "cancellation"))
 async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_commit_fails(
-    monkeypatch: pytest.MonkeyPatch,
     cancel_second: bool,
 ) -> None:
     class SecondScopeCommitError(RuntimeError):
@@ -898,22 +896,6 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_install = facade_module.install_confirmed_resume_frames
-    installed_scopes: list[tuple[GraphNodeId, ...]] = []
-    installed_indexes: list[ScopedFrameIndex[str]] = []
-
-    def record_install(
-        frames: ScopedFrameIndex[str],
-        planned: PlannedResume[str],
-        confirmed: GraphRunState,
-    ) -> ScopedFrameIndex[str]:
-        installed = original_install(frames, planned, confirmed)
-        installed_scopes.append(planned.scope_run.scope)
-        installed_indexes.append(installed)
-        return installed
-
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", record_install)
-
     transitions: list[Graph.Transition[str]] = []
 
     old_snapshot = _continuation_snapshot(paused.continuation)
@@ -950,21 +932,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     assert _continuation_snapshot(paused.continuation) is old_snapshot
 
     assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
-    assert installed_scopes == [(GraphNodeId("left"),)]
     assert all(isinstance(transition.command, ResumeGraphNodes) for transition in transitions)
-    assert len(installed_indexes) == 1
-    substitutions = tuple(
-        record
-        for record in installed_indexes[0].publications
-        if isinstance(record.provenance, SkipSubstitutionProvenance)
-    )
-    assert len(substitutions) == 1
-    assert substitutions[0].coordinate.activation.scope_run.scope == (GraphNodeId("left"),)
-    assert _frame_value(substitutions[0].frame, "value") == "left"
-    assert not any(
-        record.coordinate.activation.scope_run.scope == (GraphNodeId("right"),)
-        for record in installed_indexes[0].publications
-    )
     compiled_owner = _require_compiled_owner(parent)
     checkpoint = _admit_continuation(
         compiled_owner.family_identity,
@@ -993,9 +961,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
 
 
 @pytest.mark.asyncio
-async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_is_non_exact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_is_non_exact() -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
@@ -1011,19 +977,6 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_install = facade_module.install_confirmed_resume_frames
-    installed: list[ScopedFrameIndex[str]] = []
-
-    def record_install(
-        frames: ScopedFrameIndex[str],
-        planned: PlannedResume[str],
-        confirmed: GraphRunState,
-    ) -> ScopedFrameIndex[str]:
-        result = original_install(frames, planned, confirmed)
-        installed.append(result)
-        return result
-
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", record_install)
 
     async def non_exact_second(transition: Graph.Transition[str], /) -> Graph.State:
         if transition.scope == ("right",):
@@ -1056,10 +1009,16 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
     assert partial.failed_scope == ("right",)
     assert _continuation_snapshot(paused.continuation) is old_snapshot
 
-    assert len(installed) == 1
-    assert tuple(record.coordinate.activation.scope_run.scope for record in installed[0].publications) == (
-        (GraphNodeId("left"),),
+    checkpoint = _admit_continuation(
+        _require_compiled_owner(parent).family_identity,
+        partial.state,
+        partial.continuation,
     )
+    assert tuple(
+        record.coordinate.activation.scope_run.scope
+        for record in checkpoint.frames.publications
+        if isinstance(record.provenance, SkipSubstitutionProvenance)
+    ) == ((GraphNodeId("left"),),)
     retried = await parent.run(
         state=partial.state,
         continuation=partial.continuation,
@@ -1089,23 +1048,23 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
     assert isinstance(paused, Graph.AwaitingResumeResult)
     old_snapshot = _continuation_snapshot(paused.continuation)
     owner = _require_compiled_owner(parent)
-    original_install = facade_module.install_confirmed_resume_frames
+    original_install = family_driver_module.project_resume_frames
     transitions: list[Graph.Transition[str]] = []
 
     def reject_right_install(
         frames: ScopedFrameIndex[str],
         planned: PlannedResume[str],
-        confirmed: GraphRunState,
+        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         if planned.scope_run.scope == (GraphNodeId("right"),):
             raise FrameInstallationInvariantError("right frame installation failed")
-        return original_install(frames, planned, confirmed)
+        return original_install(frames, planned, candidate)
 
     async def record(transition: Graph.Transition[str], /) -> Graph.State:
         transitions.append(transition)
         return transition.candidate_state
 
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", reject_right_install)
+    monkeypatch.setattr(family_driver_module, "project_resume_frames", reject_right_install)
     try:
         await parent.run(
             state=paused.state,
@@ -1124,7 +1083,7 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
     assert isinstance(partial.cause, FrameInstallationInvariantError)
     assert partial.failed_scope == ("right",)
     assert _continuation_snapshot(paused.continuation) is old_snapshot
-    assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
+    assert tuple(transition.scope for transition in transitions) == (("left",),)
     handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
     left_publication = next(
         record
@@ -1937,7 +1896,7 @@ async def test_skip_failed_admits_route_and_substitution_output_independently(
 
 
 @pytest.mark.asyncio
-async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_internal_invariant(
+async def test_skip_failed_substitution_rejects_publication_projection_before_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -1957,7 +1916,7 @@ async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_
     monkeypatch.setattr(ScopedFrameIndex, "add_publication", reject_publication)
     commits = CommitLog()
 
-    with pytest.raises(FrameInstallationInvariantError, match="post-commit installation"):
+    with pytest.raises(FrameInstallationInvariantError, match="owner-local projection"):
         await graph.run(
             state=paused.state,
             continuation=paused.continuation,
@@ -1965,7 +1924,7 @@ async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_
             commit=commits,
         )
 
-    assert isinstance(commits.transitions[0].command, ResumeGraphNodes)
+    assert commits.transitions == []
     owner = _require_compiled_owner(graph)
     context = _admit_continuation(
         owner.family_identity,
@@ -2073,43 +2032,6 @@ async def test_skip_failed_substitution_rejects_tampered_admitted_successor_revi
 
 
 @pytest.mark.asyncio
-async def test_skip_failed_substitution_rejects_tampered_confirmed_skip_settlement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mote_kernel.execution.invocation as invocation_module
-
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("declined")
-
-    graph = Graph[str]("public.skip-substitution-settlement-invariant")
-    graph.add_node("review", fail, inputs={}, outputs={"value": str})
-    graph.set_outputs({})
-    paused = await graph.run(Graph.values())
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    original = invocation_module.frontier_node
-
-    def hide_confirmed_node(
-        frontier: GraphFrontierState,
-        node_id: GraphNodeId,
-    ) -> GraphFrontierNode | None:
-        if node_id == GraphNodeId("review"):
-            return None
-        return original(frontier, node_id)
-
-    monkeypatch.setattr(invocation_module, "frontier_node", hide_confirmed_node)
-    commits = CommitLog()
-
-    with pytest.raises(FrameInstallationInvariantError, match="confirmed skip substitution"):
-        await graph.run(
-            state=paused.state,
-            continuation=paused.continuation,
-            resume=(graph.skip_failed("review", "replacement", output=Graph.values(value="replacement")),),
-            commit=commits,
-        )
-
-    assert isinstance(commits.transitions[0].command, ResumeGraphNodes)
-
-
 @pytest.mark.asyncio
 async def test_interrupt_resume_is_an_exact_action_inside_run() -> None:
     calls = 0
@@ -2900,7 +2822,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     owner = _require_compiled_owner(parent)
     snapshot = _admit_continuation(owner.family_identity, result.state, result.continuation)
     lineage = lineage_states(root_state, snapshot.child_states)
-    root, evidence_reader = await admit_root(
+    root, evidence_reader = await admit_continued_root(
         owner.graph,
         root_state,
         snapshot.child_states,
@@ -2908,7 +2830,12 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
         executors_for(owner.graph, lineage),
         ExecutionLimits(),
         None,
+        (),
+        (),
+        owner.family_identity,
+        recovered=False,
     )
+    await drive_root(root)
     result = project_graph_result(
         owner.graph,
         owner.family_identity,

@@ -37,10 +37,6 @@ class TaskRaised:
 _SCHEDULER_CLOSE_CANCEL = object()
 
 
-def cancel_scheduler_task(task: asyncio.Task[TaskResult[GraphValueT] | TaskRaised]) -> None:
-    task.cancel(_SCHEDULER_CLOSE_CANCEL)
-
-
 def _project_outcome(
     graph: CompiledGraph[GraphValueT],
     executable: ExecutableTask[GraphValueT],
@@ -161,7 +157,7 @@ class TaskScheduler(Generic[GraphValueT]):
     async def aclose(self) -> None:
         handles = tuple(handle for _executable, handle in self._live.values())
         for handle in handles:
-            cancel_scheduler_task(handle)
+            handle.cancel(_SCHEDULER_CLOSE_CANCEL)
         if handles:
             await asyncio.gather(*handles, return_exceptions=True)
         self._live.clear()

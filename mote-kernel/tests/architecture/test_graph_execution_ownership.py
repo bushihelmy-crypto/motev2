@@ -421,7 +421,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
     assert (
         not {
             "_PlannedState",
-            "_PlannedFence",
+            "PlannedFence",
             "PlannedResume",
             "drive_root",
             "project_graph_result",
@@ -433,7 +433,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         frozenset(
             {
                 "_PlannedState",
-                "_PlannedFence",
+                "PlannedFence",
                 "PlannedResume",
                 "GraphTransition",
                 "drive_root",
@@ -442,7 +442,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         )
     ) == {
         "_PlannedState": ("execution/invocation.py",),
-        "_PlannedFence": ("execution/invocation.py",),
+        "PlannedFence": ("execution/invocation.py",),
         "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/family_driver.py",),
         "drive_root": ("execution/family_driver.py",),

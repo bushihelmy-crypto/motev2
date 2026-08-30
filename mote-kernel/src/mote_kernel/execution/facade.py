@@ -28,7 +28,7 @@ from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
     OwnerHandoff,
-    admit_root,
+    admit_continued_root,
     commit_transition,
     drive_root,
     fresh_root,
@@ -76,12 +76,10 @@ from mote_kernel.execution.identity import (
 from mote_kernel.execution.invocation import (
     admit_state_owned_overrides,
     executors_for,
-    install_confirmed_resume_frames,
     lineage_states,
     plan_fences,
     plan_resumes,
     recovery_seed,
-    replace_planned_state,
     validate_context,
 )
 from mote_kernel.execution.limits import ExecutionLimits
@@ -102,7 +100,6 @@ from mote_kernel.execution.result import (
     _GraphFailureResult,
     _GraphInterruptResult,
     _GraphSuccessResult,
-    _partial_commit_error,
     _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
@@ -112,7 +109,6 @@ from mote_kernel.execution.run_context import (
     _CompiledFamilyIdentity,
     _continuation_recovered,
     _GraphContinuation,
-    _make_continuation,
     _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
@@ -700,92 +696,18 @@ class Graph(Generic[GraphValueT]):
                 )
 
             async def setup_continued() -> OwnerHandoff[GraphValueT]:
-                confirmed_prefix = False
-                confirmed_states = lineage
-                confirmed_frames = frames
-
-                def partial_continuation() -> _GraphContinuation[GraphValueT]:
-                    root_binding = next(binding for binding in confirmed_states if not binding.scope_run.scope)
-                    confirmed_children = tuple(
-                        ChildStateBinding(binding.scope_run, binding.parent_activation, binding.state)
-                        for binding in confirmed_states
-                        if binding.parent_activation is not None
-                    )
-                    return _make_continuation(
-                        owner.family_identity,
-                        root_binding.state,
-                        confirmed_children,
-                        confirmed_frames,
-                        recovered=recovered,
-                    )
-
-                for fence in fences:
-                    binding = next(item for item in confirmed_states if item.scope_run == fence.scope_run)
-                    try:
-                        confirmed = await commit_transition(
-                            fence.scope_run,
-                            binding.state,
-                            fence.command,
-                            None,
-                            scoped_commit(fence.scope_run, commit),
-                        )
-                    except (Exception, asyncio.CancelledError) as cause:
-                        if confirmed_prefix:
-                            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-                            raise _partial_commit_error(
-                                root_binding.state,
-                                partial_continuation(),
-                                cause,
-                                tuple(fence.scope_run.scope),
-                            ) from cause
-                        raise
-                    confirmed_states = replace_planned_state(confirmed_states, replace(binding, state=confirmed))
-                    confirmed_prefix = True
-                for planned_resume in planned_resumes:
-                    binding = next(item for item in confirmed_states if item.scope_run == planned_resume.scope_run)
-                    try:
-                        confirmed = await commit_transition(
-                            planned_resume.scope_run,
-                            binding.state,
-                            planned_resume.prepared.command,
-                            None,
-                            scoped_commit(planned_resume.scope_run, commit),
-                        )
-                        installed_frames = install_confirmed_resume_frames(
-                            confirmed_frames,
-                            planned_resume,
-                            confirmed,
-                        )
-                        confirmed_states = replace_planned_state(
-                            confirmed_states,
-                            replace(binding, state=confirmed),
-                        )
-                        confirmed_frames = installed_frames
-                    except (Exception, asyncio.CancelledError) as cause:
-                        if confirmed_prefix:
-                            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-                            raise _partial_commit_error(
-                                root_binding.state,
-                                partial_continuation(),
-                                cause,
-                                tuple(planned_resume.scope_run.scope),
-                            ) from cause
-                        raise
-                    confirmed_prefix = True
-                root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-                confirmed_children = tuple(
-                    ChildStateBinding(item.scope_run, item.parent_activation, item.state)
-                    for item in confirmed_states
-                    if item.parent_activation is not None
-                )
-                return await admit_root(
+                return await admit_continued_root(
                     graph,
-                    root_binding.state,
-                    confirmed_children,
-                    confirmed_frames,
+                    invocation,
+                    child_states,
+                    frames,
                     executors,
                     limits,
                     commit,
+                    fences,
+                    planned_resumes,
+                    owner.family_identity,
+                    recovered=recovered,
                 )
 
             (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
@@ -830,6 +752,10 @@ class Graph(Generic[GraphValueT]):
             )
         except asyncio.CancelledError as error:
             if root.consume_node_origin_cancellation(error):
+                with suppress(BaseException):
+                    await finish(None)
+                raise
+            if root.consume_commit_origin_cancellation(error):
                 with suppress(BaseException):
                     await finish(None)
                 raise

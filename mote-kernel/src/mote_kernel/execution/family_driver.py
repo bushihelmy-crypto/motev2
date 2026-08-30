@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import InitVar, dataclass, replace
-from typing import Generic, Protocol, TypeAlias, TypeVar, cast, final
+from typing import Generic, Never, Protocol, TypeAlias, TypeVar, cast, final
 from uuid import uuid4
 
 from mote_kernel.execution.engine.admission import admit_child_graph_input, project_graph_outputs
@@ -22,6 +22,12 @@ from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
     StableActivation,
     child_scope_run_for_activation,
+    root_scope_run,
+)
+from mote_kernel.execution.invocation import (
+    PlannedFence,
+    PlannedResume,
+    project_resume_frames,
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
@@ -48,6 +54,7 @@ from mote_kernel.execution.result import (
     _awaiting_result,
     _commit_result,
     _completed_result,
+    _partial_commit_error,
 )
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
@@ -70,14 +77,12 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphExecutionLease,
     GraphExecutionToken,
-    GraphFrontierStatus,
     GraphRunCommand,
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
     InterruptedGraphNode,
     ParentGraphActivation,
-    frontier_status,
     graph_interrupt_id,
     pending_node_ids,
     reduce_graph_run,
@@ -89,6 +94,7 @@ AwaitedT = TypeVar("AwaitedT")
 
 async def wait_for_owner_task(
     task: asyncio.Task[AwaitedT],
+    on_task_cancellation: Callable[[asyncio.CancelledError], None] | None = None,
 ) -> tuple[AwaitedT, asyncio.CancelledError | None]:
     cancellation: asyncio.CancelledError | None = None
     while not task.done():
@@ -100,7 +106,13 @@ async def wait_for_owner_task(
                 break
             if cancellation is None:
                 cancellation = error
-    return task.result(), cancellation
+    try:
+        result = task.result()
+    except asyncio.CancelledError as error:
+        if on_task_cancellation is not None:
+            on_task_cancellation(error)
+        raise
+    return result, cancellation
 
 
 class _TransitionSeal:
@@ -184,18 +196,18 @@ _ChildPhase: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminal[GraphValu
 _OwnerEvidence: TypeAlias = tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]]
 _EvidenceReader: TypeAlias = Callable[[], _OwnerEvidence[GraphValueT]]
 _EvidencePublisher: TypeAlias = Callable[[ChildStateBinding, ScopedFrameIndex[GraphValueT]], None]
-_ChildWaitResult: TypeAlias = tuple[
-    GraphBoundary,
-    _ChildTerminal[GraphValueT] | None,
-    ConfirmedChildBoundary[GraphValueT] | None,
-]
-_DriveChild: TypeAlias = Callable[[], Awaitable[_ChildWaitResult[GraphValueT]]]
-_AbortChild: TypeAlias = Callable[[GraphAbortReason], Awaitable[None]]
-_ReleaseChild: TypeAlias = Callable[[], Awaitable[None]]
+_ChildWaitResult: TypeAlias = (
+    tuple[
+        GraphBoundary,
+        _ChildTerminal[GraphValueT] | None,
+        ConfirmedChildBoundary[GraphValueT] | None,
+    ]
+    | asyncio.CancelledError
+)
 _ChildHandle: TypeAlias = tuple[
-    _DriveChild[GraphValueT],
-    _AbortChild,
-    _ReleaseChild,
+    Callable[[], Awaitable[_ChildWaitResult[GraphValueT]]],
+    Callable[[GraphAbortReason], Awaitable[None]],
+    Callable[[], Awaitable[None]],
 ]
 _ChildCall: TypeAlias = tuple[
     tuple[int, ...],
@@ -221,21 +233,18 @@ def _merge_frames(
     return merged
 
 
-def _binding_at(
-    bindings: tuple[ChildStateBinding, ...],
-    coordinate: ScopeRunCoordinate,
-) -> ChildStateBinding:
-    binding = next((item for item in bindings if item.coordinate == coordinate), None)
-    if binding is None:
-        raise SnapshotMismatchError(f"continuation has no child binding at {coordinate!r}")
-    return binding
-
-
 def _frames_for_owners(
     frames: ScopedFrameIndex[GraphValueT],
     bindings: tuple[ChildStateBinding, ...],
     owners: frozenset[ScopeRunCoordinate],
 ) -> ScopedFrameIndex[GraphValueT]:
+    child_boundaries: list[ConfirmedChildBoundary[GraphValueT]] = []
+    for record in frames.child_boundaries:
+        binding = next((item for item in bindings if item.coordinate == record.coordinate.child_scope_run), None)
+        if binding is None:
+            raise SnapshotMismatchError(f"continuation has no child binding at {record.coordinate.child_scope_run!r}")
+        if binding.parent_activation.scope_run in owners:
+            child_boundaries.append(record)
     return ScopedFrameIndex(
         graph_inputs=tuple(record for record in frames.graph_inputs if record.coordinate.scope_run in owners),
         publications=tuple(
@@ -244,11 +253,7 @@ def _frames_for_owners(
         resume_inputs=tuple(
             record for record in frames.resume_inputs if record.coordinate.activation.scope_run in owners
         ),
-        child_boundaries=tuple(
-            record
-            for record in frames.child_boundaries
-            if _binding_at(bindings, record.coordinate.child_scope_run).parent_activation.scope_run in owners
-        ),
+        child_boundaries=tuple(child_boundaries),
     )
 
 
@@ -317,6 +322,7 @@ class _GraphRun(Generic[GraphValueT]):
     __slots__ = (
         "_children",
         "_commit",
+        "_commit_origin_cancellation",
         "_executor",
         "_frames",
         "_graph",
@@ -343,7 +349,7 @@ class _GraphRun(Generic[GraphValueT]):
         commit: GraphCommit[GraphValueT] | None,
         position: tuple[int, ...],
         parent_activation: StableActivation | None,
-        evidence_publisher: _EvidencePublisher[GraphValueT] | None = None,
+        evidence_publisher: _EvidencePublisher[GraphValueT],
     ) -> None:
         executor.validate_state(state)
         if state.run_id != scope_run.graph_run_id or graph.definition_scope != scope_run.scope:
@@ -356,10 +362,9 @@ class _GraphRun(Generic[GraphValueT]):
         self._limits = limits
         self._raw_commit = commit
         self._commit = scoped_commit(scope_run, commit)
+        self._commit_origin_cancellation: asyncio.CancelledError | None = None
         self._position = position
         self._parent_activation = parent_activation
-        if evidence_publisher is None:
-            evidence_publisher, _evidence_reader = _evidence_adapter((), ScopedFrameIndex())
         self._publish_evidence = evidence_publisher
         self._children: list[_ChildCall[GraphValueT]] = []
         self._session: GraphExecutionSession[GraphValueT] | None = None
@@ -369,6 +374,18 @@ class _GraphRun(Generic[GraphValueT]):
     @property
     def state(self) -> GraphRunState:
         return self._state
+
+    @property
+    def coordinate(self) -> ScopeRunCoordinate:
+        return self._scope_run
+
+    @property
+    def frames(self) -> ScopedFrameIndex[GraphValueT]:
+        return self._frames
+
+    @property
+    def is_root(self) -> bool:
+        return self._parent_activation is None
 
     def _call_index(self, parent: ParentGraphActivation) -> int | None:
         return next((index for index, call in enumerate(self._children) if call[1] == parent), None)
@@ -383,6 +400,21 @@ class _GraphRun(Generic[GraphValueT]):
             raise ResultCollectionError("child activation is not part of the parent definition") from error
         generation = sum(1 for call in self._children if call[1].node_id == parent.node_id)
         return (*self._position, ordinal, generation)
+
+    def child_position(self, parent: ParentGraphActivation) -> tuple[int, ...]:
+        return self._new_position(parent)
+
+    def accept_child_call(
+        self,
+        position: tuple[int, ...],
+        parent: ParentGraphActivation,
+        phase: _ChildPhase[GraphValueT],
+        handle: _ChildHandle[GraphValueT] | None,
+    ) -> None:
+        if position != self._new_position(parent):
+            raise ResultCollectionError("child call position does not match its parent activation")
+        self._children.append((position, parent, phase, handle))
+        self._children.sort(key=lambda call: call[0])
 
     def _replace_child(
         self,
@@ -433,15 +465,46 @@ class _GraphRun(Generic[GraphValueT]):
         self,
         command: GraphRunCommand,
         result: TaskResult[GraphValueT] | None = None,
+        *,
+        confirmed_frames: ScopedFrameIndex[GraphValueT] | None = None,
+        handoff_evidence: bool = False,
     ) -> GraphRunState:
         commit_task = asyncio.create_task(
             commit_transition(self._scope_run, self._state, command, result, self._commit)
         )
-        confirmed, cancellation = await wait_for_owner_task(commit_task)
+        confirmed, cancellation = await wait_for_owner_task(
+            commit_task,
+            self._mark_commit_origin_cancellation,
+        )
         self._state = confirmed
+        if confirmed_frames is not None:
+            self._frames = confirmed_frames
+        if handoff_evidence and not self.is_root:
+            self.handoff_evidence()
         if cancellation is not None:
             raise cancellation
-        return confirmed
+        return self._state
+
+    async def apply_admission_fence(self, command: FenceGraphExecution) -> None:
+        await self._transition(command, handoff_evidence=True)
+
+    async def apply_admission_resume(self, planned: PlannedResume[GraphValueT]) -> None:
+        candidate = reduce_graph_run(self._state, planned.prepared.command)
+        confirmed_frames = project_resume_frames(self._frames, planned, candidate)
+        await self._transition(
+            planned.prepared.command,
+            confirmed_frames=confirmed_frames,
+            handoff_evidence=True,
+        )
+
+    def _mark_commit_origin_cancellation(self, error: asyncio.CancelledError) -> None:
+        self._commit_origin_cancellation = error
+
+    def consume_commit_origin_cancellation(self, error: asyncio.CancelledError) -> bool:
+        if self._commit_origin_cancellation is not error:
+            return False
+        self._commit_origin_cancellation = None
+        return True
 
     async def _fence(self, execution_token: GraphExecutionToken) -> None:
         await self._transition(FenceGraphExecution(self._state.revision, execution_token))
@@ -451,34 +514,19 @@ class _GraphRun(Generic[GraphValueT]):
         index: int,
         boundary: ConfirmedChildBoundary[GraphValueT] | None,
     ) -> None:
-        _position, parent, phase, handle = self._children[index]
+        _position, _parent, phase, _handle = self._children[index]
         if not isinstance(phase, CompletedChild):
             if boundary is not None:
                 raise ResultCollectionError("aborted child cannot provide a completed output boundary")
             return
         if boundary is None or boundary.frame != phase.output:
             raise ResultCollectionError("completed child did not provide its exact output boundary")
-        child_graph = self._graph.nested_graphs[parent.node_id]
-        availability = boundary.coordinate
-        expected_scope_run = child_scope_run_for_activation(self._scope_run, parent)
-        if (
-            availability.child_scope_run != expected_scope_run
-            or availability.descriptor != child_graph.graph_output_descriptor.identity
-        ):
-            raise SnapshotMismatchError("completed child boundary does not match its parent definition")
-        if self._frames.has_child_boundary(availability):
-            existing = self._frames.lookup(availability)
-            if existing.frame != phase.output:
-                raise SnapshotMismatchError("completed child output does not match its confirmed boundary")
-            return
-        self._frames = self._frames.add_child_boundary(ConfirmedChildBoundary(availability, phase.output))
-        self._replace_child(index, phase, handle)
+        self._frames = self._frames.add_child_boundary(boundary)
 
     async def _start_child(self, missing: MissingChild) -> None:
         parent = missing.parent
         if parent.run_id != self._state.run_id or parent.superstep != self._state.superstep:
             raise ResultCollectionError("missing child activation is stale or foreign")
-        position = self._new_position(parent)
         child_graph = self._graph.nested_graphs[parent.node_id]
         input_frame = materialize_node_input(
             self._graph,
@@ -488,55 +536,25 @@ class _GraphRun(Generic[GraphValueT]):
             parent.node_id,
         )
         child_input = admit_child_graph_input(child_graph, input_frame)
-        coordinate = child_scope_run_for_activation(self._scope_run, parent)
-        child_executor = GraphExecutor(child_graph)
-        child_commit = scoped_commit(coordinate, self._raw_commit)
-        command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
-        commit_task = asyncio.create_task(commit_transition(coordinate, None, command, None, child_commit))
-        child_state, cancellation = await wait_for_owner_task(commit_task)
-        activation = StableActivation(self._scope_run, parent.superstep, parent.node_id)
-        child: _GraphRun[GraphValueT] | None = None
-        try:
-            child = _GraphRun(
+        position = self.child_position(parent)
+        construction = asyncio.create_task(
+            _construct_fresh_child(
+                self._scope_run,
+                parent,
                 child_graph,
-                coordinate,
-                child_state,
-                ScopedFrameIndex(),
-                child_executor,
+                child_input,
                 self._limits,
                 self._raw_commit,
                 position,
-                activation,
                 self._publish_evidence,
             )
-            child.install_graph_input(child_input)
-            handle = _opaque_handle(child, parent)
-            self._children.append((position, parent, ActiveChild(parent), handle))
-            self._children.sort(key=lambda call: call[0])
-        except BaseException:
-
-            async def cleanup_candidate() -> None:
-                if child is None:
-                    await commit_transition(
-                        coordinate,
-                        child_state,
-                        AbortGraphRun(
-                            child_state.revision,
-                            GraphAbortReason("nested graph owner construction failed"),
-                        ),
-                        None,
-                        child_commit,
-                    )
-                    return
-                with suppress(BaseException):
-                    await child.abort(GraphAbortReason("nested graph owner construction failed"))
-                with suppress(BaseException):
-                    await child.release()
-
-            cleanup_task = asyncio.create_task(cleanup_candidate())
-            with suppress(BaseException):
-                await wait_for_owner_task(cleanup_task)
-            raise
+        )
+        constructed, cancellation = await wait_for_owner_task(
+            construction,
+            self._mark_commit_origin_cancellation,
+        )
+        handle = constructed
+        self.accept_child_call(position, parent, ActiveChild(parent), handle)
         if cancellation is not None:
             raise cancellation
 
@@ -544,7 +562,11 @@ class _GraphRun(Generic[GraphValueT]):
         _position, _parent, phase, handle = self._children[index]
         if handle is None or not isinstance(phase, ActiveChild):
             return
-        disposition, terminal, boundary = await handle[0]()
+        child_result = await handle[0]()
+        if isinstance(child_result, asyncio.CancelledError):
+            self._mark_commit_origin_cancellation(child_result)
+            raise child_result
+        disposition, terminal, boundary = child_result
         if isinstance(disposition, AwaitingResume):
             if terminal is not None or boundary is not None:
                 raise ResultCollectionError("awaiting child returned terminal evidence")
@@ -709,8 +731,21 @@ class _GraphRun(Generic[GraphValueT]):
 
     def terminal_boundary(
         self,
+        parent: ParentGraphActivation,
         terminal: _ChildTerminal[GraphValueT],
     ) -> ConfirmedChildBoundary[GraphValueT] | None:
+        activation = self._parent_activation
+        expected_parent = (
+            None
+            if activation is None
+            else ParentGraphActivation(
+                activation.scope_run.graph_run_id,
+                activation.superstep,
+                activation.node_id,
+            )
+        )
+        if parent != expected_parent:
+            raise SnapshotMismatchError("child terminal handoff does not match its parent activation")
         if not isinstance(terminal, CompletedChild):
             return None
         coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
@@ -718,151 +753,6 @@ class _GraphRun(Generic[GraphValueT]):
             self._graph.graph_output_descriptor.identity,
         )
         return ConfirmedChildBoundary(coordinate, terminal.output)
-
-    async def admit_existing_children(
-        self,
-        bindings: tuple[ChildStateBinding, ...],
-        frames: ScopedFrameIndex[GraphValueT],
-        executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
-    ) -> None:
-        direct_candidates = tuple(
-            binding for binding in bindings if binding.parent_activation.scope_run.scope == self._scope_run.scope
-        )
-        direct_activations = tuple(binding.parent_activation for binding in direct_candidates)
-        direct_coordinates = tuple(binding.coordinate for binding in direct_candidates)
-        if len(direct_activations) != len(set(direct_activations)) or len(direct_coordinates) != len(
-            set(direct_coordinates)
-        ):
-            raise SnapshotMismatchError("continuation repeats one direct child activation")
-        current_pending = frozenset(
-            node_id for node_id in pending_node_ids(self._state.frontier) if node_id in self._graph.nested_graphs
-        )
-        admitted: list[ChildStateBinding] = []
-        for binding in direct_candidates:
-            activation = binding.parent_activation
-            if activation.scope_run != self._scope_run:
-                raise SnapshotMismatchError("continuation child binding belongs to a foreign parent run")
-            if activation.node_id not in self._graph.nested_graphs:
-                raise SnapshotMismatchError("continuation child binding has no parent nested definition")
-            child_graph = self._graph.nested_graphs[activation.node_id]
-            parent = ParentGraphActivation(
-                self._state.run_id,
-                activation.superstep,
-                activation.node_id,
-            )
-            expected_coordinate = child_scope_run_for_activation(self._scope_run, parent)
-            if (
-                binding.coordinate != expected_coordinate
-                or binding.state.run_id != binding.coordinate.graph_run_id
-                or binding.state.parent != parent
-            ):
-                raise SnapshotMismatchError("continuation child binding has inconsistent activation coordinates")
-            if activation.superstep > self._state.superstep:
-                raise SnapshotMismatchError("continuation child binding is from a future parent frontier")
-            current_activation = (
-                self._state.status is GraphRunStatus.RUNNING
-                and activation.superstep == self._state.superstep
-                and activation.node_id in current_pending
-            )
-            if binding.state.status is GraphRunStatus.RUNNING and not current_activation:
-                raise SnapshotMismatchError("running child binding is not one current pending nested activation")
-            if binding.state.status is not GraphRunStatus.RUNNING:
-                try:
-                    GraphExecutor(child_graph).validate_state(binding.state)
-                except GraphStateTransitionError as error:
-                    raise SnapshotMismatchError("continuation child binding has invalid graph state") from error
-            if current_activation:
-                admitted.append(binding)
-        direct = tuple(
-            sorted(
-                admitted,
-                key=lambda binding: tuple(self._graph.nodes).index(binding.parent_activation.node_id),
-            )
-        )
-        for binding in direct:
-            activation = binding.parent_activation
-            parent = ParentGraphActivation(
-                activation.scope_run.graph_run_id,
-                activation.superstep,
-                activation.node_id,
-            )
-            child_graph = self._graph.nested_graphs[parent.node_id]
-            position = self._new_position(parent)
-            if binding.state.status is GraphRunStatus.RUNNING:
-                child: _GraphRun[GraphValueT] | None = None
-                try:
-                    child = _GraphRun(
-                        child_graph,
-                        binding.coordinate,
-                        binding.state,
-                        _frames_for_owners(frames, bindings, frozenset({binding.coordinate})),
-                        _executor_at(executors, binding.coordinate),
-                        self._limits,
-                        self._raw_commit,
-                        position,
-                        activation,
-                        self._publish_evidence,
-                    )
-                    await child.admit_existing_children(bindings, frames, executors)
-                    handle = _opaque_handle(child, parent)
-                except BaseException:
-
-                    async def cleanup_candidate(
-                        candidate_owner: _GraphRun[GraphValueT] | None,
-                        candidate_binding: ChildStateBinding,
-                    ) -> None:
-                        reason = GraphAbortReason("continued graph owner construction failed")
-                        if candidate_owner is not None:
-                            with suppress(BaseException):
-                                await candidate_owner.abort(reason)
-                            with suppress(BaseException):
-                                await candidate_owner.release()
-                            return
-                        subtree = _subtree_bindings(candidate_binding.coordinate, bindings)
-                        pending = tuple(
-                            sorted(
-                                subtree,
-                                key=lambda subtree_binding: (
-                                    -len(subtree_binding.coordinate.scope),
-                                    subtree_binding.coordinate,
-                                ),
-                            )
-                        )
-                        for candidate in pending:
-                            current = candidate.state
-                            if current.status is not GraphRunStatus.RUNNING:
-                                continue
-                            candidate_commit = scoped_commit(candidate.coordinate, self._raw_commit)
-                            with suppress(BaseException):
-                                await commit_transition(
-                                    candidate.coordinate,
-                                    current,
-                                    AbortGraphRun(current.revision, reason),
-                                    None,
-                                    candidate_commit,
-                                )
-
-                    cleanup_task = asyncio.create_task(cleanup_candidate(child, binding))
-                    with suppress(BaseException):
-                        await wait_for_owner_task(cleanup_task)
-                    raise
-                status = frontier_status(binding.state.frontier)
-                phase: _ChildPhase[GraphValueT] = (
-                    AwaitingResume((), ()) if status is GraphFrontierStatus.AWAITING_RESUME else ActiveChild(parent)
-                )
-                self._children.append((position, parent, phase, handle))
-                continue
-            if binding.state.status is GraphRunStatus.COMPLETED:
-                availability: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
-                    binding.coordinate,
-                    child_graph.graph_output_descriptor.identity,
-                )
-                phase = CompletedChild(parent, self._frames.lookup(availability).frame)
-            else:
-                abort = cast(GraphAbort, binding.state.abort)
-                phase = AbortedChild(parent, abort.reason)
-            self._children.append((position, parent, phase, None))
-        self._children.sort(key=lambda call: call[0])
 
     async def abort(self, reason: GraphAbortReason) -> None:
         errors: list[BaseException] = []
@@ -919,6 +809,273 @@ class _GraphRun(Generic[GraphValueT]):
 OwnerHandoff: TypeAlias = tuple[_GraphRun[GraphValueT], _EvidenceReader[GraphValueT]]
 
 
+def _admit_parent_activation(
+    parent_scope_run: ScopeRunCoordinate,
+    parent: ParentGraphActivation,
+    child_graph: CompiledGraph[GraphValueT],
+) -> StableActivation:
+    if parent.run_id != parent_scope_run.graph_run_id or child_graph.definition_scope != (
+        *parent_scope_run.scope,
+        parent.node_id,
+    ):
+        raise SnapshotMismatchError("child construction does not match its parent activation")
+    return StableActivation(parent_scope_run, parent.superstep, parent.node_id)
+
+
+async def _construct_fresh_child(
+    parent_scope_run: ScopeRunCoordinate,
+    parent: ParentGraphActivation,
+    child_graph: CompiledGraph[GraphValueT],
+    child_input: GraphInputFrame[GraphValueT],
+    limits: ExecutionLimits,
+    commit: GraphCommit[GraphValueT] | None,
+    position: tuple[int, ...],
+    evidence_publisher: _EvidencePublisher[GraphValueT],
+) -> _ChildHandle[GraphValueT]:
+    activation = _admit_parent_activation(parent_scope_run, parent, child_graph)
+    coordinate = child_scope_run_for_activation(parent_scope_run, parent)
+    child_commit = scoped_commit(coordinate, commit)
+    command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
+    child_state = await commit_transition(coordinate, None, command, None, child_commit)
+    child: _GraphRun[GraphValueT] | None = None
+    try:
+        child = _GraphRun(
+            child_graph,
+            coordinate,
+            child_state,
+            ScopedFrameIndex(),
+            GraphExecutor(child_graph),
+            limits,
+            commit,
+            position,
+            activation,
+            evidence_publisher,
+        )
+        child.install_graph_input(child_input)
+        return _opaque_handle(child, parent)
+    except BaseException:
+
+        async def cleanup_candidate() -> None:
+            reason = GraphAbortReason("nested graph owner construction failed")
+            if child is None:
+                await commit_transition(
+                    coordinate,
+                    child_state,
+                    AbortGraphRun(child_state.revision, reason),
+                    None,
+                    child_commit,
+                )
+                return
+            with suppress(BaseException):
+                await child.abort(reason)
+            with suppress(BaseException):
+                await child.release()
+
+        cleanup_task = asyncio.create_task(cleanup_candidate())
+        with suppress(BaseException):
+            await wait_for_owner_task(cleanup_task)
+        raise
+
+
+def _validate_existing_child(
+    parent_graph: CompiledGraph[GraphValueT],
+    parent_scope_run: ScopeRunCoordinate,
+    parent_state: GraphRunState,
+    binding: ChildStateBinding,
+) -> tuple[ParentGraphActivation, CompiledGraph[GraphValueT], bool]:
+    activation = binding.parent_activation
+    if activation.scope_run != parent_scope_run:
+        raise SnapshotMismatchError("continuation child binding belongs to a foreign parent run")
+    if activation.node_id not in parent_graph.nested_graphs:
+        raise SnapshotMismatchError("continuation child binding has no parent nested definition")
+    child_graph = parent_graph.nested_graphs[activation.node_id]
+    parent = ParentGraphActivation(
+        parent_state.run_id,
+        activation.superstep,
+        activation.node_id,
+    )
+    _admit_parent_activation(parent_scope_run, parent, child_graph)
+    expected_coordinate = child_scope_run_for_activation(parent_scope_run, parent)
+    if (
+        binding.coordinate != expected_coordinate
+        or binding.state.run_id != binding.coordinate.graph_run_id
+        or binding.state.parent != parent
+    ):
+        raise SnapshotMismatchError("continuation child binding has inconsistent activation coordinates")
+    if activation.superstep > parent_state.superstep:
+        raise SnapshotMismatchError("continuation child binding is from a future parent frontier")
+    current_pending = frozenset(
+        node_id for node_id in pending_node_ids(parent_state.frontier) if node_id in parent_graph.nested_graphs
+    )
+    current_activation = (
+        parent_state.status is GraphRunStatus.RUNNING
+        and activation.superstep == parent_state.superstep
+        and activation.node_id in current_pending
+    )
+    if binding.state.status is GraphRunStatus.RUNNING and not current_activation:
+        raise SnapshotMismatchError("running child binding is not one current pending nested activation")
+    if binding.state.status is not GraphRunStatus.RUNNING:
+        try:
+            GraphExecutor(child_graph).validate_state(binding.state)
+        except GraphStateTransitionError as error:
+            raise SnapshotMismatchError("continuation child binding has invalid graph state") from error
+    return parent, child_graph, current_activation
+
+
+async def _abort_unowned_graph_runs(
+    bindings: tuple[ChildStateBinding, ...],
+    commit: GraphCommit[GraphValueT] | None,
+    reason: GraphAbortReason,
+) -> None:
+    pending = tuple(
+        sorted(
+            bindings,
+            key=lambda binding: (-len(binding.coordinate.scope), binding.coordinate),
+        )
+    )
+    for binding in pending:
+        current = binding.state
+        if current.status is not GraphRunStatus.RUNNING:
+            continue
+        binding_commit = scoped_commit(binding.coordinate, commit)
+        with suppress(BaseException):
+            await commit_transition(
+                binding.coordinate,
+                current,
+                AbortGraphRun(current.revision, reason),
+                None,
+                binding_commit,
+            )
+
+
+async def _construct_existing_child(
+    parent: ParentGraphActivation,
+    binding: ChildStateBinding,
+    child_graph: CompiledGraph[GraphValueT],
+    bindings: tuple[ChildStateBinding, ...],
+    frames: ScopedFrameIndex[GraphValueT],
+    executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
+    limits: ExecutionLimits,
+    commit: GraphCommit[GraphValueT] | None,
+    position: tuple[int, ...],
+    evidence_publisher: _EvidencePublisher[GraphValueT],
+) -> tuple[_ChildHandle[GraphValueT], tuple[_GraphRun[GraphValueT], ...]]:
+    child: _GraphRun[GraphValueT] | None = None
+    try:
+        child_frames = _frames_for_owners(frames, bindings, frozenset({binding.coordinate}))
+        child = _GraphRun(
+            child_graph,
+            binding.coordinate,
+            binding.state,
+            child_frames,
+            _executor_at(executors, binding.coordinate),
+            limits,
+            commit,
+            position,
+            binding.parent_activation,
+            evidence_publisher,
+        )
+        descendants = await _admit_existing_children(
+            child,
+            child_graph,
+            binding.coordinate,
+            binding.state,
+            child_frames,
+            limits,
+            commit,
+            evidence_publisher,
+            bindings,
+            frames,
+            executors,
+        )
+        return _opaque_handle(child, parent), (child, *descendants)
+    except BaseException:
+
+        async def cleanup_candidate() -> None:
+            reason = GraphAbortReason("continued graph owner construction failed")
+            if child is None:
+                await _abort_unowned_graph_runs(
+                    _subtree_bindings(binding.coordinate, bindings),
+                    commit,
+                    reason,
+                )
+                return
+            with suppress(BaseException):
+                await child.abort(reason)
+            with suppress(BaseException):
+                await child.release()
+
+        cleanup_task = asyncio.create_task(cleanup_candidate())
+        with suppress(BaseException):
+            await wait_for_owner_task(cleanup_task)
+        raise
+
+
+async def _admit_existing_children(
+    owner: _GraphRun[GraphValueT],
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    state: GraphRunState,
+    owner_frames: ScopedFrameIndex[GraphValueT],
+    limits: ExecutionLimits,
+    commit: GraphCommit[GraphValueT] | None,
+    evidence_publisher: _EvidencePublisher[GraphValueT],
+    bindings: tuple[ChildStateBinding, ...],
+    frames: ScopedFrameIndex[GraphValueT],
+    executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
+) -> tuple[_GraphRun[GraphValueT], ...]:
+    direct_candidates = tuple(
+        binding for binding in bindings if binding.parent_activation.scope_run.scope == scope_run.scope
+    )
+    direct_activations = tuple(binding.parent_activation for binding in direct_candidates)
+    direct_coordinates = tuple(binding.coordinate for binding in direct_candidates)
+    if len(direct_activations) != len(set(direct_activations)) or len(direct_coordinates) != len(
+        set(direct_coordinates)
+    ):
+        raise SnapshotMismatchError("continuation repeats one direct child activation")
+    admitted: list[tuple[ChildStateBinding, ParentGraphActivation, CompiledGraph[GraphValueT]]] = []
+    for binding in direct_candidates:
+        parent, child_graph, current_activation = _validate_existing_child(graph, scope_run, state, binding)
+        if current_activation:
+            admitted.append((binding, parent, child_graph))
+    direct = tuple(
+        sorted(
+            admitted,
+            key=lambda item: tuple(graph.nodes).index(item[1].node_id),
+        )
+    )
+    admitted_owners: list[_GraphRun[GraphValueT]] = []
+    for binding, parent, child_graph in direct:
+        position = owner.child_position(parent)
+        if binding.state.status is GraphRunStatus.RUNNING:
+            handle, child_owners = await _construct_existing_child(
+                parent,
+                binding,
+                child_graph,
+                bindings,
+                frames,
+                executors,
+                limits,
+                commit,
+                position,
+                evidence_publisher,
+            )
+            owner.accept_child_call(position, parent, ActiveChild(parent), handle)
+            admitted_owners.extend(child_owners)
+            continue
+        if binding.state.status is GraphRunStatus.COMPLETED:
+            availability: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
+                binding.coordinate,
+                child_graph.graph_output_descriptor.identity,
+            )
+            phase = CompletedChild(parent, owner_frames.lookup(availability).frame)
+        else:
+            abort = cast(GraphAbort, binding.state.abort)
+            phase = AbortedChild(parent, abort.reason)
+        owner.accept_child_call(position, parent, phase, None)
+    return tuple(sorted(admitted_owners, key=lambda admitted: admitted.coordinate))
+
+
 def _opaque_handle(
     child: _GraphRun[GraphValueT],
     parent: ParentGraphActivation,
@@ -936,13 +1093,18 @@ def _opaque_handle(
         current = require_owner()
         if handed_off:
             raise ResultCollectionError("child call evidence can only be handed off once")
-        disposition = await current.drive_quantum()
+        try:
+            disposition = await current.drive_quantum()
+        except asyncio.CancelledError as error:
+            if current.consume_commit_origin_cancellation(error):
+                return error
+            raise
         if isinstance(disposition, AwaitingResume):
             current.handoff_evidence()
             handed_off = True
             return disposition, None, None
         terminal = current.terminal_projection(parent)
-        boundary = current.terminal_boundary(terminal)
+        boundary = current.terminal_boundary(parent, terminal)
         current.handoff_evidence()
         handed_off = True
         return disposition, terminal, boundary
@@ -971,7 +1133,23 @@ def _executor_at(
     return executor
 
 
-async def admit_root(
+def _validate_owner_transition_plans(
+    owners: tuple[_GraphRun[GraphValueT], ...],
+    fences: tuple[PlannedFence, ...],
+    resumes: tuple[PlannedResume[GraphValueT], ...],
+) -> None:
+    fence_coordinates = tuple(fence.scope_run for fence in fences)
+    resume_coordinates = tuple(resume.scope_run for resume in resumes)
+    owner_coordinates = frozenset(owner.coordinate for owner in owners)
+    missing = next(
+        (coordinate for coordinate in (*fence_coordinates, *resume_coordinates) if coordinate not in owner_coordinates),
+        None,
+    )
+    if missing is not None:
+        raise SnapshotMismatchError(f"continuation transition plan has no constructed owner at {missing!r}")
+
+
+async def _construct_continued_root(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
     child_states: tuple[ChildStateBinding, ...],
@@ -979,16 +1157,20 @@ async def admit_root(
     executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
-) -> OwnerHandoff[GraphValueT]:
-    scope_run = ScopeRunCoordinate((), state.run_id)
+    fences: tuple[PlannedFence, ...],
+    resumes: tuple[PlannedResume[GraphValueT], ...],
+) -> tuple[tuple[_GraphRun[GraphValueT], ...], _EvidenceReader[GraphValueT]]:
+    scope_run = root_scope_run(state.run_id)
     evidence_publisher, evidence_reader = _evidence_adapter(child_states, frames)
+    root_frames: ScopedFrameIndex[GraphValueT]
     root: _GraphRun[GraphValueT] | None = None
     try:
+        root_frames = _frames_for_owners(frames, child_states, frozenset({scope_run}))
         root = _GraphRun(
             graph,
             scope_run,
             state,
-            _frames_for_owners(frames, child_states, frozenset({scope_run})),
+            root_frames,
             _executor_at(executors, scope_run),
             limits,
             commit,
@@ -996,8 +1178,22 @@ async def admit_root(
             None,
             evidence_publisher,
         )
-        await root.admit_existing_children(child_states, frames, executors)
-        return root, evidence_reader
+        descendants = await _admit_existing_children(
+            root,
+            graph,
+            scope_run,
+            state,
+            root_frames,
+            limits,
+            commit,
+            evidence_publisher,
+            child_states,
+            frames,
+            executors,
+        )
+        owners = (root, *descendants)
+        _validate_owner_transition_plans(owners, fences, resumes)
+        return owners, evidence_reader
     except BaseException:
 
         async def cleanup_root() -> None:
@@ -1008,25 +1204,7 @@ async def admit_root(
                 with suppress(BaseException):
                     await root.release()
                 return
-            pending = tuple(
-                sorted(
-                    child_states,
-                    key=lambda binding: (-len(binding.coordinate.scope), binding.coordinate),
-                )
-            )
-            for binding in pending:
-                current = binding.state
-                if current.status is not GraphRunStatus.RUNNING:
-                    continue
-                binding_commit = scoped_commit(binding.coordinate, commit)
-                with suppress(BaseException):
-                    await commit_transition(
-                        binding.coordinate,
-                        current,
-                        AbortGraphRun(current.revision, reason),
-                        None,
-                        binding_commit,
-                    )
+            await _abort_unowned_graph_runs(child_states, commit, reason)
             root_commit = scoped_commit(scope_run, commit)
             with suppress(BaseException):
                 if state.status is GraphRunStatus.RUNNING:
@@ -1042,6 +1220,103 @@ async def admit_root(
         with suppress(BaseException):
             await wait_for_owner_task(cleanup_task)
         raise
+
+
+async def _raise_setup_transition_failure(
+    root: _GraphRun[GraphValueT],
+    family_identity: _CompiledFamilyIdentity,
+    evidence_reader: _EvidenceReader[GraphValueT],
+    cause: Exception | asyncio.CancelledError,
+    failed_scope: tuple[str, ...],
+    confirmed_prefix: bool,
+    *,
+    recovered: bool,
+) -> Never:
+    if not confirmed_prefix:
+        with suppress(BaseException):
+            await root.release()
+        raise cause from None
+    child_states, child_frames = evidence_reader()
+    continuation = _make_continuation(
+        family_identity,
+        root.state,
+        child_states,
+        _merge_frames((root.frames, child_frames)),
+        recovered=recovered,
+    )
+    partial = _partial_commit_error(
+        root.state,
+        continuation,
+        cause,
+        failed_scope,
+    )
+    with suppress(BaseException):
+        await root.release()
+    raise partial from cause
+
+
+async def admit_continued_root(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+    child_states: tuple[ChildStateBinding, ...],
+    frames: ScopedFrameIndex[GraphValueT],
+    executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
+    limits: ExecutionLimits,
+    commit: GraphCommit[GraphValueT] | None,
+    fences: tuple[PlannedFence, ...],
+    resumes: tuple[PlannedResume[GraphValueT], ...],
+    family_identity: _CompiledFamilyIdentity,
+    *,
+    recovered: bool,
+) -> OwnerHandoff[GraphValueT]:
+    owners, evidence_reader = await _construct_continued_root(
+        graph,
+        state,
+        child_states,
+        frames,
+        executors,
+        limits,
+        commit,
+        fences,
+        resumes,
+    )
+    root = owners[0]
+    confirmed_prefix = False
+    for owner in owners:
+        fence = next((candidate for candidate in fences if candidate.scope_run == owner.coordinate), None)
+        if fence is None:
+            continue
+        try:
+            await owner.apply_admission_fence(fence.command)
+            confirmed_prefix = True
+        except (Exception, asyncio.CancelledError) as cause:
+            await _raise_setup_transition_failure(
+                root,
+                family_identity,
+                evidence_reader,
+                cause,
+                tuple(owner.coordinate.scope),
+                confirmed_prefix,
+                recovered=recovered,
+            )
+    for owner in owners:
+        planned = next((candidate for candidate in resumes if candidate.scope_run == owner.coordinate), None)
+        if planned is None:
+            continue
+        try:
+            await owner.apply_admission_resume(planned)
+            confirmed_prefix = True
+        except (Exception, asyncio.CancelledError) as cause:
+            await _raise_setup_transition_failure(
+                root,
+                family_identity,
+                evidence_reader,
+                cause,
+                tuple(owner.coordinate.scope),
+                confirmed_prefix,
+                recovered=recovered,
+            )
+    return root, evidence_reader
 
 
 async def fresh_root(
@@ -1149,7 +1424,7 @@ def project_graph_result(
         recovered=recovered,
     )
     if isinstance(disposition, CompletedGraph):
-        view = project_graph_outputs(graph, ScopeRunCoordinate((), state.run_id), state.superstep, frames)
+        view = project_graph_outputs(graph, root_scope_run(state.run_id), state.superstep, frames)
         return _completed_result(state, continuation, _public_values(view))
     if isinstance(disposition, AbortedGraph):
         if state.abort is None:

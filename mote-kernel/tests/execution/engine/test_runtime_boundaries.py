@@ -80,9 +80,9 @@ from mote_kernel.execution.identity import (
 )
 from mote_kernel.execution.invocation import (
     PlannedResume,
-    install_confirmed_resume_frames,
     lineage_states,
     plan_fences,
+    project_resume_frames,
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
@@ -114,6 +114,7 @@ from mote_kernel.execution.run_context import (
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
+    _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -1184,7 +1185,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
 
     assert aborted.status is GraphRunStatus.ABORTED
     with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
-        install_confirmed_resume_frames(
+        project_resume_frames(
             request(graph, parent).frames,
             PlannedResume(
                 scope_run,
@@ -1196,7 +1197,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
         )
     assert aborted.abort is not None and aborted.abort.reason == "child aborted"
     assert availability.has_publication(substitution.coordinate)
-    installed = install_confirmed_resume_frames(
+    installed = project_resume_frames(
         request(graph, parent).frames,
         PlannedResume(
             scope_run,
@@ -1272,7 +1273,7 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
             (candidate,),
             installed,
         )
-        installed = install_confirmed_resume_frames(
+        installed = project_resume_frames(
             installed,
             PlannedResume(
                 scope_run,
@@ -1359,7 +1360,7 @@ async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         StableActivation(scope_run, 0, GraphNodeId("nested")),
         aborted,
     )
-    root, _evidence_reader = await family_driver_module.admit_root(
+    root, _evidence_reader = await family_driver_module.admit_continued_root(
         graph,
         parent,
         (binding,),
@@ -1367,6 +1368,10 @@ async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         ((scope_run, GraphExecutor(graph)),),
         ExecutionLimits(),
         None,
+        (),
+        (),
+        _new_family_identity(),
+        recovered=True,
     )
 
     disposition = await family_driver_module.drive_root(root)

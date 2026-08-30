@@ -73,9 +73,6 @@ from mote_kernel.state.graph_state import (
     OverrideGraphNodeInput,
     ParentGraphActivation,
     PendingGraphNode,
-    SelectGraphRoute,
-    SkipFailedNode,
-    SkippedGraphNode,
     SucceededGraphNode,
     frontier_node,
     reduce_graph_run,
@@ -93,7 +90,7 @@ class _PlannedState:
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedFence:
+class PlannedFence:
     scope_run: ScopeRunCoordinate
     command: FenceGraphExecution
 
@@ -106,54 +103,18 @@ class PlannedResume(Generic[GraphValueT]):
     substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
 
 
-def install_confirmed_resume_frames(
+def project_resume_frames(
     frames: ScopedFrameIndex[GraphValueT],
     planned: PlannedResume[GraphValueT],
-    confirmed: GraphRunState,
+    candidate: GraphRunState,
 ) -> ScopedFrameIndex[GraphValueT]:
-    if confirmed != planned.successor:
-        raise FrameInstallationInvariantError("confirmed resume state does not match its admitted successor")
+    if candidate != planned.successor:
+        raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     installed = frames
     try:
         for admitted in planned.prepared.inputs:
             installed = installed.add_resume_input(admitted)
         for substitution in planned.substitutions:
-            activation = substitution.coordinate.activation
-            node = frontier_node(confirmed.frontier, activation.node_id)
-            route = (
-                node.settlement.routing.route
-                if node is not None
-                and isinstance(node.settlement, SkippedGraphNode)
-                and isinstance(node.settlement.routing, SelectGraphRoute)
-                else None
-            )
-            action = next(
-                (
-                    candidate
-                    for candidate in planned.prepared.command.actions
-                    if candidate.node_id == activation.node_id
-                ),
-                None,
-            )
-            action_route = (
-                action.routing.route
-                if isinstance(action, SkipFailedNode) and isinstance(action.routing, SelectGraphRoute)
-                else None
-            )
-            if (
-                activation.scope_run != planned.scope_run
-                or activation.superstep != confirmed.superstep
-                or substitution.expected_revision != confirmed.revision
-                or type(substitution.provenance) is not SkipSubstitutionProvenance
-                or not isinstance(action, SkipFailedNode)
-                or node is None
-                or not isinstance(node.settlement, SkippedGraphNode)
-                or node.settlement.reason != action.reason
-                or route != action_route
-            ):
-                raise FrameInstallationInvariantError(
-                    "confirmed skip substitution does not match its admitted successor"
-                )
             installed = installed.add_publication(
                 ConfirmedPublication(
                     substitution.coordinate,
@@ -163,7 +124,7 @@ def install_confirmed_resume_frames(
                 )
             )
     except GraphValuePublicationError as error:
-        raise FrameInstallationInvariantError("pre-admitted resume frames failed post-commit installation") from error
+        raise FrameInstallationInvariantError("admitted resume frames failed owner-local projection") from error
     return installed
 
 
@@ -188,7 +149,7 @@ def _planned_state(
     return match
 
 
-def replace_planned_state(
+def _replace_planned_state(
     states: tuple[_PlannedState, ...],
     replacement: _PlannedState,
 ) -> tuple[_PlannedState, ...]:
@@ -226,9 +187,9 @@ def lineage_states(
 def plan_fences(
     graph: CompiledGraph[GraphValueT],
     states: tuple[_PlannedState, ...],
-) -> tuple[tuple[_PlannedState, ...], tuple[_PlannedFence, ...]]:
+) -> tuple[tuple[_PlannedState, ...], tuple[PlannedFence, ...]]:
     planned = states
-    fences: list[_PlannedFence] = []
+    fences: list[PlannedFence] = []
     for binding in states:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         require_snapshot_matches_graph(scoped_graph, binding.state)
@@ -261,8 +222,8 @@ def plan_fences(
             continue
         command = FenceGraphExecution(binding.state.revision, execution.token)
         candidate = reduce_graph_run(binding.state, command)
-        fences.append(_PlannedFence(binding.scope_run, command))
-        planned = replace_planned_state(
+        fences.append(PlannedFence(binding.scope_run, command))
+        planned = _replace_planned_state(
             planned,
             _PlannedState(binding.scope_run, candidate, binding.parent_activation),
         )
@@ -416,7 +377,7 @@ def plan_resumes(
             )
         )
         facts.extend(action_facts)
-        planned_states = replace_planned_state(
+        planned_states = _replace_planned_state(
             planned_states,
             _PlannedState(scope_run, candidate, binding.parent_activation),
         )
