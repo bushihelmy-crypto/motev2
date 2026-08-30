@@ -30,8 +30,33 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: mote-kernel/pyproject.toml
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.3"
+          enable-cache: true
+          cache-dependency-glob: |
+            mote-infra/persistence/cloudflare/python/uv.lock
+            mote-resource/container/cloudflare/python/uv.lock
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: |
+            mote-infra/persistence/cloudflare/ts/pnpm-lock.yaml
+            mote-resource/container/cloudflare/ts/pnpm-lock.yaml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
+      - run: uv sync --locked
+        working-directory: mote-infra/persistence/cloudflare/python
+      - run: uv sync --locked
+        working-directory: mote-resource/container/cloudflare/python
+      - run: pnpm install --frozen-lockfile
+        working-directory: mote-infra/persistence/cloudflare/ts
+      - run: pnpm install --frozen-lockfile
+        working-directory: mote-resource/container/cloudflare/ts
       - run: pre-commit run --all-files
         working-directory: .
       - run: python -m ruff check src tests
