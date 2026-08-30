@@ -34,16 +34,12 @@ class FrontierPreparation(Generic[GraphValueT]):
     active_children: tuple[ActiveChild, ...]
 
 
-def _activation(task: GraphTask) -> ParentGraphActivation:
-    return ParentGraphActivation(task.run_id, task.superstep, task.node_id)
-
-
 def prepare_frontier(
     graph: CompiledGraph[GraphValueT], request: StepRequest[GraphValueT]
 ) -> FrontierPreparation[GraphValueT]:
     tasks = plan_tasks(graph, request.state, request.limits)
     nested_tasks = tuple(task for task in tasks if task.node_id in graph.nested_graphs)
-    expected = tuple(_activation(task) for task in nested_tasks)
+    expected = tuple(ParentGraphActivation(task.run_id, task.superstep, task.node_id) for task in nested_tasks)
     received = tuple(projection.parent for projection in request.child_projections)
     if received != expected:
         raise ResultCollectionError("child projections must exactly and canonically cover pending nested activations")
@@ -51,20 +47,14 @@ def prepare_frontier(
     missing: list[MissingChild] = []
     active: list[ActiveChild] = []
     nested_results: list[TaskResult[GraphValueT]] = []
-    task_by_parent = {_activation(task): task for task in nested_tasks}
-    for projection in request.child_projections:
-        parent = projection.parent
-        task = task_by_parent[parent]
+    for task, projection in zip(nested_tasks, request.child_projections, strict=True):
         if isinstance(projection, MissingChild):
             missing.append(projection)
             continue
         if isinstance(projection, ActiveChild):
             active.append(projection)
         elif isinstance(projection, CompletedChild):
-            declarations = tuple(
-                (item.name, item.descriptor)
-                for item in graph.transition.publications[task.node_id].declarations.entries
-            )
+            declarations = graph.transition.publications[task.node_id].declarations
             nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
         else:
             nested_results.append(TaskFailure(task, projection.reason))

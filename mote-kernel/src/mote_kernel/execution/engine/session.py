@@ -14,25 +14,16 @@ from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
-from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId
+from mote_kernel.execution.engine.task import ExecutableTask, TaskId
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.result import ExecutedGraphNode, TaskResult
 from mote_kernel.state.graph_state import (
-    FailedGraphNode,
-    FailedGraphNodeOutcome,
     GraphNodeId,
-    GraphNodeInterrupt,
-    GraphNodeSettlement,
     GraphRunState,
-    GraphRunStatus,
-    InterruptedGraphNode,
-    PendingGraphNode,
     SettleGraphNode,
-    SucceededGraphNode,
-    SucceededGraphNodeOutcome,
-    frontier_node,
     pending_node_ids,
+    reduce_graph_run,
 )
 
 GraphValueT = TypeVar("GraphValueT")
@@ -76,7 +67,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         "_awaiting_ack",
         "_close_lock",
         "_disposition",
-        "_errors",
+        "_error",
         "_executables",
         "_graph",
         "_limits",
@@ -98,17 +89,14 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         self._limits = preparation.request.limits
         self._executables = preparation.executables
         self._state = state
-        self._queued_results: deque[_QueuedCompletion[GraphValueT]] = deque()
+        self._queued_results = deque(_QueuedCompletion(result) for result in preparation.nested_results)
         self._started: set[GraphNodeId] = set()
-        for result in preparation.nested_results:
-            self._started.add(result.task.node_id)
-            self._queued_results.append(_QueuedCompletion(result))
         self._scheduler = TaskScheduler(graph)
         self._awaiting_ack: SettleGraphNode | None = None
         self._next_in_progress = False
         self._close_lock = asyncio.Lock()
         self._disposition = _SessionDisposition.OPEN
-        self._errors: list[tuple[GraphTask, BaseException]] = []
+        self._error: TaskRaised | None = None
         self._node_origin_cancellation: asyncio.CancelledError | None = None
 
     async def __aenter__(self) -> GraphExecutionSession[GraphValueT]:
@@ -128,58 +116,15 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         if self._disposition is _SessionDisposition.QUIESCENT:
             raise ResultCollectionError("execution session is quiescent")
 
-    def _validate_initial_state(self, state: GraphRunState) -> None:
-        require_snapshot_matches_graph(self._graph, state)
-        if state != self._state:
-            raise ResultCollectionError("first session state must be the reducer-applied claim successor")
-
-    @staticmethod
-    def _expected_settlement(command: SettleGraphNode) -> GraphNodeSettlement:
-        outcome = command.outcome
-        if isinstance(outcome, SucceededGraphNodeOutcome):
-            return SucceededGraphNode(outcome.routing)
-        if isinstance(outcome, FailedGraphNodeOutcome):
-            return FailedGraphNode(outcome.failure)
-        return InterruptedGraphNode(GraphNodeInterrupt(outcome.identity, outcome.request_payload))
-
     def _acknowledge(self, state: GraphRunState) -> None:
         command = self._awaiting_ack
         if command is None:
-            self._validate_initial_state(state)
+            require_snapshot_matches_graph(self._graph, state)
+            if state != self._state:
+                raise ResultCollectionError("first session state must be the reducer-applied claim successor")
             return
-        require_snapshot_matches_graph(self._graph, state)
-        previous = self._state
-        if (
-            state.revision != previous.revision + 1
-            or state.run_id != previous.run_id
-            or state.definition_id != previous.definition_id
-            or state.definition_version != previous.definition_version
-            or state.superstep != previous.superstep
-            or state.execution_sequence != previous.execution_sequence
-            or state.status is not GraphRunStatus.RUNNING
-            or state.join_progress != previous.join_progress
-            or state.parent != previous.parent
-            or state.resume_input_codec != previous.resume_input_codec
-            or state.abort != previous.abort
-            or tuple(node.node_id for node in state.frontier.nodes)
-            != tuple(node.node_id for node in previous.frontier.nodes)
-        ):
-            raise ResultCollectionError("session state acknowledgement is not a single successor revision")
-        for before, after in zip(previous.frontier.nodes, state.frontier.nodes, strict=True):
-            if before.node_id != command.outcome.node_id and before.settlement != after.settlement:
-                raise ResultCollectionError("acknowledged state changed an unrelated node settlement")
-        target = frontier_node(state.frontier, command.outcome.node_id)
-        if target is None or isinstance(target.settlement, PendingGraphNode):
-            raise ResultCollectionError("acknowledged state did not settle the yielded node")
-        expected = self._expected_settlement(command)
-        if target.settlement != expected:
-            raise ResultCollectionError("acknowledged node settlement does not match the yielded outcome")
-        if state.execution is not None and state.execution != previous.execution:
-            raise ResultCollectionError("acknowledged state changed the active execution token")
-        if pending_node_ids(state.frontier) and state.execution is None:
-            raise ResultCollectionError("an acknowledged partial frontier must retain its execution token")
-        # ``require_snapshot_matches_graph`` has already validated the authoritative
-        # complete-frontier quiescence invariant before this successor proof.
+        if state != reduce_graph_run(self._state, command):
+            raise ResultCollectionError("session state acknowledgement is not the exact reducer successor")
         self._state = state
         self._awaiting_ack = None
 
@@ -195,17 +140,17 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             self._state.resources,
             self._limits,
             active_count=self._scheduler.live_count,
-            started_node_ids=frozenset(self._started),
+            started_node_ids=self._started,
         )
         by_task_id: dict[TaskId, ExecutableTask[GraphValueT]] = {
             executable.task.task_id: executable for executable in executables
         }
         return tuple(by_task_id[task.task_id] for task in selected)
 
-    def _record_error(self, task: GraphTask, error: BaseException) -> None:
-        self._errors.append((task, error))
-        self._errors.sort(key=lambda item: item[0].sort_key)
-        first = self._errors[0][1]
+    def _record_error(self, raised: TaskRaised) -> None:
+        if self._error is None or raised.task.sort_key < self._error.task.sort_key:
+            self._error = raised
+        first = self._error.error
         self._node_origin_cancellation = first if isinstance(first, asyncio.CancelledError) else None
         self._disposition = _SessionDisposition.ERROR_DRAINING
 
@@ -218,7 +163,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
     def _drain_scheduler_events(self) -> None:
         errors, completions = self._scheduler.drain_pending_events()
         for raised in errors:
-            self._record_error(raised.task, raised.error)
+            self._record_error(raised)
         self._queued_results.extend(_QueuedCompletion(result, True) for result in completions)
 
     def _schedule_ordinary(self) -> bool:
@@ -231,12 +176,6 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         command = settle_result(self._graph, self._state, result)
         self._awaiting_ack = command
         return ExecutedGraphNode(result, command)
-
-    async def _close_after_cancellation(self) -> None:
-        """Finish close even if the cancelled caller receives further cancellation requests."""
-
-        close_task = asyncio.create_task(self.aclose())
-        await wait_for_owner_task(close_task)
 
     async def next(self, state: GraphRunState) -> ExecutedGraphNode[GraphValueT]:
         """Acknowledge the previous command and yield exactly one new completion."""
@@ -263,9 +202,9 @@ class _GraphExecutionSession(Generic[GraphValueT]):
 
                 self._schedule_ordinary()
                 if self._scheduler.live_count == 0:
-                    if self._errors:
+                    if self._error is not None:
                         self._disposition = _SessionDisposition.QUIESCENT
-                        raise self._errors[0][1]
+                        raise self._error.error
                     if not pending_node_ids(self._state.frontier):
                         self._disposition = _SessionDisposition.QUIESCENT
                         raise StopAsyncIteration
@@ -273,11 +212,11 @@ class _GraphExecutionSession(Generic[GraphValueT]):
 
                 event = await self._scheduler.next_completion()
                 if isinstance(event, TaskRaised):
-                    self._record_error(event.task, event.error)
+                    self._record_error(event)
                     continue
                 return self._project(event)
         except asyncio.CancelledError:
-            await self._close_after_cancellation()
+            await wait_for_owner_task(asyncio.create_task(self.aclose()))
             raise
         finally:
             self._next_in_progress = False

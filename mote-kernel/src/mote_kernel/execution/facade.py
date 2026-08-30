@@ -635,17 +635,18 @@ class Graph(Generic[GraphValueT]):
                 )
             )
         else:
-            resumed_scopes = {action.scope for action in resume}
-            substitution_actions = tuple(
-                action for action in resume if isinstance(action, SkipFailedNodeRequest) and action.output is not None
-            )
-            if continuation is None and len(resumed_scopes) > 1 and substitution_actions:
-                identities = tuple((tuple(action.scope), action.node_id) for action in substitution_actions)
-                raise GraphValueUnavailableError(
-                    "state-only multi-scope substitution cannot preserve a partially confirmed "
-                    f"publication checkpoint before commit; actions={identities!r}"
-                )
             if continuation is None:
+                substitution_actions = tuple(
+                    action
+                    for action in resume
+                    if isinstance(action, SkipFailedNodeRequest) and action.output is not None
+                )
+                if substitution_actions and len({action.scope for action in resume}) > 1:
+                    identities = tuple((tuple(action.scope), action.node_id) for action in substitution_actions)
+                    raise GraphValueUnavailableError(
+                        "state-only multi-scope substitution cannot preserve a partially confirmed "
+                        f"publication checkpoint before commit; actions={identities!r}"
+                    )
                 child_states: tuple[ChildStateBinding, ...] = ()
                 frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
                 recovered = True

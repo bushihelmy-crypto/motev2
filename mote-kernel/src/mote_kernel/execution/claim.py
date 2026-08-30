@@ -1,18 +1,16 @@
 """Linear execution claims owned by one assembled graph executor."""
 
-import asyncio
-from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.frontier import FrontierPreparation
-from mote_kernel.execution.engine.task import task_identity
+from mote_kernel.execution.engine.task import GraphTask, task_identity
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.state.graph_state import (
     ClaimGraphExecution,
-    GraphExecutionToken,
     GraphRunState,
     pending_node_ids,
+    reduce_graph_run,
 )
 
 GraphValueT = TypeVar("GraphValueT")
@@ -27,12 +25,6 @@ _CLAIM_CONSUMPTION_AUTHORITY = _ClaimConsumptionAuthority()
 
 class ExecutionClaimOwner:
     """Nominal identity proving which assembled executor owns a linear claim."""
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionClaimSnapshot:
-    command: ClaimGraphExecution
-    token: GraphExecutionToken
 
 
 class ConsumedExecutionClaim(Generic[GraphValueT]):
@@ -60,60 +52,57 @@ class ConsumedExecutionClaim(Generic[GraphValueT]):
 
 
 def _require_committed_claim_state(
-    snapshot: ExecutionClaimSnapshot,
+    command: ClaimGraphExecution,
     state: GraphRunState,
     preparation: FrontierPreparation[GraphValueT],
 ) -> None:
-    execution = state.execution
-    node_ids = tuple(task.node_id for task in preparation.tasks)
-    if (
-        execution is None
-        or execution.token != snapshot.token
-        or state.revision != snapshot.command.expected_revision + 1
-        or state.resources != snapshot.command.resources
-        or node_ids != pending_node_ids(state.frontier)
-        or tuple(task.task_id for task in preparation.tasks)
-        != tuple(task_identity(state.run_id, state.superstep, node_id) for node_id in node_ids)
-    ):
+    expected_tasks = tuple(
+        GraphTask(
+            task_identity(state.run_id, state.superstep, node_id),
+            state.run_id,
+            state.superstep,
+            node_id,
+        )
+        for node_id in pending_node_ids(state.frontier)
+    )
+    if state != reduce_graph_run(preparation.request.state, command) or preparation.tasks != expected_tasks:
         raise ResultCollectionError("execution claim does not match committed graph state")
 
 
 class PreparedExecutionClaim(Generic[GraphValueT]):
-    __slots__ = ("_consumed", "_gate", "_owner", "_preparation", "_snapshot")
+    __slots__ = ("_command", "_consumed", "_owner", "_preparation")
 
     def __init__(
         self,
         owner: ExecutionClaimOwner,
-        snapshot: ExecutionClaimSnapshot,
+        command: ClaimGraphExecution,
         preparation: FrontierPreparation[GraphValueT],
     ) -> None:
-        self._snapshot = snapshot
+        self._command = command
         self._owner = owner
         self._preparation = preparation
-        self._gate = asyncio.Lock()
         self._consumed = False
 
     @property
     def command(self) -> ClaimGraphExecution:
-        return self._snapshot.command
+        return self._command
 
     @property
     def scope_run(self) -> ScopeRunCoordinate:
         return self._preparation.request.scope_run
 
-    async def consume(
+    def consume(
         self,
         owner: ExecutionClaimOwner,
         state: GraphRunState,
     ) -> ConsumedExecutionClaim[GraphValueT]:
-        async with self._gate:
-            if self._consumed:
-                raise ResultCollectionError("execution claim has already been consumed")
-            if owner is not self._owner:
-                raise ResultCollectionError("execution claim does not match committed graph state")
-            _require_committed_claim_state(self._snapshot, state, self._preparation)
-            self._consumed = True
-            return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, state, self._preparation)
+        if self._consumed:
+            raise ResultCollectionError("execution claim has already been consumed")
+        if owner is not self._owner:
+            raise ResultCollectionError("execution claim does not match committed graph state")
+        _require_committed_claim_state(self._command, state, self._preparation)
+        self._consumed = True
+        return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, state, self._preparation)
 
 
-__all__ = ["ExecutionClaimOwner", "ExecutionClaimSnapshot", "PreparedExecutionClaim"]
+__all__ = ["ExecutionClaimOwner", "PreparedExecutionClaim"]

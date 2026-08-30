@@ -579,8 +579,6 @@ class _GraphRun(Generic[GraphValueT]):
         self._install_terminal(index, boundary)
 
     async def _retire_child(self, result: TaskResult[GraphValueT]) -> None:
-        if result.task.node_id not in self._graph.nested_graphs:
-            return
         parent = ParentGraphActivation(result.task.run_id, result.task.superstep, result.task.node_id)
         index = self._call_index(parent)
         if index is None:
@@ -597,11 +595,10 @@ class _GraphRun(Generic[GraphValueT]):
         session: GraphExecutionSession[GraphValueT],
         execution_token: GraphExecutionToken,
     ) -> None:
-        state = self._state
         async with session:
             while True:
                 try:
-                    completed = await session.next(state)
+                    completed = await session.next(self._state)
                 except StopAsyncIteration:
                     return
                 except asyncio.CancelledError as error:
@@ -619,27 +616,25 @@ class _GraphRun(Generic[GraphValueT]):
                     await session.aclose()
                     await self._fence(execution_token)
                     raise
-                confirmed = await self._transition(completed.command, completed.result)
-                if isinstance(completed.result, TaskSuccess):
-                    activation = StableActivation(
-                        self._scope_run,
-                        state.superstep,
-                        completed.result.task.node_id,
-                    )
+                result = completed.result
+                await self._transition(completed.command, result)
+                task = result.task
+                if isinstance(result, TaskSuccess):
+                    publication = self._graph.transition.publications[task.node_id]
                     coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                        activation,
-                        self._graph.transition.publications[completed.result.task.node_id].identity,
+                        StableActivation(self._scope_run, task.superstep, task.node_id),
+                        publication.identity,
                     )
                     self._frames = self._frames.add_publication(
                         ConfirmedPublication(
                             coordinate,
-                            completed.result.output,
-                            confirmed.revision,
+                            result.output,
+                            self._state.revision,
                             ExecutionPublicationProvenance(completed.command.execution),
                         )
                     )
-                await self._retire_child(completed.result)
-                state = confirmed
+                if task.node_id in self._graph.nested_graphs:
+                    await self._retire_child(result)
 
     async def _execute_frontier(
         self,
@@ -648,7 +643,7 @@ class _GraphRun(Generic[GraphValueT]):
         claimed = await self._transition(prepared.claim.command)
         execution = cast(GraphExecutionLease, claimed.execution)
         try:
-            session = await self._executor.execute(prepared.claim, claimed)
+            session = self._executor.issue_session(prepared.claim, claimed)
         except Exception:
             await self._fence(execution.token)
             raise
@@ -660,7 +655,7 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def drive_quantum(self) -> GraphBoundary:
         while True:
-            disposition = await self._executor.prepare(
+            disposition = self._executor.prepare(
                 StepRequest(
                     self._state,
                     self._scope_run,
@@ -933,6 +928,8 @@ async def admit_continued_root(
     recovered: bool,
 ) -> OwnerHandoff[GraphValueT]:
     scope_run = root_scope_run(state.run_id)
+    fences_by_scope = {candidate.scope_run: candidate for candidate in fences}
+    resumes_by_scope = {candidate.scope_run: candidate for candidate in resumes}
     evidence_publisher, evidence_reader = _evidence_adapter(child_states, frames)
     root_child_constructor = _make_child_constructor(scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
@@ -1024,12 +1021,11 @@ async def admit_continued_root(
         owner_state: GraphRunState,
     ) -> None:
         nonlocal failed_scope
-        direct_candidates = tuple(
-            binding for binding in child_states if binding.parent_activation.scope_run == owner_scope_run
-        )
         admitted: list[tuple[ChildStateBinding, ParentGraphActivation, CompiledGraph[GraphValueT]]] = []
-        for binding in direct_candidates:
+        for binding in child_states:
             activation = binding.parent_activation
+            if activation.scope_run != owner_scope_run:
+                continue
             if not is_current_child_activation(owner_state, activation):
                 continue
             parent = ParentGraphActivation(
@@ -1038,13 +1034,8 @@ async def admit_continued_root(
                 activation.node_id,
             )
             admitted.append((binding, parent, owner_graph.nested_graphs[activation.node_id]))
-        direct = tuple(
-            sorted(
-                admitted,
-                key=lambda item: tuple(owner_graph.nodes).index(item[1].node_id),
-            )
-        )
-        for binding, parent, child_graph in direct:
+        admitted.sort(key=lambda item: item[1].node_id)
+        for binding, parent, child_graph in admitted:
             position = owner.child_position(parent)
             if binding.state.status is not GraphRunStatus.RUNNING:
                 if binding.state.status is GraphRunStatus.COMPLETED:
@@ -1064,11 +1055,8 @@ async def admit_continued_root(
                 owner.accept_child_call(position, parent, phase, None)
                 continue
 
-            fence = next((candidate for candidate in fences if candidate.scope_run == binding.coordinate), None)
-            resume = next(
-                (candidate for candidate in resumes if candidate.scope_run == binding.coordinate),
-                None,
-            )
+            fence = fences_by_scope.get(binding.coordinate)
+            resume = resumes_by_scope.get(binding.coordinate)
             handle = await construct_child(parent, binding, child_graph, position, fence, resume)
             try:
                 owner.accept_child_call(position, parent, ActiveChild(parent), handle)
@@ -1095,8 +1083,8 @@ async def admit_continued_root(
             None,
             evidence_publisher,
         )
-        root_fence = next((candidate for candidate in fences if candidate.scope_run == scope_run), None)
-        root_resume = next((candidate for candidate in resumes if candidate.scope_run == scope_run), None)
+        root_fence = fences_by_scope.get(scope_run)
+        root_resume = resumes_by_scope.get(scope_run)
         await apply_admission(root, root_fence, root_resume, ())
         await admit_children(root, graph, scope_run, state)
         return root, evidence_reader

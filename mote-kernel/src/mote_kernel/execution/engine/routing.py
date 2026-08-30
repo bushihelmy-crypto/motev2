@@ -255,12 +255,9 @@ def resolve_routing_facts(
 
 
 def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> ResolutionCommand:
-    control_targets = {target.node_id for target in (*facts.control_targets, *facts.completed_join_targets)}
-    unavailable_control = tuple(
-        target.node_id
-        for target in (*facts.control_targets, *facts.completed_join_targets)
-        if target.unavailable_inputs
-    )
+    required_targets = facts.control_targets + facts.completed_join_targets
+    control_targets = {target.node_id for target in required_targets}
+    unavailable_control = tuple(target.node_id for target in required_targets if target.unavailable_inputs)
     if unavailable_control:
         return AbortGraphRun(
             state.revision,

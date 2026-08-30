@@ -129,7 +129,7 @@ def request(
     return step_request(graph, state, "input", limits=limits).execution_request()
 
 
-async def claim_session(
+def claim_session(
     graph: CompiledGraph[str],
     state: GraphRunState,
     *,
@@ -138,10 +138,10 @@ async def claim_session(
     effective_limits = ExecutionLimits() if limits is None else limits
     executor = GraphExecutor(graph)
     execution_request = request(graph, state, effective_limits)
-    prepared = await executor.prepare(execution_request)
+    prepared = executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, claimed)
+    session = executor.issue_session(prepared.claim, claimed)
     return executor, claimed, session
 
 
@@ -159,7 +159,7 @@ async def test_completion_is_yielded_before_the_frontier_finishes() -> None:
 
     compiled = graph((node("a", a), node("b", b)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await asyncio.wait_for(session.next(claimed), timeout=1)
         assert first.result.task.node_id == GraphNodeId("a")
@@ -188,7 +188,7 @@ async def test_resource_release_makes_waiter_selectable_on_next_acknowledged_sta
         resources=(ResourceDefinition(resource, 0),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         assert first.result.task.node_id == GraphNodeId("a")
@@ -219,7 +219,7 @@ async def test_resource_waiter_starts_only_after_the_settlement_successor_is_ack
         resources=(ResourceDefinition(resource, 0),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         assert first.result.task.node_id == GraphNodeId("a")
@@ -266,7 +266,7 @@ async def test_queued_typed_sibling_does_not_delay_a_newly_admitted_waiter() -> 
         resources=(ResourceDefinition(resource, 0),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(
+    _executor, claimed, session = claim_session(
         compiled,
         state,
         limits=ExecutionLimits(max_parallel_tasks=2),
@@ -327,7 +327,7 @@ async def test_queued_ordinary_error_prevents_newly_admitted_waiter_from_startin
         resources=(ResourceDefinition(resource, 0),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(
+    _executor, claimed, session = claim_session(
         compiled,
         state,
         limits=ExecutionLimits(max_parallel_tasks=2),
@@ -371,7 +371,7 @@ async def test_max_parallel_limit_applies_to_dynamic_selection() -> None:
         )
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(
+    _executor, claimed, session = claim_session(
         compiled,
         state,
         limits=ExecutionLimits(max_parallel_tasks=2),
@@ -408,7 +408,7 @@ async def test_concurrent_next_is_rejected_before_a_second_command_can_be_produc
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first_call = asyncio.create_task(session.next(claimed))
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -450,7 +450,7 @@ async def test_ordinary_error_drains_started_typed_siblings_and_stops_new_activa
         )
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(
+    _executor, claimed, session = claim_session(
         compiled,
         state,
         limits=ExecutionLimits(max_parallel_tasks=2),
@@ -492,7 +492,7 @@ async def test_close_is_idempotent_and_cancels_live_tasks() -> None:
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     waiter = asyncio.create_task(session.next(claimed))
     await asyncio.wait_for(started.wait(), timeout=1)
     await asyncio.gather(session.aclose(), session.aclose())
@@ -510,7 +510,7 @@ async def test_async_context_manager_reaches_quiescence_and_closed_next_fails_cl
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    executor, claimed, session = await claim_session(compiled, state)
+    executor, claimed, session = claim_session(compiled, state)
     del executor
     async with session:
         completed = await session.next(claimed)
@@ -531,7 +531,7 @@ async def test_next_cancellation_performs_cancellation_safe_close() -> None:
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     waiter = asyncio.create_task(session.next(claimed))
     await started.wait()
     waiter.cancel()
@@ -560,7 +560,7 @@ async def test_repeated_next_cancellation_waits_for_cleanup_to_finish() -> None:
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     waiter = asyncio.create_task(session.next(claimed))
     cancelled = False
     try:
@@ -592,7 +592,7 @@ async def test_failure_completion_is_settled_as_a_node_failure() -> None:
 
     compiled = graph((node("a", fail),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         completed = await session.next(claimed)
         settled = reduce_graph_run(claimed, completed.command)
@@ -607,7 +607,7 @@ async def test_interrupt_completion_is_settled_with_a_state_identity() -> None:
 
     compiled = interrupt_graph(interrupt)
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         completed = await session.next(claimed)
         settled = reduce_graph_run(claimed, completed.command)
@@ -624,7 +624,7 @@ async def test_session_acknowledges_failure_and_interrupt_variants_before_next_c
 
     failure_graph = graph((node("a", fail), node("b", fail)))
     failure_state = reduce_graph_run(None, project_start_graph_command(failure_graph, GraphRunId("failure-run")))
-    _executor, failure_claimed, failure_session = await claim_session(failure_graph, failure_state)
+    _executor, failure_claimed, failure_session = claim_session(failure_graph, failure_state)
     try:
         first = await failure_session.next(failure_claimed)
         after = reduce_graph_run(failure_claimed, first.command)
@@ -641,7 +641,7 @@ async def test_session_acknowledges_failure_and_interrupt_variants_before_next_c
         None,
         project_start_graph_command(interrupt_compiled, GraphRunId("interrupt-run")),
     )
-    _executor, interrupt_claimed, interrupt_session = await claim_session(
+    _executor, interrupt_claimed, interrupt_session = claim_session(
         interrupt_compiled,
         interrupt_state,
     )
@@ -660,7 +660,7 @@ async def test_session_initial_state_guards_fail_closed() -> None:
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         with pytest.raises(ResultCollectionError, match="claim successor"):
             await session.next(replace(claimed, revision=claimed.revision + 1))
@@ -682,11 +682,11 @@ async def test_session_acknowledgement_rejects_a_target_that_remains_pending() -
 
     compiled = graph((node("a", operation), node("b", operation)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         _ = await session.next(claimed)
         invalid = replace(claimed, revision=claimed.revision + 1)
-        with pytest.raises(ResultCollectionError, match="did not settle"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -698,7 +698,7 @@ async def test_session_acknowledgement_rejects_an_unrelated_settlement_change() 
 
     compiled = graph((node("a", operation), node("b", operation)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
@@ -713,7 +713,7 @@ async def test_session_acknowledgement_rejects_an_unrelated_settlement_change() 
             ),
             execution=None,
         )
-        with pytest.raises(ResultCollectionError, match="unrelated node"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(unrelated)
     finally:
         await session.aclose()
@@ -725,7 +725,7 @@ async def test_session_acknowledgement_rejects_a_mismatched_settlement_variant()
 
     compiled = graph((node("a", operation), node("b", operation)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
@@ -739,7 +739,7 @@ async def test_session_acknowledgement_rejects_a_mismatched_settlement_variant()
                 ),
             ),
         )
-        with pytest.raises(ResultCollectionError, match="does not match"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -751,12 +751,12 @@ async def test_session_acknowledgement_rejects_a_missing_partial_execution_token
 
     compiled = graph((node("a", operation), node("b", operation)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
         invalid = replace(after, execution=None)
-        with pytest.raises(ResultCollectionError, match="retain its execution"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -768,7 +768,7 @@ async def test_session_acknowledgement_rejects_a_changed_execution_token() -> No
 
     compiled = graph((node("a", operation), node("b", operation)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
@@ -779,7 +779,7 @@ async def test_session_acknowledgement_rejects_a_changed_execution_token() -> No
                 GraphExecutionToken(after.execution.token.generation, GraphExecutionAttemptId("other"))
             ),
         )
-        with pytest.raises(ResultCollectionError, match="active execution token"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(changed)
     finally:
         await session.aclose()
@@ -791,7 +791,7 @@ async def test_quiescent_session_rejects_next_after_terminal_acknowledgement() -
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         settled = reduce_graph_run(claimed, first.command)
@@ -821,7 +821,7 @@ async def test_invalid_routing_completion_drains_a_typed_sibling() -> None:
         )
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
@@ -849,7 +849,7 @@ async def test_invalid_queued_routing_completion_becomes_an_ordinary_error() -> 
         )
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         first = await session.next(claimed)
         assert first.result.task.node_id == GraphNodeId("a")
@@ -866,7 +866,7 @@ async def test_no_executable_pending_node_fails_closed(monkeypatch: pytest.Monke
 
     compiled = graph((node("a", operation),))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
 
     def no_selection(_self: GraphExecutionSession[str]) -> tuple[ExecutableTask[str], ...]:
         return ()
@@ -895,7 +895,7 @@ async def test_multiple_ordinary_errors_are_reported_by_canonical_task_identity(
 
     compiled = graph((node("a", fail_a), node("b", fail_b)))
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, claimed, session = await claim_session(compiled, state)
+    _executor, claimed, session = claim_session(compiled, state)
     try:
         with pytest.raises(ValueError, match="input"):
             await session.next(claimed)

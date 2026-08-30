@@ -28,7 +28,6 @@ from mote_kernel.execution.graph.ports import (
     FrameDescriptorIdentity,
     FrameKind,
     GraphOutputDeclarations,
-    canonical_nominal_type,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -419,8 +418,10 @@ def test_recovery_preflight_never_hashes_orders_or_renders_concrete_frame_values
     )
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("hostile-run")))
     scope_run = root_scope_run(state.run_id)
-    descriptor = canonical_nominal_type(HostileValue)
-    frame = _make_graph_input_frame(Graph.values(value=HostileValue()), (("value", descriptor),))
+    frame = _make_graph_input_frame(
+        Graph.values(value=HostileValue()),
+        normalize_output_declarations({"value": HostileValue}),
+    )
     frames = ScopedFrameIndex(
         graph_inputs=(
             AdmittedGraphInput(
@@ -625,7 +626,7 @@ def test_recovery_preflight_requires_exact_resume_input_availability_for_each_no
         None,
     )
     plan = graph.transition.materializations[node_id]
-    input_frame: NodeInputFrame[str] = _make_node_input_frame((), ())
+    input_frame: NodeInputFrame[str] = _make_node_input_frame((), plan.descriptor.declarations)
     exact_record: AdmittedResumeInput[str] = AdmittedResumeInput(
         ResumeInputAvailabilityCoordinate(activation, plan.descriptor.identity),
         input_frame,
@@ -704,7 +705,7 @@ def test_recovery_preflight_requires_exact_resume_input_availability_for_each_no
     publication = graph.transition.publications[node_id]
     publication_record: ConfirmedPublication[str] = ConfirmedPublication(
         PublicationAvailabilityCoordinate(activation, publication.identity),
-        _make_node_output_frame(Graph.values(), ()),
+        _make_node_output_frame(Graph.values(), publication.declarations),
         root_state.revision,
         ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("duplicate-publication"))),
     )
@@ -1236,12 +1237,12 @@ def _partial_history_frames(
 ) -> ScopedFrameIndex[str]:
     graph_input = _make_graph_input_frame(
         Graph.values(input="present"),
-        tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries),
+        graph.graph_input_descriptor.declarations,
     )
     publication = graph.transition.publications[GraphNodeId("available")]
     output = _make_node_output_frame(
         Graph.values(value="present"),
-        tuple((item.name, item.descriptor) for item in publication.declarations.entries),
+        publication.declarations,
     )
     return ScopedFrameIndex(
         graph_inputs=(

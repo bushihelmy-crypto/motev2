@@ -181,10 +181,10 @@ def nested_runtime() -> tuple[
 
 
 def graph_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
-    declarations = tuple(
-        (declaration.name, declaration.descriptor) for declaration in graph.graph_output_descriptor.declarations.entries
+    return _make_graph_output_view(
+        (NamedValue("value", value),),
+        graph.graph_output_descriptor.declarations,
     )
-    return _make_graph_output_view((NamedValue("value", value),), declarations)
 
 
 async def admit_continuation_root(
@@ -270,9 +270,10 @@ def test_frame_partition_requires_known_children() -> None:
     child_activation = StableActivation(root, 0, GraphNodeId("child"))
     child_binding = ChildStateBinding(child, child_activation, running_state(run_id=child.graph_run_id))
     unknown = ScopeRunCoordinate((GraphNodeId("unknown"),), GraphRunId("unknown"))
+    graph = nested_graph()
     boundary = ConfirmedChildBoundary(
-        ChildBoundaryAvailabilityCoordinate(unknown, nested_graph().graph_output_descriptor.identity),
-        _make_graph_output_view((), ()),
+        ChildBoundaryAvailabilityCoordinate(unknown, graph.graph_output_descriptor.identity),
+        _make_graph_output_view((), graph.graph_output_descriptor.declarations),
     )
     with pytest.raises(SnapshotMismatchError, match="no child binding"):
         _frames_for_owner(ScopedFrameIndex(child_boundaries=(boundary,)), (), root)
@@ -981,7 +982,7 @@ async def test_drive_rejects_an_active_projection_without_a_child_call(
 ) -> None:
     _graph, _state, owner, parent, _child_scope, _activation, _child_state = nested_runtime()
 
-    async def forged_prepare(
+    def forged_prepare(
         _executor: GraphExecutor[str],
         _request: StepRequest[str],
     ) -> WaitingForChildren[str]:

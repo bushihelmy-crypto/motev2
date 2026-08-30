@@ -155,10 +155,7 @@ def prepare_resume(
             )
             if requested.output is not None:
                 publication = graph.transition.publications[requested.node_id]
-                declarations = tuple(
-                    (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
-                )
-                frame = _make_node_output_frame(requested.output, declarations)
+                frame = _make_node_output_frame(requested.output, publication.declarations)
                 substitutions.append(
                     PreparedSubstitution(
                         PublicationAvailabilityCoordinate(activation, publication.identity),

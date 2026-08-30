@@ -1,6 +1,6 @@
 """Scoped node-input materialization and graph-local resume codecs."""
 
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
 from mote_kernel.execution.errors import (
@@ -64,14 +64,6 @@ def _resume_input_coordinate(
     )
 
 
-def _require_decoded_values(
-    candidate: _GraphValues[GraphValueT] | bytes,
-) -> _GraphValues[GraphValueT]:
-    if not isinstance(candidate, _GraphValues):
-        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
-    return candidate
-
-
 def require_resume_input_binding(graph: CompiledGraph[GraphValueT], state: GraphRunState) -> None:
     binding = graph.resume_input
     codec = state.resume_input_codec
@@ -103,10 +95,9 @@ def _admit_override(
     values: _GraphValues[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
     plan = _require_node_materialization(graph, node_id)
-    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in values.items()),
-        declarations,
+        plan.descriptor.declarations,
     )
 
 
@@ -119,10 +110,12 @@ def decode_resume_input(
     if binding is None:
         raise SnapshotMismatchError("input override is missing its compiled graph decoder")
     try:
-        candidate = binding.decoder.decode(payload)
+        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder.decode(payload))
     except Exception as error:
         raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
-    return _admit_override(graph, node_id, _require_decoded_values(candidate))
+    if not isinstance(candidate, _GraphValues):
+        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
+    return _admit_override(graph, node_id, candidate)
 
 
 def _publication_value(
@@ -251,8 +244,7 @@ def materialize_node_input(
                 binding.publication,
             )
         entries.append(NamedValue(binding.destination.local_name, value))
-    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
-    return _make_node_input_frame(tuple(entries), declarations)
+    return _make_node_input_frame(tuple(entries), plan.descriptor.declarations)
 
 
 __all__ = ["_require_node_materialization", "_resume_input_coordinate"]

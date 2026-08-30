@@ -2831,7 +2831,7 @@ async def test_session_creation_error_fences_the_committed_claim(
     async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
         return values
 
-    async def fail_execute(
+    def fail_issue_session(
         self: GraphExecutor[str],
         claim: PreparedExecutionClaim[str],
         state: GraphRunState,
@@ -2839,7 +2839,7 @@ async def test_session_creation_error_fences_the_committed_claim(
         del self, claim, state
         raise RuntimeError("session creation failed")
 
-    monkeypatch.setattr(GraphExecutor, "execute", fail_execute)
+    monkeypatch.setattr(GraphExecutor, "issue_session", fail_issue_session)
     graph = Graph[str]("public.session-error")
     graph.add_node("node", echo, inputs={"value": input_ref()}, outputs={"value": str})
     graph.set_outputs({})

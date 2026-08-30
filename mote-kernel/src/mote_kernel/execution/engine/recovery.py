@@ -23,7 +23,6 @@ from mote_kernel.execution.engine.settlement import (
     project_failure_settlement,
     project_success_settlement,
 )
-from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
     ExecutionLimitError,
     GraphValueUnavailableError,
@@ -598,22 +597,6 @@ def _publication_coordinate(
     )
 
 
-def _claim(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    tasks: tuple[GraphTask, ...],
-) -> GraphRunState:
-    attempt_id = GraphExecutionAttemptId("recovery-preflight")
-    return reduce_graph_run(
-        state,
-        project_claim_command(
-            state,
-            attempt_id,
-            claim_resource_snapshot(graph, tasks),
-        ),
-    )
-
-
 def _select_live(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -897,7 +880,14 @@ def _expand_quiescent_executable(
                 f"for pending nodes {unavailable_inputs!r} at {scope_run!r}; "
                 "node input or nested boundary materialization is unavailable"
             )
-        claimed = _claim(graph, state, tasks)
+        claimed = reduce_graph_run(
+            state,
+            project_claim_command(
+                state,
+                GraphExecutionAttemptId("recovery-preflight"),
+                claim_resource_snapshot(graph, tasks),
+            ),
+        )
         settled, availability = _settle_nested_outcomes(
             graph,
             claimed,
@@ -1112,11 +1102,9 @@ def preflight_recovery(
     action_targets = tuple(action.target for action in seed.admitted_actions)
     if action_targets != tuple(sorted(set(action_targets))):
         raise SnapshotMismatchError("recovery admitted resume actions must be unique and canonical")
+    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     for action in seed.admitted_actions:
-        binding = next(
-            (candidate for candidate in bindings if candidate.scope_run == action.target.scope_run),
-            None,
-        )
+        binding = family.binding(action.target.scope_run)
         if binding is None or binding.state.superstep != action.target.superstep:
             raise SnapshotMismatchError("recovery admitted resume action does not match a simulated scoped successor")
         node = frontier_node(binding.state.frontier, action.target.node_id)
@@ -1141,7 +1129,6 @@ def preflight_recovery(
         expected = _resume_input_coordinate(action.target, plan)
         if not availability.has_resume_input(expected):
             raise SnapshotMismatchError("recovery admitted resume action lacks its exact resume-input availability")
-    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     boundaries = _prove_scope(
         graph,
         seed.root.state,
