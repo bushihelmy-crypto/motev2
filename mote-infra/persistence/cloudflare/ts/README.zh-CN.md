@@ -2,9 +2,9 @@
 
 本项目是 `mote-infra/persistence` 下的 Cloudflare Durable Object TypeScript 持久化实现。具体 `storage.sql`、schema、序列化、migration 和事务行为都归这里所有。
 
-它与 `mote-container/cloudflare/ts` 明确分层：
+它与 `mote-resource/container/cloudflare/ts` 明确分层：
 
-- Container 负责 Worker 与 Durable Object 入口、注册、定位、调用和部署绑定；
+- `mote-resource/container` 负责 Worker 与 Durable Object 入口、注册、定位、调用和部署绑定；
 - 上层负责 Agent transition 语义和可观察持久化契约；
 - 本包使用对象私有的 Cloudflare SQLite Storage API 实现该契约。
 

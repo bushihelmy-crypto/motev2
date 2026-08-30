@@ -56,7 +56,7 @@ async def _echo(values: Graph.Values[str]) -> Graph.Values[str]:
     return values
 
 
-def _data_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
+def _controlled_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
     source = CallableNodeDefinition(
         GraphNodeId("source"),
         _echo,
@@ -77,7 +77,7 @@ def _data_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
             nodes=(source, target),
-            edges=(),
+            edges=(direct("source", "target"),),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
@@ -348,8 +348,8 @@ def test_non_skip_resume_admission_rejects_unavailable_control_target() -> None:
         admit_resume_candidates((candidate,), ScopedFrameIndex())
 
 
-def test_resume_admission_rejects_triggered_data_target_with_an_unavailable_input() -> None:
-    graph = _data_graph(target_uses_graph_input=True)
+def test_resume_admission_rejects_a_control_target_with_an_unavailable_input() -> None:
+    graph = _controlled_graph(target_uses_graph_input=True)
     state = _failed_state(running_state(frontier=("source",)))
     substitution = _substitution(graph, state)
     candidate = _candidate(graph, state, (substitution,), (_skip_action(),))
@@ -358,8 +358,8 @@ def test_resume_admission_rejects_triggered_data_target_with_an_unavailable_inpu
         admit_resume_candidates((candidate,), ScopedFrameIndex())
 
 
-def test_resume_admission_accepts_triggered_data_target_with_complete_inputs() -> None:
-    graph = _data_graph(target_uses_graph_input=True)
+def test_resume_admission_accepts_a_control_target_with_complete_inputs() -> None:
+    graph = _controlled_graph(target_uses_graph_input=True)
     state = _failed_state(running_state(frontier=("source",)))
     substitution = _substitution(graph, state)
     scope_run = root_scope_run(state.run_id)

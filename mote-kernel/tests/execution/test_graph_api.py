@@ -7,30 +7,33 @@ from typing import Protocol, cast
 import pytest
 
 import mote_kernel.execution as public_execution
+import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.claim import PreparedExecutionClaim
 from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.errors import FrameInstallationInvariantError, GraphValuePublicationError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.family_driver import project_graph_result
+from mote_kernel.execution.family_driver import admit_continued_root, project_graph_result
+from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate
+from mote_kernel.execution.invocation import PlannedResume
+from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     AwaitingResume,
-    PrepareDisposition,
-    PreparedNestedRun,
-    StartMissingChildren,
-    WaitingForChildren,
 )
 from mote_kernel.execution.run_context import (
+    AdmittedGraphInput,
     ChildStateBinding,
     ConfirmedPublication,
+    ContinuationSnapshot,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
-    _context_from_continuation,
+    _admit_continuation,
+    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -42,20 +45,17 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphExecutionAttemptId,
     GraphFailure,
-    GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
     GraphNodeId,
     GraphNodeInterrupt,
     GraphRunState,
     InterruptedGraphNode,
-    ParentGraphActivation,
     PendingGraphNode,
     ResumeGraphNodes,
     SettleGraphNode,
     StartGraphRun,
     UseStepRequestInput,
-    child_graph_run_id,
     derive_graph_node_interrupt_identity,
     reduce_graph_run,
 )
@@ -69,6 +69,26 @@ class CommitLog:
         self.transitions.append(transition)
         assert transition.candidate_state == reduce_graph_run(transition.previous_state, transition.command)
         return transition.candidate_state
+
+
+def fail_owner_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    *,
+    scope_depth: int,
+) -> None:
+    original = family_driver_module.require_scoped_snapshot_matches_graph
+
+    def reject(
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+    ) -> None:
+        if len(scope_run.scope) == scope_depth:
+            raise error
+        original(graph, state, scope_run)
+
+    monkeypatch.setattr(family_driver_module, "require_scoped_snapshot_matches_graph", reject)
 
 
 class TextSubclass(str):
@@ -108,6 +128,43 @@ class _RuntimeRun(Protocol):
         resume: tuple[Graph.ResumeAction[str], ...] = (),
         run_id: str | None = None,
     ) -> Graph.Result[str]: ...
+
+
+class _CompiledOwnerView(Protocol):
+    graph: CompiledGraph[str]
+    family_identity: _CompiledFamilyIdentity
+
+
+class _GraphOwnerView(Protocol):
+    _compiled_owner: _CompiledOwnerView | None
+
+    @staticmethod
+    def read(graph: Graph[str]) -> _CompiledOwnerView | None:
+        return cast(_GraphOwnerView, graph)._compiled_owner
+
+
+class _ContinuationView(Protocol):
+    _snapshot: ContinuationSnapshot[str]
+
+    @staticmethod
+    def read(continuation: Graph.Continuation[str]) -> ContinuationSnapshot[str]:
+        return cast(_ContinuationView, continuation)._snapshot
+
+
+def _require_compiled_owner(graph: Graph[str]) -> _CompiledOwnerView:
+    owner = _GraphOwnerView.read(graph)
+    assert owner is not None
+    return owner
+
+
+def _continuation_snapshot(continuation: Graph.Continuation[str]) -> ContinuationSnapshot[str]:
+    return _ContinuationView.read(continuation)
+
+
+def _require_partial_commit(error: Graph.Error) -> Graph.PartialCommitError[str]:
+    if not isinstance(error, Graph.PartialCommitError):
+        raise AssertionError("expected a partial commit error")
+    return cast(Graph.PartialCommitError[str], error)
 
 
 def encode_text(value: Graph.Values[str]) -> bytes:
@@ -235,6 +292,90 @@ async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_o
 
     with pytest.raises(Graph.Error, match="family driver"):
         replace(result, _seal=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outgoing", ["conditional", "end"])
+async def test_missing_control_fails_before_side_effects_and_leaves_the_builder_mutable(outgoing: str) -> None:
+    calls: list[str] = []
+
+    async def source(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("source")
+        return Graph.success(
+            Graph.values(value="published"),
+            route="go" if outgoing == "conditional" else None,
+        )
+
+    async def hidden(values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append(f"hidden:{values['value']}")
+        return Graph.values()
+
+    async def visible(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("visible")
+        return Graph.values()
+
+    graph = Graph[str](f"public.explicit-activation.{outgoing}")
+    graph.add_node("source", source, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "hidden",
+        hidden,
+        inputs={"value": Graph.node_output("source", "value")},
+        outputs={},
+    )
+    if outgoing == "conditional":
+        graph.add_node("visible", visible, inputs={}, outputs={})
+        graph.add_conditional_edge("source", "go", "visible")
+    else:
+        graph.add_edge("source", Graph.END)
+    graph.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(
+        Graph.ValidationError,
+        match=r"node 'hidden' consumes node outputs from \('source',\) but has no incoming control edge",
+    ):
+        await graph.run(Graph.values(), commit=commits)
+
+    assert calls == []
+    assert commits.transitions == []
+    assert _GraphOwnerView.read(graph) is None
+
+    graph.add_edge("source", "hidden")
+    completed = await graph.run(Graph.values())
+
+    assert isinstance(completed, Graph.CompletedResult)
+    assert calls.count("source") == 1
+    assert calls.count("hidden:published") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("route", "expected"), [("go", ["published"]), ("stop", [])])
+async def test_conditional_control_alone_selects_a_node_output_consumer(route: str, expected: list[str]) -> None:
+    consumed: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(Graph.values(value="published"), route=route)
+
+    async def consume(values: Graph.Values[str]) -> Graph.Values[str]:
+        consumed.append(values["value"])
+        return Graph.values()
+
+    graph = Graph[str](f"public.explicit-conditional.{route}")
+    graph.add_node("choose", choose, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "consume",
+        consume,
+        inputs={"value": Graph.node_output("choose", "value")},
+        outputs={},
+    )
+    graph.add_conditional_edge("choose", "go", "consume")
+    graph.add_conditional_edge("choose", "stop", Graph.END)
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert consumed == expected
 
 
 @pytest.mark.asyncio
@@ -531,9 +672,6 @@ async def test_failure_resume_actions_are_canonicalized_and_share_run() -> None:
 async def test_same_scope_resume_input_and_substitution_install_as_one_frame_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     attempts = 0
 
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -552,18 +690,18 @@ async def test_same_scope_resume_input_and_substitution_install_as_one_frame_sna
     paused = await graph.run(Graph.values(value="initial"))
     assert isinstance(paused, Graph.AwaitingResumeResult)
     observed: list[tuple[ScopedFrameIndex[str], ScopedFrameIndex[str]]] = []
-    original = facade_module.install_confirmed_resume_frames
+    original = family_driver_module.project_resume_frames
 
     def capture(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
-        confirmed: GraphRunState,
+        planned: PlannedResume[str],
+        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
-        installed = original(frames, planned, confirmed)
+        installed = original(frames, planned, candidate)
         observed.append((frames, installed))
         return installed
 
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", capture)
+    monkeypatch.setattr(family_driver_module, "project_resume_frames", capture)
 
     completed = await graph.run(
         state=paused.state,
@@ -632,6 +770,7 @@ async def test_skip_failed_substitution_publishes_exact_output_for_downstream_ma
         inputs={"value": Graph.node_output("review", "value")},
         outputs={"result": str},
     )
+    graph.add_edge("review", "consume")
     graph.set_outputs({"result": Graph.node_output("consume", "result")})
     failed = await graph.run(Graph.values(value="input"), run_id="skip-substitution-run")
     assert isinstance(failed, Graph.AwaitingResumeResult)
@@ -692,9 +831,8 @@ async def test_loop_substitutions_keep_the_same_node_isolated_by_superstep() -> 
 
     assert isinstance(completed, Graph.CompletedResult)
     assert completed.outputs["value"] == "second"
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    context = _context_from_continuation(owner.family_identity, completed.state, completed.continuation)
+    owner = _require_compiled_owner(graph)
+    context = _admit_continuation(owner.family_identity, completed.state, completed.continuation)
     substitutions = tuple(
         record for record in context.frames.publications if isinstance(record.provenance, SkipSubstitutionProvenance)
     )
@@ -723,6 +861,7 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
             inputs={"value": Graph.node_output("leaf", "value")},
             outputs={},
         )
+        graph.add_edge("leaf", "consume")
         graph.set_outputs({})
         return graph
 
@@ -744,9 +883,8 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 
     assert isinstance(completed, Graph.CompletedResult)
     assert sorted(observed) == [("left", "L"), ("right", "R")]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    context = _context_from_continuation(owner.family_identity, completed.state, completed.continuation)
+    owner = _require_compiled_owner(parent)
+    context = _admit_continuation(owner.family_identity, completed.state, completed.continuation)
     substitutions = tuple(
         record for record in context.frames.publications if isinstance(record.provenance, SkipSubstitutionProvenance)
     )
@@ -758,12 +896,10 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_second", [False, True], ids=("error", "cancellation"))
 async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_commit_fails(
-    monkeypatch: pytest.MonkeyPatch,
+    cancel_second: bool,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     class SecondScopeCommitError(RuntimeError):
         pass
 
@@ -782,41 +918,10 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_install = facade_module.install_confirmed_resume_frames
-    installed_scopes: list[tuple[GraphNodeId, ...]] = []
-    installed_indexes: list[ScopedFrameIndex[str]] = []
-    replaced_states: list[tuple[tuple[GraphNodeId, ...], GraphRunState, ScopedFrameIndex[str]]] = []
-
-    def record_install(
-        frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
-        confirmed: GraphRunState,
-    ) -> ScopedFrameIndex[str]:
-        installed = original_install(frames, planned, confirmed)
-        installed_scopes.append(planned.scope_run.scope)
-        installed_indexes.append(installed)
-        return installed
-
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", record_install)
-
-    def record_replace(
-        context: facade_module.GraphRunContext[str],
-        coordinate: ScopeRunCoordinate,
-        state: GraphRunState,
-    ) -> None:
-        replaced_states.append((coordinate.scope, state, context.frames))
-        if not coordinate.scope:
-            context.replace_root(state)
-            return
-        child = context.child_state(coordinate)
-        assert child is not None
-        context.replace_child(ChildStateBinding(coordinate, child.parent_activation, state))
-
-    monkeypatch.setattr(facade_module.GraphRunContext, "replace_state", record_replace)
     transitions: list[Graph.Transition[str]] = []
 
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
-    original_error = SecondScopeCommitError()
+    old_snapshot = _continuation_snapshot(paused.continuation)
+    original_error: BaseException = asyncio.CancelledError() if cancel_second else SecondScopeCommitError()
 
     async def fail_second_scope(transition: Graph.Transition[str], /) -> Graph.State:
         transitions.append(transition)
@@ -839,40 +944,19 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
             ),
             commit=fail_second_scope,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second scope failure must produce an explicit partial handoff")
     assert partial.cause is original_error
     assert partial.__cause__ is original_error
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
 
     assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
-    assert installed_scopes == [(GraphNodeId("left"),)]
     assert all(isinstance(transition.command, ResumeGraphNodes) for transition in transitions)
-    assert len(installed_indexes) == 1
-    substitutions = tuple(
-        record
-        for record in installed_indexes[0].publications
-        if isinstance(record.provenance, SkipSubstitutionProvenance)
-    )
-    assert len(substitutions) == 1
-    assert substitutions[0].coordinate.activation.scope_run.scope == (GraphNodeId("left"),)
-    assert _frame_value(substitutions[0].frame, "value") == "left"
-    assert not any(
-        record.coordinate.activation.scope_run.scope == (GraphNodeId("right"),)
-        for record in installed_indexes[0].publications
-    )
-    resume_replacements = tuple(
-        item for item in replaced_states if item[0] in ((GraphNodeId("left"),), (GraphNodeId("right"),))
-    )
-    assert tuple(item[0] for item in resume_replacements) == ((GraphNodeId("left"),),)
-    assert resume_replacements[0][2].publications == ()
-
-    compiled_owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert compiled_owner is not None
-    checkpoint = _context_from_continuation(
+    compiled_owner = _require_compiled_owner(parent)
+    checkpoint = _admit_continuation(
         compiled_owner.family_identity,
         partial.state,
         partial.continuation,
@@ -899,12 +983,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
 
 
 @pytest.mark.asyncio
-async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_is_non_exact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
+async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_is_non_exact() -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
@@ -920,26 +999,13 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_install = facade_module.install_confirmed_resume_frames
-    installed: list[ScopedFrameIndex[str]] = []
-
-    def record_install(
-        frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
-        confirmed: GraphRunState,
-    ) -> ScopedFrameIndex[str]:
-        result = original_install(frames, planned, confirmed)
-        installed.append(result)
-        return result
-
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", record_install)
 
     async def non_exact_second(transition: Graph.Transition[str], /) -> Graph.State:
         if transition.scope == ("right",):
             return replace(transition.candidate_state, revision=transition.candidate_state.revision + 1)
         return transition.candidate_state
 
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
     try:
         await parent.run(
             state=paused.state,
@@ -955,20 +1021,26 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
             ),
             commit=non_exact_second,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("non-exact second scope must produce an explicit partial handoff")
     assert isinstance(partial.cause, Graph.SnapshotMismatchError)
     assert "exact authoritative" in str(partial.cause)
     assert partial.__cause__ is partial.cause
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
 
-    assert len(installed) == 1
-    assert tuple(record.coordinate.activation.scope_run.scope for record in installed[0].publications) == (
-        (GraphNodeId("left"),),
+    checkpoint = _admit_continuation(
+        _require_compiled_owner(parent).family_identity,
+        partial.state,
+        partial.continuation,
     )
+    assert tuple(
+        record.coordinate.activation.scope_run.scope
+        for record in checkpoint.frames.publications
+        if isinstance(record.provenance, SkipSubstitutionProvenance)
+    ) == ((GraphNodeId("left"),),)
     retried = await parent.run(
         state=partial.state,
         continuation=partial.continuation,
@@ -981,9 +1053,6 @@ async def test_multi_scope_resume_keeps_first_install_when_second_confirmation_i
 async def test_second_scope_frame_install_failure_hands_off_only_the_first_installed_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import mote_kernel.execution.facade as facade_module
-    from mote_kernel.execution.invocation import _PlannedResume  # pyright: ignore[reportPrivateUsage]
-
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
@@ -999,26 +1068,25 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    original_install = facade_module.install_confirmed_resume_frames
+    old_snapshot = _continuation_snapshot(paused.continuation)
+    owner = _require_compiled_owner(parent)
+    original_install = family_driver_module.project_resume_frames
     transitions: list[Graph.Transition[str]] = []
 
     def reject_right_install(
         frames: ScopedFrameIndex[str],
-        planned: _PlannedResume[str],  # pyright: ignore[reportPrivateUsage]
-        confirmed: GraphRunState,
+        planned: PlannedResume[str],
+        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         if planned.scope_run.scope == (GraphNodeId("right"),):
             raise FrameInstallationInvariantError("right frame installation failed")
-        return original_install(frames, planned, confirmed)
+        return original_install(frames, planned, candidate)
 
     async def record(transition: Graph.Transition[str], /) -> Graph.State:
         transitions.append(transition)
         return transition.candidate_state
 
-    monkeypatch.setattr(facade_module, "install_confirmed_resume_frames", reject_right_install)
+    monkeypatch.setattr(family_driver_module, "project_resume_frames", reject_right_install)
     try:
         await parent.run(
             state=paused.state,
@@ -1029,16 +1097,16 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
             ),
             commit=record,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second scope frame installation failure must explicitly hand off the first scope")
 
     assert isinstance(partial.cause, FrameInstallationInvariantError)
     assert partial.failed_scope == ("right",)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
-    assert tuple(transition.scope for transition in transitions) == (("left",), ("right",))
-    handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
+    assert tuple(transition.scope for transition in transitions) == (("left",),)
+    handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
     left_publication = next(
         record
         for record in handed_off.frames.publications
@@ -1071,7 +1139,7 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
     parent.set_outputs({})
     paused = await parent.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    original_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    original_snapshot = _continuation_snapshot(paused.continuation)
     root_failed = replace(
         paused.state,
         frontier=GraphFrontierState(
@@ -1105,11 +1173,11 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
         "_snapshot",
         replace(
             original_snapshot,
-            root_binding=replace(original_snapshot.root_binding, state=root_failed),
+            root_state=root_failed,
             child_states=child_states,
         ),
     )
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
     original = RuntimeError("child commit failed")
     transitions: list[Graph.Transition[str]] = []
 
@@ -1129,19 +1197,18 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
             ),
             commit=fail_child,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("child failure after root confirmation must explicitly hand off the latest root snapshot")
 
     assert partial.cause is original
     assert partial.failed_scope == ("child",)
     assert partial.state == transitions[0].candidate_state
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
-    assert handed_off.root_binding.state == partial.state
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
+    owner = _require_compiled_owner(parent)
+    handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
+    assert handed_off.root_state == partial.state
     child_binding = next(
         binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("child"),)
     )
@@ -1207,7 +1274,7 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    snapshot = _continuation_snapshot(paused.continuation)
     active_children: list[ChildStateBinding] = []
     for binding in snapshot.child_states:
         pending = replace(
@@ -1244,17 +1311,16 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
             continuation=paused.continuation,
             commit=fail_second_fence,
         )
-    except Graph.PartialCommitError as error:  # pyright: ignore[reportUnknownVariableType]
-        partial = cast(Graph.PartialCommitError[str], error)
+    except Graph.Error as error:
+        partial = _require_partial_commit(error)
     else:
         pytest.fail("second fence failure must hand off the first confirmed fence")
 
     assert [type(transition.command) for transition in transitions] == [FenceGraphExecution, FenceGraphExecution]
     assert partial.cause is original
     assert partial.failed_scope == ("right",)
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    handed_off = _context_from_continuation(owner.family_identity, partial.state, partial.continuation)
+    owner = _require_compiled_owner(graph)
+    handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
     left = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("left"),))
     right = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("right"),))
     assert left.state == transitions[0].candidate_state
@@ -1296,6 +1362,87 @@ async def test_first_fence_failure_propagates_original_error_without_partial_han
         await graph.run(state=captured, commit=reject)
 
     assert raised.value is original
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancestor() -> None:
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    grandchild = Graph[str]("public.orphan-descendant.grandchild")
+    grandchild.add_node("leaf", complete, inputs={}, outputs={})
+    grandchild.set_outputs({})
+    child = Graph[str]("public.orphan-descendant.child")
+    child.add_node("grandchild", grandchild, inputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.orphan-descendant.parent")
+    parent.add_node("child", child, inputs={})
+    parent.set_outputs({})
+    completed = await parent.run(Graph.values())
+    assert isinstance(completed, Graph.CompletedResult)
+    snapshot = _continuation_snapshot(completed.continuation)
+    descendant = next(
+        binding
+        for binding in snapshot.child_states
+        if binding.coordinate.scope == (GraphNodeId("child"), GraphNodeId("grandchild"))
+    )
+    parent_activation = descendant.state.parent
+    assert parent_activation is not None
+    compiled = _require_compiled_owner(parent).graph
+    compiled_grandchild = compiled.nested_graphs[GraphNodeId("child")].nested_graphs[GraphNodeId("grandchild")]
+    running = reduce_graph_run(
+        None,
+        project_start_graph_command(
+            compiled_grandchild,
+            descendant.coordinate.graph_run_id,
+            parent_activation,
+        ),
+    )
+    leased = reduce_graph_run(
+        running,
+        project_claim_command(running, GraphExecutionAttemptId("orphan-descendant"), None),
+    )
+    child_states = tuple(
+        replace(binding, state=leased) if binding.coordinate == descendant.coordinate else binding
+        for binding in snapshot.child_states
+    )
+    frames = replace(
+        snapshot.frames,
+        publications=tuple(
+            record
+            for record in snapshot.frames.publications
+            if record.coordinate.activation.scope_run != descendant.coordinate
+        ),
+        resume_inputs=tuple(
+            record
+            for record in snapshot.frames.resume_inputs
+            if record.coordinate.activation.scope_run != descendant.coordinate
+        ),
+        child_boundaries=tuple(
+            record
+            for record in snapshot.frames.child_boundaries
+            if record.coordinate.child_scope_run != descendant.coordinate
+        ),
+    )
+    object.__setattr__(
+        completed.continuation,
+        "_snapshot",
+        replace(snapshot, child_states=child_states, frames=frames),
+    )
+    transitions: list[Graph.Transition[str]] = []
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="running child lineage"):
+        await parent.run(
+            state=completed.state,
+            continuation=completed.continuation,
+            commit=commit,
+        )
+
+    assert transitions == []
 
 
 @pytest.mark.asyncio
@@ -1344,7 +1491,7 @@ async def test_normal_resume_never_mutates_the_input_continuation_snapshot() -> 
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
 
     completed = await graph.run(
         state=paused.state,
@@ -1353,12 +1500,11 @@ async def test_normal_resume_never_mutates_the_input_continuation_snapshot() -> 
     )
 
     assert isinstance(completed, Graph.CompletedResult)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
     assert completed.continuation is not paused.continuation
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    restored = _context_from_continuation(owner.family_identity, paused.state, paused.continuation)
-    assert restored.root_binding.state == paused.state
+    owner = _require_compiled_owner(graph)
+    restored = _admit_continuation(owner.family_identity, paused.state, paused.continuation)
+    assert restored.root_state == paused.state
 
 
 @pytest.mark.asyncio
@@ -1371,7 +1517,7 @@ async def test_shared_input_continuation_is_not_modified_by_independent_invocati
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
-    old_snapshot = paused.continuation._snapshot  # pyright: ignore[reportPrivateUsage]
+    old_snapshot = _continuation_snapshot(paused.continuation)
 
     first, second = await asyncio.gather(
         graph.run(
@@ -1388,7 +1534,7 @@ async def test_shared_input_continuation_is_not_modified_by_independent_invocati
 
     assert isinstance(first, Graph.CompletedResult)
     assert isinstance(second, Graph.CompletedResult)
-    assert paused.continuation._snapshot is old_snapshot  # pyright: ignore[reportPrivateUsage]
+    assert _continuation_snapshot(paused.continuation) is old_snapshot
     assert first.continuation is not second.continuation
 
 
@@ -1412,6 +1558,7 @@ async def test_pure_skip_future_proof_accepts_a_substitution_candidate_path() ->
         inputs={"value": Graph.node_output("source", "value")},
         outputs={"result": str},
     )
+    graph.add_edge("source", "consumer")
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
@@ -1563,16 +1710,16 @@ async def test_state_only_recovery_fails_closed_after_confirmed_substitution_con
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("continuation_mode", ["complete", "state-only"])
-async def test_skip_failed_substitution_rejects_triggered_data_target_with_missing_required_input_before_commit(
+async def test_skip_failed_substitution_rejects_completed_join_with_missing_required_input_before_commit(
     continuation_mode: str,
 ) -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
     async def consume(_values: Graph.Values[str]) -> Graph.Values[str]:
-        pytest.fail("unavailable data target must not execute")
+        pytest.fail("unavailable join target must not execute")
 
-    graph = Graph[str](f"public.skip-substitution-unavailable-data.{continuation_mode}")
+    graph = Graph[str](f"public.skip-substitution-unavailable-join.{continuation_mode}")
     graph.add_node("missing", fail, inputs={}, outputs={"value": str})
     graph.add_node("review", fail, inputs={}, outputs={"value": str})
     graph.add_node(
@@ -1584,6 +1731,7 @@ async def test_skip_failed_substitution_rejects_triggered_data_target_with_missi
         },
         outputs={},
     )
+    graph.add_join(("missing", "review"), "consume")
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
@@ -1719,20 +1867,20 @@ async def test_pure_skip_rejects_a_completed_join_with_missing_input_before_comm
 
 
 @pytest.mark.asyncio
-async def test_pure_skip_allows_unselected_branch_and_untriggered_data_dependency() -> None:
+async def test_pure_skip_allows_an_unselected_branch() -> None:
     calls: list[str] = []
 
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.failure("declined")
 
     async def forbidden(_values: Graph.Values[str]) -> Graph.Values[str]:
-        pytest.fail("unselected/untriggered consumer must not execute")
+        pytest.fail("unselected consumer must not execute")
 
     async def selected(_values: Graph.Values[str]) -> Graph.Values[str]:
         calls.append("selected")
         return Graph.values()
 
-    graph = Graph[str]("public.skip-unselected-and-untriggered")
+    graph = Graph[str]("public.skip-unselected")
     graph.add_node("source", fail, inputs={}, outputs={"value": str})
     graph.add_node(
         "unselected",
@@ -1741,12 +1889,6 @@ async def test_pure_skip_allows_unselected_branch_and_untriggered_data_dependenc
         outputs={},
     )
     graph.add_node("selected", selected, inputs={}, outputs={})
-    graph.add_node(
-        "data-only",
-        forbidden,
-        inputs={"value": Graph.node_output("source", "value")},
-        outputs={},
-    )
     graph.add_conditional_edge("source", "unselected", "unselected")
     graph.add_conditional_edge("source", "selected", "selected")
     graph.set_outputs({})
@@ -1857,7 +1999,7 @@ async def test_skip_failed_admits_route_and_substitution_output_independently(
 
 
 @pytest.mark.asyncio
-async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_internal_invariant(
+async def test_skip_failed_substitution_rejects_publication_projection_before_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -1877,7 +2019,7 @@ async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_
     monkeypatch.setattr(ScopedFrameIndex, "add_publication", reject_publication)
     commits = CommitLog()
 
-    with pytest.raises(FrameInstallationInvariantError, match="post-commit installation"):
+    with pytest.raises(FrameInstallationInvariantError, match="owner-local projection"):
         await graph.run(
             state=paused.state,
             continuation=paused.continuation,
@@ -1885,10 +2027,9 @@ async def test_skip_failed_substitution_maps_post_commit_publication_failure_to_
             commit=commits,
         )
 
-    assert isinstance(commits.transitions[0].command, ResumeGraphNodes)
-    owner = graph._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    context = _context_from_continuation(
+    assert commits.transitions == []
+    owner = _require_compiled_owner(graph)
+    context = _admit_continuation(
         owner.family_identity,
         paused.state,
         paused.continuation,
@@ -1994,43 +2135,6 @@ async def test_skip_failed_substitution_rejects_tampered_admitted_successor_revi
 
 
 @pytest.mark.asyncio
-async def test_skip_failed_substitution_rejects_tampered_confirmed_skip_settlement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mote_kernel.execution.invocation as invocation_module
-
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("declined")
-
-    graph = Graph[str]("public.skip-substitution-settlement-invariant")
-    graph.add_node("review", fail, inputs={}, outputs={"value": str})
-    graph.set_outputs({})
-    paused = await graph.run(Graph.values())
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    original = invocation_module.frontier_node
-
-    def hide_confirmed_node(
-        frontier: GraphFrontierState,
-        node_id: GraphNodeId,
-    ) -> GraphFrontierNode | None:
-        if node_id == GraphNodeId("review"):
-            return None
-        return original(frontier, node_id)
-
-    monkeypatch.setattr(invocation_module, "frontier_node", hide_confirmed_node)
-    commits = CommitLog()
-
-    with pytest.raises(FrameInstallationInvariantError, match="confirmed skip substitution"):
-        await graph.run(
-            state=paused.state,
-            continuation=paused.continuation,
-            resume=(graph.skip_failed("review", "replacement", output=Graph.values(value="replacement")),),
-            commit=commits,
-        )
-
-    assert isinstance(commits.transitions[0].command, ResumeGraphNodes)
-
-
 @pytest.mark.asyncio
 async def test_interrupt_resume_is_an_exact_action_inside_run() -> None:
     calls = 0
@@ -2305,29 +2409,23 @@ async def test_run_fences_an_authoritative_unacknowledged_claim_before_recovery(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_run_quiesces_workers_retains_the_claim_and_recovers_from_authoritative_state() -> None:
+async def test_waiter_cancellation_aborts_standalone_root_after_quiescence() -> None:
     entered = asyncio.Event()
     cleaned = asyncio.Event()
-    never = asyncio.Event()
-    calls = 0
-    should_block = True
 
-    async def operation(_values: Graph.Values[str]) -> Graph.Values[str]:
-        nonlocal calls
-        calls += 1
-        if should_block:
-            entered.set()
-            try:
-                await never.wait()
-            finally:
-                cleaned.set()
+    async def wait(_values: Graph.Values[str]) -> Graph.Values[str]:
+        entered.set()
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cleaned.set()
         return Graph.values()
 
-    graph = Graph[str]("public.cancel-recovery")
-    graph.add_node("node", operation, inputs={}, outputs={})
+    graph = Graph[str]("public.waiter-cancellation")
+    graph.add_node("node", wait, inputs={}, outputs={})
     graph.set_outputs({})
     commits = CommitLog()
-    running = asyncio.create_task(graph.run(Graph.values(), run_id="cancel-run", commit=commits))
+    running = asyncio.create_task(graph.run(Graph.values(), commit=commits))
     await entered.wait()
 
     running.cancel()
@@ -2335,20 +2433,325 @@ async def test_cancelled_run_quiesces_workers_retains_the_claim_and_recovers_fro
         await running
 
     assert cleaned.is_set()
-    assert [type(transition.command) for transition in commits.transitions] == [
-        StartGraphRun,
-        ClaimGraphExecution,
-    ]
-    active_state = commits.transitions[-1].candidate_state
-    assert active_state.execution is not None
+    assert isinstance(commits.transitions[-2].command, FenceGraphExecution)
+    assert isinstance(commits.transitions[-1].command, AbortGraphRun)
+    assert commits.transitions[-1].scope == ()
 
-    should_block = False
-    recovery_commits = CommitLog()
-    recovered = await graph.run(state=active_state, commit=recovery_commits)
 
-    assert isinstance(recovery_commits.transitions[0].command, FenceGraphExecution)
-    assert isinstance(recovered, Graph.CompletedResult)
-    assert calls == 2
+@pytest.mark.asyncio
+async def test_root_node_origin_cancellation_rethrows_without_invocation_abort() -> None:
+    async def cancel(_values: Graph.Values[str]) -> Graph.Values[str]:
+        raise asyncio.CancelledError
+
+    graph = Graph[str]("public.root-node-cancellation")
+    graph.add_node("node", cancel, inputs={}, outputs={})
+    graph.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(asyncio.CancelledError):
+        await graph.run(Graph.values(), commit=commits)
+
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in commits.transitions)
+
+
+@pytest.mark.asyncio
+async def test_nested_node_origin_cancellation_becomes_a_typed_parent_failure() -> None:
+    async def cancel(_values: Graph.Values[str]) -> Graph.Values[str]:
+        raise asyncio.CancelledError
+
+    child = Graph[str]("public.nested-node-cancellation.child")
+    child.add_node("leaf", cancel, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.nested-node-cancellation.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    commits = CommitLog()
+
+    result = await parent.run(Graph.values(), commit=commits)
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert tuple((failure.scope, failure.node_id, failure.failure) for failure in result.failures) == (
+        ((), "nested", "nested graph node was cancelled"),
+    )
+    abort_scopes = tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    )
+    assert abort_scopes == (("nested",),)
+
+
+@pytest.mark.asyncio
+async def test_root_owner_setup_failure_aborts_the_confirmed_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RootSetupError(RuntimeError):
+        pass
+
+    original = RootSetupError("root frame installation failed")
+
+    def reject_input(
+        _frames: ScopedFrameIndex[str],
+        _record: AdmittedGraphInput[str],
+    ) -> ScopedFrameIndex[str]:
+        raise original
+
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    monkeypatch.setattr(ScopedFrameIndex, "add_graph_input", reject_input)
+    graph = Graph[str]("public.root-owner-setup-failure")
+    graph.add_node("node", complete, inputs={}, outputs={})
+    graph.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(RootSetupError) as raised:
+        await graph.run(Graph.values(), commit=commits)
+
+    assert raised.value is original
+    assert isinstance(commits.transitions[0].command, StartGraphRun)
+    assert isinstance(commits.transitions[-1].command, AbortGraphRun)
+    assert commits.transitions[-1].scope == ()
+
+
+@pytest.mark.asyncio
+async def test_root_owner_construction_failure_aborts_the_confirmed_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RootConstructionError(RuntimeError):
+        pass
+
+    original = RootConstructionError("root owner construction failed")
+
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
+
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    graph = Graph[str]("public.root-owner-construction-failure")
+    graph.add_node("node", complete, inputs={}, outputs={})
+    graph.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(RootConstructionError) as raised:
+        await graph.run(Graph.values(), commit=commits)
+
+    assert raised.value is original
+    assert isinstance(commits.transitions[0].command, StartGraphRun)
+    assert isinstance(commits.transitions[-1].command, AbortGraphRun)
+    assert commits.transitions[-1].scope == ()
+
+
+@pytest.mark.asyncio
+async def test_continued_root_construction_failure_aborts_the_admitted_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RootConstructionError(RuntimeError):
+        pass
+
+    async def fail(_values: Graph.Values[str]) -> Graph.FailureOutcome:
+        return Graph.failure("retry")
+
+    graph = Graph[str]("public.continued-root-construction-failure")
+    graph.add_node("node", fail, inputs={}, outputs={})
+    graph.set_outputs({})
+    awaiting = await graph.run(Graph.values())
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+    original = RootConstructionError("continued root owner construction failed")
+
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
+    commits = CommitLog()
+
+    with pytest.raises(RootConstructionError) as raised:
+        await graph.run(
+            state=awaiting.state,
+            continuation=awaiting.continuation,
+            commit=commits,
+        )
+
+    assert raised.value is original
+    assert tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    ) == ((),)
+
+
+@pytest.mark.asyncio
+async def test_child_owner_setup_failure_aborts_only_the_confirmed_child_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChildSetupError(RuntimeError):
+        pass
+
+    original_add = ScopedFrameIndex[str].add_graph_input
+    original = ChildSetupError("child frame installation failed")
+    calls = 0
+
+    def reject_child_input(
+        frames: ScopedFrameIndex[str],
+        record: AdmittedGraphInput[str],
+    ) -> ScopedFrameIndex[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise original
+        return original_add(frames, record)
+
+    monkeypatch.setattr(ScopedFrameIndex, "add_graph_input", reject_child_input)
+
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    child = Graph[str]("public.child-owner-setup-failure.child")
+    child.add_node("leaf", complete, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.child-owner-setup-failure.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(ChildSetupError) as raised:
+        await parent.run(Graph.values(), commit=commits)
+
+    assert raised.value is original
+    abort_scopes = tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    )
+    assert abort_scopes == (("nested",),)
+
+
+@pytest.mark.asyncio
+async def test_child_owner_construction_failure_aborts_only_the_confirmed_child_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChildConstructionError(RuntimeError):
+        pass
+
+    original = ChildConstructionError("child owner construction failed")
+    fail_owner_construction(monkeypatch, original, scope_depth=1)
+
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    child = Graph[str]("public.child-owner-construction-failure.child")
+    child.add_node("leaf", complete, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.child-owner-construction-failure.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    commits = CommitLog()
+
+    with pytest.raises(ChildConstructionError) as raised:
+        await parent.run(Graph.values(), commit=commits)
+
+    assert raised.value is original
+    assert tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    ) == (("nested",),)
+
+
+@pytest.mark.asyncio
+async def test_continued_child_construction_failure_aborts_child_then_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ChildConstructionError(RuntimeError):
+        pass
+
+    async def fail(_values: Graph.Values[str]) -> Graph.FailureOutcome:
+        return Graph.failure("retry")
+
+    child = Graph[str]("public.continued-child-construction-failure.child")
+    child.add_node("leaf", fail, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.continued-child-construction-failure.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    awaiting = await parent.run(Graph.values())
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+    original = ChildConstructionError("continued child owner construction failed")
+    fail_owner_construction(monkeypatch, original, scope_depth=1)
+    commits = CommitLog()
+
+    with pytest.raises(ChildConstructionError) as raised:
+        await parent.run(
+            state=awaiting.state,
+            continuation=awaiting.continuation,
+            commit=commits,
+        )
+
+    assert raised.value is original
+    assert tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    ) == (("nested",), ())
+
+
+@pytest.mark.asyncio
+async def test_continued_root_construction_failure_aborts_only_root_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RootConstructionError(RuntimeError):
+        pass
+
+    async def fail(_values: Graph.Values[str]) -> Graph.FailureOutcome:
+        return Graph.failure("retry")
+
+    child = Graph[str]("public.continued-root-child-cleanup.child")
+    child.add_node("leaf", fail, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.continued-root-child-cleanup.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    awaiting = await parent.run(Graph.values())
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+    original = RootConstructionError("continued root owner construction failed")
+
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
+    commits = CommitLog()
+
+    with pytest.raises(RootConstructionError) as raised:
+        await parent.run(
+            state=awaiting.state,
+            continuation=awaiting.continuation,
+            commit=commits,
+        )
+
+    assert raised.value is original
+    assert tuple(
+        transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
+    ) == ((),)
+
+
+@pytest.mark.asyncio
+async def test_child_exact_completion_survives_parent_settlement_failure() -> None:
+    class ParentSettlementError(RuntimeError):
+        pass
+
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    child = Graph[str]("public.parent-settlement-failure.child")
+    child.add_node("leaf", complete, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.parent-settlement-failure.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.set_outputs({})
+    original = ParentSettlementError("parent settlement failed")
+    transitions: list[Graph.Transition[str]] = []
+
+    async def reject_parent_settlement(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        if transition.scope == () and isinstance(transition.command, SettleGraphNode):
+            raise original
+        return transition.candidate_state
+
+    with pytest.raises(ParentSettlementError) as raised:
+        await parent.run(Graph.values(), commit=reject_parent_settlement)
+
+    assert raised.value is original
+    assert any(
+        transition.scope == ("nested",) and isinstance(transition.command, CompleteGraphFrontier)
+        for transition in transitions
+    )
+    assert not any(
+        transition.scope == ("nested",) and isinstance(transition.command, AbortGraphRun) for transition in transitions
+    )
 
 
 @pytest.mark.asyncio
@@ -2481,11 +2884,30 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
             )
         ),
     )
-    owner = parent._compiled_owner  # pyright: ignore[reportPrivateUsage]
-    assert owner is not None
-    context = _context_from_continuation(owner.family_identity, result.state, result.continuation)
-    context.replace_root(root_state)
-    result = project_graph_result(owner.graph, context, AwaitingResume((), ()))
+    owner = _require_compiled_owner(parent)
+    snapshot = _admit_continuation(owner.family_identity, result.state, result.continuation)
+    root, evidence_reader = await admit_continued_root(
+        owner.graph,
+        root_state,
+        snapshot.child_states,
+        snapshot.frames,
+        ExecutionLimits(),
+        None,
+        (),
+        (),
+        owner.family_identity,
+        recovered=False,
+    )
+    await root.drive_quantum()
+    result = project_graph_result(
+        owner.graph,
+        owner.family_identity,
+        root,
+        evidence_reader,
+        AwaitingResume((), ()),
+        recovered=False,
+    )
+    await root.release()
 
     assert isinstance(result, Graph.AwaitingResumeResult)
     assert tuple((view.scope, view.node_id, view.failure) for view in result.failures) == (
@@ -2498,48 +2920,6 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
         (("left",), "interrupted", b"left"),
         (("right",), "interrupted", b"right"),
     )
-
-
-@pytest.mark.asyncio
-async def test_facade_fails_closed_if_internal_preparation_requests_nested_coordination(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
-        return values
-
-    async def wait_for_unknown_child(
-        self: GraphExecutor[str],
-        request: StepRequest[str],
-    ) -> PrepareDisposition[str]:
-        child_graph = self.graph.nested_graphs[GraphNodeId("child")]
-        parent = ParentGraphActivation(
-            request.state.run_id,
-            request.state.superstep,
-            GraphNodeId("unknown-child"),
-        )
-        run_id = child_graph_run_id(parent.run_id, parent.superstep, parent.node_id)
-        prepared = PreparedNestedRun(
-            parent,
-            child_graph,
-            project_start_graph_command(child_graph, run_id, parent),
-        )
-        return WaitingForChildren(StartMissingChildren((prepared,)))
-
-    child = Graph[str]("public.invalid-child-coordination.child")
-    child.add_node(
-        "leaf",
-        echo,
-        inputs={"value": input_ref()},
-        outputs={"value": str},
-    )
-    child.set_outputs({"value": Graph.node_output("leaf", "value")})
-    parent = Graph[str]("public.invalid-child-coordination.parent")
-    parent.add_node("child", child, inputs={"value": input_ref()})
-    parent.set_outputs({})
-    monkeypatch.setattr(GraphExecutor, "prepare", wait_for_unknown_child)
-
-    with pytest.raises(Graph.SnapshotMismatchError, match="current pending node"):
-        await parent.run(Graph.values(value="input"))
 
 
 @pytest.mark.asyncio

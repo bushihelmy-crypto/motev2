@@ -38,7 +38,6 @@ from mote_kernel.state.graph_state import (
     InterruptedGraphNode,
     SelectGraphRoute,
     SkippedGraphNode,
-    SucceededGraphNode,
     routing_contributions,
 )
 
@@ -58,7 +57,6 @@ class RoutingFacts:
     control_targets: tuple[RequiredTarget, ...]
     completed_join_targets: tuple[RequiredTarget, ...]
     remaining_join_progress: tuple[GraphJoinProgress, ...]
-    data_targets: tuple[RequiredTarget, ...]
     unavailable_graph_outputs: tuple[str, ...]
 
 
@@ -193,7 +191,6 @@ def resolve_routing_facts(
         arrivals[key] = set(progress.arrived)
     direct_control_targets: set[GraphNodeId] = set()
     completed_join_targets: set[GraphNodeId] = set()
-    data_targets: set[GraphNodeId] = set()
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)
         direct_control_targets.update(graph.transition.direct_targets[node_id])
@@ -203,15 +200,6 @@ def resolve_routing_facts(
                 direct_control_targets.add(target)
         for edge in graph.transition.joins_by_source[node_id]:
             arrivals.setdefault(_join_key(edge.sources, edge.target), set()).add(node_id)
-    for node in state.frontier.nodes:
-        publication_coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-            StableActivation(scope_run, state.superstep, node.node_id),
-            graph.transition.publications[node.node_id].identity,
-        )
-        if isinstance(node.settlement, (SucceededGraphNode, SkippedGraphNode)) and frames.has_publication(
-            publication_coordinate
-        ):
-            data_targets.update(graph.transition.data_triggers[node.node_id].targets)
     remaining: list[GraphJoinProgress] = []
     for key in sorted(arrivals):
         edge = declared[key]
@@ -259,13 +247,11 @@ def resolve_routing_facts(
 
     control_facts = tuple(required(target) for target in sorted(direct_control_targets))
     completed_join_facts = tuple(required(target) for target in sorted(completed_join_targets))
-    data_facts = tuple(required(target) for target in sorted(data_targets))
     output_diagnostics = unavailable_graph_outputs(graph, scope_run, state.superstep, frames)
     return RoutingFacts(
         control_facts,
         completed_join_facts,
         tuple(remaining),
-        data_facts,
         output_diagnostics,
     )
 
@@ -282,27 +268,15 @@ def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> Resoluti
             state.revision,
             GraphAbortReason(f"required values unavailable for controlled nodes {unavailable_control!r}"),
         )
-    ready_data = {target.node_id for target in facts.data_targets if not target.unavailable_inputs}
-    next_nodes = control_targets | ready_data
-    if next_nodes:
+    if control_targets:
         return AdvanceGraphFrontier(
             state.revision,
-            tuple(sorted(next_nodes)),
+            tuple(sorted(control_targets)),
             facts.remaining_join_progress,
         )
     if facts.remaining_join_progress:
         raise RoutingDeadlockError("partial join progress has no next task able to complete it")
-    if (
-        not any(
-            (
-                facts.control_targets,
-                facts.completed_join_targets,
-                facts.remaining_join_progress,
-                facts.data_targets,
-            )
-        )
-        and facts.unavailable_graph_outputs
-    ):
+    if facts.unavailable_graph_outputs:
         return AbortGraphRun(
             state.revision,
             GraphAbortReason("required graph output values are unavailable at completion"),

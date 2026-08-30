@@ -213,11 +213,15 @@ The monorepo is designed to support multiple languages without duplicating autho
 
 - **Python owns agent flow semantics.** `mote-kernel` defines how an agent interacts and advances.
 - **Go owns control-plane mechanisms.** Future Go components may implement Agent registration, lineage, communication, placement, leases, routing, and distributed ownership without defining Swarm collaboration or interpreting agent cognition.
-- **Container owns placement execution.** `mote-container` registers, locates, and invokes local, Docker, Cloudflare, and future Agent containers uniformly. It consumes Control-issued identity and placement without interpreting Agent flow.
+- **Resources own provider mechanics.** `mote-resource/container` registers,
+  locates, and invokes local, Docker, Cloudflare, and future Agent Containers
+  uniformly. `mote-resource/embodiment` resolves physical-body capabilities
+  such as a robot. Both consume Control-issued bindings without interpreting
+  Agent Flow; Control records any required Container/Embodiment co-location.
 - **Infrastructure owns concrete adapters.** `mote-infra/persistence` provides deployment-specific durable state and transaction mechanisms, while `mote-infra/rpc` provides reusable transport implementations. Neither decides what the Agent should do.
 - **`conformance/` owns shared observable contracts.** No language implementation may privately reinterpret a released cross-language behavior.
 
-Control, Container, and deployment-specific Infrastructure implementations therefore extend placement, hosting, communication, and persistence choices; they do not become co-owners of the Agent flow. Container placement and persistence placement are orthogonal: Kernel Port configuration selects `Commit`, while a Container only exposes optional platform capabilities such as Durable Object storage.
+Control, Resource providers, and deployment-specific Infrastructure implementations therefore extend placement, hosting, communication, and persistence choices; they do not become co-owners of the Agent flow. Container/Embodiment placement and persistence placement are orthogonal: Kernel Port configuration selects `Commit`, while a Container only exposes optional platform capabilities such as Durable Object storage.
 
 ## Conformance
 
@@ -243,12 +247,14 @@ motev2/
 ├── conformance/       language-neutral schemas, vectors, scenarios, and traces
 ├── mote-control/      planned Go control plane
 ├── mote-kernel/       Python Agent flow and state-machine semantics
-├── mote-container/    container registration, lookup, invocation, and hosting glue
-│   ├── local/         reserved local container implementation
-│   ├── docker/        reserved Docker container implementation
-│   └── cloudflare/    Cloudflare Worker and Durable Object containers
-│       ├── python/    Python Worker and Durable Object implementation
-│       └── ts/        TypeScript Worker and Durable Object implementation
+├── mote-resource/     resource registration, discovery, and handle providers
+│   ├── container/     Agent/Kernel hosting providers
+│   │   ├── local/     reserved local Container implementation
+│   │   ├── docker/    reserved Docker Container implementation
+│   │   └── cloudflare/ Cloudflare Worker and Durable Object Containers
+│   │       ├── python/ Python Worker and Durable Object implementation
+│   │       └── ts/      TypeScript Worker and Durable Object implementation
+│   └── embodiment/    physical-body capability providers (robot, etc.)
 ├── mote-infra/        infrastructure adapters
 │   ├── persistence/   deployment-specific persistence and transaction mechanisms
 │   │   ├── local/     local Rust implementation
@@ -327,7 +333,7 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-container/README.md`](mote-container/README.md), [`mote-infra/README.md`](mote-infra/README.md), [`mote-infra/persistence/README.md`](mote-infra/persistence/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details. Each concrete Container and infrastructure implementation also has a local README.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`mote-kernel/README.md`](mote-kernel/README.md), [`mote-resource/README.md`](mote-resource/README.md), [`mote-resource/container/README.md`](mote-resource/container/README.md), [`mote-infra/README.md`](mote-infra/README.md), [`mote-infra/persistence/README.md`](mote-infra/persistence/README.md), and [`conformance/README.md`](conformance/README.md) for project-specific details. Each concrete Container, Embodiment, and infrastructure implementation also has a local README.
 
 ## License
 

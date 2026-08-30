@@ -26,7 +26,11 @@ assert isinstance(result, Graph.CompletedResult)
 assert result.outputs["text"] == "mote"
 ```
 
-Callable nodes declare named input bindings and exact named output types directly on `add_node()`. Input bindings are the sole data-dependency truth; edges and joins declare control flow only. `Graph.values()` creates immutable concrete frames, and `set_outputs()` binds the graph result boundary to admitted graph inputs or confirmed node publications.
+Callable nodes declare named input bindings and exact named output types directly on `add_node()`. Input bindings are
+the sole value-source/readiness truth; direct, conditional, and join edges are the sole activation truth. A
+`Graph.node_output()` binding never creates an execution edge, so every node-output consumer also needs an incoming
+control edge. Graph-input-only and zero-input roots remain automatic entries, while `set_outputs()` is only a result
+projection and never activates a node. `Graph.values()` creates immutable concrete frames.
 
 `Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
 
@@ -36,13 +40,9 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 
 ## Documentation
 
+- [Runnable graph examples](example/graph/README.md) cover linear, conditional, parallel, nested, and state-only resume flows through the public `Graph` facade.
 - [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
-- [Graph Node I/O implementation](docs/graph-node-input-output-contract-implementation.zh-CN.md) owns the current Node I/O, compiled topology, frame, continuation, and recovery shape.
-- [`skip_failed` requirements](docs/skip-failed-output-requirements.zh-CN.md) and [implementation](docs/skip-failed-output-implementation.zh-CN.md) own current skip-output behavior.
-- [Semantics-preserving simplification requirements](docs/graph-semantics-preserving-simplification-requirements.zh-CN.md) own only this refactor's preservation obligations, non-goals, and phase admission conditions.
-- [Semantics-preserving simplification implementation plan](docs/graph-semantics-preserving-simplification-implementation.zh-CN.md) owns only the target shape, atomic migration ledger, ordering, and verification plan.
-
-The implementation plan maintains the review and historical-research index; this README does not duplicate that evolving list or normative text.
+- [Execution/state frontier call chain](docs/execution-state-frontier-call-chain.zh-CN.md) explains the current command, reducer, commit, and frontier flow.
 
 ## Design principles
 
@@ -66,6 +66,14 @@ pytest --cov=mote_kernel
 ```
 
 Run `pre-commit install` and `pre-commit run --all-files` from the monorepo root.
+
+The structural-complexity checks compare AST structure rather than source text, so renaming identifiers or changing
+literals does not hide a logic clone. `make complexity-ratchet` is the blocking non-regression gate for production
+type/field/decision counts and structural-smell counts. `make complexity` is the blocking review gate: it compares the
+current candidate identities with the explicit `complexity_reviewed` inventory in `pyproject.toml` and passes only when
+there are no unreviewed or stale identities. Reviewed nominal boundaries remain visible in the report, while a new
+candidate still fails the gate. `make complexity-report` prints every candidate and its review status. The ratchet is
+not a health claim; lower it whenever debt is removed so the improvement cannot regress. Both gates run from `make check`.
 
 Run all repository checks with:
 

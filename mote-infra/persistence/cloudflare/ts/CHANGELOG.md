@@ -9,6 +9,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - Renamed the package to `@mote/infra-persistence-cloudflare` and moved it under `mote-infra/persistence`.
-- Split Worker and Durable Object container hosting into `mote-container/cloudflare/ts`.
+- Split Worker and Durable Object Container hosting into `mote-resource/container/cloudflare/ts`.
 - Retained Cloudflare SQLite schema, serialization, and transaction ownership in this Persistence package.
 - Made persistence selection independent of the Cloudflare Container; Port configuration supplies storage only when this backend is selected.

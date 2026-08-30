@@ -15,7 +15,7 @@ def test_strict_type_gate_cannot_be_downgraded() -> None:
     pyright = configuration["tool"]["pyright"]
 
     assert pyright["typeCheckingMode"] == "strict"
-    assert pyright["include"] == ["src", "tests"]
+    assert pyright["include"] == ["src", "tests", "example"]
     assert pyright["exclude"] == ["tests/typing_negative"]
     assert pyright["reportMissingTypeStubs"] == "error"
 

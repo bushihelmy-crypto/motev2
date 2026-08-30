@@ -1,8 +1,21 @@
 from dataclasses import replace
+from typing import Protocol, cast
 
 import pytest
 
 from mote_kernel.execution import Graph
+
+
+class _PartialCommitConstructor(Protocol):
+    def __call__(
+        self,
+        *,
+        state: Graph.State,
+        continuation: Graph.Continuation[str],
+        cause: Exception,
+        failed_scope: tuple[str, ...],
+        _seal: object,
+    ) -> Graph.Error: ...
 
 
 class TypedResultConsumer:
@@ -104,11 +117,12 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
     assert issubclass(Graph.SnapshotMismatchError, Graph.Error)
     assert issubclass(Graph.ExecutionLimitError, Graph.Error)
     assert issubclass(Graph.PartialCommitError, Graph.Error)
+    partial_commit_error = cast(_PartialCommitConstructor, Graph.PartialCommitError[str])
     with pytest.raises(Graph.SnapshotMismatchError, match="Graph owner"):
-        Graph.PartialCommitError(
+        partial_commit_error(
             state=completed.state,
             continuation=completed.continuation,
             cause=RuntimeError("forged"),
             failed_scope=(),
-            _seal=object(),  # pyright: ignore[reportArgumentType]
+            _seal=object(),
         )

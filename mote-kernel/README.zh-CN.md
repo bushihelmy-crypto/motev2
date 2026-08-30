@@ -26,7 +26,10 @@ assert isinstance(result, Graph.CompletedResult)
 assert result.outputs["text"] == "mote"
 ```
 
-Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名输出类型。输入绑定是 data dependency 的唯一事实源；edge 与 join 只声明 control flow。`Graph.values()` 构造 immutable concrete frame，`set_outputs()` 将图结果边界绑定到已 admission 的 graph input 或已确认的 node publication。
+Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名输出类型。输入绑定是 value source/readiness
+的唯一事实源；direct、conditional 与 join edge 是 activation 的唯一事实源。`Graph.node_output()` 绑定不会创建
+执行边，因此每个 node-output consumer 还必须声明 incoming control edge。仅依赖 graph input 或没有输入的 root
+仍是 automatic entry；`set_outputs()` 只投影结果，不激活节点。`Graph.values()` 构造 immutable concrete frame。
 
 `Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
 
@@ -36,13 +39,9 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 
 ## 文档导航
 
+- [可运行图示例](example/graph/README.md)通过公开 `Graph` 门面覆盖线性、条件、并行、嵌套与仅凭状态恢复；
 - [架构说明](docs/architecture.zh-CN.md)记录当前公共门面、execution/state owner 与持久化边界；
-- [Graph Node I/O 实施规范](docs/graph-node-input-output-contract-implementation.zh-CN.md)记录当前 Node I/O、compiled topology、frame、continuation 与 recovery shape；
-- [`skip_failed` 需求](docs/skip-failed-output-requirements.zh-CN.md)及其[实施规范](docs/skip-failed-output-implementation.zh-CN.md)记录当前 skip-output 行为；
-- [语义保持型简化需求](docs/graph-semantics-preserving-simplification-requirements.zh-CN.md)只拥有本轮行为保持义务、非目标与阶段准入条件；
-- [语义保持型简化实施方案](docs/graph-semantics-preserving-simplification-implementation.zh-CN.md)只拥有 target shape、原子迁移账本、实施顺序与验证计划。
-
-各轮评审和历史调研由实施方案的“关联记录”统一索引，README 不复制动态评审列表或规范正文。
+- [Execution / State / Frontier 核心调用链](docs/execution-state-frontier-call-chain.zh-CN.md)说明当前 command、reducer、commit 与 frontier 流程。
 
 ## 开发
 
@@ -53,6 +52,13 @@ make check
 ```
 
 `pre-commit install` 和 `pre-commit run --all-files` 应在 monorepo 根目录执行。
+
+结构复杂度扫描基于 AST 而非源码文本，因此改变量名或常量不能掩盖逻辑重复。`make complexity-ratchet`
+是阻止生产类型、字段、分支和结构异味继续增长的 CI 棘轮；`make complexity` 是阻断式审查门禁：它将当前候选
+身份与 `pyproject.toml` 中显式维护的 `complexity_reviewed` 清单比较，只有不存在未审查或过期身份时才通过。
+已审查、为保持 nominal owner 边界而保留的候选仍会显示在报告中；任何新增候选都会使门禁失败。`make complexity-report`
+输出每个候选及其审查状态。棘轮不等于代码健康；债务下降时必须同步下调基线，锁住改进。
+两道门禁都会由 `make check` 执行。
 
 ## 许可证
 

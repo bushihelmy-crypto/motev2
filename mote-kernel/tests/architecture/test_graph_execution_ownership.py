@@ -169,6 +169,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
             }
         ),
         "execution/engine/routing.py": frozenset({"validate_routing_contribution", "resolve_routing"}),
+        "execution/engine/resume_admission.py": frozenset({"prepare_resume"}),
         "execution/engine/task.py": frozenset({"TaskId", "task_identity", "GraphTask", "ExecutableTask"}),
         "execution/identity.py": frozenset({"ExecutionRequestAttemptId", "ScopeRunCoordinate", "StableActivation"}),
         "execution/claim.py": frozenset(
@@ -292,7 +293,6 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": set(),
         "conditional_targets": set(),
         "joins_by_source": set(),
-        "data_triggers": set(),
     }
     for relative, tree in _production_modules():
         for node in ast.walk(tree):
@@ -303,7 +303,6 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
         "direct_targets": {"execution/engine/routing.py"},
         "conditional_targets": {"execution/engine/routing.py"},
         "joins_by_source": {"execution/engine/routing.py"},
-        "data_triggers": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
     forbidden = {"materializations", "graph_outputs"}
@@ -351,6 +350,11 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
         "_claim_owner",
         "_graph",
     }
+    assert {
+        node.name
+        for node in graph_executor.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
+    } == {"execute", "prepare"}
 
     forbidden_names = {"reduce_graph_run", "store", "state_store"}
     assert not {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id in forbidden_names}
@@ -372,6 +376,29 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
             else ()
         )
     )
+
+
+def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
+    handle = _top_level_definition("execution/family_driver.py", "_ChildHandle")
+    if not isinstance(handle, ast.ClassDef):
+        raise AssertionError("_ChildHandle must remain a nominal private type")
+    slots = next(
+        node.value
+        for node in handle.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__slots__" for target in node.targets)
+    )
+    assert isinstance(slots, ast.Tuple)
+    assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
+        "_abort",
+        "_drive",
+        "_release",
+    }
+    assert {
+        node.name
+        for node in handle.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
+    } == {"abort", "drive", "release"}
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
@@ -423,9 +450,8 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
     assert (
         not {
             "_PlannedState",
-            "_PlannedFence",
-            "_PlannedResume",
-            "drive_root",
+            "PlannedFence",
+            "PlannedResume",
             "project_graph_result",
             "validate_context",
         }
@@ -435,31 +461,22 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         frozenset(
             {
                 "_PlannedState",
-                "_PlannedFence",
-                "_PlannedResume",
+                "PlannedFence",
+                "PlannedResume",
                 "GraphTransition",
-                "drive_root",
                 "project_graph_result",
             }
         )
     ) == {
         "_PlannedState": ("execution/invocation.py",),
-        "_PlannedFence": ("execution/invocation.py",),
-        "_PlannedResume": ("execution/invocation.py",),
+        "PlannedFence": ("execution/invocation.py",),
+        "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/family_driver.py",),
-        "drive_root": ("execution/family_driver.py",),
         "project_graph_result": ("execution/family_driver.py",),
     }
 
 
-def test_graph_transition_dispatch_is_exhaustive_and_modules_do_not_alias_contracts() -> None:
-    reducer = _top_level_definition("state/graph_state/reducer.py", "reduce_graph_run")
-    assert any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "assert_never"
-        for node in ast.walk(reducer)
-    )
-    assert not any(isinstance(node, ast.Try) for node in ast.walk(reducer))
-
+def test_graph_transition_modules_do_not_alias_contracts() -> None:
     aliases: list[str] = []
     for relative, tree in _production_modules():
         if not relative.startswith(("state/graph_state/", "execution/")):
@@ -512,7 +529,6 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
-        "data_triggers": "FrozenMap[GraphNodeId, DataTriggerPlan]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",

@@ -40,7 +40,7 @@ pnpm run check
 For the Cloudflare Python Container:
 
 ```bash
-cd mote-container/cloudflare/python
+cd mote-resource/container/cloudflare/python
 uv sync --locked
 pnpm install --frozen-lockfile
 make check
@@ -49,7 +49,7 @@ make check
 For the Cloudflare TypeScript Container:
 
 ```bash
-cd mote-container/cloudflare/ts
+cd mote-resource/container/cloudflare/ts
 pnpm install --frozen-lockfile
 pnpm run check
 ```

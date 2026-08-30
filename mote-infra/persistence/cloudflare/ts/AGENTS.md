@@ -5,7 +5,7 @@
 - This project is the TypeScript Cloudflare Durable Object SQLite persistence Adapter. It does not own the Worker, Durable Object container, routing, registration, or lookup.
 - Upper layers own Agent flow semantics. This lowest-level package must not import Kernel, Container, Control, or Product code.
 - Persistence-backend selection belongs to Port configuration and is independent of Container selection. This Adapter is constructed only when configuration selects it and supplies an object-local Cloudflare storage handle; a Cloudflare Container may instead use a remote backend.
-- Raw SQL, schema, migrations, serialization, and multi-statement transaction code belong here and nowhere in `mote-container`.
+- Raw SQL, schema, migrations, serialization, and multi-statement transaction code belong here and nowhere in `mote-resource/container`.
 - The package exports exactly one symbol: `Commit`. All storage types, errors, and helpers remain private.
 - Multi-statement SQL changes must use `transactionSync()`. Do not issue raw `BEGIN`, `COMMIT`, `ROLLBACK`, or `SAVEPOINT` statements.
 - Do not invent a durable schema, identity encoding, or transition serialization before the owning contract and matching conformance cases exist.

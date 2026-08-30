@@ -1,5 +1,6 @@
 """Fail-closed boundaries retained by the scoped-frame execution runtime."""
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from typing import cast
@@ -22,7 +23,11 @@ from mote_kernel.execution.engine.resume_input import (
 )
 from mote_kernel.execution.engine.routing import resolve_routing
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
-from mote_kernel.execution.engine.session import issue_execution_session
+from mote_kernel.execution.engine.session import (
+    GraphExecutionSession,
+    consume_node_origin_cancellation,
+    issue_execution_session,
+)
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
 from mote_kernel.execution.engine.superstep import validate_execution_session_request
@@ -74,8 +79,10 @@ from mote_kernel.execution.identity import (
     root_scope_run,
 )
 from mote_kernel.execution.invocation import (
-    _PlannedResume,  # pyright: ignore[reportPrivateUsage]
-    install_confirmed_resume_frames,
+    PlannedResume,
+    lineage_states,
+    plan_fences,
+    project_resume_frames,
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
@@ -83,15 +90,13 @@ from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import (
     AbortedChild,
     ActiveChild,
+    AwaitingResume,
     ChildProjection,
     CompletedChild,
     MissingChild,
-    PreparedNestedRun,
     PreparedResume,
-    StartMissingChildren,
     TaskFailure,
     TaskSuccess,
-    WaitForActiveChildren,
     WaitingForChildren,
 )
 from mote_kernel.execution.run_context import (
@@ -109,13 +114,11 @@ from mote_kernel.execution.run_context import (
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
-    _new_context,
     _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ClaimGraphExecution,
-    CompleteGraphFrontier,
     ContinueGraphRouting,
     FailedGraphNode,
     GraphAbortReason,
@@ -147,10 +150,8 @@ from mote_kernel.state.graph_state import (
     ResourceSnapshot,
     ResumeGraphNodes,
     SelectGraphRoute,
-    SettleGraphNode,
     SkipFailedNode,
     SucceededGraphNode,
-    SucceededGraphNodeOutcome,
     UseStepRequestInput,
     child_graph_run_id,
     reduce_graph_run,
@@ -268,6 +269,7 @@ def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
             nodes=tuple(nodes),
             edges=(
                 DirectEdge(GraphNodeId("nested"), GraphNodeId("controller")),
+                DirectEdge(GraphNodeId("nested"), GraphNodeId("consumer")),
                 ConditionalEdge(GraphNodeId("controller"), GraphRouteId("repeat"), GraphNodeId("nested")),
                 ConditionalEdge(GraphNodeId("controller"), GraphRouteId("done"), END),
             )
@@ -302,6 +304,101 @@ def parallel_nested_graph() -> CompiledGraph[str]:
             outputs=normalize_graph_output_declarations({}),
         )
     )
+
+
+def started_nested_child(
+    parent_graph: CompiledGraph[str],
+    parent_state: GraphRunState,
+    parent_scope: ScopeRunCoordinate,
+    node_id: GraphNodeId,
+) -> tuple[ScopeRunCoordinate, StableActivation, GraphRunState]:
+    parent = ParentGraphActivation(parent_state.run_id, parent_state.superstep, node_id)
+    coordinate = child_scope_run_for_activation(parent_scope, parent)
+    child_graph = parent_graph.nested_graphs[node_id]
+    command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
+    activation = StableActivation(parent_scope, parent.superstep, parent.node_id)
+    return coordinate, activation, reduce_graph_run(None, command)
+
+
+def test_waiting_for_children_rejects_an_empty_internal_disposition() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        WaitingForChildren[str]((), ())
+
+
+def test_node_origin_marker_rejects_a_foreign_session() -> None:
+    session = cast(GraphExecutionSession[str], object())
+
+    with pytest.raises(ResultCollectionError, match="not issued"):
+        consume_node_origin_cancellation(session, asyncio.CancelledError())
+
+
+def test_lineage_rejects_a_child_binding_at_the_root_coordinate() -> None:
+    state = running_state()
+    scope_run = root_scope_run(state.run_id)
+    binding = ChildStateBinding(
+        scope_run,
+        StableActivation(scope_run, state.superstep, GraphNodeId("a")),
+        state,
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="repeats one scoped graph run"):
+        lineage_states(state, (binding,))
+
+
+def test_fence_planning_rejects_parent_metadata_on_a_root_state() -> None:
+    graph = compiled_graph("a")
+    parent = ParentGraphActivation(GraphRunId("outer"), 0, GraphNodeId("parent"))
+    state = replace(
+        running_state(run_id=child_graph_run_id(parent.run_id, parent.superstep, parent.node_id)),
+        parent=parent,
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="root graph state cannot carry"):
+        plan_fences(graph, lineage_states(state, ()))
+
+
+def test_fence_planning_rejects_a_child_state_without_its_parent() -> None:
+    graph = nested_graph()
+    parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent")
+    parent_scope = root_scope_run(parent.run_id)
+    child_scope, activation, child = started_nested_child(
+        graph,
+        parent,
+        parent_scope,
+        GraphNodeId("nested"),
+    )
+    binding = ChildStateBinding(child_scope, activation, replace(child, parent=None))
+
+    with pytest.raises(SnapshotMismatchError, match="nested graph state does not match"):
+        plan_fences(graph, lineage_states(parent, (binding,)))
+
+
+def test_fence_planning_rejects_a_child_from_a_future_parent_frontier() -> None:
+    graph = nested_graph()
+    parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent")
+    parent_scope = root_scope_run(parent.run_id)
+    future_parent = ParentGraphActivation(
+        parent.run_id,
+        parent.superstep + 1,
+        GraphNodeId("nested"),
+    )
+    child_scope = child_scope_run_for_activation(parent_scope, future_parent)
+    child = reduce_graph_run(
+        None,
+        project_start_graph_command(
+            graph.nested_graphs[future_parent.node_id],
+            child_scope.graph_run_id,
+            future_parent,
+        ),
+    )
+    binding = ChildStateBinding(
+        child_scope,
+        StableActivation(parent_scope, future_parent.superstep, future_parent.node_id),
+        child,
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="future parent frontier"):
+        plan_fences(graph, lineage_states(parent, (binding,)))
 
 
 def test_claim_task_guard_rejects_forged_rebuild() -> None:
@@ -493,28 +590,35 @@ def test_resume_input_narrow_guards() -> None:
 
 def test_child_projection_coverage_and_variant_guards_fail_closed() -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(state.run_id, 0, GraphNodeId("nested"))
     with pytest.raises(ResultCollectionError, match="exactly and canonically"):
         prepare_frontier(graph, request(graph, state))
 
     missing = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
+    assert missing.missing_children == (MissingChild(activation),)
     child_graph = graph.nested_graphs[GraphNodeId("nested")]
-    child = reduce_graph_run(None, missing.missing_children[0].command)
-    mismatched = replace(child, definition_id=GraphDefinitionId("other.child"))
-    with pytest.raises(ResultCollectionError, match="parent activation or definition"):
-        prepare_frontier(graph, request(graph, state, (ActiveChild(activation, mismatched),)))
-
-    completed = completed_child(child)
-    with pytest.raises(ResultCollectionError, match="running child"):
-        prepare_frontier(graph, request(graph, state, (ActiveChild(activation, completed),)))
-    with pytest.raises(ResultCollectionError, match="completed child"):
-        prepare_frontier(
-            graph,
-            request(graph, state, (CompletedChild(activation, child, child_output(child_graph, "output")),)),
-        )
-    with pytest.raises(ResultCollectionError, match="aborted child"):
-        prepare_frontier(graph, request(graph, state, (AbortedChild(activation, child),)))
+    active = prepare_frontier(graph, request(graph, state, (ActiveChild(activation),)))
+    assert active.active_children == (ActiveChild(activation),)
+    completed = prepare_frontier(
+        graph,
+        request(graph, state, (CompletedChild(activation, child_output(child_graph, "output")),)),
+    )
+    aborted = prepare_frontier(
+        graph,
+        request(graph, state, (AbortedChild(activation, GraphAbortReason("aborted")),)),
+    )
+    assert isinstance(completed.nested_results[0], TaskSuccess)
+    assert isinstance(aborted.nested_results[0], TaskFailure)
+    assert not hasattr(active.active_children[0], "child_state")
+    assert not hasattr(
+        request(graph, state, (CompletedChild(activation, child_output(child_graph, "output")),)).child_projections[0],
+        "child_state",
+    )
+    assert not hasattr(
+        request(graph, state, (AbortedChild(activation, GraphAbortReason("aborted")),)).child_projections[0],
+        "child_state",
+    )
 
 
 @pytest.mark.parametrize(
@@ -523,7 +627,7 @@ def test_child_projection_coverage_and_variant_guards_fail_closed() -> None:
 )
 def test_child_projection_requires_exact_canonical_parent_coverage(case: str) -> None:
     graph = parallel_nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     a = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("a"))
     b = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("b"))
     wrong_run = ParentGraphActivation(GraphRunId("other"), state.superstep, GraphNodeId("a"))
@@ -547,10 +651,14 @@ def test_child_projection_requires_exact_canonical_parent_coverage(case: str) ->
 )
 def test_child_projection_rejects_each_state_coordinate_mismatch(coordinate: str) -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    prepared = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    child = reduce_graph_run(None, prepared.missing_children[0].command)
+    child_coordinate, stable_activation, child = started_nested_child(
+        graph,
+        state,
+        root_scope_run(state.run_id),
+        GraphNodeId("nested"),
+    )
     mismatched = {
         "run-id": replace(child, run_id=GraphRunId("forged")),
         "parent-run": replace(child, parent=replace(activation, run_id=GraphRunId("other"))),
@@ -559,31 +667,26 @@ def test_child_projection_rejects_each_state_coordinate_mismatch(coordinate: str
         "definition": replace(child, definition_id=GraphDefinitionId("other.child")),
         "version": replace(child, definition_version=GraphDefinitionVersion(2)),
     }[coordinate]
-    identity_coordinates = {"run-id", "parent-run", "parent-step", "parent-node"}
-    error = GraphStateTransitionError if coordinate in identity_coordinates else ResultCollectionError
+    binding = ChildStateBinding(child_coordinate, stable_activation, mismatched)
 
-    with pytest.raises(error):
-        prepare_frontier(graph, request(graph, state, (ActiveChild(activation, mismatched),)))
+    with pytest.raises((GraphStateTransitionError, InvalidExecutionSnapshotError, SnapshotMismatchError)):
+        plan_fences(graph, lineage_states(state, (binding,)))
 
 
 def test_child_projection_validates_terminal_state_before_projecting_variant() -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
-    activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    prepared = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    child = reduce_graph_run(None, prepared.missing_children[0].command)
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
+    child_coordinate, stable_activation, child = started_nested_child(
+        graph,
+        state,
+        root_scope_run(state.run_id),
+        GraphNodeId("nested"),
+    )
     corrupted = replace(child, status=GraphRunStatus.COMPLETED)
-    child_graph = graph.nested_graphs[GraphNodeId("nested")]
+    binding = ChildStateBinding(child_coordinate, stable_activation, corrupted)
 
     with pytest.raises(GraphStateTransitionError, match="canonical empty position"):
-        prepare_frontier(
-            graph,
-            request(
-                graph,
-                state,
-                (CompletedChild(activation, corrupted, child_output(child_graph, "output")),),
-            ),
-        )
+        plan_fences(graph, lineage_states(state, (binding,)))
 
 
 def test_non_nested_frontier_rejects_nonempty_child_projection() -> None:
@@ -597,36 +700,31 @@ def test_non_nested_frontier_rejects_nonempty_child_projection() -> None:
 
 def test_running_awaiting_resume_child_remains_active_without_rebuild() -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    missing = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    child = reduce_graph_run(None, missing.missing_children[0].command)
-    awaiting = replace(
-        child,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(GraphNodeId("child"), FailedGraphNode(GraphFailure("failed"))),)
-        ),
-    )
-
-    prepared = prepare_frontier(graph, request(graph, state, (ActiveChild(activation, awaiting),)))
+    prepared = prepare_frontier(graph, request(graph, state, (ActiveChild(activation),)))
 
     assert prepared.missing_children == ()
-    assert prepared.active_children == (ActiveChild(activation, awaiting),)
+    assert prepared.active_children == (ActiveChild(activation),)
 
 
 def test_active_child_must_match_its_compiled_resume_codec() -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
-    activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    missing = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    child = reduce_graph_run(None, missing.missing_children[0].command)
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
+    child_coordinate, stable_activation, child = started_nested_child(
+        graph,
+        state,
+        root_scope_run(state.run_id),
+        GraphNodeId("nested"),
+    )
     mismatched = replace(
         child,
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("unexpected.input"), 1),
     )
+    binding = ChildStateBinding(child_coordinate, stable_activation, mismatched)
 
     with pytest.raises(SnapshotMismatchError, match="codec"):
-        prepare_frontier(graph, request(graph, state, (ActiveChild(activation, mismatched),)))
+        plan_fences(graph, lineage_states(state, (binding,)))
 
 
 @pytest.mark.asyncio
@@ -654,7 +752,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
     nested = TaskScheduler(nested_graph_value)
     nested_state = reduce_graph_run(
         None,
-        GraphExecutor(nested_graph_value).start_command(GraphRunId("run")),
+        project_start_graph_command(nested_graph_value, GraphRunId("run")),
     )
     nested.submit(
         (
@@ -684,7 +782,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
     )
     invalid_state = reduce_graph_run(
         None,
-        GraphExecutor(invalid_graph).start_command(GraphRunId("run")),
+        project_start_graph_command(invalid_graph, GraphRunId("run")),
     )
     invalid_scheduler = TaskScheduler(invalid_graph)
     invalid_scheduler.submit(
@@ -743,7 +841,7 @@ async def test_scheduler_rejects_an_unsupported_callable_return_without_settleme
             outputs=normalize_graph_output_declarations({}),
         )
     )
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     scheduler = TaskScheduler(graph)
     scheduler.submit(
         (
@@ -784,29 +882,6 @@ async def test_scheduler_yields_each_canonically_buffered_completion() -> None:
     assert isinstance(second, TaskSuccess)
     assert (first.task.node_id, second.task.node_id) == (GraphNodeId("a"), GraphNodeId("b"))
     await scheduler.aclose()
-
-
-def test_child_wait_payloads_require_nonempty_canonical_parents() -> None:
-    graph = nested_graph()
-    state = running_state(definition_id="boundary.parent", frontier=("nested",))
-    activation = ParentGraphActivation(state.run_id, 0, GraphNodeId("nested"))
-    compiled_child = graph.nested_graphs[GraphNodeId("nested")]
-    command = project_start_graph_command(
-        compiled_child,
-        child_graph_run_id(state.run_id, state.superstep, activation.node_id),
-        activation,
-    )
-    prepared = PreparedNestedRun(activation, compiled_child, command)
-    active = ActiveChild(activation, reduce_graph_run(None, command))
-
-    with pytest.raises(ValueError, match="non-empty"):
-        StartMissingChildren[str](())
-    with pytest.raises(ValueError, match="non-empty"):
-        WaitForActiveChildren(())
-    with pytest.raises(ValueError, match="canonical"):
-        StartMissingChildren((prepared, prepared))
-    with pytest.raises(ValueError, match="canonical"):
-        WaitForActiveChildren((active, active))
 
 
 def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
@@ -948,10 +1023,8 @@ def test_session_request_validation_rejects_a_claim_with_the_wrong_task_scope() 
 
 def test_session_request_validation_rejects_a_claim_that_still_has_an_active_child() -> None:
     graph = nested_graph()
-    state = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    missing = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    child = reduce_graph_run(None, missing.missing_children[0].command)
     tasks = plan_tasks(graph, state, ExecutionLimits())
     claim = prepare_claim(
         ExecutionClaimOwner(),
@@ -963,7 +1036,7 @@ def test_session_request_validation_rejects_a_claim_that_still_has_an_active_chi
     with pytest.raises(ResultCollectionError, match="cannot wait for children"):
         validate_execution_session_request(
             graph,
-            request(graph, state, (ActiveChild(activation, child),)),
+            request(graph, state, (ActiveChild(activation),)),
             claim,
         )
 
@@ -1033,60 +1106,43 @@ async def test_claim_receipt_requires_exact_owner_identity() -> None:
         await claim.consume(ExecutionClaimOwner(), claimed, request_id)
 
 
-def completed_child(state: GraphRunState) -> GraphRunState:
-    claimed = reduce_graph_run(
-        state,
-        ClaimGraphExecution(state.revision, GraphExecutionAttemptId("child-attempt"), None),
-    )
-    assert claimed.execution is not None
-    settled = reduce_graph_run(
-        claimed,
-        SettleGraphNode(
-            claimed.revision,
-            claimed.execution.token,
-            SucceededGraphNodeOutcome(GraphNodeId("child"), ContinueGraphRouting()),
-        ),
-    )
-    return reduce_graph_run(settled, CompleteGraphFrontier(settled.revision))
-
-
 @pytest.mark.asyncio
 async def test_missing_child_takes_priority_over_an_active_sibling() -> None:
     graph = parallel_nested_graph()
     executor = GraphExecutor(graph)
-    parent = reduce_graph_run(None, executor.start_command(GraphRunId("run")))
+    parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     a = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("a"))
     b = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("b"))
     both_missing = await executor.prepare(request(graph, parent, (MissingChild(a), MissingChild(b))))
     assert isinstance(both_missing, WaitingForChildren)
-    assert isinstance(both_missing.action, StartMissingChildren)
-    active_b = reduce_graph_run(None, both_missing.action.children[1].command)
+    assert both_missing.missing == (MissingChild(a), MissingChild(b))
 
-    disposition = await executor.prepare(request(graph, parent, (MissingChild(a), ActiveChild(b, active_b))))
+    disposition = await executor.prepare(request(graph, parent, (MissingChild(a), ActiveChild(b))))
 
     assert isinstance(disposition, WaitingForChildren)
-    assert isinstance(disposition.action, StartMissingChildren)
-    assert tuple(child.parent for child in disposition.action.children) == (a,)
+    assert disposition.missing == (MissingChild(a),)
+    assert disposition.active == (ActiveChild(b),)
+
+    reverse = await executor.prepare(request(graph, parent, (ActiveChild(a), MissingChild(b))))
+
+    assert isinstance(reverse, WaitingForChildren)
+    assert reverse.missing == (MissingChild(b),)
+    assert reverse.active == (ActiveChild(a),)
 
 
 @pytest.mark.parametrize("variant", ["completed", "aborted"])
 def test_terminal_child_projects_its_matching_parent_result_variant(variant: str) -> None:
     graph = nested_graph()
-    parent = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
-    missing = prepare_frontier(graph, request(graph, parent, (MissingChild(activation),)))
-    child = reduce_graph_run(None, missing.missing_children[0].command)
     if variant == "completed":
-        terminal = completed_child(child)
         projection: ChildProjection[str] = CompletedChild(
             activation,
-            terminal,
             child_output(graph.nested_graphs[GraphNodeId("nested")], "child-output"),
         )
         result_type = TaskSuccess
     else:
-        terminal = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-        projection = AbortedChild(activation, terminal)
+        projection = AbortedChild(activation, GraphAbortReason("child aborted"))
         result_type = TaskFailure
 
     prepared = prepare_frontier(graph, request(graph, parent, (projection,)))
@@ -1097,12 +1153,19 @@ def test_terminal_child_projects_its_matching_parent_result_variant(variant: str
 
 def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitution_is_admitted() -> None:
     graph = nested_graph(with_consumer=True)
-    parent = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
-    missing = prepare_frontier(graph, request(graph, parent, (MissingChild(activation),)))
-    child = reduce_graph_run(None, missing.missing_children[0].command)
+    _coordinate, _stable_activation, child = started_nested_child(
+        graph,
+        parent,
+        root_scope_run(parent.run_id),
+        GraphNodeId("nested"),
+    )
     aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-    prepared = prepare_frontier(graph, request(graph, parent, (AbortedChild(activation, aborted),)))
+    prepared = prepare_frontier(
+        graph,
+        request(graph, parent, (AbortedChild(activation, GraphAbortReason("child aborted")),)),
+    )
     claimed = reduce_graph_run(
         parent,
         ClaimGraphExecution(parent.revision, GraphExecutionAttemptId("parent-attempt"), None),
@@ -1150,9 +1213,9 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
 
     assert aborted.status is GraphRunStatus.ABORTED
     with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
-        install_confirmed_resume_frames(
+        project_resume_frames(
             request(graph, parent).frames,
-            _PlannedResume(
+            PlannedResume(
                 scope_run,
                 successor,
                 PreparedResume(command, (), ()),
@@ -1162,9 +1225,9 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
         )
     assert aborted.abort is not None and aborted.abort.reason == "child aborted"
     assert availability.has_publication(substitution.coordinate)
-    installed = install_confirmed_resume_frames(
+    installed = project_resume_frames(
         request(graph, parent).frames,
-        _PlannedResume(
+        PlannedResume(
             scope_run,
             successor,
             PreparedResume(command, (), ()),
@@ -1238,9 +1301,9 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
             (candidate,),
             installed,
         )
-        installed = install_confirmed_resume_frames(
+        installed = project_resume_frames(
             installed,
-            _PlannedResume(
+            PlannedResume(
                 scope_run,
                 candidate.successor,
                 PreparedResume(candidate.command, (), ()),
@@ -1264,19 +1327,9 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
 
 def test_mixed_completed_and_aborted_children_keep_canonical_parent_order() -> None:
     graph = parallel_nested_graph()
-    parent = reduce_graph_run(None, GraphExecutor(graph).start_command(GraphRunId("run")))
+    parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     a = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("a"))
     b = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("b"))
-    missing = prepare_frontier(
-        graph,
-        request(graph, parent, (MissingChild(a), MissingChild(b))),
-    )
-    completed = completed_child(reduce_graph_run(None, missing.missing_children[0].command))
-    aborted_child = reduce_graph_run(None, missing.missing_children[1].command)
-    aborted = reduce_graph_run(
-        aborted_child,
-        AbortGraphRun(aborted_child.revision, GraphAbortReason("child aborted")),
-    )
     child_graph = graph.nested_graphs[GraphNodeId("a")]
 
     prepared = prepare_frontier(
@@ -1285,8 +1338,8 @@ def test_mixed_completed_and_aborted_children_keep_canonical_parent_order() -> N
             graph,
             parent,
             (
-                CompletedChild(a, completed, child_output(child_graph, "a-output")),
-                AbortedChild(b, aborted),
+                CompletedChild(a, child_output(child_graph, "a-output")),
+                AbortedChild(b, GraphAbortReason("child aborted")),
             ),
         ),
     )
@@ -1317,7 +1370,8 @@ def test_planner_claims_only_pending_nodes_from_a_mixed_frontier() -> None:
     assert tuple(task.node_id for task in tasks) == (GraphNodeId("c"),)
 
 
-def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
+@pytest.mark.asyncio
+async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
     graph = nested_graph()
     parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent-run")
     scope_run = root_scope_run(parent.run_id)
@@ -1329,17 +1383,28 @@ def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         project_start_graph_command(child_graph, child_coordinate.graph_run_id, parent_activation),
     )
     aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-    context = _new_context(_new_family_identity(), parent, ScopedFrameIndex(), recovered=False)
-    context.replace_child(
-        ChildStateBinding(
-            child_coordinate,
-            StableActivation(scope_run, 0, GraphNodeId("nested")),
-            aborted,
-        )
+    binding = ChildStateBinding(
+        child_coordinate,
+        StableActivation(scope_run, 0, GraphNodeId("nested")),
+        aborted,
+    )
+    root, _evidence_reader = await family_driver_module.admit_continued_root(
+        graph,
+        parent,
+        (binding,),
+        ScopedFrameIndex(),
+        ExecutionLimits(),
+        None,
+        (),
+        (),
+        _new_family_identity(),
+        recovered=True,
     )
 
-    projections = family_driver_module._child_projections(graph, parent, scope_run, context)  # pyright: ignore[reportPrivateUsage]
+    disposition = await root.drive_quantum()
 
-    assert len(projections) == 1
-    assert isinstance(projections[0], AbortedChild)
-    assert projections[0].child_state == aborted
+    assert isinstance(disposition, AwaitingResume)
+    settlement = root.state.frontier.nodes[0].settlement
+    assert isinstance(settlement, FailedGraphNode)
+    assert settlement.failure == "child aborted"
+    await root.release()

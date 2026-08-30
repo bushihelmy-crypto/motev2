@@ -9,6 +9,6 @@ rpc/
 └── websocket/     WebSocket transport
 ```
 
-The transport layer carries an owner-defined protocol. It does not define Agent flow, lineage, persistence transactions, or Container placement. Those contracts remain with Kernel Ports, Control, Persistence, and Container respectively.
+The transport layer carries an owner-defined protocol. It does not define Agent flow, lineage, persistence transactions, or Resource placement. Those contracts remain with Kernel Ports, Control, Persistence, and the relevant Resource provider respectively.
 
 No public RPC API is fixed yet. Add a concrete child package only when a real caller and conformance contract exist.

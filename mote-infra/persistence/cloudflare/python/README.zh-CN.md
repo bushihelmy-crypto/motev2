@@ -2,9 +2,9 @@
 
 本项目是 `mote-infra/persistence` 下的 Cloudflare Durable Object SQLite 持久化 Adapter。Kernel 持久化 Port 背后的具体 SQL、schema、序列化、migration 和事务实现都归这里所有。
 
-它与 `mote-container/cloudflare/python` 明确分层：
+它与 `mote-resource/container/cloudflare/python` 明确分层：
 
-- Container 负责 Worker 与 Durable Object 入口、注册、定位、调用和部署绑定；
+- `mote-resource/container` 负责 Worker 与 Durable Object 入口、注册、定位、调用和部署绑定；
 - Kernel 负责 Agent Flow 语义与持久化 Port 契约；
 - 本包使用对象私有的 Cloudflare SQLite Storage API 实现该 Port。
 

@@ -83,9 +83,11 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
             case PendingGraphNode(input=node_input):
                 match node_input:
                     case OverrideGraphNodeInput(payload=payload):
-                        if not isinstance(payload, bytes):  # pyright: ignore[reportUnnecessaryIsInstance]
-                            raise GraphStateTransitionError("resume input payload must be opaque bytes")
-                        needs_codec = True
+                        match payload:
+                            case bytes():
+                                needs_codec = True
+                            case _:
+                                raise GraphStateTransitionError("resume input payload must be opaque bytes")
                     case UseStepRequestInput():
                         pass
                     case _:
@@ -97,10 +99,11 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
             case InterruptedGraphNode(interrupt=interrupt):
                 needs_codec = True
                 identity = interrupt.identity
-                if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
-                    interrupt.request_payload, bytes
-                ):
-                    raise GraphStateTransitionError("interrupt request payload must be opaque bytes")
+                match interrupt.request_payload:
+                    case bytes():
+                        pass
+                    case _:
+                        raise GraphStateTransitionError("interrupt request payload must be opaque bytes")
                 if identity.node_id != node.node_id:
                     raise GraphStateTransitionError("interrupt identity node does not match its frontier node")
                 _validate_interrupt_identity(state, identity)

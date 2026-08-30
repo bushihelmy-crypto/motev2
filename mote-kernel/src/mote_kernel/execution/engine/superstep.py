@@ -18,8 +18,6 @@ from mote_kernel.execution.result import (
     ExecutableFrontier,
     PrepareDisposition,
     ReadyToResolve,
-    StartMissingChildren,
-    WaitForActiveChildren,
     WaitingForChildren,
 )
 from mote_kernel.state.graph_state import (
@@ -66,10 +64,8 @@ async def prepare_superstep(
     if state.execution is not None:
         raise ResultCollectionError("active execution requires its original execution session")
     frontier = prepare_frontier(graph, request)
-    if frontier.missing_children:
-        return WaitingForChildren(StartMissingChildren(frontier.missing_children))
-    if frontier.active_children:
-        return WaitingForChildren(WaitForActiveChildren(frontier.active_children))
+    if frontier.missing_children or frontier.active_children:
+        return WaitingForChildren(frontier.missing_children, frontier.active_children)
     _validate_inputs(graph, request, frontier)
     claim = prepare_claim(
         owner,

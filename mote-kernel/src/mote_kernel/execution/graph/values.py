@@ -274,15 +274,6 @@ def _public_node_input(frame: NodeInputFrame[GraphValueT]) -> _GraphValues[Graph
     return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
 
 
-def _frame_entries(
-    frame: GraphInputFrame[GraphValueT]
-    | NodeInputFrame[GraphValueT]
-    | NodeOutputFrame[GraphValueT]
-    | GraphOutputView[GraphValueT],
-) -> tuple[NamedValue[GraphValueT], ...]:
-    return frame.entries
-
-
 def _frame_value(
     frame: GraphInputFrame[GraphValueT]
     | NodeInputFrame[GraphValueT]
@@ -302,7 +293,6 @@ __all__ = [
     "_admit_graph_output_view",
     "_admit_node_input_frame",
     "_admit_node_output_frame",
-    "_frame_entries",
     "_frame_value",
     "_graph_input_from_node_input",
     "_make_graph_input_frame",
