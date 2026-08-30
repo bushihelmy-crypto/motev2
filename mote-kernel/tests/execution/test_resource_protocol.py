@@ -607,7 +607,8 @@ async def test_claimed_resource_session_revalidates_exact_participants() -> None
     forged = replace(claimed, resources=None)
     with pytest.raises(InvalidExecutionSnapshotError, match="compiled resource"):
         await executor.execute(prepared.claim, forged)
-    assert not prepared.claim.consumed
+    session = await executor.execute(prepared.claim, claimed)
+    await session.aclose()
 
 
 async def test_later_waiter_error_preserves_earlier_authoritative_settlement() -> None:

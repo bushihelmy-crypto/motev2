@@ -38,6 +38,7 @@ from mote_kernel.execution.result import (
     AbortedGraph,
     ActiveChild,
     AwaitingResume,
+    ChildProjection,
     CompletedChild,
     CompletedGraph,
     GraphAbortView,
@@ -422,10 +423,8 @@ class _GraphRun(Generic[GraphValueT]):
         position, parent, _old_phase, _old_handle = self._children[index]
         self._children[index] = (position, parent, phase, handle)
 
-    def _child_projections(
-        self,
-    ) -> tuple[MissingChild | ActiveChild | CompletedChild[GraphValueT] | AbortedChild, ...]:
-        projections: list[MissingChild | ActiveChild | CompletedChild[GraphValueT] | AbortedChild] = []
+    def _child_projections(self) -> tuple[ChildProjection[GraphValueT], ...]:
+        projections: list[ChildProjection[GraphValueT]] = []
         for node_id in pending_node_ids(self._state.frontier):
             if node_id not in self._graph.nested_graphs:
                 continue
@@ -440,15 +439,6 @@ class _GraphRun(Generic[GraphValueT]):
             else:
                 projections.append(phase)
         return tuple(projections)
-
-    def _request(self) -> StepRequest[GraphValueT]:
-        return StepRequest(
-            self._state,
-            self._scope_run,
-            self._frames,
-            self._child_projections(),
-            self._limits,
-        )
 
     def install_graph_input(self, input_frame: GraphInputFrame[GraphValueT]) -> None:
         coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
@@ -549,11 +539,10 @@ class _GraphRun(Generic[GraphValueT]):
                 position,
             )
         )
-        constructed, cancellation = await wait_for_owner_task(
+        handle, cancellation = await wait_for_owner_task(
             construction,
             self._mark_commit_origin_cancellation,
         )
-        handle = constructed
         try:
             self.accept_child_call(position, parent, ActiveChild(parent), handle)
         except BaseException:
@@ -671,8 +660,15 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def drive_quantum(self) -> GraphBoundary:
         while True:
-            request = self._request()
-            disposition = await self._executor.prepare(request)
+            disposition = await self._executor.prepare(
+                StepRequest(
+                    self._state,
+                    self._scope_run,
+                    self._frames,
+                    self._child_projections(),
+                    self._limits,
+                )
+            )
             if isinstance(disposition, ReadyToResolve):
                 await self._transition(disposition.command)
                 continue

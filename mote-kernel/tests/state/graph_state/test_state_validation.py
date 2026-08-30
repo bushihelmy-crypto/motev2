@@ -23,6 +23,7 @@ from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphNodeInputBinding,
     GraphNodeInterrupt,
+    GraphNodeInterruptIdentity,
     GraphNodeSettlement,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
@@ -48,7 +49,6 @@ from mote_kernel.state.graph_state import (
     SucceededGraphNode,
     UseStepRequestInput,
     child_graph_run_id,
-    derive_graph_node_interrupt_identity,
     frontier_status,
     reduce_graph_run,
     validate_graph_run_state,
@@ -240,11 +240,11 @@ def test_frontier_rejects_unsupported_typed_union_variants(
 def test_interrupt_identity_generation_and_codec_invariants(coordinate: str) -> None:
     base = replace(running(), execution_sequence=2)
     identity = {
-        "run": derive_graph_node_interrupt_identity(GraphRunId("other"), 0, A, 1),
-        "superstep": derive_graph_node_interrupt_identity(base.run_id, 1, A, 1),
-        "node": derive_graph_node_interrupt_identity(base.run_id, 0, B, 1),
-        "zero-generation": derive_graph_node_interrupt_identity(base.run_id, 0, A, 0),
-        "future-generation": derive_graph_node_interrupt_identity(base.run_id, 0, A, 3),
+        "run": GraphNodeInterruptIdentity(GraphRunId("other"), 0, A, 1),
+        "superstep": GraphNodeInterruptIdentity(base.run_id, 1, A, 1),
+        "node": GraphNodeInterruptIdentity(base.run_id, 0, B, 1),
+        "zero-generation": GraphNodeInterruptIdentity(base.run_id, 0, A, 0),
+        "future-generation": GraphNodeInterruptIdentity(base.run_id, 0, A, 3),
     }[coordinate]
     frontier = GraphFrontierState(
         (
@@ -305,7 +305,7 @@ def test_opaque_frontier_payloads_must_be_bytes(case: str) -> None:
                     A,
                     InterruptedGraphNode(
                         GraphNodeInterrupt(
-                            derive_graph_node_interrupt_identity(base.run_id, base.superstep, A, 1),
+                            GraphNodeInterruptIdentity(base.run_id, base.superstep, A, 1),
                             cast(GraphInterruptPayload, "not-bytes"),
                         )
                     ),
@@ -320,7 +320,7 @@ def test_opaque_frontier_payloads_must_be_bytes(case: str) -> None:
 
 def test_historical_interrupt_generation_remains_valid_after_a_sibling_attempt() -> None:
     base = replace(running(), execution_sequence=3)
-    historical = derive_graph_node_interrupt_identity(base.run_id, base.superstep, A, 1)
+    historical = GraphNodeInterruptIdentity(base.run_id, base.superstep, A, 1)
     frontier = GraphFrontierState(
         (
             GraphFrontierNode(
@@ -349,7 +349,7 @@ def test_pending_can_coexist_with_failed_and_interrupted_settlements() -> None:
                 B,
                 InterruptedGraphNode(
                     GraphNodeInterrupt(
-                        derive_graph_node_interrupt_identity(base.run_id, base.superstep, B, 1),
+                        GraphNodeInterruptIdentity(base.run_id, base.superstep, B, 1),
                         GraphInterruptPayload(b"question"),
                     )
                 ),

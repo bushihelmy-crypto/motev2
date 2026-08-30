@@ -102,9 +102,7 @@ def _success_routes(
     node_id: GraphNodeId,
 ) -> tuple[GraphRouteId | None, ...]:
     routes = tuple(graph.transition.conditional_targets[node_id])
-    if routes:
-        return routes
-    return (None,)
+    return routes or (None,)
 
 
 def _join_key(

@@ -500,7 +500,6 @@ async def test_close_is_idempotent_and_cancels_live_tasks() -> None:
         await waiter
     assert cancelled.is_set()
     assert cancellations == 1
-    assert session.quiescent
     with pytest.raises(ResultCollectionError):
         await session.next(claimed)
 
@@ -518,8 +517,6 @@ async def test_async_context_manager_reaches_quiescence_and_closed_next_fails_cl
         settled = reduce_graph_run(claimed, completed.command)
         with pytest.raises(StopAsyncIteration):
             await session.next(settled)
-        assert session.quiescent
-    assert session.quiescent
     with pytest.raises(ResultCollectionError, match="closed"):
         await session.next(settled)
 
@@ -540,7 +537,6 @@ async def test_next_cancellation_performs_cancellation_safe_close() -> None:
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
-    assert session.quiescent
     with pytest.raises(ResultCollectionError, match="closed"):
         await session.next(claimed)
 
@@ -576,7 +572,6 @@ async def test_repeated_next_cancellation_waits_for_cleanup_to_finish() -> None:
         await asyncio.sleep(0)
         assert not waiter.done()
         assert not cleanup_finished.is_set()
-        assert not session.quiescent
     finally:
         release_cleanup.set()
         try:
@@ -587,7 +582,6 @@ async def test_repeated_next_cancellation_waits_for_cleanup_to_finish() -> None:
 
     assert cancelled
     assert cleanup_finished.is_set()
-    assert session.quiescent
     with pytest.raises(ResultCollectionError, match="closed"):
         await session.next(claimed)
 
@@ -673,19 +667,6 @@ async def test_session_initial_state_guards_fail_closed() -> None:
 
         completed = await session.next(claimed)
         assert completed.result.task.node_id == GraphNodeId("a")
-    finally:
-        await session.aclose()
-
-
-async def test_public_session_contract_is_runtime_checkable_and_executor_issued() -> None:
-    async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
-        return values
-
-    compiled = graph((node("a", operation),))
-    state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    _executor, _claimed, session = await claim_session(compiled, state)
-    try:
-        assert isinstance(session, GraphExecutionSession)
     finally:
         await session.aclose()
 
@@ -919,6 +900,7 @@ async def test_multiple_ordinary_errors_are_reported_by_canonical_task_identity(
         with pytest.raises(ValueError, match="input"):
             await session.next(claimed)
         assert completion_order == ["b", "a"]
-        assert session.quiescent
+        with pytest.raises(ResultCollectionError, match="quiescent"):
+            await session.next(claimed)
     finally:
         await session.aclose()

@@ -12,7 +12,6 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_input
 from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.resume_admission import prepare_resume
-from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.errors import (
@@ -536,9 +535,9 @@ async def test_claim_rejects_a_forged_prepared_task_identity(monkeypatch: pytest
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
 
-    with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, claimed)
-    assert not prepared.claim.consumed
+    for _ in range(2):
+        with pytest.raises(ResultCollectionError, match="committed graph state"):
+            await executor.execute(prepared.claim, claimed)
 
 
 async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winner() -> None:
@@ -555,7 +554,7 @@ async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winne
         executor.execute(prepared.claim, claimed),
         return_exceptions=True,
     )
-    sessions = tuple(outcome for outcome in outcomes if isinstance(outcome, GraphExecutionSession))
+    sessions = tuple(outcome for outcome in outcomes if not isinstance(outcome, BaseException))
     failures = tuple(outcome for outcome in outcomes if isinstance(outcome, ResultCollectionError))
 
     assert len(sessions) == len(failures) == 1
@@ -1326,7 +1325,6 @@ async def test_prepared_claim_remains_bound_to_executor_and_prepared_input() -> 
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
         await other.execute(prepared.claim, claimed)
-    assert not prepared.claim.consumed
     assert calls == 0
 
     session = await owner.execute(prepared.claim, claimed)
@@ -1336,7 +1334,8 @@ async def test_prepared_claim_remains_bound_to_executor_and_prepared_input() -> 
         assert output_value(completed.result) == "input"
     finally:
         await session.aclose()
-    assert prepared.claim.consumed
+    with pytest.raises(ResultCollectionError, match="already been consumed"):
+        await owner.execute(prepared.claim, claimed)
     assert calls == 1
 
 
@@ -1358,9 +1357,9 @@ async def test_fenced_unstarted_claim_cannot_start_or_be_consumed() -> None:
     assert claimed.execution is not None
     fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
 
-    with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, fenced)
-    assert not prepared.claim.consumed
+    for _ in range(2):
+        with pytest.raises(ResultCollectionError, match="committed graph state"):
+            await executor.execute(prepared.claim, fenced)
     assert calls == 0
 
 
@@ -1687,7 +1686,6 @@ async def test_node_initiated_cancellation_waits_for_sibling_cleanup() -> None:
         await session.next(claimed)
 
     assert sibling_cleaned.is_set()
-    assert session.quiescent
     assert claimed.execution is not None
 
 
@@ -1711,6 +1709,6 @@ async def test_claim_guard_rejects_a_forged_committed_attempt_token() -> None:
         ),
     )
 
-    with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, forged)
-    assert not prepared.claim.consumed
+    for _ in range(2):
+        with pytest.raises(ResultCollectionError, match="committed graph state"):
+            await executor.execute(prepared.claim, forged)

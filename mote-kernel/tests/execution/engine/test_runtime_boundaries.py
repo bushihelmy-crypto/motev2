@@ -1,7 +1,6 @@
 """Fail-closed boundaries retained by the scoped-frame execution runtime."""
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import replace
 from typing import cast
 
@@ -11,7 +10,7 @@ from tests.execution.engine.factories import compiled_graph, running_state
 
 import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
-from mote_kernel.execution.claim import ConsumedExecutionClaim, ExecutionClaimOwner
+from mote_kernel.execution.claim import ExecutionClaimOwner
 from mote_kernel.execution.engine.frontier import prepare_frontier
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
@@ -28,7 +27,10 @@ from mote_kernel.execution.engine.session import (
     issue_execution_session,
 )
 from mote_kernel.execution.engine.settlement import settle_result
-from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
+from mote_kernel.execution.engine.snapshot_guard import (
+    require_scoped_snapshot_matches_graph,
+    require_snapshot_matches_graph,
+)
 from mote_kernel.execution.engine.superstep import ExecutableFrontier, prepare_superstep
 from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import (
@@ -214,12 +216,12 @@ async def prepare_execution_frontier(
     graph: CompiledGraph[str],
     state: GraphRunState,
     projections: tuple[ChildProjection[str], ...] = (),
-) -> tuple[ExecutionClaimOwner, StepRequest[str], ExecutableFrontier[str]]:
+) -> tuple[ExecutionClaimOwner, ExecutableFrontier[str]]:
     owner = ExecutionClaimOwner()
     execution_request = request(graph, state, projections)
     disposition = await prepare_superstep(owner, graph, execution_request)
     assert isinstance(disposition, ExecutableFrontier)
-    return owner, execution_request, disposition
+    return owner, disposition
 
 
 def executable_input(graph: CompiledGraph[str], state: GraphRunState, node_id: str) -> NodeInputFrame[str]:
@@ -981,19 +983,19 @@ def test_snapshot_guard_rejects_unknown_and_mismatched_resource_participants() -
         require_snapshot_matches_graph(compiled_graph("a"), unknown)
 
 
-def test_snapshot_guard_rejects_a_parent_activation_not_declared_by_the_executor() -> None:
-    parent = ParentGraphActivation(GraphRunId("parent"), 0, GraphNodeId("nested"))
+def test_scoped_snapshot_guard_rejects_a_parent_activation_outside_the_compiled_scope() -> None:
+    parent = ParentGraphActivation(GraphRunId("parent"), 0, GraphNodeId("other"))
     child = replace(
         running_state(definition_id="boundary.child", frontier=("child",)),
         run_id=child_graph_run_id(parent.run_id, parent.superstep, parent.node_id),
         parent=parent,
     )
     compiled_child = nested_graph().nested_graphs[GraphNodeId("nested")]
-    with pytest.raises(InvalidExecutionSnapshotError, match="parent activation"):
-        require_snapshot_matches_graph(
+    with pytest.raises(SnapshotMismatchError, match="compiled definition scope"):
+        require_scoped_snapshot_matches_graph(
             compiled_child,
             child,
-            frozenset({((compiled_child.definition_id, compiled_child.version), GraphNodeId("other"))}),
+            ScopeRunCoordinate(compiled_child.definition_scope, child.run_id),
         )
 
 
@@ -1008,9 +1010,9 @@ async def test_session_request_validation_rejects_a_claim_with_the_wrong_task_sc
     claimed = reduce_graph_run(state, prepared.claim.command)
     forged = replace(claimed, frontier=GraphFrontierState((claimed.frontier.nodes[0],)))
 
-    with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await executor.execute(prepared.claim, forged)
-    assert not prepared.claim.consumed
+    for _ in range(2):
+        with pytest.raises(ResultCollectionError, match="committed graph state"):
+            await executor.execute(prepared.claim, forged)
 
 
 @pytest.mark.asyncio
@@ -1028,7 +1030,7 @@ async def test_session_request_validation_rejects_a_claim_that_still_has_an_acti
 async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
     graph = compiled_graph("a")
     state = running_state()
-    owner, _execution_request, prepared = await prepare_execution_frontier(graph, state)
+    owner, prepared = await prepare_execution_frontier(graph, state)
     claimed = reduce_graph_run(state, prepared.claim.command)
     assert claimed.execution is not None
     forged = replace(
@@ -1042,7 +1044,6 @@ async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
     )
     with pytest.raises(ResultCollectionError, match="committed graph state"):
         await prepared.claim.consume(owner, forged)
-    assert not prepared.claim.consumed
 
     receipt = await prepared.claim.consume(owner, claimed)
     session = issue_execution_session(graph, receipt)
@@ -1054,25 +1055,10 @@ async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consumed_claim_receipt_cannot_be_constructed_directly() -> None:
-    graph = compiled_graph("a")
-    state = running_state()
-    _owner, _execution_request, prepared = await prepare_execution_frontier(graph, state)
-
-    with pytest.raises(TypeError, match="issued only"):
-        cast(Callable[..., object], ConsumedExecutionClaim)(
-            object(),
-            prepared.claim.snapshot,
-            state,
-            _execution_request,
-        )
-
-
-@pytest.mark.asyncio
 async def test_claim_receipt_requires_exact_owner_identity() -> None:
     graph = compiled_graph("a")
     state = running_state()
-    _owner, _execution_request, prepared = await prepare_execution_frontier(graph, state)
+    _owner, prepared = await prepare_execution_frontier(graph, state)
     claimed = reduce_graph_run(state, prepared.claim.command)
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):

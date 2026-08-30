@@ -321,7 +321,7 @@ class RecoveryInvocationSeed(Generic[GraphValueT]):
     admitted_actions: tuple[AdmittedResumeFact, ...] = ()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _RecoveryWorkItem(Generic[GraphValueT]):
     state: GraphRunState = field(repr=False)
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
@@ -1107,10 +1107,10 @@ def preflight_recovery(
         raise SnapshotMismatchError("recovery root binding has an invalid scope-run coordinate")
     bindings = (seed.root, *seed.children)
     coordinates = tuple(binding.scope_run for binding in bindings)
-    if len(coordinates) != len(set(coordinates)) or coordinates != tuple(sorted(coordinates)):
+    if coordinates != tuple(sorted(set(coordinates))):
         raise SnapshotMismatchError("recovery state bindings must be unique and canonical")
     action_targets = tuple(action.target for action in seed.admitted_actions)
-    if len(action_targets) != len(set(action_targets)) or action_targets != tuple(sorted(action_targets)):
+    if action_targets != tuple(sorted(set(action_targets))):
         raise SnapshotMismatchError("recovery admitted resume actions must be unique and canonical")
     for action in seed.admitted_actions:
         binding = next(

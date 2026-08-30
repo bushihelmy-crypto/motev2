@@ -35,7 +35,6 @@ from mote_kernel.state.graph_state.resource_reducer import (
     reduce_resources,
     validate_resource_snapshot,
 )
-from mote_kernel.state.graph_state.transition_guard import require_execution_lease
 from mote_kernel.state.graph_state.validation import (
     GraphStateTransitionError,
     validate_graph_frontier,
@@ -76,6 +75,12 @@ def _validate_claim_resources(state: GraphRunState, resources: ResourceSnapshot 
         raise GraphStateTransitionError("claim resource participant is outside current pending nodes")
 
 
+def _require_execution_lease(state: GraphRunState, token: GraphExecutionToken) -> None:
+    execution = state.execution
+    if execution is None or execution.token != token:
+        raise GraphStateTransitionError("graph command does not own the active execution lease")
+
+
 def claim_graph_execution(state: GraphRunState, command: ClaimGraphExecution) -> GraphRunState:
     if state.status is not GraphRunStatus.RUNNING or state.execution is not None or state.resources is not None:
         raise GraphStateTransitionError("only a quiescent running graph can claim execution")
@@ -98,7 +103,7 @@ def claim_graph_execution(state: GraphRunState, command: ClaimGraphExecution) ->
 def fence_graph_execution(state: GraphRunState, command: FenceGraphExecution) -> GraphRunState:
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can fence execution")
-    require_execution_lease(state, command.execution)
+    _require_execution_lease(state, command.execution)
     return validated_graph_run_state(replace(state, execution=None, resources=None))
 
 
@@ -125,8 +130,6 @@ def advance_graph_frontier(state: GraphRunState, command: AdvanceGraphFrontier) 
                 )
             ),
             join_progress=command.join_progress,
-            resources=None,
-            execution=None,
         )
     )
 
@@ -140,9 +143,6 @@ def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier
             state,
             status=GraphRunStatus.COMPLETED,
             frontier=GraphFrontierState(()),
-            join_progress=(),
-            resources=None,
-            execution=None,
         )
     )
 
@@ -150,13 +150,10 @@ def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier
 def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRunState:
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph execution can settle a node")
-    require_execution_lease(state, command.execution)
+    _require_execution_lease(state, command.execution)
     outcome = command.outcome
-    match outcome:
-        case SucceededGraphNodeOutcome() | FailedGraphNodeOutcome() | InterruptedGraphNodeOutcome():
-            pass
-        case _:
-            raise GraphStateTransitionError("settlement outcome has an unsupported variant")
+    if type(outcome) not in (SucceededGraphNodeOutcome, FailedGraphNodeOutcome, InterruptedGraphNodeOutcome):
+        raise GraphStateTransitionError("settlement outcome has an unsupported variant")
     node_id = outcome.node_id
     current = frontier_node(state.frontier, node_id)
     if current is None or not isinstance(current.settlement, PendingGraphNode):

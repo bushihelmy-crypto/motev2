@@ -20,6 +20,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptPayload,
     GraphJoinProgress,
     GraphNodeId,
+    GraphNodeInterruptIdentity,
     GraphNodeOutcome,
     GraphNodeResumeAction,
     GraphResumeInputCodec,
@@ -49,7 +50,6 @@ from mote_kernel.state.graph_state import (
     StartGraphRun,
     SucceededGraphNodeOutcome,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     graph_interrupt_id,
     reduce_graph_run,
 )
@@ -111,7 +111,7 @@ def failed_state() -> GraphRunState:
 def interrupted_state() -> GraphRunState:
     leased = claim(start(A, B))
     assert leased.execution is not None
-    identity = derive_graph_node_interrupt_identity(
+    identity = GraphNodeInterruptIdentity(
         leased.run_id,
         leased.superstep,
         B,

@@ -15,6 +15,7 @@ from mote_kernel.state.graph_state import (
     GraphFailure,
     GraphInterruptPayload,
     GraphNodeId,
+    GraphNodeInterruptIdentity,
     GraphRouteId,
     GraphRunState,
     InterruptedGraphNodeOutcome,
@@ -22,7 +23,6 @@ from mote_kernel.state.graph_state import (
     SelectGraphRoute,
     SettleGraphNode,
     SucceededGraphNodeOutcome,
-    derive_graph_node_interrupt_identity,
     frontier_node,
 )
 
@@ -77,7 +77,7 @@ def project_interrupt_settlement(
         token,
         InterruptedGraphNodeOutcome(
             node_id,
-            derive_graph_node_interrupt_identity(
+            GraphNodeInterruptIdentity(
                 state.run_id,
                 state.superstep,
                 node_id,

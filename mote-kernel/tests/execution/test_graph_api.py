@@ -48,6 +48,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptPayload,
     GraphNodeId,
     GraphNodeInterrupt,
+    GraphNodeInterruptIdentity,
     GraphRunState,
     InterruptedGraphNode,
     PendingGraphNode,
@@ -56,7 +57,6 @@ from mote_kernel.state.graph_state import (
     StartGraphRun,
     SucceededGraphNode,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     reduce_graph_run,
 )
 
@@ -2908,7 +2908,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     root_state = replace(result.state, execution_sequence=max(1, result.state.execution_sequence))
     root_interrupt = InterruptedGraphNode(
         GraphNodeInterrupt(
-            derive_graph_node_interrupt_identity(
+            GraphNodeInterruptIdentity(
                 root_state.run_id,
                 root_state.superstep,
                 GraphNodeId("root-interrupted"),

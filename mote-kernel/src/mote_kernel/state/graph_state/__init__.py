@@ -40,14 +40,12 @@ from mote_kernel.state.graph_state.frontier_model import (
     SkippedGraphNode,
     SucceededGraphNode,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     failed_node_ids,
     frontier_node,
     frontier_status,
     interrupted_node_ids,
     pending_node_ids,
     routing_contributions,
-    skipped_node_ids,
 )
 from mote_kernel.state.graph_state.identity import (
     GraphDefinitionId,
@@ -147,7 +145,6 @@ __all__ = [
     "SucceededGraphNodeOutcome",
     "UseStepRequestInput",
     "child_graph_run_id",
-    "derive_graph_node_interrupt_identity",
     "failed_node_ids",
     "frontier_node",
     "frontier_status",
@@ -157,7 +154,6 @@ __all__ = [
     "reduce_graph_run",
     "reduce_resources",
     "routing_contributions",
-    "skipped_node_ids",
     "validate_graph_run_state",
     "validate_resource_snapshot",
 ]

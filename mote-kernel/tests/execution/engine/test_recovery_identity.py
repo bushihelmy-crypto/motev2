@@ -76,6 +76,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptId,
     GraphInterruptPayload,
     GraphNodeId,
+    GraphNodeInterruptIdentity,
     GraphResumeInputCodecId,
     GraphRouteId,
     GraphRunId,
@@ -92,7 +93,6 @@ from mote_kernel.state.graph_state import (
     SkippedGraphNode,
     SucceededGraphNodeOutcome,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     graph_interrupt_id,
     reduce_graph_run,
 )
@@ -191,7 +191,7 @@ def test_recovery_control_identity_preserves_an_interrupted_settlement() -> None
     )
     execution = claimed.execution
     assert execution is not None
-    identity = derive_graph_node_interrupt_identity(
+    identity = GraphNodeInterruptIdentity(
         claimed.run_id,
         claimed.superstep,
         GraphNodeId("node"),

@@ -38,29 +38,25 @@ class ExecutionClaimSnapshot:
 class ConsumedExecutionClaim(Generic[GraphValueT]):
     """Internal one-shot receipt authorizing one session construction."""
 
-    __slots__ = ("_issued", "_preparation", "_snapshot", "_state")
+    __slots__ = ("_issued", "_preparation", "_state")
 
     def __init__(
         self,
         authority: _ClaimConsumptionAuthority,
-        snapshot: ExecutionClaimSnapshot,
         state: GraphRunState,
         preparation: FrontierPreparation[GraphValueT],
     ) -> None:
         if authority is not _CLAIM_CONSUMPTION_AUTHORITY:
             raise TypeError("consumed execution claims are issued only by PreparedExecutionClaim.consume()")
-        self._snapshot = snapshot
         self._state = state
         self._preparation = preparation
         self._issued = False
 
-    def issue(
-        self,
-    ) -> tuple[ExecutionClaimSnapshot, GraphRunState, FrontierPreparation[GraphValueT]]:
+    def issue(self) -> tuple[GraphRunState, FrontierPreparation[GraphValueT]]:
         if self._issued:
             raise ResultCollectionError("consumed execution claim has already issued its session")
         self._issued = True
-        return self._snapshot, self._state, self._preparation
+        return self._state, self._preparation
 
 
 def _require_committed_claim_state(
@@ -99,19 +95,11 @@ class PreparedExecutionClaim(Generic[GraphValueT]):
 
     @property
     def command(self) -> ClaimGraphExecution:
-        return self.snapshot.command
-
-    @property
-    def snapshot(self) -> ExecutionClaimSnapshot:
-        return self._snapshot
+        return self._snapshot.command
 
     @property
     def scope_run(self) -> ScopeRunCoordinate:
         return self._preparation.request.scope_run
-
-    @property
-    def consumed(self) -> bool:
-        return self._consumed
 
     async def consume(
         self,
@@ -121,12 +109,11 @@ class PreparedExecutionClaim(Generic[GraphValueT]):
         async with self._gate:
             if self._consumed:
                 raise ResultCollectionError("execution claim has already been consumed")
-            snapshot = self.snapshot
             if owner is not self._owner:
                 raise ResultCollectionError("execution claim does not match committed graph state")
-            _require_committed_claim_state(snapshot, state, self._preparation)
+            _require_committed_claim_state(self._snapshot, state, self._preparation)
             self._consumed = True
-            return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, snapshot, state, self._preparation)
+            return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, state, self._preparation)
 
 
 __all__ = ["ExecutionClaimOwner", "ExecutionClaimSnapshot", "PreparedExecutionClaim"]

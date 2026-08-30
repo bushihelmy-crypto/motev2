@@ -139,8 +139,7 @@ def _release(snapshot: ResourceSnapshot, node_id: GraphNodeId) -> ResourceSnapsh
 
     acquisitions = [item for item in snapshot.acquisitions if item.node_id != node_id]
     by_node = {item.node_id: item for item in acquisitions}
-    for resource in tuple(resources):
-        position = positions[resource.resource_id]
+    for position in range(len(resources)):
         current = resources[position]
         if current.owner is None and current.waiters:
             waiter = current.waiters[0]

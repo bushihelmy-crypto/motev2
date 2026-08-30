@@ -12,6 +12,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptPayload,
     GraphNodeId,
     GraphNodeInterrupt,
+    GraphNodeInterruptIdentity,
     GraphNodeSettlement,
     GraphResumeInputPayload,
     GraphRunId,
@@ -22,14 +23,12 @@ from mote_kernel.state.graph_state import (
     SkippedGraphNode,
     SucceededGraphNode,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     failed_node_ids,
     frontier_node,
     frontier_status,
     interrupted_node_ids,
     pending_node_ids,
     routing_contributions,
-    skipped_node_ids,
 )
 
 A = GraphNodeId("a")
@@ -40,7 +39,7 @@ E = GraphNodeId("e")
 
 
 def interrupt(node_id: GraphNodeId = C) -> InterruptedGraphNode:
-    identity = derive_graph_node_interrupt_identity(GraphRunId("run"), 4, node_id, 2)
+    identity = GraphNodeInterruptIdentity(GraphRunId("run"), 4, node_id, 2)
     return InterruptedGraphNode(GraphNodeInterrupt(identity, GraphInterruptPayload(b"question")))
 
 
@@ -109,7 +108,6 @@ def test_frontier_queries_preserve_canonical_node_order_by_settlement() -> None:
     assert pending_node_ids(frontier) == (A,)
     assert failed_node_ids(frontier) == (C,)
     assert interrupted_node_ids(frontier) == (D,)
-    assert skipped_node_ids(frontier) == (E,)
 
 
 def test_frontier_node_returns_exact_value_or_none() -> None:

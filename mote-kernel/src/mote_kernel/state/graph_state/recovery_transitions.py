@@ -30,13 +30,10 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
     if state.status is not GraphRunStatus.RUNNING or state.execution is not None or state.resources is not None:
         raise GraphStateTransitionError("node resume requires one quiescent running graph")
     for action in command.actions:
-        match action:
-            case ResumeFailedNode() | SkipFailedNode() | ResumeInterruptedNode():
-                pass
-            case _:
-                raise GraphStateTransitionError("resume action has an unsupported variant")
+        if type(action) not in (ResumeFailedNode, SkipFailedNode, ResumeInterruptedNode):
+            raise GraphStateTransitionError("resume action has an unsupported variant")
     action_ids = tuple(action.node_id for action in command.actions)
-    if not action_ids or action_ids != tuple(sorted(action_ids)) or len(action_ids) != len(set(action_ids)):
+    if not action_ids or action_ids != tuple(sorted(set(action_ids))):
         raise GraphStateTransitionError("resume actions must be non-empty, distinct, and canonical")
     actions = {action.node_id: action for action in command.actions}
     updated: list[GraphFrontierNode] = []
