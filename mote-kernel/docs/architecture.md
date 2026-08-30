@@ -20,7 +20,7 @@ Every node in one concurrent frontier receives the same immutable input snapshot
 `GraphRunState` is the sole durable truth for frontier settlement, resource ownership, and the active execution token. One atomic
 `ClaimGraphExecution` transition installs a token-only lease and, when needed, the initial `ResourceSnapshot`.
 
-Inside the facade, `GraphExecutor.execute()` is the only supported session creation path. It consumes the prepared claim linearly and issues a
+Inside the facade, `GraphExecutor.issue_session()` is the only supported session creation path. It consumes the prepared claim linearly and issues a
 single-consumer `GraphExecutionSession`; the internal session contract is a non-constructible protocol. Each `next(authoritative_state)` call
 requires the exact successor of the preceding reducer command and yields at most one typed node completion with one `SettleGraphNode` command. Concurrent
 `next()` calls fail closed before reaching the scheduler, and `aclose()` is idempotent and waits for live tasks to stop.

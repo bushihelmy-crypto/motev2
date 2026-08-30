@@ -126,7 +126,7 @@ family_driver._execute_frontier(...)
   +-- commit_transition(ClaimGraphExecution)
   |     `-- GraphRunState 安装 execution lease / resources
   |
-  +-- GraphExecutor.execute(prepared_claim, claimed_state)
+  +-- GraphExecutor.issue_session(prepared_claim, claimed_state)
   |     +-- 校验 claimed State 是 claim command 的精确 reducer 后继
   |     +-- 校验 preparation 的完整 canonical GraphTask 序列
   |     +-- 线性消费 PreparedExecutionClaim（不重建 frontier）
@@ -161,7 +161,7 @@ family_driver._execute_frontier(...)
 ```
 
 `GraphExecutor.prepare()` 只准备 disposition 和 claim，不执行节点，也不调用 reducer。
-`GraphExecutor.execute()` 只验证精确 reducer 后继并签发由 claim 授权的 session，不拥有持久化或 State 变更。
+`GraphExecutor.issue_session()` 只验证精确 reducer 后继并签发由 claim 授权的 session，不拥有持久化或 State 变更。
 普通 callable node 的唯一调用点是 `TaskScheduler`。
 
 ## 5. 并发执行、逐节点提交

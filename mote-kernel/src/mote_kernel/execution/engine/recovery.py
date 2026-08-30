@@ -1102,11 +1102,9 @@ def preflight_recovery(
     action_targets = tuple(action.target for action in seed.admitted_actions)
     if action_targets != tuple(sorted(set(action_targets))):
         raise SnapshotMismatchError("recovery admitted resume actions must be unique and canonical")
+    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     for action in seed.admitted_actions:
-        binding = next(
-            (candidate for candidate in bindings if candidate.scope_run == action.target.scope_run),
-            None,
-        )
+        binding = family.binding(action.target.scope_run)
         if binding is None or binding.state.superstep != action.target.superstep:
             raise SnapshotMismatchError("recovery admitted resume action does not match a simulated scoped successor")
         node = frontier_node(binding.state.frontier, action.target.node_id)
@@ -1131,7 +1129,6 @@ def preflight_recovery(
         expected = _resume_input_coordinate(action.target, plan)
         if not availability.has_resume_input(expected):
             raise SnapshotMismatchError("recovery admitted resume action lacks its exact resume-input availability")
-    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     boundaries = _prove_scope(
         graph,
         seed.root.state,

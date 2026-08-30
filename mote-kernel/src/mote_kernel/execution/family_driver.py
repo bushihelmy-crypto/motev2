@@ -1021,12 +1021,11 @@ async def admit_continued_root(
         owner_state: GraphRunState,
     ) -> None:
         nonlocal failed_scope
-        direct_candidates = tuple(
-            binding for binding in child_states if binding.parent_activation.scope_run == owner_scope_run
-        )
         admitted: list[tuple[ChildStateBinding, ParentGraphActivation, CompiledGraph[GraphValueT]]] = []
-        for binding in direct_candidates:
+        for binding in child_states:
             activation = binding.parent_activation
+            if activation.scope_run != owner_scope_run:
+                continue
             if not is_current_child_activation(owner_state, activation):
                 continue
             parent = ParentGraphActivation(
@@ -1035,13 +1034,8 @@ async def admit_continued_root(
                 activation.node_id,
             )
             admitted.append((binding, parent, owner_graph.nested_graphs[activation.node_id]))
-        direct = tuple(
-            sorted(
-                admitted,
-                key=lambda item: tuple(owner_graph.nodes).index(item[1].node_id),
-            )
-        )
-        for binding, parent, child_graph in direct:
+        admitted.sort(key=lambda item: item[1].node_id)
+        for binding, parent, child_graph in admitted:
             position = owner.child_position(parent)
             if binding.state.status is not GraphRunStatus.RUNNING:
                 if binding.state.status is GraphRunStatus.COMPLETED:
