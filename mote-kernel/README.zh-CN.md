@@ -57,6 +57,13 @@ make check
 
 `pre-commit install` 和 `pre-commit run --all-files` 应在 monorepo 根目录执行。
 
+结构复杂度扫描基于 AST 而非源码文本，因此改变量名或常量不能掩盖逻辑重复。`make complexity-ratchet`
+是阻止生产类型、字段、分支和结构异味继续增长的 CI 棘轮；`make complexity` 是阻断式审查门禁：它将当前候选
+身份与 `pyproject.toml` 中显式维护的 `complexity_reviewed` 清单比较，只有不存在未审查或过期身份时才通过。
+已审查、为保持 nominal owner 边界而保留的候选仍会显示在报告中；任何新增候选都会使门禁失败。`make complexity-report`
+输出每个候选及其审查状态。棘轮不等于代码健康；债务下降时必须同步下调基线，锁住改进。
+两道门禁都会由 `make check` 执行。
+
 ## 许可证
 
 Apache License 2.0。详见 [LICENSE](LICENSE)。
