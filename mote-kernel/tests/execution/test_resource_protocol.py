@@ -17,6 +17,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_output_declarations,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import ExecutableFrontier
 from mote_kernel.state.graph_state import (
@@ -164,7 +165,7 @@ async def claimed_internal_state(
     graph: CompiledGraph[str],
 ) -> tuple[GraphExecutor[str], Graph.State, ExecutableFrontier]:
     executor = GraphExecutor(graph)
-    state = reduce_graph_run(None, executor.start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     prepared = await executor.prepare(step_request(graph, state, "input").execution_request())
     assert isinstance(prepared, ExecutableFrontier)
     return executor, reduce_graph_run(state, prepared.claim.command), prepared
@@ -582,7 +583,7 @@ async def test_competing_resource_claims_have_one_durable_winner() -> None:
         requirement=(file_resource,),
     )
     executor = GraphExecutor(graph)
-    state = reduce_graph_run(None, executor.start_command(GraphRunId("run")))
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     execution_request = step_request(graph, state, "input").execution_request()
     first, second = await asyncio.gather(
         executor.prepare(execution_request),

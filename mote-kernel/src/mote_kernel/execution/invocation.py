@@ -10,20 +10,23 @@ from mote_kernel.execution.engine.recovery import (
     RecoveryInvocationSeed,
     RecoveryStateBinding,
 )
-from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
+from mote_kernel.execution.engine.resume_admission import (
+    ScopedResumeCandidate,
+    admit_resume_candidates,
+    prepare_resume,
+)
 from mote_kernel.execution.engine.resume_input import (
     materialize_node_input,
     pending_node_input_available,
 )
 from mote_kernel.execution.engine.routing import graph_outputs_available
-from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
+from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import (
     FrameInstallationInvariantError,
     GraphValueAdmissionError,
     GraphValuePublicationError,
     SnapshotMismatchError,
 )
-from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.topology import CompiledGraph, _compiled_graph_at_scope
 from mote_kernel.execution.graph.values import (
     _admit_graph_input_frame,
@@ -129,17 +132,6 @@ def project_resume_frames(
     return installed
 
 
-def executors_for(
-    root: CompiledGraph[GraphValueT],
-    states: tuple["_PlannedState", ...],
-) -> tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...]:
-    return tuple(
-        (binding.scope_run, GraphExecutor(_compiled_graph_at_scope(root, binding.scope_run.scope)))
-        for binding in states
-        if not binding.scope_run.scope or binding.state.status is GraphRunStatus.RUNNING
-    )
-
-
 def _planned_state(
     states: tuple[_PlannedState, ...],
     coordinate: ScopeRunCoordinate,
@@ -204,15 +196,7 @@ def plan_fences(
     fences: list[PlannedFence] = []
     for binding in states:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
-        require_snapshot_matches_graph(scoped_graph, binding.state)
-        if not binding.scope_run.scope and binding.state.parent is not None:
-            raise SnapshotMismatchError("root graph state cannot carry a parent activation")
-        if binding.scope_run.scope and (
-            binding.state.parent is None or binding.state.parent.node_id != binding.scope_run.scope[-1]
-        ):
-            raise SnapshotMismatchError("nested graph state does not match its compiled definition scope")
-        if binding.state.run_id != binding.scope_run.graph_run_id:
-            raise SnapshotMismatchError("lineage state does not match its scoped run identity")
+        require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
         activation = binding.parent_activation
         if activation is not None:
             expected_parent = ParentGraphActivation(
@@ -332,7 +316,6 @@ def plan_resumes(
     states: tuple[_PlannedState, ...],
     frames: ScopedFrameIndex[GraphValueT],
     resume: tuple[ResumeNodeRequest[GraphValueT], ...],
-    executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[GraphValueT]], ...],
 ) -> tuple[
     tuple[_PlannedState, ...],
     CandidateFrameAvailability[GraphValueT],
@@ -369,10 +352,8 @@ def plan_resumes(
         scope_run = _resolve_scope_run(graph, planned_states, scope)
         binding = _planned_state(planned_states, scope_run)
         _forbid_aborted_child_restart(graph, planned_states, scope_run, binding.state, actions)
-        executor = next((value for coordinate, value in executors if coordinate == scope_run), None)
-        if executor is None:
-            raise SnapshotMismatchError(f"invocation has no live executor at {scope_run!r}")
-        prepared = executor.resume(ResumeRequest(binding.state, scope_run, candidate_frames, actions))
+        scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
+        prepared = prepare_resume(scoped_graph, ResumeRequest(binding.state, scope_run, candidate_frames, actions))
         candidate = reduce_graph_run(binding.state, prepared.command)
         action_facts = _resume_facts(scope_run, binding.state.superstep, actions)
         for admitted in prepared.inputs:
@@ -389,7 +370,7 @@ def plan_resumes(
         plans.append(PlannedResume(scope_run, candidate, prepared, substitutions))
         candidates.append(
             ScopedResumeCandidate(
-                executor.graph,
+                scoped_graph,
                 scope_run,
                 binding.state,
                 candidate,

@@ -7,6 +7,7 @@ from enum import Enum, auto
 from types import TracebackType
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
+from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.claim import ConsumedExecutionClaim, ExecutionClaimSnapshot
 from mote_kernel.execution.engine.admission import select_executable_tasks
 from mote_kernel.execution.engine.frontier import FrontierPreparation, prepare_frontier
@@ -268,12 +269,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         """Finish close even if the cancelled caller receives further cancellation requests."""
 
         close_task = asyncio.create_task(self.aclose())
-        while not close_task.done():
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError:
-                continue
-        close_task.result()
+        await wait_for_owner_task(close_task)
 
     async def next(self, state: GraphRunState) -> ExecutedGraphNode[GraphValueT]:
         """Acknowledge the previous command and yield exactly one new completion."""

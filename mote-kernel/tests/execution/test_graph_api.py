@@ -14,11 +14,12 @@ from mote_kernel.execution.engine.claim_stage import project_claim_command
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.errors import FrameInstallationInvariantError, GraphValuePublicationError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.family_driver import admit_continued_root, drive_root, project_graph_result
+from mote_kernel.execution.family_driver import admit_continued_root, project_graph_result
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.execution.invocation import PlannedResume, executors_for, lineage_states
+from mote_kernel.execution.identity import ScopeRunCoordinate
+from mote_kernel.execution.invocation import PlannedResume
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
@@ -68,6 +69,26 @@ class CommitLog:
         self.transitions.append(transition)
         assert transition.candidate_state == reduce_graph_run(transition.previous_state, transition.command)
         return transition.candidate_state
+
+
+def fail_owner_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    *,
+    scope_depth: int,
+) -> None:
+    original = family_driver_module.require_scoped_snapshot_matches_graph
+
+    def reject(
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+    ) -> None:
+        if len(scope_run.scope) == scope_depth:
+            raise error
+        original(graph, state, scope_run)
+
+    monkeypatch.setattr(family_driver_module, "require_scoped_snapshot_matches_graph", reject)
 
 
 class TextSubclass(str):
@@ -2500,13 +2521,7 @@ async def test_root_owner_construction_failure_aborts_the_confirmed_start(
 
     original = RootConstructionError("root owner construction failed")
 
-    def reject_state(
-        _executor: GraphExecutor[str],
-        _state: Graph.State,
-    ) -> None:
-        raise original
-
-    monkeypatch.setattr(GraphExecutor, "validate_state", reject_state)
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
 
     async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values()
@@ -2542,13 +2557,7 @@ async def test_continued_root_construction_failure_aborts_the_admitted_state(
     assert isinstance(awaiting, Graph.AwaitingResumeResult)
     original = RootConstructionError("continued root owner construction failed")
 
-    def reject_state(
-        _executor: GraphExecutor[str],
-        _state: Graph.State,
-    ) -> None:
-        raise original
-
-    monkeypatch.setattr(GraphExecutor, "validate_state", reject_state)
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
     commits = CommitLog()
 
     with pytest.raises(RootConstructionError) as raised:
@@ -2615,18 +2624,8 @@ async def test_child_owner_construction_failure_aborts_only_the_confirmed_child_
     class ChildConstructionError(RuntimeError):
         pass
 
-    original_validate = GraphExecutor[str].validate_state
     original = ChildConstructionError("child owner construction failed")
-
-    def reject_child_state(
-        executor: GraphExecutor[str],
-        state: Graph.State,
-    ) -> None:
-        if executor.graph.definition_scope:
-            raise original
-        original_validate(executor, state)
-
-    monkeypatch.setattr(GraphExecutor, "validate_state", reject_child_state)
+    fail_owner_construction(monkeypatch, original, scope_depth=1)
 
     async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values()
@@ -2666,18 +2665,8 @@ async def test_continued_child_construction_failure_aborts_child_then_root(
     parent.set_outputs({})
     awaiting = await parent.run(Graph.values())
     assert isinstance(awaiting, Graph.AwaitingResumeResult)
-    original_validate = GraphExecutor[str].validate_state
     original = ChildConstructionError("continued child owner construction failed")
-
-    def reject_child_state(
-        executor: GraphExecutor[str],
-        state: Graph.State,
-    ) -> None:
-        if executor.graph.definition_scope:
-            raise original
-        original_validate(executor, state)
-
-    monkeypatch.setattr(GraphExecutor, "validate_state", reject_child_state)
+    fail_owner_construction(monkeypatch, original, scope_depth=1)
     commits = CommitLog()
 
     with pytest.raises(ChildConstructionError) as raised:
@@ -2713,13 +2702,7 @@ async def test_continued_root_construction_failure_aborts_only_root_candidate(
     assert isinstance(awaiting, Graph.AwaitingResumeResult)
     original = RootConstructionError("continued root owner construction failed")
 
-    def reject_state(
-        _executor: GraphExecutor[str],
-        _state: Graph.State,
-    ) -> None:
-        raise original
-
-    monkeypatch.setattr(GraphExecutor, "validate_state", reject_state)
+    fail_owner_construction(monkeypatch, original, scope_depth=0)
     commits = CommitLog()
 
     with pytest.raises(RootConstructionError) as raised:
@@ -2903,13 +2886,11 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     )
     owner = _require_compiled_owner(parent)
     snapshot = _admit_continuation(owner.family_identity, result.state, result.continuation)
-    lineage = lineage_states(root_state, snapshot.child_states)
     root, evidence_reader = await admit_continued_root(
         owner.graph,
         root_state,
         snapshot.child_states,
         snapshot.frames,
-        executors_for(owner.graph, lineage),
         ExecutionLimits(),
         None,
         (),
@@ -2917,7 +2898,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
         owner.family_identity,
         recovered=False,
     )
-    await drive_root(root)
+    await root.drive_quantum()
     result = project_graph_result(
         owner.graph,
         owner.family_identity,

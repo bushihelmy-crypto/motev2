@@ -5,7 +5,6 @@ import pytest
 from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import admit_continued_root, project_graph_result
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
 from mote_kernel.execution.graph.values import (
@@ -16,7 +15,7 @@ from mote_kernel.execution.graph.values import (
     _make_node_input_frame,
     _make_node_output_frame,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import AbortedGraph
 from mote_kernel.execution.run_context import (
@@ -233,7 +232,6 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
         aborted,
         (),
         ScopedFrameIndex(),
-        ((root_scope_run(aborted.run_id), GraphExecutor(graph)),),
         ExecutionLimits(),
         None,
         (),
@@ -1152,7 +1150,7 @@ async def test_recovered_continuation_rejects_a_child_run_id_mismatch() -> None:
     )
     layout.install(replace(snapshot, child_states=(mismatched,), frames=ScopedFrameIndex()))
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="scoped run identity"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="scope-run coordinate"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
 
 

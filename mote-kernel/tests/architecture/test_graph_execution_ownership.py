@@ -169,6 +169,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
             }
         ),
         "execution/engine/routing.py": frozenset({"validate_routing_contribution", "resolve_routing"}),
+        "execution/engine/resume_admission.py": frozenset({"prepare_resume"}),
         "execution/engine/task.py": frozenset({"TaskId", "task_identity", "GraphTask", "ExecutableTask"}),
         "execution/identity.py": frozenset({"ExecutionRequestAttemptId", "ScopeRunCoordinate", "StableActivation"}),
         "execution/claim.py": frozenset(
@@ -349,6 +350,11 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
         "_claim_owner",
         "_graph",
     }
+    assert {
+        node.name
+        for node in graph_executor.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
+    } == {"execute", "prepare"}
 
     forbidden_names = {"reduce_graph_run", "store", "state_store"}
     assert not {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id in forbidden_names}
@@ -370,6 +376,29 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
             else ()
         )
     )
+
+
+def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
+    handle = _top_level_definition("execution/family_driver.py", "_ChildHandle")
+    if not isinstance(handle, ast.ClassDef):
+        raise AssertionError("_ChildHandle must remain a nominal private type")
+    slots = next(
+        node.value
+        for node in handle.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__slots__" for target in node.targets)
+    )
+    assert isinstance(slots, ast.Tuple)
+    assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
+        "_abort",
+        "_drive",
+        "_release",
+    }
+    assert {
+        node.name
+        for node in handle.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
+    } == {"abort", "drive", "release"}
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
@@ -423,7 +452,6 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
             "_PlannedState",
             "PlannedFence",
             "PlannedResume",
-            "drive_root",
             "project_graph_result",
             "validate_context",
         }
@@ -436,7 +464,6 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
                 "PlannedFence",
                 "PlannedResume",
                 "GraphTransition",
-                "drive_root",
                 "project_graph_result",
             }
         )
@@ -445,7 +472,6 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         "PlannedFence": ("execution/invocation.py",),
         "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/family_driver.py",),
-        "drive_root": ("execution/family_driver.py",),
         "project_graph_result": ("execution/family_driver.py",),
     }
 

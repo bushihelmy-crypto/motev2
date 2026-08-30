@@ -7,6 +7,7 @@ from mote_kernel.execution.engine.routing import _declared_joins, validate_routi
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -78,4 +79,22 @@ def require_snapshot_matches_graph(
             )
 
 
-__all__ = ["require_snapshot_matches_graph"]
+def require_scoped_snapshot_matches_graph(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+    scope_run: ScopeRunCoordinate,
+) -> None:
+    """Require one snapshot to belong to one compiled scoped run."""
+
+    require_snapshot_matches_graph(graph, state)
+    if graph.definition_scope != scope_run.scope or state.run_id != scope_run.graph_run_id:
+        raise SnapshotMismatchError("scope-run coordinate does not match its compiled graph state")
+    if not scope_run.scope:
+        if state.parent is not None:
+            raise SnapshotMismatchError("root graph state cannot carry a parent activation")
+        return
+    if state.parent is None or state.parent.node_id != scope_run.scope[-1]:
+        raise SnapshotMismatchError("nested graph state does not match its compiled definition scope")
+
+
+__all__ = ["require_scoped_snapshot_matches_graph", "require_snapshot_matches_graph"]

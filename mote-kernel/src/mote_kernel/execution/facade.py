@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
 from uuid import uuid4
 
+from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.engine.admission import (
     admit_graph_input,
 )
@@ -23,18 +24,13 @@ from mote_kernel.execution.errors import (
     RoutingError,
     SnapshotMismatchError,
 )
-from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
     OwnerHandoff,
     admit_continued_root,
-    commit_transition,
-    drive_root,
     fresh_root,
     project_graph_result,
-    scoped_commit,
-    wait_for_owner_task,
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END, START
@@ -75,7 +71,6 @@ from mote_kernel.execution.identity import (
 )
 from mote_kernel.execution.invocation import (
     admit_state_owned_overrides,
-    executors_for,
     lineage_states,
     plan_fences,
     plan_resumes,
@@ -633,23 +628,12 @@ class Graph(Generic[GraphValueT]):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
             input_candidate = admit_graph_input(graph, invocation)
-            executor = GraphExecutor(graph)
-            command = executor.start_command(effective_run_id)
 
             async def setup_fresh() -> OwnerHandoff[GraphValueT]:
-                current = await commit_transition(
-                    scope_run,
-                    None,
-                    command,
-                    None,
-                    scoped_commit(scope_run, commit),
-                )
                 return await fresh_root(
                     graph,
                     scope_run,
-                    current,
                     input_candidate,
-                    executor,
                     limits,
                     commit,
                 )
@@ -677,14 +661,12 @@ class Graph(Generic[GraphValueT]):
                 recovered = _continuation_recovered(snapshot)
             lineage = lineage_states(invocation, child_states)
             validate_context(graph, lineage, frames, recovered=recovered)
-            executors = executors_for(graph, lineage)
             planned_states, fences = plan_fences(graph, lineage)
             planned_states, candidate_frames, planned_resumes, facts = plan_resumes(
                 graph,
                 planned_states,
                 frames,
                 resume,
-                executors,
             )
             admit_state_owned_overrides(graph, planned_states, candidate_frames.confirmed)
             if recovered or any(
@@ -701,7 +683,6 @@ class Graph(Generic[GraphValueT]):
                     invocation,
                     child_states,
                     frames,
-                    executors,
                     limits,
                     commit,
                     fences,
@@ -731,17 +712,12 @@ class Graph(Generic[GraphValueT]):
                     raise primary
 
             cleanup_task = asyncio.create_task(cleanup())
-            while not cleanup_task.done():
-                try:
-                    await asyncio.shield(cleanup_task)
-                except asyncio.CancelledError:
-                    continue
-            cleanup_task.result()
+            await wait_for_owner_task(cleanup_task)
 
         try:
             if setup_cancellation is not None:
                 raise setup_cancellation
-            disposition = await drive_root(root)
+            disposition = await root.drive_quantum()
             result = project_graph_result(
                 graph,
                 owner.family_identity,
