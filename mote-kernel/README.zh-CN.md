@@ -53,12 +53,10 @@ make check
 
 `pre-commit install` 和 `pre-commit run --all-files` 应在 monorepo 根目录执行。
 
-结构复杂度扫描基于 AST 而非源码文本，因此改变量名或常量不能掩盖逻辑重复。`make complexity-ratchet`
-是阻止生产类型、字段、分支和结构异味继续增长的 CI 棘轮；`make complexity` 是阻断式审查门禁：它将当前候选
-身份与 `pyproject.toml` 中显式维护的 `complexity_reviewed` 清单比较，只有不存在未审查或过期身份时才通过。
-已审查、为保持 nominal owner 边界而保留的候选仍会显示在报告中；任何新增候选都会使门禁失败。`make complexity-report`
-输出每个候选及其审查状态。棘轮不等于代码健康；债务下降时必须同步下调基线，锁住改进。
-两道门禁都会由 `make check` 执行。
+仓库级 AST 门禁以多个独立探测器召回整函数、语句子树和近似重复，并分析符号/字段使用率、函数内部复杂度与
+副作用、调用链、模块依赖环和异步所有权。`make complexity` 对确定性违规执行无例外清单的零债务门禁；
+`make complexity-ratchet` 阻止每一项高召回指标增长，并要求在指标改善后立即下调上限。`make complexity-report`
+输出指标对应的全部候选。两道门禁都会由 `make check` 执行。
 
 ## 许可证
 

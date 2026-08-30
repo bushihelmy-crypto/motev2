@@ -1,15 +1,11 @@
-from dataclasses import replace
 from pathlib import Path
 
 from tests.architecture.complexity_rules import (
     HEALTH_METRIC_NAMES,
     RATCHET_METRIC_NAMES,
-    ComplexityCandidateInventory,
-    candidate_inventory,
     complexity_snapshot,
     health_target_gaps,
     load_metric_limits,
-    load_reviewed_candidates,
     render_complexity_report,
 )
 
@@ -26,7 +22,7 @@ def _complexity_limits() -> dict[str, int]:
     )
 
 
-def test_health_targets_do_not_accept_unreviewed_structural_smells() -> None:
+def test_health_targets_require_zero_proven_debt() -> None:
     targets = load_metric_limits(
         PROJECT_ROOT,
         table_name="complexity_health",
@@ -36,60 +32,43 @@ def test_health_targets_do_not_accept_unreviewed_structural_smells() -> None:
     assert targets == dict.fromkeys(HEALTH_METRIC_NAMES, 0)
 
 
-def test_current_candidates_are_explicitly_reviewed_and_inventory_is_fresh() -> None:
+def test_proven_debt_is_absent() -> None:
     snapshot = complexity_snapshot(PACKAGE_ROOT, TEST_ROOT)
-    actual = candidate_inventory(snapshot)
-    reviewed = load_reviewed_candidates(PROJECT_ROOT)
     targets = load_metric_limits(
         PROJECT_ROOT,
         table_name="complexity_health",
         expected_names=HEALTH_METRIC_NAMES,
     )
 
-    assert actual.difference(reviewed).total() == 0
-    assert reviewed.difference(actual).total() == 0
-    assert health_target_gaps(snapshot, targets, reviewed) == ()
+    assert health_target_gaps(snapshot, targets) == ()
 
 
-def test_reviewed_candidates_do_not_mask_new_or_stale_identities(tmp_path: Path) -> None:
+def test_zero_debt_health_flags_proven_violations(tmp_path: Path) -> None:
     package_root = tmp_path / "package"
     test_root = tmp_path / "tests"
     package_root.mkdir()
     test_root.mkdir()
     (package_root / "logic.py").write_text(
         """
-def select_large(values: tuple[int, ...]) -> tuple[int, ...]:
-    selected: list[int] = []
-    for value in values:
-        if value > 10:
-            selected.append(value * 2)
-    return tuple(selected)
+def _unused() -> None:
+    return None
 
-def retain_ready(items: tuple[int, ...]) -> tuple[int, ...]:
-    ready: list[int] = []
-    for item in items:
-        if item > 99:
-            ready.append(item * 7)
-    return tuple(ready)
+async def _fetch() -> str:
+    return "value"
+
+async def run() -> None:
+    _fetch()
 """,
         encoding="utf-8",
     )
 
     snapshot = complexity_snapshot(package_root, test_root)
-    actual = candidate_inventory(snapshot)
-    empty_review = ComplexityCandidateInventory(
-        logical_clone_pairs=frozenset(),
-        record_shape_clone_pairs=frozenset(),
-        thin_single_use_helpers=frozenset(),
-        single_use_private_dataclasses=frozenset(),
-        test_only_private_definitions=frozenset(),
-    )
     targets = dict.fromkeys(HEALTH_METRIC_NAMES, 0)
 
-    assert health_target_gaps(snapshot, targets, empty_review) == (("logical_clone_pairs", 0, 1),)
-    assert health_target_gaps(snapshot, targets, actual) == ()
-    stale_review = replace(empty_review, logical_clone_pairs=frozenset({"stale candidate"}))
-    assert stale_review.difference(actual).logical_clone_pairs == frozenset({"stale candidate"})
+    assert health_target_gaps(snapshot, targets) == (
+        ("unconsumed_internal_async_calls", 0, 1),
+        ("unused_private_definitions", 0, 1),
+    )
 
 
 def test_structural_complexity_does_not_grow_and_improvements_are_ratchet_locked() -> None:
@@ -100,7 +79,8 @@ def test_structural_complexity_does_not_grow_and_improvements_are_ratchet_locked
     unratcheted_improvements = {name: (limits[name], value) for name, value in actual.items() if value < limits[name]}
 
     assert not regressions, (
-        "structural complexity grew; remove the new indirection/duplicate shape or explicitly review the baseline "
+        "structural complexity grew; remove the new indirection/duplicate shape or update the ratchet only after "
+        "a deliberate architecture review "
         f"change (metric: configured -> actual): {regressions}\n\n{render_complexity_report(snapshot)}"
     )
     assert not unratcheted_improvements, (
@@ -175,6 +155,82 @@ def count_ready(ready: bool, items: tuple[int, ...]) -> int:
 
     assert snapshot.logical_clone_pairs == 1
     assert snapshot.logical_clones[0].kind == "branch"
+
+
+def test_normalized_statement_clones_cover_non_branch_subtrees(tmp_path: Path) -> None:
+    package_root = tmp_path / "package"
+    test_root = tmp_path / "tests"
+    package_root.mkdir()
+    test_root.mkdir()
+    (package_root / "statements.py").write_text(
+        """
+def select(values: tuple[int, ...]) -> tuple[int, ...]:
+    selected: list[int] = []
+    for value in values:
+        normalized = value * 2
+        if normalized > 10 and normalized not in selected:
+            selected.append(normalized)
+        elif normalized < 0:
+            raise ValueError("negative")
+    return tuple(selected)
+
+def retain(items: tuple[int, ...]) -> list[int]:
+    ready = True
+    retained: list[int] = []
+    for item in items:
+        prepared = item * 7
+        if prepared > 99 and prepared not in retained:
+            retained.append(prepared)
+        elif prepared < 0:
+            raise ValueError("invalid")
+    if ready:
+        return retained
+    return []
+""",
+        encoding="utf-8",
+    )
+
+    snapshot = complexity_snapshot(package_root, test_root)
+
+    assert snapshot.statement_clone_pairs >= 1
+    assert any(pair.kind == "statement" for pair in snapshot.statement_clones)
+
+
+def test_near_clone_detector_survives_small_control_flow_edits(tmp_path: Path) -> None:
+    package_root = tmp_path / "package"
+    test_root = tmp_path / "tests"
+    package_root.mkdir()
+    test_root.mkdir()
+    (package_root / "near.py").write_text(
+        """
+def select(values: tuple[int, ...]) -> tuple[int, ...]:
+    selected: list[int] = []
+    for value in values:
+        normalized = value * 2
+        if normalized > 10 and normalized not in selected:
+            selected.append(normalized)
+        elif normalized < 0:
+            raise ValueError("negative")
+    return tuple(selected)
+
+def retain(items: tuple[int, ...]) -> tuple[int, ...]:
+    retained: list[int] = []
+    for item in items:
+        prepared = item * 7
+        if prepared >= 99 and prepared not in retained:
+            retained.append(prepared)
+        elif prepared < 0:
+            raise ValueError("invalid")
+    return tuple(retained)
+""",
+        encoding="utf-8",
+    )
+
+    snapshot = complexity_snapshot(package_root, test_root)
+
+    assert snapshot.logical_clone_pairs == 0
+    assert snapshot.near_clone_pairs == 1
+    assert snapshot.near_clones[0].similarity >= 85
 
 
 def test_matching_record_shapes_are_detected_across_nominal_types(tmp_path: Path) -> None:

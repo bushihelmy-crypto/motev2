@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
 from heapq import heappop, heappush
+from itertools import chain
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.admission import claim_resource_snapshot, select_executable_tasks
@@ -521,16 +522,7 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
     parts.append(str(max(0, state.limits.max_parallel_tasks - len(state.live))))
     for coordinate in state.availability.graph_inputs:
         parts.extend((*_coordinate_parts(coordinate.scope_run), str(coordinate.descriptor)))
-    for coordinate in state.availability.publications:
-        parts.extend(
-            (
-                *_coordinate_parts(coordinate.activation.scope_run),
-                str(coordinate.activation.superstep),
-                _atom(coordinate.activation.node_id),
-                str(coordinate.descriptor),
-            )
-        )
-    for coordinate in state.availability.resume_inputs:
+    for coordinate in chain(state.availability.publications, state.availability.resume_inputs):
         parts.extend(
             (
                 *_coordinate_parts(coordinate.activation.scope_run),

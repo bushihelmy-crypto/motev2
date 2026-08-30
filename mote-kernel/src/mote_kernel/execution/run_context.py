@@ -369,10 +369,6 @@ class _GraphContinuation(Generic[GraphValueT]):
         raise SnapshotMismatchError("continuations do not provide a serialization contract")
 
 
-def _new_family_identity() -> _CompiledFamilyIdentity:
-    return _CompiledFamilyIdentity()
-
-
 def _admit_continuation(
     family_identity: _CompiledFamilyIdentity,
     state: GraphRunState,
@@ -409,5 +405,4 @@ __all__ = [
     "_admit_continuation",
     "_continuation_recovered",
     "_make_continuation",
-    "_new_family_identity",
 ]

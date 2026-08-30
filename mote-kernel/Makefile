@@ -15,7 +15,7 @@ complexity:
 	python -m tests.architecture.complexity_rules --check-health
 
 complexity-ratchet:
-	python -m pytest -q tests/architecture/test_complexity_gate.py
+	python -m pytest -q tests/architecture/test_complexity_gate.py tests/architecture/test_semantic_index.py
 
 complexity-report:
 	python -m tests.architecture.complexity_rules
