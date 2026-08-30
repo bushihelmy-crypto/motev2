@@ -227,7 +227,7 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
     graph = compiled_graph("a")
     running = running_state()
     aborted = reduce_graph_run(running, AbortGraphRun(running.revision, GraphAbortReason("aborted")))
-    root = await admit_root(
+    root, evidence_reader = await admit_root(
         graph,
         aborted,
         (),
@@ -239,7 +239,14 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
     object.__setattr__(root.state, "abort", None)
 
     with pytest.raises(Graph.SnapshotMismatchError, match="missing its canonical abort"):
-        project_graph_result(graph, _new_family_identity(), root, AbortedGraph(), recovered=True)
+        project_graph_result(
+            graph,
+            _new_family_identity(),
+            root,
+            evidence_reader,
+            AbortedGraph(),
+            recovered=True,
+        )
 
 
 @pytest.mark.asyncio

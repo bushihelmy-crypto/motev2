@@ -1094,6 +1094,12 @@ async def test_missing_child_takes_priority_over_an_active_sibling() -> None:
     assert disposition.missing == (MissingChild(a),)
     assert disposition.active == (ActiveChild(b),)
 
+    reverse = await executor.prepare(request(graph, parent, (ActiveChild(a), MissingChild(b))))
+
+    assert isinstance(reverse, WaitingForChildren)
+    assert reverse.missing == (MissingChild(b),)
+    assert reverse.active == (ActiveChild(a),)
+
 
 @pytest.mark.parametrize("variant", ["completed", "aborted"])
 def test_terminal_child_projects_its_matching_parent_result_variant(variant: str) -> None:
@@ -1353,7 +1359,7 @@ async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         StableActivation(scope_run, 0, GraphNodeId("nested")),
         aborted,
     )
-    root = await family_driver_module.admit_root(
+    root, _evidence_reader = await family_driver_module.admit_root(
         graph,
         parent,
         (binding,),

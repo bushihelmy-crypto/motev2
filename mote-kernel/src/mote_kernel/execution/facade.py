@@ -27,12 +27,14 @@ from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
+    OwnerHandoff,
     admit_root,
     commit_transition,
     drive_root,
     fresh_root,
     project_graph_result,
     scoped_commit,
+    wait_for_owner_task,
 )
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END, START
@@ -630,28 +632,33 @@ class Graph(Generic[GraphValueT]):
         owner = self._compile()
         graph = owner.graph
         recovered = False
+        setup_cancellation: asyncio.CancelledError | None = None
         if isinstance(invocation, _GraphValues):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
             input_candidate = admit_graph_input(graph, invocation)
             executor = GraphExecutor(graph)
             command = executor.start_command(effective_run_id)
-            current = await commit_transition(
-                scope_run,
-                None,
-                command,
-                None,
-                scoped_commit(scope_run, commit),
-            )
-            root = await fresh_root(
-                graph,
-                scope_run,
-                current,
-                input_candidate,
-                executor,
-                limits,
-                commit,
-            )
+
+            async def setup_fresh() -> OwnerHandoff[GraphValueT]:
+                current = await commit_transition(
+                    scope_run,
+                    None,
+                    command,
+                    None,
+                    scoped_commit(scope_run, commit),
+                )
+                return await fresh_root(
+                    graph,
+                    scope_run,
+                    current,
+                    input_candidate,
+                    executor,
+                    limits,
+                    commit,
+                )
+
+            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(setup_fresh()))
         else:
             resumed_scopes = {action.scope for action in resume}
             substitution_actions = tuple(
@@ -691,92 +698,98 @@ class Graph(Generic[GraphValueT]):
                     graph,
                     recovery_seed(planned_states, candidate_frames, limits, facts),
                 )
-            confirmed_prefix = False
-            confirmed_states = lineage
-            confirmed_frames = frames
 
-            def partial_continuation() -> _GraphContinuation[GraphValueT]:
-                root_binding = next(binding for binding in confirmed_states if not binding.scope_run.scope)
+            async def setup_continued() -> OwnerHandoff[GraphValueT]:
+                confirmed_prefix = False
+                confirmed_states = lineage
+                confirmed_frames = frames
+
+                def partial_continuation() -> _GraphContinuation[GraphValueT]:
+                    root_binding = next(binding for binding in confirmed_states if not binding.scope_run.scope)
+                    confirmed_children = tuple(
+                        ChildStateBinding(binding.scope_run, binding.parent_activation, binding.state)
+                        for binding in confirmed_states
+                        if binding.parent_activation is not None
+                    )
+                    return _make_continuation(
+                        owner.family_identity,
+                        root_binding.state,
+                        confirmed_children,
+                        confirmed_frames,
+                        recovered=recovered,
+                    )
+
+                for fence in fences:
+                    binding = next(item for item in confirmed_states if item.scope_run == fence.scope_run)
+                    try:
+                        confirmed = await commit_transition(
+                            fence.scope_run,
+                            binding.state,
+                            fence.command,
+                            None,
+                            scoped_commit(fence.scope_run, commit),
+                        )
+                    except (Exception, asyncio.CancelledError) as cause:
+                        if confirmed_prefix:
+                            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
+                            raise _partial_commit_error(
+                                root_binding.state,
+                                partial_continuation(),
+                                cause,
+                                tuple(fence.scope_run.scope),
+                            ) from cause
+                        raise
+                    confirmed_states = replace_planned_state(confirmed_states, replace(binding, state=confirmed))
+                    confirmed_prefix = True
+                for planned_resume in planned_resumes:
+                    binding = next(item for item in confirmed_states if item.scope_run == planned_resume.scope_run)
+                    try:
+                        confirmed = await commit_transition(
+                            planned_resume.scope_run,
+                            binding.state,
+                            planned_resume.prepared.command,
+                            None,
+                            scoped_commit(planned_resume.scope_run, commit),
+                        )
+                        installed_frames = install_confirmed_resume_frames(
+                            confirmed_frames,
+                            planned_resume,
+                            confirmed,
+                        )
+                        confirmed_states = replace_planned_state(
+                            confirmed_states,
+                            replace(binding, state=confirmed),
+                        )
+                        confirmed_frames = installed_frames
+                    except (Exception, asyncio.CancelledError) as cause:
+                        if confirmed_prefix:
+                            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
+                            raise _partial_commit_error(
+                                root_binding.state,
+                                partial_continuation(),
+                                cause,
+                                tuple(planned_resume.scope_run.scope),
+                            ) from cause
+                        raise
+                    confirmed_prefix = True
+                root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
                 confirmed_children = tuple(
-                    ChildStateBinding(binding.scope_run, binding.parent_activation, binding.state)
-                    for binding in confirmed_states
-                    if binding.parent_activation is not None
+                    ChildStateBinding(item.scope_run, item.parent_activation, item.state)
+                    for item in confirmed_states
+                    if item.parent_activation is not None
                 )
-                return _make_continuation(
-                    owner.family_identity,
+                return await admit_root(
+                    graph,
                     root_binding.state,
                     confirmed_children,
                     confirmed_frames,
-                    recovered=recovered,
+                    executors,
+                    limits,
+                    commit,
                 )
 
-            for fence in fences:
-                binding = next(item for item in confirmed_states if item.scope_run == fence.scope_run)
-                try:
-                    confirmed = await commit_transition(
-                        fence.scope_run,
-                        binding.state,
-                        fence.command,
-                        None,
-                        scoped_commit(fence.scope_run, commit),
-                    )
-                except Exception as cause:
-                    if confirmed_prefix:
-                        root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-                        raise _partial_commit_error(
-                            root_binding.state,
-                            partial_continuation(),
-                            cause,
-                            tuple(fence.scope_run.scope),
-                        ) from cause
-                    raise
-                confirmed_states = replace_planned_state(confirmed_states, replace(binding, state=confirmed))
-                confirmed_prefix = True
-            for planned_resume in planned_resumes:
-                binding = next(item for item in confirmed_states if item.scope_run == planned_resume.scope_run)
-                try:
-                    confirmed = await commit_transition(
-                        planned_resume.scope_run,
-                        binding.state,
-                        planned_resume.prepared.command,
-                        None,
-                        scoped_commit(planned_resume.scope_run, commit),
-                    )
-                    installed_frames = install_confirmed_resume_frames(
-                        confirmed_frames,
-                        planned_resume,
-                        confirmed,
-                    )
-                    confirmed_states = replace_planned_state(
-                        confirmed_states,
-                        replace(binding, state=confirmed),
-                    )
-                    confirmed_frames = installed_frames
-                except Exception as cause:
-                    if confirmed_prefix:
-                        root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-                        raise _partial_commit_error(
-                            root_binding.state,
-                            partial_continuation(),
-                            cause,
-                            tuple(planned_resume.scope_run.scope),
-                        ) from cause
-                    raise
-                confirmed_prefix = True
-            root_binding = next(item for item in confirmed_states if not item.scope_run.scope)
-            confirmed_children = tuple(
-                ChildStateBinding(item.scope_run, item.parent_activation, item.state)
-                for item in confirmed_states
-                if item.parent_activation is not None
-            )
-            root = await admit_root(
-                graph,
-                root_binding.state,
-                confirmed_children,
-                confirmed_frames,
-                executors,
-                limits,
-                commit,
+            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
+                asyncio.create_task(setup_continued())
             )
 
         async def finish(abort_reason: GraphAbortReason | None) -> None:
@@ -804,11 +817,14 @@ class Graph(Generic[GraphValueT]):
             cleanup_task.result()
 
         try:
+            if setup_cancellation is not None:
+                raise setup_cancellation
             disposition = await drive_root(root)
             result = project_graph_result(
                 graph,
                 owner.family_identity,
                 root,
+                evidence_reader,
                 disposition,
                 recovered=recovered,
             )
@@ -817,7 +833,10 @@ class Graph(Generic[GraphValueT]):
                 with suppress(BaseException):
                     await finish(None)
                 raise
-            await finish(GraphAbortReason("graph invocation was cancelled"))
+            try:
+                await finish(GraphAbortReason("graph invocation was cancelled"))
+            except BaseException as cleanup_error:
+                raise error from cleanup_error
             raise
         except BaseException:
             with suppress(BaseException):

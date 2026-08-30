@@ -585,7 +585,7 @@ async def test_nested_projection_requires_terminal_child_state() -> None:
         root_scope_run(parent.run_id),
         GraphNodeId("nested"),
     )
-    owner = await fresh_root(
+    (owner, _evidence_reader) = await fresh_root(
         child_graph,
         coordinate,
         active,

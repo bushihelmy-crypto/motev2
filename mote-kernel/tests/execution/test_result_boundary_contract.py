@@ -31,7 +31,7 @@ def test_commit_result_rejects_a_task_result_subclass() -> None:
 async def test_graph_result_projection_rejects_a_boundary_subclass() -> None:
     graph = compiled_graph("a")
     state = running_state()
-    root = await admit_root(
+    root, evidence_reader = await admit_root(
         graph,
         state,
         (),
@@ -46,6 +46,7 @@ async def test_graph_result_projection_rejects_a_boundary_subclass() -> None:
             graph,
             _new_family_identity(),
             root,
+            evidence_reader,
             AwaitingResumeSubclass((), ()),
             recovered=True,
         )

@@ -875,8 +875,10 @@ async def test_sibling_scope_substitutions_install_and_materialize_without_cross
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_second", [False, True], ids=("error", "cancellation"))
 async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
+    cancel_second: bool,
 ) -> None:
     class SecondScopeCommitError(RuntimeError):
         pass
@@ -915,7 +917,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
     transitions: list[Graph.Transition[str]] = []
 
     old_snapshot = _continuation_snapshot(paused.continuation)
-    original_error = SecondScopeCommitError()
+    original_error: BaseException = asyncio.CancelledError() if cancel_second else SecondScopeCommitError()
 
     async def fail_second_scope(transition: Graph.Transition[str], /) -> Graph.State:
         transitions.append(transition)
@@ -2898,7 +2900,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     owner = _require_compiled_owner(parent)
     snapshot = _admit_continuation(owner.family_identity, result.state, result.continuation)
     lineage = lineage_states(root_state, snapshot.child_states)
-    root = await admit_root(
+    root, evidence_reader = await admit_root(
         owner.graph,
         root_state,
         snapshot.child_states,
@@ -2911,6 +2913,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
         owner.graph,
         owner.family_identity,
         root,
+        evidence_reader,
         AwaitingResume((), ()),
         recovered=False,
     )

@@ -1,5 +1,6 @@
 """Execution results, public commit evidence, and graph dispositions."""
 
+import asyncio
 from dataclasses import InitVar, dataclass
 from typing import Generic, TypeAlias, TypeVar, final
 
@@ -27,6 +28,7 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
+_PartialCommitCause: TypeAlias = Exception | asyncio.CancelledError
 
 
 class _PartialCommitSeal:
@@ -47,7 +49,7 @@ class _PartialCommitError(ExecutionError, Generic[GraphValueT]):
         *,
         state: GraphRunState,
         continuation: _GraphContinuation[GraphValueT],
-        cause: Exception,
+        cause: _PartialCommitCause,
         failed_scope: tuple[str, ...],
         _seal: _PartialCommitSeal,
     ) -> None:
@@ -63,7 +65,7 @@ class _PartialCommitError(ExecutionError, Generic[GraphValueT]):
 def _partial_commit_error(
     state: GraphRunState,
     continuation: _GraphContinuation[GraphValueT],
-    cause: Exception,
+    cause: _PartialCommitCause,
     failed_scope: tuple[str, ...],
 ) -> _PartialCommitError[GraphValueT]:
     return _PartialCommitError(
@@ -198,10 +200,17 @@ class WaitingForChildren(Generic[GraphValueT]):
     active: tuple[ActiveChild, ...]
 
     def __post_init__(self) -> None:
-        projections: tuple[MissingChild | ActiveChild, ...] = (*self.missing, *self.active)
-        parents = tuple(projection.parent for projection in projections)
-        canonical = tuple(sorted(parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
-        if not parents or len(parents) != len(set(parents)) or parents != canonical:
+        missing_parents = tuple(projection.parent for projection in self.missing)
+        active_parents = tuple(projection.parent for projection in self.active)
+        parents = (*missing_parents, *active_parents)
+        if (
+            not parents
+            or len(parents) != len(set(parents))
+            or missing_parents
+            != tuple(sorted(missing_parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
+            or active_parents
+            != tuple(sorted(active_parents, key=lambda parent: (parent.run_id, parent.superstep, parent.node_id)))
+        ):
             raise ValueError("children to drive must be non-empty, distinct, and canonical")
 
 
