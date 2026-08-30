@@ -13,7 +13,7 @@ from mote_kernel.state.graph_state.frontier_model import (
     frontier_status,
     pending_node_ids,
 )
-from mote_kernel.state.graph_state.identity import child_graph_run_id
+from mote_kernel.state.graph_state.identity import child_graph_run_id, is_canonical_identity
 from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
 from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution, SelectGraphRoute
@@ -24,7 +24,7 @@ class GraphStateTransitionError(ValueError):
 
 
 def _require_identity(value: str, field: str) -> None:
-    if not value or value != value.strip() or "\n" in value or "\r" in value:
+    if not is_canonical_identity(value):
         raise GraphStateTransitionError(f"{field} must be non-empty and trimmed")
 
 

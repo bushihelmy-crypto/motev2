@@ -1,6 +1,6 @@
 """Invocation-local scoped frames and opaque continuation snapshots."""
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import InitVar, dataclass, field, replace
 from typing import Generic, Never, Protocol, SupportsIndex, TypeAlias, TypeVar, final, overload
 
 from mote_kernel.execution.errors import (
@@ -252,11 +252,9 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     ) -> "ScopedFrameIndex[GraphValueT]":
         if any(existing.coordinate == record.coordinate for existing in self.graph_inputs):
             raise GraphValuePublicationError("graph input coordinate was admitted more than once")
-        return ScopedFrameIndex(
+        return replace(
+            self,
             graph_inputs=tuple(sorted((*self.graph_inputs, record), key=lambda item: item.coordinate)),
-            publications=self.publications,
-            resume_inputs=self.resume_inputs,
-            child_boundaries=self.child_boundaries,
         )
 
     def add_publication(
@@ -265,11 +263,9 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     ) -> "ScopedFrameIndex[GraphValueT]":
         if any(existing.coordinate == record.coordinate for existing in self.publications):
             raise GraphValuePublicationError("stable activation was published more than once")
-        return ScopedFrameIndex(
-            graph_inputs=self.graph_inputs,
+        return replace(
+            self,
             publications=tuple(sorted((*self.publications, record), key=lambda item: item.coordinate)),
-            resume_inputs=self.resume_inputs,
-            child_boundaries=self.child_boundaries,
         )
 
     def add_resume_input(
@@ -278,11 +274,9 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     ) -> "ScopedFrameIndex[GraphValueT]":
         if any(existing.coordinate == record.coordinate for existing in self.resume_inputs):
             raise GraphValuePublicationError("resume input coordinate was admitted more than once")
-        return ScopedFrameIndex(
-            graph_inputs=self.graph_inputs,
-            publications=self.publications,
+        return replace(
+            self,
             resume_inputs=tuple(sorted((*self.resume_inputs, record), key=lambda item: item.coordinate)),
-            child_boundaries=self.child_boundaries,
         )
 
     def add_child_boundary(
@@ -291,10 +285,8 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     ) -> "ScopedFrameIndex[GraphValueT]":
         if any(existing.coordinate == record.coordinate for existing in self.child_boundaries):
             raise GraphValuePublicationError("child boundary coordinate was confirmed more than once")
-        return ScopedFrameIndex(
-            graph_inputs=self.graph_inputs,
-            publications=self.publications,
-            resume_inputs=self.resume_inputs,
+        return replace(
+            self,
             child_boundaries=tuple(sorted((*self.child_boundaries, record), key=lambda item: item.coordinate)),
         )
 

@@ -11,6 +11,10 @@ GraphExecutionAttemptId = NewType("GraphExecutionAttemptId", str)
 GraphInterruptId = NewType("GraphInterruptId", str)
 
 
+def is_canonical_identity(value: str) -> bool:
+    return type(value) is str and bool(value) and value == value.strip() and "\n" not in value and "\r" not in value
+
+
 def _identity_field(value: str) -> str:
     return f"{len(value)}:{value}"
 
