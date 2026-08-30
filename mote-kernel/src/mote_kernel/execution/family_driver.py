@@ -27,6 +27,7 @@ from mote_kernel.execution.identity import (
 from mote_kernel.execution.invocation import (
     PlannedFence,
     PlannedResume,
+    is_current_child_activation,
     project_resume_frames,
 )
 from mote_kernel.execution.limits import ExecutionLimits
@@ -80,7 +81,6 @@ from mote_kernel.state.graph_state import (
     GraphRunCommand,
     GraphRunState,
     GraphRunStatus,
-    GraphStateTransitionError,
     InterruptedGraphNode,
     ParentGraphActivation,
     graph_interrupt_id,
@@ -875,51 +875,6 @@ async def _construct_fresh_child(
         raise
 
 
-def _validate_existing_child(
-    parent_graph: CompiledGraph[GraphValueT],
-    parent_scope_run: ScopeRunCoordinate,
-    parent_state: GraphRunState,
-    binding: ChildStateBinding,
-) -> tuple[ParentGraphActivation, CompiledGraph[GraphValueT], bool]:
-    activation = binding.parent_activation
-    if activation.scope_run != parent_scope_run:
-        raise SnapshotMismatchError("continuation child binding belongs to a foreign parent run")
-    if activation.node_id not in parent_graph.nested_graphs:
-        raise SnapshotMismatchError("continuation child binding has no parent nested definition")
-    child_graph = parent_graph.nested_graphs[activation.node_id]
-    parent = ParentGraphActivation(
-        parent_state.run_id,
-        activation.superstep,
-        activation.node_id,
-    )
-    _admit_parent_activation(parent_scope_run, parent, child_graph)
-    expected_coordinate = child_scope_run_for_activation(parent_scope_run, parent)
-    if (
-        binding.coordinate != expected_coordinate
-        or binding.state.run_id != binding.coordinate.graph_run_id
-        or binding.state.parent != parent
-    ):
-        raise SnapshotMismatchError("continuation child binding has inconsistent activation coordinates")
-    if activation.superstep > parent_state.superstep:
-        raise SnapshotMismatchError("continuation child binding is from a future parent frontier")
-    current_pending = frozenset(
-        node_id for node_id in pending_node_ids(parent_state.frontier) if node_id in parent_graph.nested_graphs
-    )
-    current_activation = (
-        parent_state.status is GraphRunStatus.RUNNING
-        and activation.superstep == parent_state.superstep
-        and activation.node_id in current_pending
-    )
-    if binding.state.status is GraphRunStatus.RUNNING and not current_activation:
-        raise SnapshotMismatchError("running child binding is not one current pending nested activation")
-    if binding.state.status is not GraphRunStatus.RUNNING:
-        try:
-            GraphExecutor(child_graph).validate_state(binding.state)
-        except GraphStateTransitionError as error:
-            raise SnapshotMismatchError("continuation child binding has invalid graph state") from error
-    return parent, child_graph, current_activation
-
-
 def _opaque_handle(
     child: _GraphRun[GraphValueT],
     parent: ParentGraphActivation,
@@ -1081,24 +1036,19 @@ async def admit_continued_root(
     ) -> None:
         nonlocal failed_scope
         direct_candidates = tuple(
-            binding for binding in child_states if binding.parent_activation.scope_run.scope == owner_scope_run.scope
+            binding for binding in child_states if binding.parent_activation.scope_run == owner_scope_run
         )
-        direct_activations = tuple(binding.parent_activation for binding in direct_candidates)
-        direct_coordinates = tuple(binding.coordinate for binding in direct_candidates)
-        if len(direct_activations) != len(set(direct_activations)) or len(direct_coordinates) != len(
-            set(direct_coordinates)
-        ):
-            raise SnapshotMismatchError("continuation repeats one direct child activation")
         admitted: list[tuple[ChildStateBinding, ParentGraphActivation, CompiledGraph[GraphValueT]]] = []
         for binding in direct_candidates:
-            parent, child_graph, current_activation = _validate_existing_child(
-                owner_graph,
-                owner_scope_run,
-                owner_state,
-                binding,
+            activation = binding.parent_activation
+            if not is_current_child_activation(owner_state, activation):
+                continue
+            parent = ParentGraphActivation(
+                owner_state.run_id,
+                activation.superstep,
+                activation.node_id,
             )
-            if current_activation:
-                admitted.append((binding, parent, child_graph))
+            admitted.append((binding, parent, owner_graph.nested_graphs[activation.node_id]))
         direct = tuple(
             sorted(
                 admitted,

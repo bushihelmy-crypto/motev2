@@ -708,112 +708,6 @@ async def test_first_setup_transition_failure_releases_without_aborting(
 
 
 @pytest.mark.asyncio
-async def test_existing_child_admission_rejects_unknown_or_malformed_terminal_bindings() -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
-    unknown_parent = StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId("unknown"))
-    unknown_binding = ChildStateBinding(
-        ScopeRunCoordinate((GraphNodeId("unknown"),), GraphRunId("unknown")),
-        unknown_parent,
-        child_state,
-    )
-    with pytest.raises(SnapshotMismatchError, match="no parent nested definition"):
-        await admit_continuation_root(graph, state, (unknown_binding,))
-
-    malformed = replace(child_state, status=GraphRunStatus.ABORTED, abort=None)
-    binding = ChildStateBinding(child_scope, activation, malformed)
-    with pytest.raises(SnapshotMismatchError, match="invalid graph state"):
-        await admit_continuation_root(graph, state, (binding,))
-
-
-@pytest.mark.asyncio
-async def test_existing_child_admission_validates_exact_current_identity() -> None:
-    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
-    binding = ChildStateBinding(child_scope, activation, child_state)
-
-    with pytest.raises(SnapshotMismatchError, match="repeats one direct child activation"):
-        await admit_continuation_root(graph, state, (binding, binding))
-
-    foreign_parent_scope = root_scope_run(GraphRunId("foreign-parent"))
-    foreign_parent = ParentGraphActivation(
-        foreign_parent_scope.graph_run_id,
-        state.superstep,
-        parent.node_id,
-    )
-    foreign_child_scope = child_scope_run_for_activation(foreign_parent_scope, foreign_parent)
-    child_graph = graph.nested_graphs[parent.node_id]
-    foreign_state = reduce_graph_run(
-        None,
-        project_start_graph_command(child_graph, foreign_child_scope.graph_run_id, foreign_parent),
-    )
-    foreign_binding = ChildStateBinding(
-        foreign_child_scope,
-        StableActivation(foreign_parent_scope, foreign_parent.superstep, foreign_parent.node_id),
-        foreign_state,
-    )
-    with pytest.raises(SnapshotMismatchError, match="foreign parent run"):
-        await admit_continuation_root(graph, state, (foreign_binding,))
-
-    wrong_coordinate = replace(
-        binding,
-        coordinate=ScopeRunCoordinate(child_scope.scope, GraphRunId("wrong-coordinate")),
-    )
-    with pytest.raises(SnapshotMismatchError, match="inconsistent activation coordinates"):
-        await admit_continuation_root(graph, state, (wrong_coordinate,))
-
-    wrong_state = replace(binding, state=replace(child_state, run_id=GraphRunId("wrong-state")))
-    with pytest.raises(SnapshotMismatchError, match="inconsistent activation coordinates"):
-        await admit_continuation_root(graph, state, (wrong_state,))
-
-    wrong_parent = replace(
-        binding,
-        state=replace(
-            child_state,
-            parent=ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("other")),
-        ),
-    )
-    with pytest.raises(SnapshotMismatchError, match="inconsistent activation coordinates"):
-        await admit_continuation_root(graph, state, (wrong_parent,))
-
-    stale_owner = root_owner(graph, replace(state, superstep=state.superstep + 1))
-    with pytest.raises(SnapshotMismatchError, match="not one current pending nested activation"):
-        await admit_continuation_root(graph, stale_owner.state, (binding,))
-
-
-@pytest.mark.asyncio
-async def test_existing_child_admission_rejects_a_future_parent_activation() -> None:
-    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
-    future_parent = ParentGraphActivation(state.run_id, state.superstep + 1, parent.node_id)
-    parent_scope = root_scope_run(state.run_id)
-    future_scope = child_scope_run_for_activation(parent_scope, future_parent)
-    child_graph = graph.nested_graphs[parent.node_id]
-    future_state = reduce_graph_run(
-        None,
-        project_start_graph_command(child_graph, future_scope.graph_run_id, future_parent),
-    )
-    future_binding = ChildStateBinding(
-        future_scope,
-        StableActivation(parent_scope, future_parent.superstep, future_parent.node_id),
-        future_state,
-    )
-
-    coordinate_collision = replace(future_binding, coordinate=child_scope)
-    with pytest.raises(SnapshotMismatchError, match="repeats one direct child activation"):
-        await admit_continuation_root(
-            graph,
-            state,
-            (ChildStateBinding(child_scope, activation, child_state), coordinate_collision),
-        )
-
-    with pytest.raises(SnapshotMismatchError, match="future parent frontier"):
-        await admit_continuation_root(
-            graph,
-            state,
-            (future_binding,),
-            child_executors=((future_scope, GraphExecutor(child_graph)),),
-        )
-
-
-@pytest.mark.asyncio
 async def test_existing_child_handoff_failure_cleans_a_constructed_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -963,7 +857,7 @@ async def test_child_constructor_failure_after_root_fence_preserves_the_confirme
 
 
 @pytest.mark.asyncio
-async def test_descendant_validation_failure_aborts_the_constructed_ancestor_then_root() -> None:
+async def test_missing_descendant_executor_aborts_each_constructed_candidate() -> None:
     grandchild = Graph[str]("ownership.descendant-validation.grandchild")
     grandchild.add_node("leaf", produce, inputs={}, outputs={"value": str})
     grandchild.set_outputs({})
@@ -1007,9 +901,9 @@ async def test_descendant_validation_failure_aborts_the_constructed_ancestor_the
             grandchild_parent,
         ),
     )
-    malformed_grandchild = ChildStateBinding(
+    grandchild_binding = ChildStateBinding(
         grandchild_scope,
-        StableActivation(child_scope, grandchild_parent.superstep, GraphNodeId("unknown")),
+        StableActivation(child_scope, grandchild_parent.superstep, grandchild_parent.node_id),
         grandchild_state,
     )
     transitions: list[GraphTransition[str]] = []
@@ -1018,16 +912,17 @@ async def test_descendant_validation_failure_aborts_the_constructed_ancestor_the
         transitions.append(transition)
         return transition.candidate_state
 
-    with pytest.raises(SnapshotMismatchError, match="no parent nested definition"):
+    with pytest.raises(SnapshotMismatchError, match="no executor"):
         await admit_continuation_root(
             graph,
             state,
-            (child_binding, malformed_grandchild),
+            (child_binding, grandchild_binding),
             child_executors=((child_scope, GraphExecutor(child_graph)),),
             commit=commit,
         )
 
     assert tuple(transition.scope for transition in transitions if isinstance(transition.command, AbortGraphRun)) == (
+        ("child", "grandchild"),
         ("child",),
         (),
     )

@@ -17,6 +17,7 @@ from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import admit_continued_root, drive_root, project_graph_result
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
+from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.invocation import PlannedResume, executors_for, lineage_states
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
@@ -1340,6 +1341,87 @@ async def test_first_fence_failure_propagates_original_error_without_partial_han
         await graph.run(state=captured, commit=reject)
 
     assert raised.value is original
+
+
+@pytest.mark.asyncio
+async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancestor() -> None:
+    async def complete(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    grandchild = Graph[str]("public.orphan-descendant.grandchild")
+    grandchild.add_node("leaf", complete, inputs={}, outputs={})
+    grandchild.set_outputs({})
+    child = Graph[str]("public.orphan-descendant.child")
+    child.add_node("grandchild", grandchild, inputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.orphan-descendant.parent")
+    parent.add_node("child", child, inputs={})
+    parent.set_outputs({})
+    completed = await parent.run(Graph.values())
+    assert isinstance(completed, Graph.CompletedResult)
+    snapshot = _continuation_snapshot(completed.continuation)
+    descendant = next(
+        binding
+        for binding in snapshot.child_states
+        if binding.coordinate.scope == (GraphNodeId("child"), GraphNodeId("grandchild"))
+    )
+    parent_activation = descendant.state.parent
+    assert parent_activation is not None
+    compiled = _require_compiled_owner(parent).graph
+    compiled_grandchild = compiled.nested_graphs[GraphNodeId("child")].nested_graphs[GraphNodeId("grandchild")]
+    running = reduce_graph_run(
+        None,
+        project_start_graph_command(
+            compiled_grandchild,
+            descendant.coordinate.graph_run_id,
+            parent_activation,
+        ),
+    )
+    leased = reduce_graph_run(
+        running,
+        project_claim_command(running, GraphExecutionAttemptId("orphan-descendant"), None),
+    )
+    child_states = tuple(
+        replace(binding, state=leased) if binding.coordinate == descendant.coordinate else binding
+        for binding in snapshot.child_states
+    )
+    frames = replace(
+        snapshot.frames,
+        publications=tuple(
+            record
+            for record in snapshot.frames.publications
+            if record.coordinate.activation.scope_run != descendant.coordinate
+        ),
+        resume_inputs=tuple(
+            record
+            for record in snapshot.frames.resume_inputs
+            if record.coordinate.activation.scope_run != descendant.coordinate
+        ),
+        child_boundaries=tuple(
+            record
+            for record in snapshot.frames.child_boundaries
+            if record.coordinate.child_scope_run != descendant.coordinate
+        ),
+    )
+    object.__setattr__(
+        completed.continuation,
+        "_snapshot",
+        replace(snapshot, child_states=child_states, frames=frames),
+    )
+    transitions: list[Graph.Transition[str]] = []
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="running child lineage"):
+        await parent.run(
+            state=completed.state,
+            continuation=completed.continuation,
+            commit=commit,
+        )
+
+    assert transitions == []
 
 
 @pytest.mark.asyncio

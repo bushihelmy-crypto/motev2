@@ -75,6 +75,7 @@ from mote_kernel.state.graph_state import (
     PendingGraphNode,
     SucceededGraphNode,
     frontier_node,
+    pending_node_ids,
     reduce_graph_run,
 )
 
@@ -161,6 +162,17 @@ def _replace_planned_state(
     )
 
 
+def is_current_child_activation(
+    parent_state: GraphRunState,
+    activation: StableActivation,
+) -> bool:
+    return (
+        parent_state.status is GraphRunStatus.RUNNING
+        and activation.superstep == parent_state.superstep
+        and activation.node_id in pending_node_ids(parent_state.frontier)
+    )
+
+
 def lineage_states(
     root_state: GraphRunState,
     child_states: tuple[ChildStateBinding, ...],
@@ -201,22 +213,31 @@ def plan_fences(
             raise SnapshotMismatchError("nested graph state does not match its compiled definition scope")
         if binding.state.run_id != binding.scope_run.graph_run_id:
             raise SnapshotMismatchError("lineage state does not match its scoped run identity")
-        if binding.parent_activation is not None:
+        activation = binding.parent_activation
+        if activation is not None:
             expected_parent = ParentGraphActivation(
-                binding.parent_activation.scope_run.graph_run_id,
-                binding.parent_activation.superstep,
-                binding.parent_activation.node_id,
+                activation.scope_run.graph_run_id,
+                activation.superstep,
+                activation.node_id,
             )
             if (
                 not binding.scope_run.scope
                 or binding.state.parent != expected_parent
                 or child_scope_run_for_activation(
-                    binding.parent_activation.scope_run,
+                    activation.scope_run,
                     expected_parent,
                 )
                 != binding.scope_run
             ):
                 raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
+            parent_state = _planned_state(states, activation.scope_run).state
+            if activation.superstep > parent_state.superstep:
+                raise SnapshotMismatchError("child lineage binding is from a future parent frontier")
+            if binding.state.status is GraphRunStatus.RUNNING and not is_current_child_activation(
+                parent_state,
+                activation,
+            ):
+                raise SnapshotMismatchError("running child lineage is not one current parent activation")
         execution = binding.state.execution
         if execution is None:
             continue

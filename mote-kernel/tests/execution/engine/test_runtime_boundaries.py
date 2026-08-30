@@ -373,6 +373,34 @@ def test_fence_planning_rejects_a_child_state_without_its_parent() -> None:
         plan_fences(graph, lineage_states(parent, (binding,)))
 
 
+def test_fence_planning_rejects_a_child_from_a_future_parent_frontier() -> None:
+    graph = nested_graph()
+    parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent")
+    parent_scope = root_scope_run(parent.run_id)
+    future_parent = ParentGraphActivation(
+        parent.run_id,
+        parent.superstep + 1,
+        GraphNodeId("nested"),
+    )
+    child_scope = child_scope_run_for_activation(parent_scope, future_parent)
+    child = reduce_graph_run(
+        None,
+        project_start_graph_command(
+            graph.nested_graphs[future_parent.node_id],
+            child_scope.graph_run_id,
+            future_parent,
+        ),
+    )
+    binding = ChildStateBinding(
+        child_scope,
+        StableActivation(parent_scope, future_parent.superstep, future_parent.node_id),
+        child,
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="future parent frontier"):
+        plan_fences(graph, lineage_states(parent, (binding,)))
+
+
 def test_claim_task_guard_rejects_forged_rebuild() -> None:
     graph = compiled_graph("a")
     state = running_state()
