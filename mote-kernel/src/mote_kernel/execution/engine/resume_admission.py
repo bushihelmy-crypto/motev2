@@ -87,8 +87,7 @@ def prepare_resume(
     requested_ids = tuple(action.node_id for action in request.actions)
     if (
         not requested_ids
-        or requested_ids != tuple(sorted(requested_ids))
-        or len(requested_ids) != len(set(requested_ids))
+        or requested_ids != tuple(sorted(set(requested_ids)))
         or any(action.scope != request.scope_run.scope for action in request.actions)
     ):
         raise SnapshotMismatchError("resume actions must be non-empty, distinct, canonical, and scoped")
@@ -217,16 +216,6 @@ def admit_resume_candidates(
                 (action for action in skip_actions if action.node_id == activation.node_id),
                 None,
             )
-            route = (
-                node.settlement.routing.route
-                if node is not None
-                and isinstance(node.settlement, SkippedGraphNode)
-                and isinstance(node.settlement.routing, SelectGraphRoute)
-                else None
-            )
-            action_route = (
-                action.routing.route if action is not None and isinstance(action.routing, SelectGraphRoute) else None
-            )
             if (
                 activation.scope_run != candidate.scope_run
                 or activation.superstep != candidate.previous.superstep
@@ -237,7 +226,7 @@ def admit_resume_candidates(
                 or not isinstance(node.settlement, SkippedGraphNode)
                 or action is None
                 or node.settlement.reason != action.reason
-                or route != action_route
+                or node.settlement.routing != action.routing
             ):
                 raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
     canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))

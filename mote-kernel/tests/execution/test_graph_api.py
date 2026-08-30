@@ -21,7 +21,6 @@ from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.invocation import PlannedResume
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     AwaitingResume,
 )
@@ -49,6 +48,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptPayload,
     GraphNodeId,
     GraphNodeInterrupt,
+    GraphNodeInterruptIdentity,
     GraphRunState,
     InterruptedGraphNode,
     PendingGraphNode,
@@ -57,7 +57,6 @@ from mote_kernel.state.graph_state import (
     StartGraphRun,
     SucceededGraphNode,
     UseStepRequestInput,
-    derive_graph_node_interrupt_identity,
     reduce_graph_run,
 )
 
@@ -696,9 +695,8 @@ async def test_same_scope_resume_input_and_substitution_install_as_one_frame_sna
     def capture(
         frames: ScopedFrameIndex[str],
         planned: PlannedResume[str],
-        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
-        installed = original(frames, planned, candidate)
+        installed = original(frames, planned)
         observed.append((frames, installed))
         return installed
 
@@ -1077,11 +1075,10 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
     def reject_right_install(
         frames: ScopedFrameIndex[str],
         planned: PlannedResume[str],
-        candidate: GraphRunState,
     ) -> ScopedFrameIndex[str]:
         if planned.scope_run.scope == (GraphNodeId("right"),):
             raise FrameInstallationInvariantError("right frame installation failed")
-        return original_install(frames, planned, candidate)
+        return original_install(frames, planned)
 
     async def record(transition: Graph.Transition[str], /) -> Graph.State:
         transitions.append(transition)
@@ -2836,10 +2833,10 @@ async def test_session_creation_error_fences_the_committed_claim(
 
     async def fail_execute(
         self: GraphExecutor[str],
-        claim: PreparedExecutionClaim,
-        request: StepRequest[str],
+        claim: PreparedExecutionClaim[str],
+        state: GraphRunState,
     ) -> GraphExecutionSession[str]:
-        del self, claim, request
+        del self, claim, state
         raise RuntimeError("session creation failed")
 
     monkeypatch.setattr(GraphExecutor, "execute", fail_execute)
@@ -2911,7 +2908,7 @@ async def test_awaiting_result_views_preserve_canonical_root_to_child_scope_orde
     root_state = replace(result.state, execution_sequence=max(1, result.state.execution_sequence))
     root_interrupt = InterruptedGraphNode(
         GraphNodeInterrupt(
-            derive_graph_node_interrupt_identity(
+            GraphNodeInterruptIdentity(
                 root_state.run_id,
                 root_state.superstep,
                 GraphNodeId("root-interrupted"),

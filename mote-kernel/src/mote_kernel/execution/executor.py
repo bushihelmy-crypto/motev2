@@ -5,10 +5,10 @@ from typing import Generic, TypeVar
 from mote_kernel.execution.claim import ExecutionClaimOwner, PreparedExecutionClaim
 from mote_kernel.execution.engine.session import GraphExecutionSession, issue_execution_session
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
-from mote_kernel.execution.engine.superstep import prepare_superstep, validate_execution_session_request
+from mote_kernel.execution.engine.superstep import PrepareDisposition, prepare_superstep
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.request import StepRequest
-from mote_kernel.execution.result import PrepareDisposition
+from mote_kernel.state.graph_state import GraphRunState
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -26,13 +26,12 @@ class GraphExecutor(Generic[GraphValueT]):
 
     async def execute(
         self,
-        claim: PreparedExecutionClaim,
-        request: StepRequest[GraphValueT],
+        claim: PreparedExecutionClaim[GraphValueT],
+        state: GraphRunState,
     ) -> GraphExecutionSession[GraphValueT]:
-        require_scoped_snapshot_matches_graph(self._graph, request.state, request.scope_run)
-        validate_execution_session_request(self._graph, request, claim)
-        consumed = await claim.consume(self._claim_owner, request.state, request.request_attempt_id)
-        return issue_execution_session(self._graph, request, consumed)
+        require_scoped_snapshot_matches_graph(self._graph, state, claim.scope_run)
+        consumed = await claim.consume(self._claim_owner, state)
+        return issue_execution_session(self._graph, consumed)
 
 
 __all__: list[str] = []

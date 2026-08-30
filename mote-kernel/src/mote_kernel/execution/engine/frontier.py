@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.planner import plan_tasks
-from mote_kernel.execution.engine.task import GraphTask
+from mote_kernel.execution.engine.resume_input import materialize_node_input
+from mote_kernel.execution.engine.task import ExecutableTask, GraphTask
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
@@ -25,8 +26,9 @@ GraphValueT = TypeVar("GraphValueT")
 
 @dataclass(frozen=True, slots=True)
 class FrontierPreparation(Generic[GraphValueT]):
+    request: StepRequest[GraphValueT]
     tasks: tuple[GraphTask, ...]
-    executable_definitions: tuple[tuple[GraphTask, CallableNodeDefinition[GraphValueT]], ...]
+    executables: tuple[ExecutableTask[GraphValueT], ...]
     nested_results: tuple[TaskResult[GraphValueT], ...]
     missing_children: tuple[MissingChild, ...]
     active_children: tuple[ActiveChild, ...]
@@ -66,12 +68,26 @@ def prepare_frontier(
             nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
         else:
             nested_results.append(TaskFailure(task, projection.reason))
-    executable: list[tuple[GraphTask, CallableNodeDefinition[GraphValueT]]] = []
-    for task in tasks:
-        definition = graph.nodes[task.node_id]
-        if isinstance(definition, CallableNodeDefinition):
-            executable.append((task, definition))
-    return FrontierPreparation(tasks, tuple(executable), tuple(nested_results), tuple(missing), tuple(active))
+    executables = (
+        tuple(
+            ExecutableTask(
+                task,
+                materialize_node_input(graph, request.state, request.scope_run, request.frames, task.node_id),
+            )
+            for task in tasks
+            if isinstance(graph.nodes[task.node_id], CallableNodeDefinition)
+        )
+        if not missing and not active
+        else ()
+    )
+    return FrontierPreparation(
+        request,
+        tasks,
+        executables,
+        tuple(nested_results),
+        tuple(missing),
+        tuple(active),
+    )
 
 
 __all__ = ["FrontierPreparation", "prepare_frontier"]

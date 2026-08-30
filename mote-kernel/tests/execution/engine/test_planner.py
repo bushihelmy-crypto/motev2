@@ -29,6 +29,7 @@ from mote_kernel.state.graph_state import (
     GraphJoinProgress,
     GraphNodeId,
     GraphNodeInterrupt,
+    GraphNodeInterruptIdentity,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphRunId,
@@ -39,7 +40,6 @@ from mote_kernel.state.graph_state import (
     SkippedGraphNode,
     SucceededGraphNode,
     child_graph_run_id,
-    derive_graph_node_interrupt_identity,
 )
 
 LIMITS = ExecutionLimits()
@@ -99,7 +99,7 @@ def test_planner_excludes_every_nonpending_settlement_variant() -> None:
                     GraphNodeId("c"),
                     InterruptedGraphNode(
                         GraphNodeInterrupt(
-                            derive_graph_node_interrupt_identity(state.run_id, state.superstep, GraphNodeId("c"), 1),
+                            GraphNodeInterruptIdentity(state.run_id, state.superstep, GraphNodeId("c"), 1),
                             GraphInterruptPayload(b"question"),
                         )
                     ),

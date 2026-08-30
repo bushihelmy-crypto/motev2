@@ -6,6 +6,7 @@ from tests.execution.engine.factories import callable_node, output_value
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.session import GraphExecutionSession
+from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
@@ -14,7 +15,7 @@ from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
-from mote_kernel.execution.result import ExecutableFrontier, ReadyToResolve, TaskSuccess
+from mote_kernel.execution.result import ReadyToResolve, TaskSuccess
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
     GraphDefinitionId,
@@ -58,10 +59,7 @@ async def claim(
     prepared = await executor.prepare(request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        step_request(graph, claimed, "input").execution_request(),
-    )
+    session = await executor.execute(prepared.claim, claimed)
     return claimed, session
 
 
@@ -176,13 +174,11 @@ async def test_ordinary_error_after_applied_sibling_settlement_preserves_that_si
     )
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    prepared = await executor.prepare(step_request(compiled, initial, "input").execution_request())
+    request = step_request(compiled, initial, "input").execution_request()
+    prepared = await executor.prepare(request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        step_request(compiled, claimed, "input").execution_request(),
-    )
+    session = await executor.execute(prepared.claim, claimed)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)

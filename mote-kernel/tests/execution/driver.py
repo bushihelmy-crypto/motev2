@@ -4,16 +4,15 @@ from typing import Generic, TypeVar
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.session import GraphExecutionSession
+from mote_kernel.execution.engine.superstep import ExecutableFrontier, PrepareDisposition
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.identity import ExecutionRequestAttemptId, root_scope_run
+from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     ChildProjection,
-    ExecutableFrontier,
     ExecutedGraphNode,
-    PrepareDisposition,
 )
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
@@ -23,7 +22,6 @@ from mote_kernel.execution.run_context import (
 from mote_kernel.state.graph_state import GraphRunCommand, GraphRunState, reduce_graph_run
 
 GraphValueT = TypeVar("GraphValueT")
-ATTEMPT_ID = ExecutionRequestAttemptId("test-request")
 DEFAULT_LIMITS = ExecutionLimits()
 
 
@@ -49,7 +47,6 @@ class DriverRequest(Generic[GraphValueT]):
             self.state,
             scope_run,
             frames,
-            ATTEMPT_ID,
             self.child_projections,
             self.limits,
         )
@@ -85,17 +82,7 @@ async def execute_step(
     if not isinstance(prepared, ExecutableFrontier):
         return prepared
     claimed = apply_command(request.state, prepared.claim.command)
-    session = await executor.execute(
-        prepared.claim,
-        StepRequest(
-            claimed,
-            execution_request.scope_run,
-            execution_request.frames,
-            ATTEMPT_ID,
-            request.child_projections,
-            request.limits,
-        ),
-    )
+    session = await executor.execute(prepared.claim, claimed)
     result = await session.next(claimed)
     return ClaimedStep(claimed, session, result)
 
@@ -109,7 +96,6 @@ async def close_claimed(step: ClaimedStep[GraphValueT]) -> None:
 
 
 __all__ = [
-    "ATTEMPT_ID",
     "ClaimedStep",
     "DriverRequest",
     "apply_claimed",

@@ -110,10 +110,7 @@ class PlannedResume(Generic[GraphValueT]):
 def project_resume_frames(
     frames: ScopedFrameIndex[GraphValueT],
     planned: PlannedResume[GraphValueT],
-    candidate: GraphRunState,
 ) -> ScopedFrameIndex[GraphValueT]:
-    if candidate != planned.successor:
-        raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     installed = frames
     try:
         for admitted in planned.prepared.inputs:
@@ -432,8 +429,7 @@ def _validate_frame_index(
     states: tuple[_PlannedState, ...],
     frames: ScopedFrameIndex[GraphValueT],
 ) -> None:
-    bindings = states
-    coordinates = frozenset(binding.scope_run for binding in bindings)
+    coordinates = frozenset(binding.scope_run for binding in states)
     if any(
         type(record) is not AdmittedGraphInput or type(record.coordinate) is not GraphInputAvailabilityCoordinate
         for record in frames.graph_inputs
@@ -479,7 +475,7 @@ def _validate_frame_index(
             raise SnapshotMismatchError("continuation graph input frame does not match its descriptor") from error
     for record in frames.publications:
         coordinate = record.coordinate
-        binding = _planned_state(bindings, coordinate.activation.scope_run)
+        binding = _planned_state(states, coordinate.activation.scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
         if (
@@ -505,7 +501,7 @@ def _validate_frame_index(
             raise SnapshotMismatchError("continuation publication frame does not match its descriptor") from error
     for record in frames.resume_inputs:
         coordinate = record.coordinate
-        binding = _planned_state(bindings, coordinate.activation.scope_run)
+        binding = _planned_state(states, coordinate.activation.scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
         if (
@@ -524,7 +520,7 @@ def _validate_frame_index(
             raise SnapshotMismatchError("continuation resume input frame does not match its descriptor") from error
     for record in frames.child_boundaries:
         coordinate = record.coordinate
-        binding = _planned_state(bindings, coordinate.child_scope_run)
+        binding = _planned_state(states, coordinate.child_scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.child_scope_run.scope)
         if (
             coordinate.descriptor != scoped_graph.graph_output_descriptor.identity

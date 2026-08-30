@@ -216,7 +216,6 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
         "state",
         "scope_run",
         "frames",
-        "request_attempt_id",
         "child_projections",
         "limits",
     }

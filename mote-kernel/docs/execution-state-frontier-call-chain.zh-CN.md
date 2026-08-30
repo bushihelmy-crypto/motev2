@@ -59,18 +59,16 @@ Graph.run(...)
   |     `-- 必要时 ResumeGraphNodes
   |           `-- commit_transition(...)
   |
-  `-- drive_root(...)
+  `-- _GraphRun.drive_quantum()
         |
-        `-- loop: _advance_scope_quantum(...)
-              |
-              +-- 构造 StepRequest(authoritative state, frames, limits)
-              |
+        `-- loop
+              +-- StepRequest(authoritative state, frames, limits)
               `-- GraphExecutor.prepare(request)
                     `-- prepare_superstep(...)
 ```
 
-`Graph` 门面不保存 run state。一次调用使用 `GraphRunContext` 暂存本次 invocation 的当前
-state binding 和 concrete frames；每次权威提交确认后才替换其中的 state binding。
+`Graph` 门面不保存 run state。一次调用由 owner-local `_GraphRun` 持有当前 state 和
+`ScopedFrameIndex`；每次权威提交确认后才替换其内存 state。
 
 ## 3. `GraphExecutor.prepare()` 的分流
 
@@ -98,12 +96,11 @@ prepare_superstep(state, compiled_graph)
         |     +-- plan_tasks(...)
         |     +-- 校验 nested child projections
         |     +-- 投影 terminal child result
-        |     `-- 区分 callable tasks / missing children / active children
+        |     +-- 区分 callable tasks / missing children / active children
+        |     `-- 无待处理 child 时，每个 callable node 只物化一次 effective input
         |
-        +-- missing child ---------------> StartMissingChildren
-        +-- active child ----------------> WaitForActiveChildren
+        +-- missing / active child ------> WaitingForChildren
         |
-        +-- materialize inputs（claim 前预校验）
         +-- claim_resource_snapshot(...)
         `-- prepare_claim(...)
               `-- ExecutableFrontier(
@@ -129,9 +126,9 @@ family_driver._execute_frontier(...)
   +-- commit_transition(ClaimGraphExecution)
   |     `-- GraphRunState 安装 execution lease / resources
   |
-  +-- GraphExecutor.execute(prepared_claim, claimed_request)
-  |     +-- 重新校验 claimed State 与任务集合
-  |     +-- 线性消费 PreparedExecutionClaim
+  +-- GraphExecutor.execute(prepared_claim, claimed_state)
+  |     +-- 校验 claimed State 与 preparation 的唯一任务范围
+  |     +-- 线性消费 PreparedExecutionClaim（不重建 frontier）
   |     `-- issue_execution_session(...)
   |
   `-- family_driver._consume_session(...)
@@ -140,7 +137,7 @@ family_driver._execute_frontier(...)
               |
               +-- acknowledge 上一条 settlement 已提交
               +-- select_executable_tasks(...)
-              +-- materialize_node_input(...)
+              +-- 复用 prepare 阶段的 ExecutableTask / effective input
               +-- TaskScheduler.submit(...)
               |     `-- await node.operation(node_input)
               |
@@ -158,7 +155,7 @@ family_driver._execute_frontier(...)
                           v
                     confirmed GraphRunState
                           |
-                          `-- context.replace_state(...)
+                          `-- _GraphRun 替换内存 state
                                 `-- 下一次 session.next(new_state)
 ```
 
@@ -249,14 +246,15 @@ state-owned 结构。Settlement 与 routing 拆成两次提交，保证崩溃后
 AWAITING_RESUME
   |
   +-- Graph.resume_failed / resume_interrupted / skip_failed
-  |     `-- GraphExecutor.resume(...)
-  |           `-- ResumeGraphNodes
-  |                 `-- commit_transition -> reduce_graph_run
-  |                       |
-  |                       +-- 恢复节点变回 Pending
-  |                       `-- skip 节点变为 Skipped
+  |     `-- plan_resumes(...) -> PlannedResume(successor)
+  |           `-- admit_continued_root(...)
+  |                 `-- _GraphRun.apply_admission_resume(...)
+  |                       `-- commit_transition(admitted_successor=successor)
+  |                             `-- 唯一一次 reduce_graph_run
+  |                                   +-- 恢复节点变回 Pending
+  |                                   `-- skip 节点变为 Skipped
   |
-  `-- 回到 drive_root / prepare_superstep
+  `-- 回到 _GraphRun.drive_quantum / prepare_superstep
 ```
 
 ```text
@@ -313,7 +311,7 @@ authoritative transition、commit 和确认都经过 `commit_transition()`。
 | `GraphExecutor` | Execution | prepare、claim 校验和 session 签发 |
 | `GraphExecutionSession` | Execution | 单消费者 completion/ack 协议和 transient task lifecycle |
 | `TaskScheduler` | Execution | 唯一普通节点 invocation owner |
-| `GraphRunContext` / frames | Execution | invocation-local State binding 与 concrete value availability |
+| `_GraphRun` / `ScopedFrameIndex` | Execution | owner-local State binding 与 concrete value availability |
 | `GraphRunState` | State | 整个 Graph Run 的可恢复控制快照 |
 | `GraphRunCommand` | State | 封闭的状态转换输入 union |
 | `reduce_graph_run` | State | pure transition、invariant 校验与 revision 推进 |

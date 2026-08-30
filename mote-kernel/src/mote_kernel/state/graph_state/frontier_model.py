@@ -64,17 +64,6 @@ class GraphNodeInterruptIdentity:
     execution_generation: int
 
 
-def derive_graph_node_interrupt_identity(
-    run_id: GraphRunId,
-    superstep: int,
-    node_id: GraphNodeId,
-    execution_generation: int,
-) -> GraphNodeInterruptIdentity:
-    """Build the structured interrupt coordinate owned by graph state."""
-
-    return GraphNodeInterruptIdentity(run_id, superstep, node_id, execution_generation)
-
-
 @dataclass(frozen=True, slots=True)
 class GraphNodeInterrupt:
     identity: GraphNodeInterruptIdentity
@@ -142,10 +131,6 @@ def interrupted_node_ids(frontier: GraphFrontierState) -> tuple[GraphNodeId, ...
     return _node_ids(frontier, InterruptedGraphNode)
 
 
-def skipped_node_ids(frontier: GraphFrontierState) -> tuple[GraphNodeId, ...]:
-    return _node_ids(frontier, SkippedGraphNode)
-
-
 def routing_contributions(
     frontier: GraphFrontierState,
 ) -> tuple[tuple[GraphNodeId, GraphRoutingContribution], ...]:
@@ -177,12 +162,10 @@ __all__ = [
     "SkippedGraphNode",
     "SucceededGraphNode",
     "UseStepRequestInput",
-    "derive_graph_node_interrupt_identity",
     "failed_node_ids",
     "frontier_node",
     "frontier_status",
     "interrupted_node_ids",
     "pending_node_ids",
     "routing_contributions",
-    "skipped_node_ids",
 ]

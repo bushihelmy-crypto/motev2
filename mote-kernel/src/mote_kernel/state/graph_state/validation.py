@@ -72,7 +72,7 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
     """Validate one durable or transition-local Frontier against its run coordinates."""
 
     node_ids = tuple(node.node_id for node in frontier.nodes)
-    if node_ids != tuple(sorted(node_ids)) or len(node_ids) != len(set(node_ids)):
+    if node_ids != tuple(sorted(set(node_ids))):
         raise GraphStateTransitionError("frontier node identities must be distinct and canonical")
     needs_codec = False
     for node in frontier.nodes:
@@ -166,7 +166,7 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         if execution.token.generation != state.execution_sequence or execution.token.generation < 1:
             raise GraphStateTransitionError("execution lease generation must match the graph sequence")
         _require_identity(execution.token.attempt_id, "execution attempt identity")
-        if state.status is GraphRunStatus.RUNNING and not pending_node_ids(state.frontier):
+        if not pending_node_ids(state.frontier):
             raise GraphStateTransitionError("an active execution lease requires pending nodes")
 
     match state.status:

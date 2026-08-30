@@ -8,12 +8,8 @@ from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
 from uuid import uuid4
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
-from mote_kernel.execution.engine.admission import (
-    admit_graph_input,
-)
-from mote_kernel.execution.engine.recovery import (
-    preflight_recovery,
-)
+from mote_kernel.execution.engine.admission import admit_graph_input
+from mote_kernel.execution.engine.recovery import preflight_recovery
 from mote_kernel.execution.errors import (
     ExecutionError,
     ExecutionLimitError,
@@ -27,7 +23,6 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
-    OwnerHandoff,
     admit_continued_root,
     fresh_root,
     project_graph_result,
@@ -623,22 +618,22 @@ class Graph(Generic[GraphValueT]):
         owner = self._compile()
         graph = owner.graph
         recovered = False
-        setup_cancellation: asyncio.CancelledError | None = None
         if isinstance(invocation, _GraphValues):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
             input_candidate = admit_graph_input(graph, invocation)
 
-            async def setup_fresh() -> OwnerHandoff[GraphValueT]:
-                return await fresh_root(
-                    graph,
-                    scope_run,
-                    input_candidate,
-                    limits,
-                    commit,
+            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
+                asyncio.create_task(
+                    fresh_root(
+                        graph,
+                        scope_run,
+                        input_candidate,
+                        limits,
+                        commit,
+                    )
                 )
-
-            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(setup_fresh()))
+            )
         else:
             resumed_scopes = {action.scope for action in resume}
             substitution_actions = tuple(
@@ -677,22 +672,21 @@ class Graph(Generic[GraphValueT]):
                     recovery_seed(planned_states, candidate_frames, limits, facts),
                 )
 
-            async def setup_continued() -> OwnerHandoff[GraphValueT]:
-                return await admit_continued_root(
-                    graph,
-                    invocation,
-                    child_states,
-                    frames,
-                    limits,
-                    commit,
-                    fences,
-                    planned_resumes,
-                    owner.family_identity,
-                    recovered=recovered,
-                )
-
             (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
-                asyncio.create_task(setup_continued())
+                asyncio.create_task(
+                    admit_continued_root(
+                        graph,
+                        invocation,
+                        child_states,
+                        frames,
+                        limits,
+                        commit,
+                        fences,
+                        planned_resumes,
+                        owner.family_identity,
+                        recovered=recovered,
+                    )
+                )
             )
 
         async def finish(abort_reason: GraphAbortReason | None) -> None:
@@ -727,11 +721,7 @@ class Graph(Generic[GraphValueT]):
                 recovered=recovered,
             )
         except asyncio.CancelledError as error:
-            if root.consume_node_origin_cancellation(error):
-                with suppress(BaseException):
-                    await finish(None)
-                raise
-            if root.consume_commit_origin_cancellation(error):
+            if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):
                 with suppress(BaseException):
                     await finish(None)
                 raise

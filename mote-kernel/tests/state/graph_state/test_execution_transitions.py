@@ -22,6 +22,7 @@ from mote_kernel.state.graph_state import (
     GraphInterruptPayload,
     GraphJoinProgress,
     GraphNodeId,
+    GraphNodeInterruptIdentity,
     GraphNodeOutcome,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
@@ -45,7 +46,6 @@ from mote_kernel.state.graph_state import (
     SucceededGraphNodeOutcome,
     UseStepRequestInput,
     child_graph_run_id,
-    derive_graph_node_interrupt_identity,
     frontier_status,
     reduce_graph_run,
 )
@@ -190,7 +190,7 @@ def test_each_typed_outcome_uses_the_same_single_node_transition() -> None:
         claim(running(A)),
         InterruptedGraphNodeOutcome(
             A,
-            derive_graph_node_interrupt_identity(GraphRunId("run"), 0, A, 1),
+            GraphNodeInterruptIdentity(GraphRunId("run"), 0, A, 1),
             GraphInterruptPayload(b"question"),
         ),
     )
@@ -200,7 +200,7 @@ def test_each_typed_outcome_uses_the_same_single_node_transition() -> None:
 def test_interrupt_identity_and_codec_are_checked_at_settlement() -> None:
     leased = claim(running(A))
     assert leased.execution is not None
-    wrong = derive_graph_node_interrupt_identity(GraphRunId("other"), 0, A, 1)
+    wrong = GraphNodeInterruptIdentity(GraphRunId("other"), 0, A, 1)
     with pytest.raises(GraphStateTransitionError, match="identity"):
         settle(leased, InterruptedGraphNodeOutcome(A, wrong, GraphInterruptPayload(b"q")))
     no_codec = claim(running(A, codec=False))
@@ -209,7 +209,7 @@ def test_interrupt_identity_and_codec_are_checked_at_settlement() -> None:
             no_codec,
             InterruptedGraphNodeOutcome(
                 A,
-                derive_graph_node_interrupt_identity(GraphRunId("run"), 0, A, 1),
+                GraphNodeInterruptIdentity(GraphRunId("run"), 0, A, 1),
                 GraphInterruptPayload(b"q"),
             ),
         )
@@ -318,7 +318,7 @@ def test_stale_token_and_nonpending_duplicate_are_rejected() -> None:
 def test_interrupt_settlement_rejects_each_wrong_execution_coordinate(coordinate: str) -> None:
     leased = claim(running(A))
     assert leased.execution is not None
-    identity = derive_graph_node_interrupt_identity(
+    identity = GraphNodeInterruptIdentity(
         GraphRunId("other") if coordinate == "run" else leased.run_id,
         leased.superstep + 1 if coordinate == "superstep" else leased.superstep,
         B if coordinate == "node" else A,

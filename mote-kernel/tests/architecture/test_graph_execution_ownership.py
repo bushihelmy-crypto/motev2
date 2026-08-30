@@ -171,10 +171,16 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
         "execution/engine/routing.py": frozenset({"validate_routing_contribution", "resolve_routing"}),
         "execution/engine/resume_admission.py": frozenset({"prepare_resume"}),
         "execution/engine/task.py": frozenset({"TaskId", "task_identity", "GraphTask", "ExecutableTask"}),
-        "execution/identity.py": frozenset({"ExecutionRequestAttemptId", "ScopeRunCoordinate", "StableActivation"}),
+        "execution/identity.py": frozenset({"ScopeRunCoordinate", "StableActivation"}),
         "execution/claim.py": frozenset(
-            {"ExecutionClaimOwner", "ExecutionClaimSnapshot", "PreparedExecutionClaim", "prepare_execution_claim"}
+            {
+                "ExecutionClaimOwner",
+                "ExecutionClaimSnapshot",
+                "PreparedExecutionClaim",
+            }
         ),
+        "execution/engine/frontier.py": frozenset({"FrontierPreparation"}),
+        "execution/engine/superstep.py": frozenset({"ExecutableFrontier", "PrepareDisposition"}),
         "execution/engine/scheduler.py": frozenset({"TaskRaised", "TaskScheduler"}),
         "execution/engine/session.py": frozenset({"GraphExecutionSession"}),
         "execution/graph_run.py": frozenset({"project_start_graph_command"}),
@@ -216,9 +222,6 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
     assert _class_fields("execution/claim.py", "ExecutionClaimSnapshot") == {
         "command": "ClaimGraphExecution",
         "token": "GraphExecutionToken",
-        "node_ids": "tuple[GraphNodeId, ...]",
-        "task_ids": "tuple[TaskId, ...]",
-        "request_attempt_id": "ExecutionRequestAttemptId",
     }
 
 

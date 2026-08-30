@@ -37,19 +37,16 @@ def reduce_graph_run(state: GraphRunState | None, command: GraphRunCommand) -> G
     if state is None:
         raise GraphStateTransitionError("a graph run must be started before it can transition")
     validate_graph_run_state(state)
-    match command:
-        case (
-            ClaimGraphExecution()
-            | FenceGraphExecution()
-            | SettleGraphNode()
-            | ResumeGraphNodes()
-            | AdvanceGraphFrontier()
-            | CompleteGraphFrontier()
-            | AbortGraphRun()
-        ):
-            pass
-        case _:
-            raise GraphStateTransitionError("graph command has an unsupported variant")
+    if type(command) not in (
+        ClaimGraphExecution,
+        FenceGraphExecution,
+        SettleGraphNode,
+        ResumeGraphNodes,
+        AdvanceGraphFrontier,
+        CompleteGraphFrontier,
+        AbortGraphRun,
+    ):
+        raise GraphStateTransitionError("graph command has an unsupported variant")
     if command.expected_revision != state.revision:
         raise GraphStateTransitionError("graph command was based on a stale revision")
     if isinstance(command, ClaimGraphExecution):

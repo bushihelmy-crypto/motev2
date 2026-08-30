@@ -9,9 +9,6 @@ from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.state.graph_state import (
-    GraphDefinitionId,
-    GraphDefinitionVersion,
-    GraphNodeId,
     GraphRunState,
     GraphRunStatus,
     PendingGraphNode,
@@ -20,13 +17,11 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
-GraphDefinitionKey = tuple[GraphDefinitionId, GraphDefinitionVersion]
 
 
 def require_snapshot_matches_graph(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-    parent_nodes: frozenset[tuple[GraphDefinitionKey, GraphNodeId]] | None = None,
 ) -> None:
     validate_graph_run_state(state)
     if state.definition_id != graph.definition_id or state.definition_version != graph.version:
@@ -36,16 +31,6 @@ def require_snapshot_matches_graph(
         raise InvalidExecutionSnapshotError(f"snapshot frontier contains unknown nodes: {unknown!r}")
     if state.status is not GraphRunStatus.RUNNING:
         return
-    if (
-        parent_nodes is not None
-        and state.parent is not None
-        and (
-            (state.definition_id, state.definition_version),
-            state.parent.node_id,
-        )
-        not in parent_nodes
-    ):
-        raise InvalidExecutionSnapshotError("snapshot parent activation does not match a compiled parent node")
     declared_joins = _declared_joins(graph)
     if any((progress.sources, progress.target) not in declared_joins for progress in state.join_progress):
         raise InvalidExecutionSnapshotError("snapshot references unknown join progress")
