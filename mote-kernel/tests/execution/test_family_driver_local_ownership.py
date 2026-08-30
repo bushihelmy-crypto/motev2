@@ -17,6 +17,7 @@ from mote_kernel.execution.family_driver import (
     GraphCommit,
     GraphTransition,
     _ChildHandle,
+    _ChildPhase,
     _evidence_adapter,
     _EvidencePublisher,
     _EvidenceReader,
@@ -24,8 +25,6 @@ from mote_kernel.execution.family_driver import (
     _frames_for_owners,
     _GraphRun,
     _opaque_handle,
-    _subtree_bindings,
-    _validate_owner_transition_plans,
     admit_continued_root,
     commit_transition,
     scoped_commit,
@@ -40,7 +39,7 @@ from mote_kernel.execution.identity import (
     child_scope_run_for_activation,
     root_scope_run,
 )
-from mote_kernel.execution.invocation import PlannedResume, lineage_states, plan_fences, plan_resumes
+from mote_kernel.execution.invocation import PlannedFence, PlannedResume, lineage_states, plan_fences, plan_resumes
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import ResumeFailedNodeRequest, StepRequest, UseMaterializedInput
 from mote_kernel.execution.result import (
@@ -159,6 +158,7 @@ async def admit_continuation_root(
     frames: ScopedFrameIndex[str] | None = None,
     child_executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[str]], ...] = (),
     commit: GraphCommit[str] | None = None,
+    fences: tuple[PlannedFence, ...] = (),
 ) -> tuple[_GraphRun[str], _EvidenceReader[str]]:
     scope_run = root_scope_run(state.run_id)
     return await admit_continued_root(
@@ -169,7 +169,7 @@ async def admit_continuation_root(
         ((scope_run, GraphExecutor(graph)), *child_executors),
         ExecutionLimits(),
         commit,
-        (),
+        fences,
         (),
         _new_family_identity(),
         recovered=True,
@@ -208,26 +208,11 @@ async def test_owner_task_wait_preserves_an_inner_cancellation() -> None:
         await wait_for_owner_task(asyncio.create_task(cancel()))
 
 
-def test_binding_partition_requires_known_children_and_finds_descendants() -> None:
+def test_frame_partition_requires_known_children() -> None:
     root = root_scope_run(GraphRunId("root"))
     child = ScopeRunCoordinate((GraphNodeId("child"),), GraphRunId("child"))
-    grandchild = ScopeRunCoordinate(
-        (GraphNodeId("child"), GraphNodeId("grandchild")),
-        GraphRunId("grandchild"),
-    )
     child_activation = StableActivation(root, 0, GraphNodeId("child"))
-    grandchild_activation = StableActivation(child, 0, GraphNodeId("grandchild"))
     child_binding = ChildStateBinding(child, child_activation, running_state(run_id=child.graph_run_id))
-    grandchild_binding = ChildStateBinding(
-        grandchild,
-        grandchild_activation,
-        running_state(run_id=grandchild.graph_run_id),
-    )
-
-    assert _subtree_bindings(child, (child_binding, grandchild_binding)) == (
-        child_binding,
-        grandchild_binding,
-    )
     unknown = ScopeRunCoordinate((GraphNodeId("unknown"),), GraphRunId("unknown"))
     boundary = ConfirmedChildBoundary(
         ChildBoundaryAvailabilityCoordinate(unknown, nested_graph().graph_output_descriptor.identity),
@@ -367,6 +352,50 @@ async def test_child_start_hands_off_a_confirmed_owner_before_rethrowing_cancell
     assert handle is not None and len(handle) == 3
     await owner.abort(GraphAbortReason("cancelled"))
     await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_fresh_child_handoff_failure_cleans_the_unhanded_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, state, _owner, parent, _child_scope, _activation, _child_state = nested_runtime()
+    handles: list[_ChildHandle[str]] = []
+    transitions: list[GraphTransition[str]] = []
+
+    class HandoffError(RuntimeError):
+        pass
+
+    original = HandoffError("child handle handoff failed")
+
+    def reject_handoff(
+        _owner: _GraphRun[str],
+        _position: tuple[int, ...],
+        _parent: ParentGraphActivation,
+        _phase: _ChildPhase[str],
+        handle: _ChildHandle[str] | None,
+    ) -> None:
+        assert handle is not None
+        handles.append(handle)
+        raise original
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    monkeypatch.setattr(_GraphRun, "accept_child_call", reject_handoff)
+    owner = root_owner(graph, state, commit=commit)
+
+    with pytest.raises(HandoffError) as raised:
+        await owner._start_child(MissingChild(parent))
+
+    assert raised.value is original
+    assert owner._children == []
+    assert tuple(transition.scope for transition in transitions if isinstance(transition.command, AbortGraphRun)) == (
+        ("nested",),
+    )
+    assert len(handles) == 1
+    with pytest.raises(ResultCollectionError, match="already released"):
+        await handles[0][0]()
 
 
 @pytest.mark.asyncio
@@ -577,19 +606,8 @@ def test_resume_planning_requires_an_executor_for_the_resumed_owner() -> None:
         )
 
 
-def test_continuation_transition_plan_requires_a_constructed_owner() -> None:
-    graph = compiled_graph("a")
-    root_state = running_state(run_id="root")
-    foreign_state = leased_state(running_state(run_id="foreign"))
-    owner = root_owner(graph, root_state)
-    _planned, fences = plan_fences(graph, lineage_states(foreign_state, ()))
-
-    with pytest.raises(SnapshotMismatchError, match="no constructed owner"):
-        _validate_owner_transition_plans((owner,), fences, ())
-
-
 @pytest.mark.asyncio
-async def test_child_owner_is_constructed_before_its_resume_transition(
+async def test_child_owner_completes_resume_before_opaque_handle_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fail(_values: Graph.Values[str]) -> Graph.FailureOutcome:
@@ -604,13 +622,26 @@ async def test_child_owner_is_constructed_before_its_resume_transition(
     awaiting = await parent.run(Graph.values())
     assert isinstance(awaiting, Graph.AwaitingResumeResult)
     events: list[tuple[str, tuple[str, ...]]] = []
+    original_accept = _GraphRun[str].accept_child_call
     original_resume = _GraphRun[str].apply_admission_resume
+
+    def record_handoff(
+        self: _GraphRun[str],
+        position: tuple[int, ...],
+        parent_activation: ParentGraphActivation,
+        phase: _ChildPhase[str],
+        handle: _ChildHandle[str] | None,
+    ) -> None:
+        if handle is not None:
+            events.append(("handoff", (parent_activation.node_id,)))
+        original_accept(self, position, parent_activation, phase, handle)
 
     async def record_owner_resume(
         self: _GraphRun[str],
         planned: PlannedResume[str],
     ) -> None:
-        events.append(("owner", tuple(self.coordinate.scope)))
+        assert self.state.run_id == planned.scope_run.graph_run_id
+        events.append(("owner", tuple(planned.scope_run.scope)))
         await original_resume(self, planned)
 
     async def record_commit(transition: GraphTransition[str], /) -> GraphRunState:
@@ -618,6 +649,7 @@ async def test_child_owner_is_constructed_before_its_resume_transition(
             events.append(("resume", transition.scope))
         return transition.candidate_state
 
+    monkeypatch.setattr(_GraphRun, "accept_child_call", record_handoff)
     monkeypatch.setattr(_GraphRun, "apply_admission_resume", record_owner_resume)
     completed = await parent.run(
         state=awaiting.state,
@@ -628,6 +660,7 @@ async def test_child_owner_is_constructed_before_its_resume_transition(
 
     assert isinstance(completed, Graph.CompletedResult)
     assert events.index(("owner", ("nested",))) < events.index(("resume", ("nested",)))
+    assert events.index(("resume", ("nested",))) < events.index(("handoff", ("nested",)))
 
 
 @pytest.mark.asyncio
@@ -781,48 +814,30 @@ async def test_existing_child_admission_rejects_a_future_parent_activation() -> 
 
 
 @pytest.mark.asyncio
-async def test_existing_child_setup_cleans_a_constructed_candidate(
+async def test_existing_child_handoff_failure_cleans_a_constructed_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
     binding = ChildStateBinding(child_scope, activation, child_state)
-    original_admit = family_driver._admit_existing_children
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
 
     class CandidateError(RuntimeError):
         pass
 
-    original = CandidateError("child recursive admission failed")
+    original = CandidateError("child handle handoff failed")
+    original_accept = _GraphRun[str].accept_child_call
 
-    async def reject_child(
-        candidate: _GraphRun[str],
-        candidate_graph: CompiledGraph[str],
-        scope_run: ScopeRunCoordinate,
-        candidate_state: GraphRunState,
-        owner_frames: ScopedFrameIndex[str],
-        limits: ExecutionLimits,
-        raw_commit: GraphCommit[str] | None,
-        evidence_publisher: _EvidencePublisher[str],
-        bindings: tuple[ChildStateBinding, ...],
-        frames: ScopedFrameIndex[str],
-        executors: tuple[tuple[ScopeRunCoordinate, GraphExecutor[str]], ...],
+    def reject_child_handoff(
+        self: _GraphRun[str],
+        position: tuple[int, ...],
+        parent_activation: ParentGraphActivation,
+        phase: _ChildPhase[str],
+        handle: _ChildHandle[str] | None,
     ) -> None:
-        if scope_run.scope:
+        if handle is not None:
             raise original
-        await original_admit(
-            candidate,
-            candidate_graph,
-            scope_run,
-            candidate_state,
-            owner_frames,
-            limits,
-            raw_commit,
-            evidence_publisher,
-            bindings,
-            frames,
-            executors,
-        )
+        original_accept(self, position, parent_activation, phase, handle)
 
     async def commit(transition: GraphTransition[str], /) -> GraphRunState:
         if transition.scope and isinstance(transition.command, AbortGraphRun):
@@ -830,7 +845,7 @@ async def test_existing_child_setup_cleans_a_constructed_candidate(
             await cleanup_release.wait()
         return transition.candidate_state
 
-    monkeypatch.setattr(family_driver, "_admit_existing_children", reject_child)
+    monkeypatch.setattr(_GraphRun, "accept_child_call", reject_child_handoff)
     task = asyncio.create_task(
         admit_continuation_root(
             graph,
@@ -854,32 +869,168 @@ async def test_existing_child_setup_cleans_a_constructed_candidate(
 
 
 @pytest.mark.asyncio
-async def test_unconstructed_child_cleanup_skips_terminal_descendants() -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
-    child_binding = ChildStateBinding(child_scope, activation, child_state)
-    grandchild_scope = ScopeRunCoordinate(
-        (*child_scope.scope, GraphNodeId("grandchild")),
-        GraphRunId("grandchild"),
-    )
-    grandchild_activation = StableActivation(child_scope, 0, GraphNodeId("grandchild"))
-    terminal_grandchild = replace(
-        child_state,
-        run_id=grandchild_scope.graph_run_id,
-        status=GraphRunStatus.COMPLETED,
-        frontier=GraphFrontierState(()),
-    )
-    grandchild_binding = ChildStateBinding(
-        grandchild_scope,
-        grandchild_activation,
-        terminal_grandchild,
-    )
+async def test_transitioned_child_handoff_base_signal_releases_without_stale_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    root_state = leased_state(state)
+    binding = ChildStateBinding(child_scope, activation, child_state)
+    _planned, fences = plan_fences(graph, lineage_states(root_state, (binding,)))
+    handles: list[_ChildHandle[str]] = []
+    transitions: list[GraphTransition[str]] = []
 
-    with pytest.raises(SnapshotMismatchError, match="no executor"):
+    class HandoffSignal(BaseException):
+        pass
+
+    original = HandoffSignal("child handoff interrupted")
+
+    def interrupt_handoff(
+        _owner: _GraphRun[str],
+        _position: tuple[int, ...],
+        _parent: ParentGraphActivation,
+        _phase: _ChildPhase[str],
+        handle: _ChildHandle[str] | None,
+    ) -> None:
+        assert handle is not None
+        handles.append(handle)
+        raise original
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    monkeypatch.setattr(_GraphRun, "accept_child_call", interrupt_handoff)
+    with pytest.raises(HandoffSignal) as raised:
+        await admit_continuation_root(
+            graph,
+            root_state,
+            (binding,),
+            child_executors=((child_scope, GraphExecutor(graph.nested_graphs[parent.node_id])),),
+            commit=commit,
+            fences=fences,
+        )
+
+    assert raised.value is original
+    assert tuple(transition.scope for transition in transitions) == ((),)
+    assert transitions[0].command == fences[0].command
+    assert len(handles) == 1
+    with pytest.raises(ResultCollectionError, match="already released"):
+        await handles[0][0]()
+
+
+@pytest.mark.asyncio
+async def test_child_constructor_failure_after_root_fence_preserves_the_confirmed_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    root_state = leased_state(state)
+    binding = ChildStateBinding(child_scope, activation, child_state)
+    _planned, fences = plan_fences(graph, lineage_states(root_state, (binding,)))
+    transitions: list[GraphTransition[str]] = []
+
+    class ConstructionError(RuntimeError):
+        pass
+
+    original = ConstructionError("child owner construction failed")
+    original_validate = GraphExecutor[str].validate_state
+
+    def reject_child(executor: GraphExecutor[str], candidate: GraphRunState) -> None:
+        if executor.graph.definition_scope:
+            raise original
+        original_validate(executor, candidate)
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    monkeypatch.setattr(GraphExecutor, "validate_state", reject_child)
+    with pytest.raises(Graph.Error) as raised:
+        await admit_continuation_root(
+            graph,
+            root_state,
+            (binding,),
+            child_executors=((child_scope, GraphExecutor(graph.nested_graphs[parent.node_id])),),
+            commit=commit,
+            fences=fences,
+        )
+
+    partial = cast(Graph.PartialCommitError[str], raised.value)
+    assert isinstance(partial, Graph.PartialCommitError)
+    assert partial.cause is original
+    assert partial.failed_scope == ("nested",)
+    assert partial.state == transitions[0].candidate_state
+    assert tuple(transition.scope for transition in transitions) == ((),)
+
+
+@pytest.mark.asyncio
+async def test_descendant_validation_failure_aborts_the_constructed_ancestor_then_root() -> None:
+    grandchild = Graph[str]("ownership.descendant-validation.grandchild")
+    grandchild.add_node("leaf", produce, inputs={}, outputs={"value": str})
+    grandchild.set_outputs({})
+    child = Graph[str]("ownership.descendant-validation.child")
+    child.add_node("grandchild", grandchild, inputs={})
+    child.set_outputs({})
+    parent_graph = Graph[str]("ownership.descendant-validation.parent")
+    parent_graph.add_node("child", child, inputs={})
+    parent_graph.set_outputs({})
+    graph = parent_graph._compile().graph
+    state = running_state(
+        definition_id=graph.definition_id,
+        version=graph.version,
+        frontier=("child",),
+        run_id="parent",
+    )
+    parent = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("child"))
+    scope_run = root_scope_run(state.run_id)
+    child_scope = child_scope_run_for_activation(scope_run, parent)
+    child_graph = graph.nested_graphs[parent.node_id]
+    child_state = reduce_graph_run(
+        None,
+        project_start_graph_command(child_graph, child_scope.graph_run_id, parent),
+    )
+    child_binding = ChildStateBinding(
+        child_scope,
+        StableActivation(scope_run, parent.superstep, parent.node_id),
+        child_state,
+    )
+    grandchild_parent = ParentGraphActivation(
+        child_state.run_id,
+        child_state.superstep,
+        GraphNodeId("grandchild"),
+    )
+    grandchild_scope = child_scope_run_for_activation(child_scope, grandchild_parent)
+    grandchild_state = reduce_graph_run(
+        None,
+        project_start_graph_command(
+            child_graph.nested_graphs[grandchild_parent.node_id],
+            grandchild_scope.graph_run_id,
+            grandchild_parent,
+        ),
+    )
+    malformed_grandchild = ChildStateBinding(
+        grandchild_scope,
+        StableActivation(child_scope, grandchild_parent.superstep, GraphNodeId("unknown")),
+        grandchild_state,
+    )
+    transitions: list[GraphTransition[str]] = []
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    with pytest.raises(SnapshotMismatchError, match="no parent nested definition"):
         await admit_continuation_root(
             graph,
             state,
-            (child_binding, grandchild_binding),
+            (child_binding, malformed_grandchild),
+            child_executors=((child_scope, GraphExecutor(child_graph)),),
+            commit=commit,
         )
+
+    assert tuple(transition.scope for transition in transitions if isinstance(transition.command, AbortGraphRun)) == (
+        ("child",),
+        (),
+    )
 
 
 @pytest.mark.asyncio

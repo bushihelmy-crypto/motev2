@@ -100,11 +100,11 @@ quote-style = "double"
 
 # The ratchet keeps legacy debt from growing. It is not a health target.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 518
+top_level_definitions = 512
 type_definitions = 292
 dataclass_types = 173
 dataclass_fields = 490
-decision_points = 1464
+decision_points = 1463
 logical_clone_pairs = 11
 record_shape_clone_pairs = 20
 thin_single_use_helpers = 16

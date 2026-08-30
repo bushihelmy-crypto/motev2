@@ -2612,7 +2612,7 @@ async def test_continued_child_construction_failure_aborts_child_then_root(
 
 
 @pytest.mark.asyncio
-async def test_continued_root_construction_failure_aborts_child_then_root(
+async def test_continued_root_construction_failure_aborts_only_root_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class RootConstructionError(RuntimeError):
@@ -2650,7 +2650,7 @@ async def test_continued_root_construction_failure_aborts_child_then_root(
     assert raised.value is original
     assert tuple(
         transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
-    ) == (("nested",), ())
+    ) == ((),)
 
 
 @pytest.mark.asyncio
