@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；`GSP-A06` 已对 S07、S01、S15 单项闭合；S15 已在 production commit `4b8f372` 实现并验证
-- 日期：2026-08-24（S15 design/review/approval/production/acceptance/owner writeback 已独立闭合；complexity/legacy gate 按授权排除）
+- 状态：Approved for 15 P1 / requirements 已明确批准 `GSP-A05`；`GSP-A06` 已对 S07、S01、S02、S12、S15、S16、S19 单项闭合；S21、S22 已关闭为 KEEP；账本外 A-v2 为 PENDING / NOT APPROVED。S02、S12、S15、S16、S19 均已在 production commit `170f1f2`、`269ffaa`、`4b8f372`、`f9854e1`、`2709a59` 完成并验证
+- 日期：2026-08-26（既有单元状态不变；候选 A-v1 已退休，A-v2 versioned target 处于独立复审与 `GSP-A06` 批准前阶段）
 - 适用目录：`src/mote_kernel/execution/**`
 - State/持久化边界：HARD KEEP；本轮不实现持久化，不修改当前 `GraphRunState`/command/reducer/protocol
 - 唯一公共门面：`mote_kernel.execution.Graph`
@@ -32,9 +32,32 @@
 - [S01 单项重新设计第三次评审](graph-semantics-preserving-simplification-s01-implementation-third-review.zh-CN.md)
 - [S01 第三次评审回复](graph-semantics-preserving-simplification-s01-implementation-third-review-response.zh-CN.md)
 - [S01 单项重新设计第四次评审](graph-semantics-preserving-simplification-s01-implementation-fourth-review.zh-CN.md)
+- [S02 单项实施设计评审](graph-semantics-preserving-simplification-s02-implementation-review.zh-CN.md)
+- [S02 单项实施设计第二次评审](graph-semantics-preserving-simplification-s02-implementation-second-review.zh-CN.md)
+- [S12 单项实施方案](graph-semantics-preserving-simplification-s12-implementation.zh-CN.md)
 - [S15 单项实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)
 - [S15 独立技术评审](graph-semantics-preserving-simplification-s15-implementation-review.zh-CN.md)
 - [S15 代码验收](graph-semantics-preserving-simplification-s15-implementation-acceptance.zh-CN.md)
+- [S16 单项实施方案](graph-semantics-preserving-simplification-s16-implementation.zh-CN.md)
+- [S16 第三次独立技术评审](graph-semantics-preserving-simplification-s16-implementation-third-review.zh-CN.md)
+- [S16 代码验收](graph-semantics-preserving-simplification-s16-implementation-acceptance.zh-CN.md)
+- [S19/S21/S22 单项实施方案](graph-semantics-preserving-simplification-s19-s21-s22-implementation.zh-CN.md)
+- [S19/S21/S22 第三次独立技术评审](graph-semantics-preserving-simplification-s19-s21-s22-implementation-third-review.zh-CN.md)
+- [S19/S21/S22 代码验收](graph-semantics-preserving-simplification-s19-s21-s22-implementation-acceptance.zh-CN.md)
+- [Execution 代码简化候选 A 调研](graph-execution-explosive-simplification-research.zh-CN.md)
+- [候选 A-v1 历史处置索引](graph-execution-code-simplification-implementation.zh-CN.md)
+- [候选 A-v2 新实施方案](graph-execution-code-simplification-implementation-v2.zh-CN.md)
+- [候选 A-v1 首轮评审](graph-execution-code-simplification-implementation-review.zh-CN.md)
+- [候选 A-v1 首轮评审回复](graph-execution-code-simplification-implementation-review-response.zh-CN.md)
+- [候选 A-v1 第二次独立评审](graph-execution-code-simplification-implementation-second-review.zh-CN.md)
+- [候选 A-v1 第二次评审回复](graph-execution-code-simplification-implementation-second-review-response.zh-CN.md)
+- [候选 A-v1 第三次独立评审](graph-execution-code-simplification-implementation-third-review.zh-CN.md)
+- [候选 A-v1 第三次评审回复](graph-execution-code-simplification-implementation-third-review-response.zh-CN.md)
+- [候选 A-v1 第四次独立评审](graph-execution-code-simplification-implementation-fourth-review.zh-CN.md)
+- [候选 A-v1 第四次评审回复](graph-execution-code-simplification-implementation-fourth-review-response.zh-CN.md)
+- [候选 A-v1 第五次独立评审](graph-execution-code-simplification-implementation-fifth-review.zh-CN.md)
+- [候选 A-v2 独立评审](graph-execution-code-simplification-implementation-v2-review.zh-CN.md)
+- [候选 A-v2 独立评审回复](graph-execution-code-simplification-implementation-v2-review-response.zh-CN.md)
 - [Execution / State / Frontier 调用链（非规范性草稿）](execution-state-frontier-call-chain.zh-CN.md)
 - [历史两提交调研](../example/graph-two-commits-simplification-review.zh-CN.md)
 
@@ -115,7 +138,7 @@ HARD KEEP。若说明性文档与这些基线冲突，不从冲突中推导未�
 - P2：方向可能成立，但必须先给出窄 nominal target、净复杂度下降证据和行为 characterization，并单项再评审；不得与 P1 混合实施。
 
 P1/P2 都不表示可以跳过规范同步、完整门禁或代码评审。requirements 第 7 节通过 `GSP-A05` 只授权当前矩阵中的
-15 个 P1；随后 `GSP-A06` 已分别对 S07、S01、S15 单项闭合，其余 6 个 P2 和账本外方向仍未获批。
+15 个 P1；随后 `GSP-A06` 已分别对 S07、S01、S02、S12、S15、S16、S19 单项闭合，S21/S22 已关闭为 KEEP；原 24 项账本无未决 P2，账本外 A-v2 已登记为 pending、尚未获批。
 
 ### 2.3 允许与禁止
 
@@ -185,7 +208,7 @@ artifact，或新增任何持久化/存储实现，即视为当前单元越界�
 | ID | 目标与唯一 owner | 删除 | 最多新增/替代 | 位置 | 级别 |
 | --- | --- | --- | --- | --- | --- |
 | S01 | `_compile_graph()` 保留 nested recursion、完整 phase/error order 和最终装配；typed `dict` 是 invocation-local lookup，`ActivationGate`/`direct_targets`/`FrontierTransitionPlan` 分别拥有各自唯一事实 | `control_gates`、`direct_pairs`、单次使用的 `RouteCause` alias、三个无语义转交 alias 和两份 source-only predicate | 一个被两个 production consumer 复用的窄 predicate；零 phase helper/DTO/cache/额外 scan，顶层定义不增长 | 见 3.1.2 完整单项设计 | P2 |
-| S02 | validation 仍集中拥有错误优先级；只有 direct/conditional/join 或 definition 子校验能形成独立 invariant 且净分支/变量下降时才提取 | 经证明可独立的重复校验分支 | 每个 nominal variant 至多一个 validator；不得改变遍历顺序 | `graph/validation.py` | P2 |
+| S02 | validation 与错误优先级继续只有一个 owner；以一个 invocation-local typed `nodes_by_id` 工作索引替代 `node_ids`/`known`/`nested_ids` 三份派生事实，join source identity 一次规范化；不拆 variant helper | 两份 node-derived projection、两次完整 node/ID traversal、per-edge END tuple 与 join source 的重复 collection/sort 构造 | 零 helper/DTO/field/property/cache/第二 index；只用一个 `dict[GraphNodeId, GraphNode[GraphValueT]]` 替代原三份派生 collection | [见 3.1.3 具体实施计划](#s02-gsp-a06) | P2 |
 | S03 | nested 分类直接取 `nested_graphs` key；callable 分类按 `nodes` 中 `CallableNodeDefinition` nominal variant 判断 | `FrontierTransitionPlan.callable_node_ids`、`nested_node_ids` 及 compiler producer | 无 | 见 3.1.1 完整迁移清单 | P1 |
 | S04 | `FrontierTransitionPlan.publications` 精确收窄为 `FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]`；本单元同时删除 `CompiledGraph.publications` projection，全部 publication consumer 一次迁移到 `graph.transition.publications[node_id]`；outputs 取 `descriptor.declarations`，routes 取 `conditional_targets[node_id]` | `FrontierTransitionPlan.outcomes`、`CompiledGraph.outcomes`、`CompiledGraph.publications`、`OutcomeAdmissionPlan`、`PublicationPlan`、keyed plan 中重复 `node_id`，包括 `MaterializationPlan.node_id` | 不新增 DTO；只收窄 map value type | 见 3.1.1 完整迁移清单 | P1 |
 | S05 | graph input declaration 只由 `graph_input_descriptor.declarations` 拥有，nested compiler 和 runtime admission 直接消费该字段 | `CompiledGraph.graph_inputs` | 无 property/alias | 见 3.1.1 完整迁移清单 | P1 |
@@ -479,7 +502,7 @@ writeback 还必须列出 `activation_gates`、`direct_targets`、`nested_graphs
 发现提前 `FrozenMap`、dict/frozen 双工作索引、额外 sort/freeze/full scan 或 lookup 从 typed `dict` 退化，即使测试
 绿色也失败。不得把这些一次性检查转写为永久 AST/private-source test。
 
-**原子 change units 与 exact planned manifest**
+**原子 change units 与 exact manifest**
 
 1. 本次 design-owner migration unit 只修改：
 
@@ -503,7 +526,7 @@ writeback 还必须列出 `activation_gates`、`direct_targets`、`nested_graphs
    该单元已把 S01 的 `GSP-A06` 状态改为 satisfied；design/review commit `d34c117`、approval commit `785c796`
    在前，production implementation commit `0f34aa2` 在后，Git 历史已形成可核对的 design → approval → implementation 顺序。
 
-4. approval 之后，production + behavior implementation unit 的 planned manifest 精确为：
+4. approval 之后，production + behavior implementation unit 的 actual manifest 精确为：
 
    ```text
    mote-kernel/src/mote_kernel/execution/graph/compiler.py
@@ -563,6 +586,388 @@ State/持久化边界被触及；任一适用 scoped/engineering check 未通过
 
 actual diff 已同时满足唯一 owner、结构账本全部闭合、重复事实归零、behavior matrix、无 legacy gate、no-State/
 no-persistence、四文件原子 manifest 和全部适用 gate；S01 implementation 完成证据见 7.24 owner writeback。
+
+<a id="s02-gsp-a06"></a>
+
+#### 3.1.3 S02 `GSP-A06` 具体实施计划（IMPLEMENTED / VERIFIED，2026-08-25 owner writeback）
+
+本节是 S02 target shape、结构净删除账本、characterization、actual manifest 和实施门禁的**唯一 owner**。
+requirements 继续唯一拥有批准状态；其第 7 节已将 S02 记为 `GSP-A06 SATISFIED / APPROVED`，仅授权本节 reviewed
+exact target。S02 已在 production commit `170f1f2` 与三文件 actual manifest 中落地，并完成独立验收和本节 owner writeback。
+评审记录只保留历史裁决，不复制或反向拥有本节 target。
+
+**第一、二次技术评审接受项回写**
+
+[S02 单项实施设计评审](graph-semantics-preserving-simplification-s02-implementation-review.zh-CN.md)已复核当前 production、
+requirements、89-case scoped baseline 与单文件 strict Pyright，结论是 nominal 类型域内的技术方案没有 State、持久化、
+owner、执行路径或零新增负债阻断。随后
+[S02 单项实施设计第二次评审](graph-semantics-preserving-simplification-s02-implementation-second-review.zh-CN.md)
+以主实施方案 SHA256 `4cd3c3c8c4b778dbee22aa0181830ddd9d5040afbdc3ba3bafd8a24b4bb2115f` 为 target，
+再次复核 scope-local index、nominal-domain equality、error precedence、characterization、shape/tamper evidence 与三文件
+actual manifest，裁决 `PASS / NO NEW BLOCKER`，并确认 S02 design evidence 已可提交 requirements owner approval。
+二审 record SHA256 为 `0424a7b5464a3bc8d7b119251ef594cf65c47920cd10c29f3094abba3d01db46`。两次 review
+都不代替 requirements owner 的 `GSP-A06` 裁决。
+
+| 评审事项 | owner 回写 | 准入含义 |
+| --- | --- | --- |
+| local node lookup | `nodes_by_id` 精确为**每次 `_validate_definition()`、每个 definition scope 一个**；nested scope 各自建立并释放，不跨 graph family 共享 | 关闭“一个 index”可能被误解为 family-global map 的歧义 |
+| nominal 等价域 | dict membership 与 join `frozenset` 只承诺声明的 `GraphNodeId`/`GraphNode[GraphValueT]` domain | 不新增 forged/untyped Python object 行为契约 |
+| conditional identity | `conditional_seen: set[tuple[GraphNodeId, str]]` 保持当前 shape，S02 不顺带收窄或迁移 route type | 不扩大 implementation diff 或引入无关 typing change |
+| baseline evidence | scoped baseline `89 passed`；`pyright src/mote_kernel/execution/graph/validation.py` 为 `0 errors` | 只证明当前 production，不冒充 target 已实施 |
+| 四个 target cases | 已在三文件 implementation unit 中落地，状态为 `PASS / IMPLEMENTED` | 四个 case 与 production 同一原子 unit 落地；断言目标、失败条件和 error precedence 均通过 |
+| complexity/ratchet | S02 不消费独立 complexity draft、limit、baseline、ratchet 或 `make check` 结果 | `NOT APPLICABLE` 只排除该治理单元，不放宽本节结构净删除和零新增负债账本 |
+| 二审总裁决 | **PASS / DESIGN EVIDENCE READY FOR REQUIREMENTS OWNER APPROVAL** | 历史 review 结论；target algorithm/signature/manifest 无需改向 |
+| `GSP-A06` | **SATISFIED / APPROVED** | requirements owner 已按 reviewed exact target 单项批准，批准不延伸到其他 SHA |
+
+**审计结论与目标选择**
+
+当前 `_validate_edges()` 已经按 `definition.edges` 原始顺序只扫描一次。`direct_seen`、`conditional_seen`、
+`join_seen` 分别表达三个不同 nominal variant 的 duplicate identity，并不存在可删除的重复 scan。把三个分支机械提取为
+`_validate_direct_edge()`、`_validate_conditional_edge()`、`_validate_join_edge()` 会保留全部判断与 seen state，额外增加三个
+函数、参数传递和控制跳转，不满足零负债；S02 明确**不采用 helper extraction**。
+
+可证明的简化位于同一 owner 内的 node lookup 与 join identity：当前 `_validate_definition()` 先生成 `node_ids` tuple，
+再生成 `known` frozenset；`_validate_edges()` 又完整扫描 `definition.nodes` 生成 `nested_ids`。target 在原 node-identity
+循环中同时建立一个 invocation-local、完整泛型的 `nodes_by_id` dict，后续 membership 与 conditional-source nominal
+lookup 都消费该索引。join sources 本来就是无序 identity，target 以一个 `frozenset[GraphNodeId]` 同时承担 duplicate-source、
+known-source、self-target 和 duplicate-join key，不再先排序再重复建 set。
+
+该选择不增加新抽象：`GraphDefinition.nodes` 仍是 immutable definition truth；`nodes_by_id` 是每次
+`_validate_definition()` 调用、每个 definition validation scope 内唯一的工作索引，校验返回或抛错后即释放。
+nested definition 递归时各自建立自己的 local map，不共享、合并或提升为 graph-family context；该 map 不进入
+`GraphDefinition`、`CompiledGraph`、State、runtime 或 recovery。validation module 继续集中拥有所有检查、错误分类、
+错误文本、phase precedence 和遍历顺序。
+
+**Requirement 适用性**
+
+| Requirement | 裁决 | S02 触及面 |
+| --- | --- | --- |
+| `GSP-P01` | 适用 | `compile_graph()`/public `Graph` 组装可观察的 validation error type、文本和首错顺序必须逐项保持 |
+| `GSP-P02` | 排除 | 不读取或修改 `GraphRunState`、command、revision、resource durable facts 或 State validation |
+| `GSP-P03` | 排除 | 不触及 admission、commit、confirmation、installation 或 partial-prefix transaction |
+| `GSP-P04` | 排除 | 不改变 Result、Continuation、frame/publication shape、identity 或 integrity |
+| `GSP-P05` | 适用 | direct/conditional/join 的 endpoint、route、nested-source、duplicate 和 join-shape fail-closed 行为保持 |
+| `GSP-P06` | 排除 | 不改变 compiled recovery truth、recovery traversal、equality/hash、boundary 或 budget |
+| `GSP-P07` | 适用 | definition/node/edge 原始顺序、nested recursion、definition reuse/collision 和 resource validation 顺序保持 |
+| `GSP-P08` | 适用 | `Graph`/execution/validation 唯一 owner、完整泛型、module-scope import 和无第二 store/runner 是硬边界 |
+
+**Exact signatures 与 nominal types**
+
+公共入口和 definition-family recursion 签名原样保持：
+
+```python
+def _validate_definition(
+    definition: GraphDefinition[GraphValueT],
+    visits: dict[
+        tuple[GraphDefinitionId, GraphDefinitionVersion],
+        _DefinitionVisit,
+    ],
+) -> None: ...
+
+
+def validate_graph(definition: GraphDefinition[GraphValueT]) -> None: ...
+```
+
+S02 唯一改变的 private signature 是把只含 membership 的 `known` 投影替换为同一 definition validation scope 的
+nominal lookup：
+
+```python
+def _validate_edges(
+    definition: GraphDefinition[GraphValueT],
+    nodes_by_id: dict[GraphNodeId, GraphNode[GraphValueT]],
+) -> None: ...
+```
+
+`GraphNode[GraphValueT]` 复用 `graph.definition` 已有的
+`CallableNodeDefinition[GraphValueT] | NestedGraphNodeDefinition[GraphValueT]` nominal alias；不新增 protocol、union、
+wrapper 或 type variable。`nodes_by_id` 必须保留完整 `GraphValueT`，不得退化为 `object`、`Any`、bare `dict`、
+`dict[str, object]` 或只保存 bool/kind 的第二 projection。`_validate_edges()` 只读该 dict，不返回、缓存或冻结它；
+每个 nested definition 递归调用建立自己的 map，不从 parent 传入或共享 node namespace。
+
+新增上限固定为：零 function/helper、零 DTO/dataclass/field/property/type alias、零 callback/context bag、零 cache/
+持久化 index、零 public export、零额外 full scan/sort/freeze。唯一替代对象是上述 invocation-local typed dict；
+`GraphNode` 只是在原 `graph.definition` import 中增加一个既有 nominal symbol，不产生新 module dependency。
+
+**Exact target algorithm**
+
+node identity phase 必须在原循环内建立索引，并且把 duplicate 判断保留在**整个 identity loop 之后**：
+
+```python
+nodes_by_id: dict[GraphNodeId, GraphNode[GraphValueT]] = {}
+for node in definition.nodes:
+    node_id = node.node_id
+    require_graph_identity(node_id, kind="node")
+    if node_id in (START, END):
+        raise InvalidGraphIdentityError("START and END cannot be concrete graph nodes")
+    nodes_by_id[node_id] = node
+if len(nodes_by_id) != len(definition.nodes):
+    raise DuplicateNodeError("graph definition contains duplicate node identities")
+```
+
+dict assignment可能覆盖重复 key，但在 duplicate check 之前没有任何 consumer；这只用于少建两份投影，不得改成循环内
+见到第二个 key 就立即抛错。当前行为会先检查后续 node identity，再报告 duplicate；提前抛错会改变首错优先级，属于失败。
+duplicate check 通过后，同一个 `nodes_by_id` 传给 `_validate_edges()`，不得同时保留 `node_ids`、`known`、
+`nested_ids` 或同义 set/map。
+
+edge validation 继续由一个 loop 按 `definition.edges` 原始顺序编排，variant 顺序和每个 variant 内部顺序固定为：
+
+1. entries duplicate；
+2. entries unknown-node；
+3. 对每个 edge 按原始顺序：
+   - `DirectEdge`：source/target known（target 可为 `END`）→ duplicate direct；
+   - `ConditionalEdge`：route identity → source/target known → source 不是 nested nominal node → duplicate source/route；
+   - `JoinEdge`：至少两个 sources → source 不重复 → sources 全部 known → target known/`END` → target 不在 sources
+     → duplicate unordered sources/target；
+4. 返回 `_validate_definition()` 后继续 resume binding，再按 `definition.nodes` 原始顺序递归 nested definitions。
+
+三个 duplicate identity set 继续保持当前 nominal shape；特别是 S02 明确保留
+`conditional_seen: set[tuple[GraphNodeId, str]]`，不顺带改成 `GraphRouteId`、新 wrapper 或 string discriminator。
+route typing 若未来需要独立收窄，必须另立 change unit，不能混入本 actual manifest。
+
+direct/conditional endpoint 判断必须直接读取 dict membership，并删除每个 edge 上构造 `(*known, END)` 的临时 tuple：
+
+```python
+if edge.source not in nodes_by_id or (
+    edge.target != END and edge.target not in nodes_by_id
+):
+    ...
+```
+
+conditional source 的 nominal check 必须发生在 endpoint check 之后，且直接读取同一索引：
+
+```python
+if isinstance(nodes_by_id[edge.source], NestedGraphNodeDefinition):
+    raise InvalidGraphIdentityError(
+        "nested graph nodes cannot be conditional routing sources"
+    )
+```
+
+join 的 canonical identity 固定为：
+
+```python
+join_seen: set[tuple[frozenset[GraphNodeId], GraphNodeId]] = set()
+
+sources = frozenset(edge.sources)
+key = (sources, edge.target)
+if (
+    len(edge.sources) < 2
+    or len(sources) != len(edge.sources)
+    or not sources.issubset(nodes_by_id)
+    or (edge.target != END and edge.target not in nodes_by_id)
+    or edge.target in sources
+):
+    raise InvalidJoinError(f"invalid join into node: {edge.target}")
+if key in join_seen:
+    raise InvalidJoinError(f"duplicate join into node: {edge.target}")
+join_seen.add(key)
+```
+
+该 identity 只覆盖 exact nominal domain：`edge.sources: tuple[GraphNodeId, ...]`、`edge.target: GraphNodeId`。
+在此 domain 内，`frozenset` 与当前 sorted tuple 对 unordered duplicate join 的等价类完全相同；顺序不同的同源 join 仍视为
+duplicate，错误 type/text 不变。不得借 S02 接受宽输入、改变 `JoinEdge` shape、增加 coercion，或把 strict typing
+之外的 forged Python object 行为提升为新公共契约。
+
+**唯一事实、错误顺序与 no-persistence 边界**
+
+| 事实 | target 唯一 owner | 删除/禁止 |
+| --- | --- | --- |
+| immutable node definition/order | `GraphDefinition.nodes` | 不增加 stored map、property、alias 或第二 graph definition owner |
+| validation-time node lookup | 每个 definition scope 的 local `nodes_by_id` | 删除该 scope 的 `node_ids`、`known`、`nested_ids`；不跨 nested scope 共享，不双存、不返回、不冻结 |
+| direct duplicate identity | local `direct_seen: set[DirectEdge]` | 保留独立 nominal semantics，不并入 string-tagged generic set |
+| conditional duplicate identity | local `conditional_seen: set[tuple[GraphNodeId, str]]` | 保留 source/route semantics，不把 target 错纳入 identity |
+| join duplicate identity | local `join_seen: set[tuple[frozenset[GraphNodeId], GraphNodeId]]` | 删除 sorted tuple 与重复 set assembly，不改变 unordered semantics |
+| definition-family visit state | existing `visits` + `_DefinitionVisit` | 不搬进新 context/validator，不复制 recursion/collision owner |
+| validation phase/first error | `_validate_definition()` + `_validate_edges()` 单一编排 | 不按 variant 分组扫描，不排序 node/edge/nested definition |
+
+完整错误 precedence 必须原样保持：graph identity → version → definition identity collision/recursion → 全部 node identity/
+reserved-boundary 检查 → duplicate node → resources → entries → 单遍 edges → resume binding → nested definition recursion。
+`_ValidationStatus`、`_DefinitionVisit`、`require_graph_identity()`、`_validate_resources()` 和所有 exception class/text 均不改。
+
+S02 不读取、构造、替换或提交 `GraphRunState`，不修改 command/reducer/revision、commit callback、protocol 或 State tests；
+不新增 Store、repository、journal、checkpoint、database、persistence port/backend、runner/session 或 durable cache。
+当前不实现持久化。`Graph` 继续是唯一公共 facade，`validate_graph()` 继续只由 execution compiler/facade 的现有路径消费。
+
+**结构净删除与零新增负债账本**
+
+本账本是 `GSP-A06` 所需的净结构证据；automated complexity gate、snapshot、baseline、ratchet、health identity、
+`pyproject.toml` limit、Makefile `complexity-ratchet` 和 pre-commit `kernel-complexity` 对 S02 全部
+`NOT APPLICABLE`，不得成为设计评审、批准、implementation manifest 或交付门禁。
+
+| 可核对结构 | 当前 | target | 净变化/约束 |
+| --- | ---: | ---: | --- |
+| node-derived working collections（每个 definition scope） | 3（`node_ids`、`known`、`nested_ids`） | 1（`nodes_by_id`） | 每 scope `-2`；canonical truth 仍是该 definition 的 `GraphDefinition.nodes` |
+| node/derived-ID full traversals（每个 definition scope） | 3（IDs 收集、identity loop、nested-ID 收集） | 1（identity + index） | 每 scope `-2`；resource 与 nested-recursion 两个不同职责的既有 traversal 原样保留 |
+| END membership tuple construction sites | 3（direct/conditional/join 的 `(*known, END)`） | 0 | `-3`；改为 `target == END` 或 dict membership，不增加 helper |
+| valid edge target membership | 每个 edge 构造全量 known-node tuple 并线性查询，最坏 `O(E × N)` | dict membership，平均 `O(E)` | 删除随 node count 放大的临时分配/查询；不靠额外 index |
+| join source collection/sort expressions | 3（`tuple(sorted(...))` + 两个 `set(sources)`） | 1（`frozenset(edge.sources)`） | `-2` collection expressions、`-1` sort；同一 value 同时服务四项 invariant 与 duplicate key |
+| join identity normalization | 每个 join `O(K log K)` sort + set assembly | 单次平均 `O(K)` frozenset assembly | unordered identity 不变；`K` 为该 join source count |
+| variant seen sets | 3 | 3 | 不合并不同 nominal identity，不用 string discriminator/generic bag |
+| semantic validation branches/raise sites | 当前 exact checks | 同一 exact checks | `0`；只删重复 representation，不删 validation |
+| top-level function/helper/DTO/field/property/type alias | 0 个 S02 新对象 | 0 | 不提取三个 thin validator，不增加 owner 跳转 |
+| persisted/cache/compiled/State facts | 0 | 0 | `nodes_by_id` scope-local，用后释放；不跨 graph family 共享，无第二 truth |
+| public API、Edge/GraphDefinition/compiled/protocol shape | 当前 shape | 当前 shape | 不改变任何 field、signature、export 或 wire/state shape |
+
+这里的“零新增负债”精确表示：删除两份重复 projection、两次完整 traversal、三处 END 临时 tuple、重复 join
+collection/sort；新增抽象面为 0，唯一替代 dict 同时承担原有 membership 与 nominal lookup。代码行数和 automated
+complexity 分数不作为证明。若 actual diff 保留任一旧 projection/sort，新增 helper/context/第二 index，或无法闭合本表，
+即使测试绿色也不得实施。
+
+**Case-level characterization 与 target behavior tests**
+
+2026-08-23 在未修改 production/tests 的基线 `35e7c95` 上，以下 scoped baseline 组合已实际运行并得到
+`89 passed`；实施后按三文件 actual manifest 复跑，四个新增 target case 与既有 scoped behavior 均通过，S02
+验收记录确认代码状态为 `IMPLEMENTED / VERIFIED`。单文件 strict
+`pyright src/mote_kernel/execution/graph/validation.py` 仍为 `0 errors`；这些结果只属于 S02 owner evidence，
+不改变其他 complexity/legacy 治理单元的批准口径。
+
+| Requirement/场景 | Exact `path::test_case` | 当前/target 状态 | 断言目标与失败条件 |
+| --- | --- | --- | --- |
+| P01 identity/entry/edge fail closed | `tests/execution/graph/test_validation.py::test_invalid_graphs_fail_closed` | **PASS — existing** | graph/version/node/entry/direct/conditional 错误 type 保持；任一分类消失、改类或被后续 phase 抢先即失败 |
+| P01 conditional duplicate | `tests/execution/graph/test_validation.py::test_duplicate_conditional_route_fails_closed` | **PASS — existing** | `(source, route)` duplicate 继续抛 `DuplicateEdgeError`，target 不进入 identity |
+| P01 resource phase | `tests/execution/graph/test_validation.py::test_invalid_resource_definitions_fail_closed`；`tests/execution/graph/test_validation.py::test_node_resource_requirements_must_be_unique_and_declared` | **PASS — existing** | resource structural/identity/requirement error 继续在 edge phase 前 fail closed |
+| P01 resume phase | `tests/execution/graph/test_validation.py::test_resume_input_codec_version_must_be_positive` | **PASS — existing** | resume codec version error type/text 保持，且仍在 edge 后、nested recursion 前 |
+| P05 invalid/duplicate join | `tests/execution/graph/test_join.py::test_invalid_join_shapes_fail_closed`；`tests/execution/graph/test_join.py::test_duplicate_join_fails_closed_regardless_of_source_order` | **PASS — existing** | shape、unordered duplicate 和 `InvalidJoinError` 保持 |
+| P05 valid mixed edge order | `tests/execution/graph/test_join.py::test_direct_edges_and_multiple_joins_coexist_deterministically`；`tests/execution/graph/test_join.py::test_distinct_joins_may_share_a_target` | **PASS — existing** | direct/join 混排与两个 distinct joins 的 compiled topology 不变 |
+| P05 public nested conditional fail closed | `tests/execution/test_executor.py::test_nested_conditional_source_is_rejected_at_compile_time`；`tests/execution/test_executor.py::test_nested_invalid_completion_enters_error_draining` | **PASS — existing** | public compile/run 在执行或 commit 前拒绝 nested conditional source；错误文本和零副作用保持 |
+| P07 nested reuse/collision | `tests/execution/graph/test_nested_graph.py::test_same_nested_graph_definition_may_be_reused_by_sibling_nodes`；`tests/execution/graph/test_nested_graph.py::test_distinct_nested_graphs_cannot_share_identity_and_version` | **PASS — existing** | same object 可复用，distinct object 同 identity/version 仍冲突 |
+| P07 recursion | `tests/execution/graph/test_nested_graph.py::test_direct_recursive_nested_graph_fails_with_typed_error`；`tests/execution/graph/test_nested_graph.py::test_indirect_recursive_nested_graph_fails_with_typed_error` | **PASS — existing** | direct/indirect recursion typed error 与 visit owner 保持 |
+| P07 deep invalid child | `tests/execution/graph/test_nested_graph.py::test_invalid_deeply_nested_graph_fails_root_compilation` | **PASS — existing** | deep child validation/compile error继续冒泡到 root |
+| node identity before duplicate | `tests/execution/graph/test_validation.py::test_validation_checks_all_node_identities_before_duplicate_nodes` | **PASS — IMPLEMENTED** | earlier duplicate 与 later invalid node 同时存在时仍先报 later `InvalidGraphIdentityError`；循环内提前 duplicate 即失败 |
+| cross-variant edge declaration order | `tests/execution/graph/test_validation.py::test_validation_preserves_edge_declaration_order_across_nominal_variants` | **PASS — IMPLEMENTED** | direct/conditional/join invalid edges 的排列由声明中第一个 edge 决定 error type/text；分组三遍 scan 或排序即失败 |
+| conditional internal precedence | `tests/execution/graph/test_validation.py::test_conditional_endpoint_error_precedes_nested_source_error` | **PASS — IMPLEMENTED** | route 合法但 endpoint unknown 且 source nested 时继续先报 `UnknownNodeError`；dict lookup 抢先或后移即失败 |
+| nested validation definition order | `tests/execution/graph/test_nested_graph.py::test_nested_validation_preserves_definition_order_error_priority` | **PASS — IMPLEMENTED** | 两个 sibling child 含不同 validation error 时，`definition.nodes` 中第一个 child 决定 error；分类/sort/grouping 漂移即失败 |
+| P08 generic/owner/import | `tests/architecture/test_generic_integrity.py::test_production_boundaries_preserve_generic_types`；`tests/architecture/test_source_discipline.py::test_imports_form_a_contiguous_module_header`；`tests/architecture/test_dependency_direction.py::test_execution_does_not_depend_on_domain_packages`；`tests/architecture/test_dependency_direction.py::test_graph_definition_layer_does_not_depend_on_runtime_execution_modules`；`tests/architecture/test_graph_execution_ownership.py::test_graph_state_and_execution_contracts_have_single_owners` | **PASS — existing / rerun target** | 完整 generic、连续 module imports、依赖方向、唯一 Graph/execution/State owner 保持 |
+
+四个 target cases 已通过 `compile_graph()` 或 public `Graph.run()` 可观察的 exception/result/side-effect 断言行为；
+不得 mock/monkeypatch private validator，不得断言 helper 名称、local 变量、调用次数、loop/comprehension、source text 或 AST。
+它们与 production 在同一个三文件 implementation unit 中落地并通过，状态为 `PASS / IMPLEMENTED`；不新建测试文件。
+requirements owner 依据本节固定的 exact nodeid、断言目标、失败条件、baseline、shape/tamper evidence 和 actual
+manifest 完成了 `GSP-A06` 单项批准与验收。后续 review 只记录审计，不改变已批准 target。
+
+**Exact-shape/tamper 与一次性 source review**
+
+S02 不删除或新增 public/owner-internal dataclass field，因此 exact-shape gate 的目标是“不产生 shape”：
+`GraphDefinition`、`DirectEdge`、`ConditionalEdge`、`JoinEdge`、`CompiledGraph` 和 public `Graph` signature/export 原样保持；
+既有 `tests/execution/graph/test_topology.py::test_graph_definition_edges_and_compiled_graph_are_immutable`、generic/owner gates
+原样复跑，不增加 S02-specific architecture assertion。recursion tests 中对 frozen definition 的 `object.__setattr__` tamper、
+identity collision、invalid/duplicate join、unknown endpoint 和 public nested-conditional cases共同覆盖 malformed boundary。
+
+private local 删除由 implementation actual diff 与一次性 source review 闭合，不写入 repository gate。writeback 必须记录
+下列查询结果，但不得把它们转成 legacy、AST、private-source-shape 或 source-layout test：
+
+```bash
+rg -n 'node_ids = tuple|nested_ids = frozenset|tuple\(sorted\(edge\.sources\)\)|set\(sources\)|\(\*known, END\)' \
+  src/mote_kernel/execution/graph/validation.py
+# target：exit 1 且无输出
+
+rg -n 'nodes_by_id|direct_seen|conditional_seen|join_seen' \
+  src/mote_kernel/execution/graph/validation.py
+# 只作 actual owner/source review：一个 typed node index + 三个不同 nominal duplicate sets；不冻结行数/次数
+```
+
+actual diff 还必须确认：没有新 function/class/field/property/type alias/export/import module；`nodes_by_id` 在
+`_validate_definition()` 建立、只传给 `_validate_edges()`、不逃逸；没有新增 node/edge scan、sort、freeze 或持久化事实。
+若只能靠永久 source-shape test 证明 target，S02 失败并保持现状。
+
+**原子 change units 与 exact manifests**
+
+1. 已完成的 docs-only design unit 只修改：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-implementation.zh-CN.md
+   ```
+
+   本单元只提交 target/evidence/manifest，不创建第二份 S02 implementation 文档；requirements approval 由独立 approval unit
+   记录。
+
+2. 第一次独立技术评审的唯一 review manifest 为：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-s02-implementation-review.zh-CN.md
+   ```
+
+   该 review 裁决 nominal domain 内技术方案无阻断，但不拥有 target、不修改 requirements，也不授权 production/tests。
+
+3. 第一次 review 接受项回写仍只修改本文；第二次独立技术评审随后以该 owner target 为对象，自己的唯一
+   actual manifest 为：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-s02-implementation-second-review.zh-CN.md
+   ```
+
+   二审确认 `PASS / NO NEW BLOCKER` 和 `DESIGN EVIDENCE READY FOR REQUIREMENTS OWNER APPROVAL`，但同样不拥有
+   target、不修改 requirements、不授权 production/tests。本次二审接受项 owner writeback 仍只修改本文。
+
+4. 两次技术评审通过后，requirements-only approval unit 只修改：
+
+   ```text
+   mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+   ```
+
+   该独立提交已把 S02 从未批准 P2 清单迁移为 `GSP-A06 SATISFIED — 仅限本节 exact target`。
+
+5. approval 之后，production + behavior implementation unit 的 actual manifest 精确为：
+
+   ```text
+   mote-kernel/src/mote_kernel/execution/graph/validation.py
+   mote-kernel/tests/execution/graph/test_validation.py
+   mote-kernel/tests/execution/graph/test_nested_graph.py
+   ```
+
+   两个既有测试文件只增加上表四个行为 case；不新增测试文件，不修改 `test_source_discipline.py` 或其他 architecture/
+   legacy gate。internal representation 未改变 normative shape，因此不修改 architecture、Node I/O、State/protocol、README。
+   若 actual behavior/shape 证明必须同步其他 normative owner，先停止并重新评审，不静默扩大 manifest。
+
+6. implementation 与全部适用 gate 已通过；owner-writeback unit 只修改本文，记录 actual manifest、actual structural
+   ledger、source review 和验证结果。后续 review audit 仍只修改 review record，不累计历史文件。
+
+design → first review → first owner writeback → second review → second owner writeback → requirements approval →
+production + behavior → implementation owner writeback 的 Git 顺序已闭合（requirements approval commit 与
+production commit 分离）。review record 与 owner writeback 按各自 exact manifest 分离，不混合、不倒序追认，也不使用
+compatibility bridge。任一 S02 manifest 都不包含 `pyproject.toml`、Makefile、pre-commit/complexity files、
+`src/mote_kernel/state/**`、`tests/state/**`、protocol/conformance、Store/persistence artifact 或 README。
+
+**实施步骤、门禁与停止条件（已执行）**
+
+按一个原子 diff 执行：先在 node identity loop 建立 typed index 并延迟 duplicate check；再迁移
+`_validate_edges()` signature/entries/endpoint/nested lookup；随后把 join identity 收敛为单一 frozenset；最后同步落地四个
+behavior cases。未双存新旧 collection，production 与 target tests 也未拆成两个 implementation commits。
+
+scoped checks 至少为：
+
+```bash
+python -B -m pytest -q -p no:cacheprovider \
+  tests/execution/graph/test_validation.py \
+  tests/execution/graph/test_join.py \
+  tests/execution/graph/test_nested_graph.py \
+  tests/execution/graph/test_topology.py \
+  tests/execution/test_executor.py::test_nested_conditional_source_is_rejected_at_compile_time \
+  tests/execution/test_executor.py::test_nested_invalid_completion_enters_error_draining
+python -B -m pytest -q -p no:cacheprovider \
+  tests/architecture/test_generic_integrity.py \
+  tests/architecture/test_source_discipline.py \
+  tests/architecture/test_dependency_direction.py \
+  tests/architecture/test_graph_execution_ownership.py
+python -B -m ruff check src tests
+python -B -m ruff format --check src tests
+pyright
+python -B -m pytest --ignore=tests/architecture/test_complexity_gate.py \
+  --cov=mote_kernel --cov-report=term-missing
+python -B -m build --no-isolation
+python -B -m twine check dist/*
+cd .. && SKIP=kernel-complexity pre-commit run --all-files
+git diff --check
+```
+
+完整 `make check` 的 complexity/legacy 子单元仍按 S02 批准范围排除；上列命令覆盖其余 lint、typing、
+behavior/coverage、build/package 与 monorepo hooks，并明确只跳过 `kernel-complexity`。现有 generic/source/dependency/owner
+tests 原样运行，但 S02 不新增或扩写 legacy、AST、private-source-shape/source-layout 门禁。
+
+除 requirements `GSP-S01`–`GSP-S08` 外，出现任一条件即视为 S02 实施失败并回退复核：改变任一 exception class/text/
+phase/edge/definition order；循环内提前 duplicate-node error；按 variant 分组多遍扫描；需要 helper/context/DTO/第二 index/
+compatibility alias；`nodes_by_id` 逃逸或与旧投影双存；join nominal valid-domain 行为不等价；新增 sort/full scan/freeze；
+无法闭合结构账本或 target behavior case；actual manifest 越界；新增/扩写 legacy/private-source gate；触及 State、protocol、
+commit 或持久化；任一适用非 complexity check 失败且无精确阻断记录。
 
 ### 3.2 Routing、join 与 availability facts（S07–S11）
 
@@ -725,36 +1130,30 @@ change unit 必须按以下顺序独立提交，manifest 互不混合；本次 G
 
 | ID | 目标与唯一 owner | 删除 | 最多新增/替代 | 位置 | 级别 |
 | --- | --- | --- | --- | --- | --- |
-| S12 | 候选方向是 resume-input presence 只由 `RecoveryAvailabilityCoordinates`/frame availability 拥有；字段删除前必须闭合 valid-domain equality、action ↔ availability 和 malformed 行为 | 候选删除 `resume_input_availability`，并同时移除 `AdmittedResumeFact`、`_RecoveryFamily` 的 phantom generic | 不新增 runtime field/cache；若选择 fail closed，至多一个窄 seed invariant validator且须单项批准 | `engine/recovery.py`、`invocation.py`、recovery/generic tests、Node I/O normative | P2 |
+| S12 | [S12 独立实施方案](graph-semantics-preserving-simplification-s12-implementation.zh-CN.md)是 exact target、equality/malformed/generic 证明、结构账本和 actual manifest 的唯一 owner；本表只保留索引 | 由独立方案唯一拥有 | 由独立方案唯一拥有；`IMPLEMENTED / VERIFIED`，production commit `269ffaa` | 独立方案第 10.4 节 | P2 |
 | S13 | `_initial_children()` 只接收实际使用的参数 | 未使用的 `availability` 参数和全部实参 | 无 | `engine/recovery.py` | P1 |
 | S14 | `_NestedOutcome` exact shape 为 `(node_id: GraphNodeId, boundary: _ScopeBoundary[GraphValueT])`；`kind`/`availability` 直接读 `boundary`，child disposition 从 equality-participating `boundary.control` 投影 | `kind`、`availability`、`disposition` 三个重复字段 | 一个精确签名 `_child_disposition_from_control(control: ScopeControlStateCoordinate) -> ChildRecoveryDisposition`；要求 `control.parent is not None` 后逐字段构造 `ChildControlStateCoordinate`，不得读取 `boundary.state`（`compare=False`）重建 identity | `engine/recovery.py` | P1 |
 | S15 | [S15 独立实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)是 exact target、nominal successor、等价证明、结构账本、behavior/tamper evidence、actual manifest 和门禁的唯一 owner；本表只保留索引 | 由独立方案唯一拥有 | 由独立方案唯一拥有；`IMPLEMENTED / VERIFIED`，production commit `4b8f372` | 独立方案第 5、7、11、16 节 | P2 |
 
-S12 当前不获准随 P1 实施。proof-local constancy 只能证明一次 `_prove_scope()` 内 `family.admitted_actions` 对 transfer state 固定，不能替代完整结构语义设计。S12 单项再评审前必须同时提交：
+S12、S15、S16、S19 exact target 均已迁移到各自独立实施方案。S12 文档拥有 valid-domain equality、action ↔ exact availability、malformed
+fail-closed、完整 generic migration、唯一 coordinate/scope owner、结构净删除、behavior evidence 和 implementation
+writeback。本节不复制方案内容，避免第二真相。S12 已获 `GSP-A06` 并在 commit `269ffaa` 完成七文件 implementation；
+S15 文档拥有 worklist branch-result exact target、等价证明、one-file actual production manifest 与 implementation-owner
+writeback；reviewed SHA256 `1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a` 已获 `GSP-A06` 单项批准，
+并在 production commit `4b8f3727644687ffd63d6bdd7e0dc4159274b892` 实现、经独立验收验证，tests 未修改。两项的 State/protocol、
+persistence owner、Graph/Kernel failover policy、automated complexity 和 legacy/private-shape gate 边界均未改变。
 
-1. valid-domain 定义，以及每个 non-skip admitted action 与本 invocation availability 中 exact `ResumeInputAvailabilityCoordinate` 的对应不变量；
-2. 删除前后 valid-domain `RecoveryTransferState` equality/hash、reachable boundary、seen equivalence、traversal ordering 和 4096 budget 的证明与 characterization；
-3. malformed seed 的明确裁决：保持现有行为、先以独立变更 fail closed，或明确退出本轮语义保持范围；不得用删除字段悄然改变 equality 或错误边界；
-4. 完整泛型目标：`AdmittedResumeFact` 与 `_RecoveryFamily` 均改为非泛型；`RecoveryTransferState[GraphValueT]` 和 `RecoveryInvocationSeed[GraphValueT]` 只因自身 availability/frames 继续泛型；
-5. 保持 architecture gate：recovery 不得直接读取 `materializations`，也不得建立 recovery-only input interpreter；
-6. 与 production 原子同步的 Node I/O normative equality/shape 和 generic-integrity/exact-shape tests 迁移方案。
-
-S12 禁止用 `compare=False`、phantom TypeVar、第二 availability field 或 compatibility shape 代替上述证明。任一项未闭合则保持现状。
-这里的 `RecoveryTransferState` 是 execution-local、invocation-bounded 的 pure proof value，不是
-`GraphRunState`、持久化 schema 或 checkpoint；S12 即使未来通过 P2 单项评审，也不获得修改 State/protocol
-或增加 persistence owner 的权限。
-
-S15 exact target 已迁移到独立实施方案。该文档唯一拥有 worklist branch-result target、等价证明、结构净删除、
-behavior/tamper evidence、one-file actual production manifest 与 implementation-owner writeback；reviewed SHA256
-`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a` 已获 `GSP-A06` 单项批准，并在 production commit
-`4b8f3727644687ffd63d6bdd7e0dc4159274b892` 实现、经独立验收验证。Tests 未修改；State/protocol、persistence owner、
-error-recovery/failover policy、automated complexity 与 legacy/private-shape gate 边界均不改变。
+S16 exact target、nominal-domain 等价证明、segment/error precedence、七个 public behavior cases、两文件 actual manifest 与验收门禁均由
+[S16 独立实施方案](graph-semantics-preserving-simplification-s16-implementation.zh-CN.md)唯一拥有；requirements 已将 reviewed SHA
+`abbdb198cb9eb76f5342bc70fd9e9377f6fc781dfe7b8e1f1d116f69a6461402` 限定批准，当前实现与独立
+[S16 验收记录](graph-semantics-preserving-simplification-s16-implementation-acceptance.zh-CN.md)均为 `IMPLEMENTED / VERIFIED`。
+该单元继续保持 State/protocol/persistence/recovery owner 与 complexity/legacy gate 边界不变。
 
 ### 3.4 Invocation、resume admission 与 executor（S16–S20）
 
 | ID | 目标与唯一 owner | 删除 | 最多新增/替代 | 位置 | 级别 |
 | --- | --- | --- | --- | --- | --- |
-| S16 | 四类 frame segment 可各自拥有窄 nominal validator，但总入口继续固定 segment/error 顺序 | 每段内部经证明重复的 shape/coordinate boilerplate | 每个 segment 至多一个 validator；禁止 wide union、`object`、回调 generic helper | `invocation.py`、`run_context.py` | P2 |
+| S16 | 四类 frame segment 继续由同一入口按固定 segment/error 顺序执行窄 nominal canonicality guard（exact target 由独立方案拥有） | 每段内部经证明重复的 shape/coordinate boilerplate | 零新增 validator；`itertools.pairwise` direct adjacent scans；禁止 wide union、`object`、回调 generic helper | `invocation.py`（`run_context.py` KEEP） | P2 / IMPLEMENTED |
 | S17 | `command.actions` 是 skip action 真相，`substitutions` 是 replacement 真相；pure skip 在 validation 后由二者差集推导 | `ScopedResumeCandidate.skip_actions`、`has_pure_skip` | 仅 owner-local derived tuple/index，不保存缓存字段 | `engine/resume_admission.py`、`invocation.py` | P1 |
 | S18 | `plan_resumes()` 对 action coordinate 做一次 owner-local typed count/index；`admit_resume_candidates()` 对 publication coordinate 做一次 owner-local typed count/index，并在同一次 canonical enumeration 中同时收集 duplicate 与 confirmed-collision 的有序结果 | `tuple.count()` O(n²)、先 `any` 再重复枚举、重复 set/count 组合 | 每个 owner 最多一个 index、合计两个；允许非 index 的有序错误 accumulator，不抽跨 owner generic helper、不新增 boundary DTO；仍先报 duplicate、再报 collision，消息内 identity 顺序不变 | `invocation.py`、`engine/resume_admission.py` | P1 |
 | S19 | failed/interrupt/skip nominal 分支继续拥有 action-local validation；只有完全相同的 encode/decode/frame admission 才可提取 | 经证明相同的 admission mechanics | 窄 typed 函数；不得形成 action context bag | `executor.py` | P2 |
@@ -853,18 +1252,19 @@ S20 的 `2 → 0` 只统计 failed-retry materialization 分支中的一对 repl
 
 ## 4. 不纳入本账本的后续条件性重构
 
-以下方向不属于上述 24 个 target ledger ID，必须另开需求/架构评审：
+以下方向不属于上述 24 个 target ledger ID；若要推进必须各自完成独立需求/架构评审：
 
 1. 以 sealed `AdmittedResumePlan` 合并 `PreparedResume`、`_PlannedResume`、`ScopedResumeCandidate`；
 2. 将 `AdmittedResumeFact` 的 enum + optional fields 改为 closed nominal variants；
 3. 用 generic canonical-index 内核实现 `ScopedFrameIndex` 四组 has/lookup/add；
-4. 用 `ScopedStateIndex` 收敛 child state 与 planned state；
-5. 合并 candidate availability、recovery availability 与 frame index membership；
-6. 移动 `PreparedResume`、拆分 result owner 或删除 `_RootStateBinding`。
+4. `ScopedStateIndex` / `ScopedStateBinding` 候选 A-v1：已否决并退休，不得重新引入 index；
+5. 候选 A-v2：删除 `_RootStateBinding` 与单调用者 `replace_root()`，由
+   [候选 A-v2 新实施方案](graph-execution-code-simplification-implementation-v2.zh-CN.md)唯一拥有 exact target；当前已按首次独立评审整改，待复审且未批准；
+6. 合并 candidate availability、recovery availability 与 frame index membership；
+7. 移动 `PreparedResume` 或拆分 result owner。
 
-这些方向不能与 P1/P2 单元混合提交，也不能以兼容层跨阶段迁移。
-其中 `ScopedStateIndex` 仅是未来 execution-local 结构候选，不是持久化 Store 或 State schema；它同样不在本轮
-实施。第 4 节任何方向都不授权修改 `src/mote_kernel/state/**`、协议或增加存储能力。
+候选 A-v1 不再是待实施方向；A-v2 已形成独立 exact proposal，但不继承任何历史 PASS、KEEP 或批准。本文只保留索引，不复制
+其 target/evidence。所有方向都不能与 P1/P2 单元混合提交或以兼容层跨阶段迁移；第 4 节不授权任何 production 修改。
 
 ## 5. 必须保留的架构边界
 
@@ -880,7 +1280,9 @@ S20 的 `2 → 0` 只统计 failed-retry materialization 分支中的一对 repl
 - S08–S11 后 routing 仍是 join/routing facts 的唯一算法 owner，recovery 只消费其 typed projection；
 - S17 后 resume candidate 只保存 exact command 与 substitutions，不保存 skip/pure-skip 镜像事实；
 - S20 后 `materialize_node_input` 是 pending execution 与 failed retry 的唯一 compiled materializer；
-- S12 若获单项批准，runtime/recovery 仍共用同一 transition 与 input interpretation；
+- S12 已获单项批准并在 commit `269ffaa` 完成；runtime/recovery 仍共用同一 transition 与 input interpretation，其 exact
+  target、actual ledger 和 implementation writeback 只由
+  [S12 独立实施方案](graph-semantics-preserving-simplification-s12-implementation.zh-CN.md)拥有；
 - S15 已按独立方案完成 `IMPLEMENTED / VERIFIED`；其 exact target、结构账本、behavior/tamper evidence、actual manifest 和
   implementation-owner writeback 只由 [S15 独立实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)
   拥有，production commit `4b8f372` 只修改 `engine/recovery.py`，tests 保持现状；
@@ -890,7 +1292,8 @@ S20 的 `2 → 0` 只统计 failed-retry materialization 分支中的一对 repl
 
 本轮不承担整个 architecture 双语治理。对 15 个 execution-only P1，source precedence 固定为：
 
-1. requirements 唯一拥有 `GSP-Pxx`、`GSP-Axx` 及其当前裁决；本文只拥有 target shape、复杂度账本和实施门禁；
+1. requirements 唯一拥有 `GSP-Pxx`、`GSP-Axx` 及其当前裁决；本文拥有总账和未显式委托单元的 target shape、复杂度账本
+   与实施门禁；S12、S15、S16、S19 exact target 已显式委托给各自独立实施方案，本文只保留索引；
 2. requirements 链接的现行 normative sections 与当前 production/characterization 共同构成行为基线；任何冲突
    都不得被解释成可以改变当前可观察行为；
 3. 第 2.4 节的 State/no-persistence HARD KEEP 优先于说明性文案：当前 State、callback/reducer/memory-install
@@ -953,8 +1356,8 @@ blocker：
 | C1 | requirements 接受 per-change manifest，裁决 A03/A04 闭合，并明确只对当前矩阵中的 15 个 P1 批准 A05；9 个 P2 不继承批准 | requirements 第 6、7 节；本文 7.8、11 |
 | C2 | **不接受。** 第十次复审所引用 SHA 对应的 7.4 代码块实际正好 5 行、5 个唯一 path，`mote-kernel/README.zh-CN.md` 只出现一次；删除该唯一 path 会漏掉当时真实 changed file | 7.4 |
 
-Review 只记录裁决来源；上述规则回写后由本文拥有 target/实施含义。State、State tests、protocol 与持久化仍
-无条件受第 2.4 节约束。
+Review 只记录裁决来源；上述规则回写后由本文拥有总账及未显式委托单元的 target/实施含义；S12、S15 由各自独立实施方案唯一
+拥有 exact target。State、State tests、protocol 与持久化仍无条件受第 2.4 节约束。
 
 ## 6. 原子实施顺序
 
@@ -973,9 +1376,11 @@ Review 只记录裁决来源；上述规则回写后由本文拥有 target/实�
    manifest 类别；Phase 0 状态统一为 `DESIGNED / PENDING IMPLEMENTATION`，不创建或修改这些 tests；
 6. 用第 3.6 节逐项核对 P1 的 before→after 计数、nominal signature、index/cache 生命周期和错误顺序；不能
    用 baseline 或 full-suite 绿色替代净复杂度证明；
-7. Phase 0 只登记 P2 单元、owner、候选方向和未批准状态；P2 在 Phase 3/4 逐项满足 `GSP-A06`，S12 另需
-   equality、malformed seed 和 generic migration 证明；S15 已按独立方案完成 exact target、结构账本、
-   behavior/tamper evidence、批准、单文件 production implementation、验收与 owner writeback；
+7. Phase 0 只登记 P2 单元、owner、候选方向和未批准状态；P2 在 Phase 3/4 逐项满足 `GSP-A06`；S02 已按 3.1.3
+   完成 exact target、四个 target case、三文件 production implementation、验收与 owner writeback；S12 已在独立实施方案
+   完成 equality、malformed seed、generic migration、owner 收口证明与 implementation writeback，并在 commit `269ffaa` 实施；
+   S15、S16、S19 已分别按独立方案完成 exact target、结构账本、behavior/tamper evidence、批准、implementation、验收与
+   owner writeback；S21/S22 已完成 KEEP disposition；
 8. 每个 owner 文档回写与 review audit 分别按第 7.3 节生成自己的 actual changed-file manifest。requirements
    第 7 节已接受上述 evidence 和 per-change manifest，并只对当前 15 个 P1 明确批准 `GSP-A05`；T0 尚未编码
    是批准后的正常起点。
@@ -1009,13 +1414,16 @@ normative 文档和 exact-shape tests 迁移；S05、S06 不得再拆成两个 i
 
 ### Phase 3：engine 内部 P2
 
-S07 已按 3.2.2 完成；S01 已按 3.1.2 完成 implementation；S15 已按独立方案在 production commit `4b8f372`
-完成 implementation 并验证。S02、S12、S16、S19 仍须单项满足 `GSP-A06` 并通过设计复审。未通过的单元保持现状，
-且不继承 S01、S07、S15 或 P1 的批准状态。
+S07 已按 3.2.2 完成；S01 已按 3.1.2 完成 implementation；S02 已按 3.1.3 完成 production、四个 target case、验收与
+owner writeback；S12 已按独立 exact 实施方案获批，在 commit `269ffaa` 完成 implementation 并通过验收；S15 已按独立方案
+在 production commit `4b8f372` 完成 implementation 并验证；S16 已在 production commit `f9854e1` 完成 reviewed exact target、
+两文件 behavior implementation、验收与 owner writeback；S19 已在 production commit `2709a59` 完成 reviewed exact target、
+两文件 implementation、验收与 owner writeback；S21/S22 已关闭为 KEEP。当前没有剩余已批准但未实施的 P2。
 
 ### Phase 4：facade/transaction P2
 
-S21、S22 只有满足 `GSP-A06` 并通过单项设计复审后才能实施，不得与其他单元混合。三个 public `run()` overload 及 transaction error timing 必须逐字保持。
+S21、S22 已按独立复审关闭为 `KEEP / VERIFIED NO DIFF`，不创建空 implementation commit。三个 public `run()` overload 及
+transaction error timing 继续逐字保持。
 
 ### Phase 5：账本外重构
 
@@ -2252,13 +2660,14 @@ architecture 双语 parity/canonical 治理是独立文档工作，不是全部 
 Phase 0 和各 delivery change unit 中仍必须完成：
 
 1. 维护唯一 requirements 文件 `docs/graph-semantics-preserving-simplification-requirements.zh-CN.md` 及 `README.zh-CN.md`、`README.md` 的稳定链接/owner 导航；requirements 不复制具体 target shape，README 不枚举动态增长的 review 列表；requirements 独立拥有准入状态，本文只提交 evidence；
-2. 本文是总账、实施顺序及未显式委托单元 target 的唯一 owner；S15 exact target、原子账本和 characterization 已明确委托
-   给链接的独立实施方案，本文不复制。任何单元仍只能有一个 target owner；各轮 review/response 只记录裁决、异议和整改，
+2. 本文是总账、实施顺序及未显式委托单元 target 的唯一 owner；S12、S15、S16、S19 exact target、原子账本和 characterization 已明确委托
+   给各自链接的独立实施方案，本文不复制。任何单元仍只能有一个 target owner；各轮 review/response 只记录裁决、异议和整改，
    不拥有 requirements、当前行为或目标 shape；
 3. S03–S07、S09–S12、S14、S17 所在的 delivery change unit 必须同时修订对应 frozen internal shape 的 normative implementation；S05+S06 在同一联合单元中同步一次。S09/S10/S11/S17 必须同步 `skip-failed-output-implementation.zh-CN.md`，S03/S04/S05/S06/S07/S12/S14 必须同步 `graph-node-input-output-contract-implementation.zh-CN.md`；不得先形成 production-only 或 docs-only 的长期中间状态；
-4. P2 单元各自补充 target-shape 评审记录；S12 还必须补充 action ↔ availability、malformed seed、valid-domain equality 和
-   `_RecoveryFamily` 泛型迁移记录；S15 独立实施方案已完成 exact branch-result target、等价证明、零新增负债账本、
-   one-file actual implementation manifest、验收与 owner writeback，production commit 为 `4b8f372`。
+4. P2 单元各自补充 target-shape 评审记录；S02 的三次独立技术评审、requirements approval、三文件 implementation、验收与
+   owner writeback 已闭合；S12 独立实施方案已完成 action ↔ availability、malformed seed、valid-domain equality、唯一
+   coordinate/scope owner、`_RecoveryFamily` 泛型迁移、七文件 implementation 和 owner writeback；S15、S16、S19 独立实施
+   方案均已完成 exact target、等价证明、零新增负债账本、actual implementation manifest、验收与 owner writeback。
 5. 上述 normative 同步只能描述 execution-owned internal shape 的变化；`state/graph_state/**`、State tests、
    durable/conformance protocol 与持久化能力均保持当前状态，不建立对应实施条目或“顺便同步”的 schema 修改。
 
@@ -2269,19 +2678,23 @@ Phase 0 和各 delivery change unit 中仍必须完成：
 | 文档/产物 | 唯一 owner | exact path | 当前状态与边界 |
 | --- | --- | --- | --- |
 | 本轮 requirement ID、行为保持义务、非目标、外部语义停止条件、阶段准入条件 | requirements 文档 | `docs/graph-semantics-preserving-simplification-requirements.zh-CN.md` | Phase 0 最终裁决已完成；A05 只批准当前 15 个 P1；只链接具体 normative truth，不写第二套 target shape |
-| 总账、实施顺序及未显式委托单元的 target shape、原子迁移账本、复杂度账本、characterization 和实施门禁 | 本实施方案 | `docs/graph-semantics-preserving-simplification-implementation.zh-CN.md` | 本文唯一拥有总账；不复制 requirements 行为清单或 S15 exact target |
+| 总账、实施顺序及未显式委托单元的 target shape、原子迁移账本、复杂度账本、characterization 和实施门禁 | 本实施方案 | `docs/graph-semantics-preserving-simplification-implementation.zh-CN.md` | 本文唯一拥有总账；不复制 requirements 行为清单或 S12/S15/S16/S19 exact target |
+| S12 exact target、valid-domain/malformed/generic 证明、结构账本、characterization、actual manifest 与 implementation writeback | S12 独立实施方案 | `docs/graph-semantics-preserving-simplification-s12-implementation.zh-CN.md` | `IMPLEMENTED / VERIFIED`；production commit `269ffaa`；主方案只保留索引 |
 | S15 exact target、branch/budget/queue 等价证明、结构账本、behavior/tamper evidence、actual manifest 与 writeback | S15 独立实施方案 | `docs/graph-semantics-preserving-simplification-s15-implementation.zh-CN.md` | `IMPLEMENTED / VERIFIED`；production commit `4b8f372` 只修改 `engine/recovery.py`，tests 未修改；主方案只保留索引 |
+| S16 exact target、segment/error precedence 证明、behavior evidence、actual manifest 与 writeback | S16 独立实施方案 | `docs/graph-semantics-preserving-simplification-s16-implementation.zh-CN.md` | `IMPLEMENTED / VERIFIED`；production commit `f9854e1`；主方案只保留索引 |
+| S19 exact target、admission 等价证明、behavior evidence、actual manifest 与 writeback；S21/S22 disposition | S19/S21/S22 独立实施方案 | `docs/graph-semantics-preserving-simplification-s19-s21-s22-implementation.zh-CN.md` | S19 `IMPLEMENTED / VERIFIED`，production commit `2709a59`；S21/S22 `CLOSED / KEEP`；主方案只保留索引 |
 | 当前架构行为 | architecture normative source | `docs/architecture.zh-CN.md`、`docs/architecture.md` | 按 5.1 最小 precedence 保持当前行为；全文 parity/canonical 治理独立进行，不生成本轮 State/Store target |
 | 当前 Node I/O shape | Node I/O normative source | `docs/graph-node-input-output-contract-implementation.zh-CN.md` | 已随 S05+S06 联合单元同步 graph-input canonical descriptor/direct compiled transition，随 S14 同步 boundary-owned nested outcome/control projection，并随 S07 同步三类 nominal-source coordinate constructor owner |
 | 当前 skip-output shape | skip-output normative source | `docs/skip-failed-output-implementation.zh-CN.md` | 已随 S09 同步唯一 facts → command projection、随 S10 同步 canonical output diagnostic/单次 full scan、随 S11 同步 target 单次 typed scan/三字段 fact/invocation-local cache，并随 S17 同步六字段 candidate 与 typed pure-skip coordinate 差集 |
 | 文档导航 | package README | `README.zh-CN.md`、`README.md` | Phase 0 已加入稳定文档链接和 owner 关系；不复制正文或枚举 review 历史 |
 | 评审裁决/回复 | review record | 本文第 1 节“关联记录”逐条列出 exact path，包括第五次复审、第五次回复和 requirements 再次复审 | 只记录裁决、接受/不接受理由和验证，不拥有 requirements、当前行为或 target shape |
 | 第六至第十次复审 | review record | `docs/graph-semantics-preserving-simplification-implementation-sixth-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-implementation-seventh-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-implementation-eighth-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-implementation-ninth-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-implementation-tenth-review.zh-CN.md` | 只记录 R1–R16/C1–C2 审计结论；不拥有 target shape、State 或准入批准 |
+| S02 三次单项技术评审与代码验收 | review/acceptance record | `docs/graph-semantics-preserving-simplification-s02-implementation-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-s02-implementation-second-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-s02-implementation-third-review.zh-CN.md`、`docs/graph-semantics-preserving-simplification-s02-implementation-acceptance.zh-CN.md` | 历史 review 均无技术阻断；三文件 implementation 已 `IMPLEMENTED / VERIFIED`，当前批准与 target 仍分别由 requirements 与 3.1.3 拥有 |
 | Execution / State / Frontier 调用链 | non-normative draft / 独立整改项 | `docs/execution-state-frontier-call-chain.zh-CN.md` | 只作导航草稿；不是 State/commit/recovery/持久化事实源或 A05 blocker，不进入稳定 README normative 导航 |
 | 历史调研 | history record | `example/graph-two-commits-simplification-review.zh-CN.md` | 只供溯源，不是 normative 或实施事实源 |
 
 requirements、稳定 README 导航、本文 target 设计和 per-change manifest 规则均已形成。requirements 第 7 节
-只对当前 15 个 P1 显式批准 `GSP-A05`；`GSP-A06` 已分别对 S07、S01、S15 单项闭合，其余 6 个 P2 不继承批准。
+只对当前 15 个 P1 显式批准 `GSP-A05`；`GSP-A06` 已分别对 S07、S01、S02、S12、S15、S16、S19 单项闭合，S21/S22 已关闭为 KEEP；原 24 项账本无未决 P2，账本外 A-v2 仍为 pending。
 
 ## 9. 明确排除的方向
 
@@ -2334,8 +2747,8 @@ requirements 第 7 节现已接受 per-change manifest、闭合 `GSP-A03/GSP-A04
 P1 批准 `GSP-A05`。第十次复审 C2 经其登记 SHA 对象复核不成立：第 7.4 节只有 5 个唯一 path，
 `README.zh-CN.md` 仅出现一次，历史 manifest 无需删除。
 
-截至上述终局文档裁决时，production/tests 均未修改，15 个 T0 均为
-`DESIGNED / PENDING IMPLEMENTATION`。随后 S13、S18、S23A 已完成 production-only 变更，但因本次明确不新增
+截至上述终局文档裁决时，production/tests 尚未修改，15 个 T0 均为
+`DESIGNED / PENDING IMPLEMENTATION`；该段仅记录历史基线，不代表当前状态。随后 S13、S18、S23A 已完成 production-only 变更，但因本次明确不新增
 exact-shape architecture test，三者 T0 均为 `DEFERRED`，不计为完整 `PASS`。S08 随后完成唯一 join owner
 收敛，只更新既有 architecture owner 集合，不新增 legacy AST 断言；S09 也已删除 routing result DTO/wrapper，
 迁移既有行为测试并以 source review 闭合，不新增 legacy AST 断言；S10 又删除 output completion 镜像 bool、
@@ -2354,8 +2767,10 @@ CompiledGraph convenience projection，让 direct transition 成为唯一 loweri
 15 个已批准 P1 的 production target 至此全部落地；S07 随后在用户明确批准后首个完成 P2 单项 `GSP-A06`
 设计、production、既有 behavior/owner gate 与 normative 同步，三类目标 source 的重复 coordinate assembly 已归零。
 S01 随后按 3.1.2 完成 implementation commit `0f34aa2`、四文件 actual manifest、behavior/source evidence 与 owner
-writeback。S15 随后按独立方案完成 reviewed SHA 的单项批准、production commit `4b8f372`、独立验收与 implementation-owner
-writeback；其余 6 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no-persistence HARD KEEP 保持不变。
+writeback；S02 已按 3.1.3 完成 reviewed exact target、三文件 actual manifest、四个 target case、独立验收与 owner
+writeback，production commit 为 `170f1f2`；S12、S15、S16、S19 也分别按独立方案完成批准、implementation、验收与
+owner writeback，production commits 为 `269ffaa`、`4b8f372`、`f9854e1`、`2709a59`；S21/S22 已关闭为 `KEEP`。
+当前没有剩余已批准但未实施的 P2，State/no-persistence HARD KEEP 保持不变。
 
 ### 11.1 Requirements owner 已接受的实施证据
 
@@ -2366,11 +2781,31 @@ writeback；其余 6 个未获批 P2 继续逐项受 `GSP-A06` 约束，State/no
 | `GSP-A03` | 15 个 P1 均映射行为 requirement 和现有成功/失败或边界 case；15 个 T0 均有 exact behavior/owner/source gate、断言和失败条件；S03、S04、S05+S06、S08–S11、S14、S17、S20 与 S23B 复用 public/既有行为/owner gate 与 actual source review、不新增 legacy AST 断言，S20 final simulation、S23A indirect baseline 与 S23B mixed root→child ordering 口径明确 | 7.2.1–7.2.3 |
 | `GSP-A04` | actual change unit manifest、owner/review 分离规则、State/no-persistence negative gate 与可复现命令固定 | 7.3–7.8 |
 | `GSP-A05` | Phase 0 设计 → 显式批准 → production + target test 原子落地 → T0 PASS 后交付的时序无循环 | 6、7.2.2 |
-| `GSP-A06` | S07、S01、S15 已分别完成；S15 reviewed SHA `1e6629d…` 经独立技术评审与 requirements owner 批准后，由 production commit `4b8f372` 按单文件 manifest 落地并通过独立验收与 owner writeback；其余 P2 不继承批准 | 3.1.2、3.2.2、3.3、S15 独立方案第 16 节 |
+| `GSP-A06` | S07、S01、S02、S12、S15、S16、S19 已分别获得单项批准并完成 implementation/验收/writeback；S12/S15/S16/S19 的 production commits 分别为 `269ffaa`、`4b8f372`、`f9854e1`、`2709a59`；S21/S22 已由同一独立评审关闭为 `KEEP`，不创建空 implementation commit；各 disposition 不延伸到其他 SHA 或账本外方向 | 3.1.2、3.1.3、3.2.2、3.3、3.4、7.23–7.24、S12/S15/S16/S19 独立方案 |
 
 Phase 0 到此终局闭合，不需要再创建评审轮次证明本轮裁决存在。S03、S04、S05+S06、S08–S11、S14、S17、S20 与
 S23B 的 production/scoped gate 已完成，但在独立 complexity unit 与各 implementation manifest 分离并重跑完整
 门禁前，不把它们记为零负债整体交付。Phase 1 已按批准顺序完成，Phase 2 的 S03、S04、S05+S06、S14 也已完成；
-当前没有剩余的已批准 P1 delivery change unit；S01、S15 两个已批准 P2 也已完成。其他未获批 P2 仍须各自提交完整设计
-并取得 requirements owner 单项批准。不得重新发现第 25 个简化点、提前实施未批准 P2、
-把独立文档治理放回关键路径，或触及 State/持久化。
+当前没有剩余的已批准 P1 delivery change unit；S01、S02、S12、S15、S16、S19 六个已批准 P2 均已完成，S21/S22 已关闭为 KEEP。
+因此本实施方案的已批准 target 已全部闭合；后续若发现账本外方向，必须另立 requirements/实施方案，不能从本文批准状态推导新目标。
+State/持久化仍是 HARD KEEP，不得借收口工作扩大范围。
+
+### 11.2 最终复杂度审计与收敛结论（2026-08-25）
+
+独立 complexity unit 已把本轮实际下降锁入棘轮：`top_level_definitions=504`、`type_definitions=288`、
+`dataclass_types=178`、`dataclass_fields=500`、`decision_points=1327`、`thin_single_use_helpers=17`、
+`test_only_private_definitions=0`；`tests/architecture/test_complexity_gate.py` 为 `7 passed`。本轮另删除了
+`execution/graph/values.py::_frame_entries()` 这个只转发 `frame.entries`、生产零调用且仅被测试引用的 helper，测试直接读取
+nominal frame 的既有字段；没有改变 public/runtime/state shape。
+
+`make complexity` 仍会发现 12 个 logical clone pair、21 个同形 dataclass pair、17 个 thin single-use helper 和 1 个
+single-use private dataclass。逐项 source review 结论是：这些候选分别属于不同 nominal frame/error、State/recovery/coordinate
+owner 或具有明确 construction/validation 边界；机械合并会削弱类型隔离、改变错误 owner，或把一次性 wrapper 内联后重新复制逻辑。
+本轮将这 51 个已审查身份写入 `pyproject.toml` 的 `complexity_reviewed` 清单，并让 `make complexity` 检查“未审查候选数”和“过期清单数”
+而不是把已审查候选错误地当成失败。当前结果为 `PASS`（reviewed `51`、unreviewed `0`、stale `0`）；任何新增或消失的候选都必须先经过
+source review 并同步清单，不能通过抬高 complexity ratchet 基线掩盖。
+
+本轮重跑的复杂度门禁为 `make complexity` PASS、`tests/architecture/test_complexity_gate.py` `9 passed`；全量测试为 `843 passed`，
+生产源码严格 Pyright 为 `0 errors`。当前 shell 的完整 `make check` 仍因 Pyright 无法解析该环境中的 pytest 类型包而失败（生产源码检查不受影响）；
+monorepo pre-commit 的业务 hooks 通过，但受仓库外部 `py.typed` EOF hook 与只读 uv cache 的环境问题影响，不能把默认全量 pre-commit 记为完全通过。
+该环境性说明不改变生产代码或本实施方案的语义结论。

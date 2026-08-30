@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：Approved / `GSP-A01`–`GSP-A05` 已闭合；批准当前 evidence matrix 中的 15 个 P1；`GSP-A06` 已对 S07、S01、S15 单项满足并批准
-- 日期：2026-08-24
+- 状态：Approved / `GSP-A01`–`GSP-A05` 已闭合；批准当前 evidence matrix 中的 15 个 P1；`GSP-A06` 已对 S07、S01、S02、S12、S15、S16、S19 单项满足并批准，S21/S22 已关闭为 KEEP；候选 A-v2 已登记为 PENDING / NOT APPROVED
+- 日期：2026-08-26
 - 适用范围：`src/mote_kernel/execution/**` 的内部语义保持型简化
 - 公共边界：`mote_kernel.execution.Graph`
 - 对应实施方案：[Graph 执行代码语义保持型简化实施方案](graph-semantics-preserving-simplification-implementation.zh-CN.md)
@@ -115,6 +115,25 @@ S01 随后在 design/review commit `d34c117` 收口为实施方案第 3.1.2 节�
 四文件原子 manifest。用户于 2026-08-23 以原文“你做到让我可以交付一个直接实施的文档”明确要求把已通过技术评审的
 S01 收口为可直接实施状态；本 requirements owner 据此批准 S01，不把 review record 或本段变成第二份 target shape。
 
+S02 随后由实施方案第 3.1.3 节收口为唯一 target；第三次技术评审以主实施方案 SHA256
+`a386534d3657c15485842bf63657f296805614f7c3bea43505f161f5e14d66b2` 为对象，在前两次评审基础上再次裁决
+`PASS / NO NEW BLOCKER`，确认 exact signature/nominal types、结构净删除账本、behavior/source evidence、
+no-State/no-persistence 边界与三文件 planned manifest 已闭合。用户于 2026-08-24 明确批准 S02，并要求本次只回写
+requirements、不实施代码；本 requirements owner 据此批准 S02，仅授权第 3.1.3 节该 exact target。automated complexity
+gate/baseline/ratchet 不适用于本单元，但该节的零新增负债和结构净删除约束继续完整适用。
+
+S12 随后由独立的 [S12 Recovery admitted-action 事实归一化实施方案](graph-semantics-preserving-simplification-s12-implementation.zh-CN.md)
+收口为唯一 target。三次独立技术评审及对应 owner writeback 已闭合重复 resume fact、phantom generic、valid-domain
+equality/hash、action ↔ availability、malformed seed construction、materialization/scope owner、skip 支持域、no-State/
+no-persistence 与 Graph/Kernel failover 边界；当前 reviewed exact target 固定为该实施方案 SHA256
+`1727f0c184047a0a12535f4195eafe99e2a51892ab7ed25bdfdfcb9dd04e9aa7`。用户于 2026-08-24 明确原文批准并要求本
+requirements owner 将 S12 的 `GSP-A06` 标记为仅限当前 reviewed exact target 的已批准；本 requirements owner 据此批准
+S12，仅授权上述 SHA 对应的 exact target、行为证据和七文件 planned implementation manifest。任何后续 target 内容或 SHA
+变化均不继承本次批准，须重新取得显式批准。automated complexity 与 legacy/private-source-shape gates 不适用于本单元；
+current behavior、strict typing、active owner/dependency、lint、format、build/package及适用 pre-commit checks 继续必须通过。
+该 exact target 已在 commit `269ffaa6fe101164c0055f8426a72b761135d393` 以批准的七文件 manifest 实施并通过二次代码验收；
+implementation-owner writeback 由 S12 独立实施方案拥有，本文仍只记录批准与生命周期状态。
+
 S15 随后由独立的 [S15 Recovery worklist 分支结果归一化实施方案](graph-semantics-preserving-simplification-s15-implementation.zh-CN.md)
 收口为唯一 target；独立技术评审绑定该实施方案 SHA256
 `1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a`，裁决为
@@ -125,14 +144,40 @@ S15 随后由独立的 [S15 Recovery worklist 分支结果归一化实施方案]
 behavior、strict typing、active owner/dependency、lint、format、build/package、no-State/no-persistence 与 scoped repo checks
 仍为必须通过的实施条件。本文不复制 S15 算法、结构账本或 exact source shape。
 
+S16 随后由独立的 [S16 Continuation frame segment 规范序校验简化实施方案](graph-semantics-preserving-simplification-s16-implementation.zh-CN.md)
+收口为唯一 target；第三次独立技术评审绑定该实施方案 SHA256
+`abbdb198cb9eb76f5342bc70fd9e9377f6fc781dfe7b8e1f1d116f69a6461402`，裁决为
+`PASS / READY FOR REQUIREMENTS OWNER APPROVAL`。用户于 2026-08-24 以原文“实施S16吧，我给予批准”明确批准并要求开始实施；
+本 requirements owner 据此将 S16 记为 `GSP-A06 SATISFIED / APPROVED`，只授权上述 reviewed SHA、对应 existing behavior
+证据以及 `src/mote_kernel/execution/invocation.py` 与既有 `tests/execution/test_continuation_integrity.py` 两文件原子
+implementation manifest。任何 target、baseline、manifest 或 SHA 变化均不继承本次批准。automated complexity 与
+legacy/private-source-shape gates 继续按用户范围排除；current continuation behavior、exact error type/text/cause/phase/segment
+precedence、strict typing、active owner/dependency、coverage、lint、format、build/package、no-State/no-persistence 与 scoped repo
+checks 仍为必须通过的实施条件。本文不复制 S16 算法、结构账本或 exact source shape。
+
+S19、S21、S22 随后由独立的 [S19 / S21 / S22 Graph 执行尾项语义保持型简化实施方案](graph-semantics-preserving-simplification-s19-s21-s22-implementation.zh-CN.md)
+绑定 reviewed implementation SHA256 `07c739485e9d6f24a0dc17ca092f884eb2aeca7532220bc59a67f969b735a3f9`，第三次独立技术评审裁决为
+`PASS / READY FOR REQUIREMENTS OWNER PER-UNIT DISPOSITION`。用户于 2026-08-24 明确批准该方案中的 S19、S21、S22；本
+requirements owner 据此分别记录：S19 为 `GSP-A06 SATISFIED / APPROVED`，仅授权该 reviewed target 的
+`src/mote_kernel/execution/executor.py` 与 `tests/execution/test_executor.py` 两文件 implementation unit；S21、S22 为
+`GSP-A06 SATISFIED / CLOSED — KEEP`，production/test manifest 为空，不创建空 implementation/acceptance commit。批准与关闭
+均不延伸到其他 target、SHA、complexity/legacy gate 或账本外方向；本文只拥有本 disposition，不复制 implementation target shape。
+
+候选 A-v2 随后以独立的
+[versioned root-state de-wrapper 实施方案](graph-execution-code-simplification-implementation-v2.zh-CN.md)
+登记为新增 P2。首次独立技术评审只接受其技术方向并裁决 `CHANGES REQUESTED`；当前修订补入适用
+`GSP-P01`–`GSP-P08` 映射、recovered continuation 成功/负向 evidence 与 planned exact-shape gate，但尚未经独立复审，也没有
+用户对 reviewed exact SHA 的显式实施批准。因此本文只登记 `GSP-A06 PENDING / NOT APPROVED`，不复制 target shape、不授权
+production/tests，也不使 A-v2 继承任何既有 P1/P2 的批准。
+
 | 条件 | requirements owner 最终裁决 | 依据 |
 | --- | --- | --- |
 | `GSP-A01` | **CLOSED** | requirements、implementation、normative source、README 与 review 的 owner 分工已形成；architecture 全文治理和 non-normative 调用链整改不扩大 execution P1 范围 |
 | `GSP-A02` | **CLOSED** | 24 个 execution-only 原子单元已固定；当前 15 个 P1 均有唯一 owner、删除对象、最多新增面和 exact target |
-| `GSP-A03` | **CLOSED** | 15/15 P1 均映射适用 `GSP-P01`–`GSP-P08`，具有当前成功/失败或边界 baseline，以及 `DESIGNED / PENDING IMPLEMENTATION` 的 exact T0 nodeid、断言和失败条件 |
+| `GSP-A03` | **CLOSED** | 15/15 P1 均映射适用 `GSP-P01`–`GSP-P08`，具有当前成功/失败或边界 baseline，以及 exact T0 nodeid、断言和失败条件；已批准 P2 另有各自 implementation/acceptance evidence |
 | `GSP-A04` | **CLOSED** | 接受每个 actual change unit 独立 manifest、owner writeback/review audit 分离且历史记录不累计的模型；文档门禁可复现 |
 | `GSP-A05` | **APPROVED — 仅限下列 15 个 P1** | A01–A04 evidence 已闭合；批准后 production、对应 target test 和实际受影响 normative source 按实施方案逐单元原子落地，T0 通过后才可交付 |
-| `GSP-A06` | **SATISFIED / APPROVED — 仅限 S07、S01、S15 当前 reviewed exact target** | S07、S01 已按各自批准链闭合；S15 独立实施方案 SHA `1e6629d…` 已闭合 exact nominal target、结构净删除、behavior/tamper、owner/typing、one-file manifest 与 no-State/no-persistence evidence，独立技术评审通过且用户已显式批准；批准均不延伸到其他 SHA |
+| `GSP-A06` | **SATISFIED / APPROVED — 仅限 S07、S01、S02、S12、S15、S16、S19 当前 reviewed exact target；S21/S22 CLOSED — KEEP；A-v2 PENDING / NOT APPROVED** | 既有 disposition 不变。A-v2 只有 versioned target 与整改后 evidence，仍等待独立复审、reviewed SHA 绑定和用户显式批准，不继承任何既有批准 |
 
 `GSP-A05` 本次明确且穷尽地只批准以下 15 个 P1：
 
@@ -140,19 +185,23 @@ behavior、strict typing、active owner/dependency、lint、format、build/packa
 S03, S04, S05, S06, S08, S09, S10, S11, S13, S14, S17, S18, S20, S23A, S23B
 ```
 
-S07、S01 已于 2026-08-23 分别单项满足 `GSP-A06`，S15 已于 2026-08-24 单项满足 `GSP-A06`。S07、S01 的 target
-shape、证据和 planned manifests 分别由主实施方案第 3.2.2、3.1.2 节唯一拥有；S15 由上述独立实施方案 SHA256
-`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a` 唯一拥有。本文只拥有批准状态，不复制 target。
-以下 6 个 P2 仍未获批准，须各自逐项满足 `GSP-A06`：
+S07、S01 已于 2026-08-23 分别单项满足 `GSP-A06`，S02、S12、S15、S16、S19 已于 2026-08-24 分别单项满足 `GSP-A06`。S07、S01、
+S02 的 target shape、证据和 actual manifests 分别由主实施方案第 3.2.2、3.1.2、3.1.3 节唯一拥有；S12、S15 分别由上述
+独立实施方案 SHA256 `1727f0c184047a0a12535f4195eafe99e2a51892ab7ed25bdfdfcb9dd04e9aa7` 与
+`1e6629dfacad43ed1c87036fbc9f6589f606a220592c5fde3fadba068172e85a` 唯一拥有；S16 由上述独立实施方案 SHA256
+`abbdb198cb9eb76f5342bc70fd9e9377f6fc781dfe7b8e1f1d116f69a6461402` 唯一拥有。本文只拥有批准状态，不复制 target。
+当前新增且未批准的 P2 必须逐项满足 `GSP-A06`：
 
 ```text
-S02, S12, S16, S19, S21, S22
+A-v2 root-state de-wrapper — PENDING / NOT APPROVED
 ```
 
-因此 Phase 1/2 对上述 15 个 P1 开放，Phase 3 对 S01、S15 开放；各单元必须遵循实施方案的原子顺序、per-change manifest
-和适用门禁。S15 已获实施授权，只允许按其独立实施方案第 11.4 节修改
-`src/mote_kernel/execution/engine/recovery.py`。S01、S15 均不继承、等待或修改独立 complexity framework，
-其批准分别只覆盖主实施方案第 3.1.2 节及上述 S15 exact target SHA。
+因此 Phase 1/2 对上述 15 个 P1 开放，Phase 3 对 S01、S02、S12、S15、S16、S19 开放；S21/S22 已按 KEEP 关闭。各单元必须遵循
+实施方案的原子顺序、per-change manifest 和适用门禁。S01、S02、S12、S15、S16、S19 均已按各自 reviewed exact target 完成
+implementation、验收与 owner writeback，production commits 分别为 `0f34aa2`、`170f1f2`、`269ffaa`、`4b8f372`、`f9854e1`、
+`2709a59`；S21/S22 不创建空 implementation commit，仅保留 KEEP disposition。S01、S02、S12、S15、S16、S19 均不继承、等待或修改
+独立 complexity framework，其批准分别只覆盖各自 reviewed exact target；S21/S22 的关闭也不改变 complexity/legacy gate 的用户排除口径。
+A-v2 在独立复审与显式批准前不进入 Phase 3，production/tests manifest 保持关闭。
 本次批准不授权修改 `src/mote_kernel/state/**`、`tests/state/**`、durable/conformance protocol，不授权新增
 Store、repository、journal、checkpoint、database、persistence port/backend 或任何第二执行/存储路径；State
 保持当前 shape，本轮继续不实现持久化。账本外方向也不继承本次批准。
@@ -163,7 +212,37 @@ Store、repository、journal、checkpoint、database、persistence port/backend 
 mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
 ```
 
+本次 S02 approval unit 的 exact actual manifest 也只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
+本次 S12 approval unit 的 exact actual manifest 也只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
 本次 S15 approval unit 的 exact actual manifest 也只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
+本次 S16 approval unit 的 exact actual manifest 也只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
+本次 S19 approval unit 的 exact actual manifest 也只有：
+
+```text
+mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
+```
+
+本次 S21/S22 KEEP closure unit 的 exact actual manifest 也只有：
 
 ```text
 mote-kernel/docs/graph-semantics-preserving-simplification-requirements.zh-CN.md
