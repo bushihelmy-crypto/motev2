@@ -465,12 +465,8 @@ def _validate_frame_index(
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
         if coordinate.descriptor != scoped_graph.graph_input_descriptor.identity:
             raise SnapshotMismatchError("continuation graph input descriptor does not match its scope")
-        declarations = tuple(
-            (declaration.name, declaration.descriptor)
-            for declaration in scoped_graph.graph_input_descriptor.declarations.entries
-        )
         try:
-            _admit_graph_input_frame(record.frame, declarations)
+            _admit_graph_input_frame(record.frame, scoped_graph.graph_input_descriptor.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation graph input frame does not match its descriptor") from error
     for record in frames.publications:
@@ -492,11 +488,8 @@ def _validate_frame_index(
             and record.provenance.execution_token.generation < 1
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
-        declarations = tuple(
-            (declaration.name, declaration.descriptor) for declaration in publication.declarations.entries
-        )
         try:
-            _admit_node_output_frame(record.frame, declarations)
+            _admit_node_output_frame(record.frame, publication.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation publication frame does not match its descriptor") from error
     for record in frames.resume_inputs:
@@ -510,12 +503,8 @@ def _validate_frame_index(
             or coordinate.activation.superstep > binding.state.superstep
         ):
             raise SnapshotMismatchError("continuation resume input has inconsistent coordinates")
-        declarations = tuple(
-            (declaration.name, declaration.descriptor)
-            for declaration in materialization.descriptor.declarations.entries
-        )
         try:
-            _admit_node_input_frame(record.frame, declarations)
+            _admit_node_input_frame(record.frame, materialization.descriptor.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation resume input frame does not match its descriptor") from error
     for record in frames.child_boundaries:
@@ -527,12 +516,8 @@ def _validate_frame_index(
             or binding.state.status is not GraphRunStatus.COMPLETED
         ):
             raise SnapshotMismatchError("continuation child boundary has inconsistent coordinates")
-        declarations = tuple(
-            (declaration.name, declaration.descriptor)
-            for declaration in scoped_graph.graph_output_descriptor.declarations.entries
-        )
         try:
-            _admit_graph_output_view(record.frame, declarations)
+            _admit_graph_output_view(record.frame, scoped_graph.graph_output_descriptor.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation child boundary frame does not match its descriptor") from error
 

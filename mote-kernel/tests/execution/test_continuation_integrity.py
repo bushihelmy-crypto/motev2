@@ -6,7 +6,7 @@ from tests.execution.engine.factories import compiled_graph, running_state
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.family_driver import admit_continued_root, project_graph_result
-from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
+from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
     NamedValue,
@@ -614,7 +614,7 @@ async def test_complete_continuation_readmits_graph_input_frame_names_and_values
         GraphInputFrame[str],
         _make_graph_input_frame(
             Graph.values(value=7),
-            (("value", canonical_nominal_type(int)),),
+            normalize_output_declarations({"value": int}),
         ),
     )
     layout.install(
@@ -634,7 +634,7 @@ async def test_complete_continuation_rejects_the_wrong_graph_input_frame_nominal
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
     graph_input = snapshot.frames.graph_inputs[0]
-    wrong_frame = cast(GraphInputFrame[str], _make_node_input_frame((), ()))
+    wrong_frame = cast(GraphInputFrame[str], _make_node_input_frame((), normalize_output_declarations({})))
     layout.install(
         replace(
             snapshot,
@@ -711,7 +711,7 @@ async def test_complete_continuation_readmits_publication_frame_content() -> Non
     publication = snapshot.frames.publications[0]
     wrong_frame = _make_node_output_frame(
         Graph.values(other="published"),
-        (("other", canonical_nominal_type(str)),),
+        normalize_output_declarations({"other": str}),
     )
     layout.install(
         replace(
@@ -779,7 +779,7 @@ async def test_substitution_continuation_rejects_each_integrity_violation(tamper
             malformed,
             frame=_make_node_output_frame(
                 Graph.values(other="replacement"),
-                (("other", canonical_nominal_type(str)),),
+                normalize_output_declarations({"other": str}),
             ),
         )
     layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=(malformed,))))
@@ -861,7 +861,7 @@ async def test_complete_continuation_readmits_resume_input_frame_content() -> No
     admitted = snapshot.frames.resume_inputs[0]
     wrong_frame = _make_node_input_frame(
         (NamedValue("extra", "input"),),
-        (("extra", canonical_nominal_type(str)),),
+        normalize_output_declarations({"extra": str}),
     )
     layout.install(
         replace(
@@ -921,7 +921,7 @@ async def test_complete_continuation_readmits_child_boundary_frame_content() -> 
     boundary = snapshot.frames.child_boundaries[0]
     wrong_frame = _make_graph_output_view(
         (NamedValue("extra", "output"),),
-        (("extra", canonical_nominal_type(str)),),
+        normalize_output_declarations({"extra": str}),
     )
     layout.install(
         replace(
@@ -1082,7 +1082,7 @@ async def test_recovered_continuation_readmits_existing_frame_content() -> None:
     graph_input = snapshot.frames.graph_inputs[0]
     wrong_frame = _make_graph_input_frame(
         Graph.values(extra="malformed"),
-        (("extra", canonical_nominal_type(str)),),
+        normalize_output_declarations({"extra": str}),
     )
     layout.install(
         replace(

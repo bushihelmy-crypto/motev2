@@ -95,10 +95,9 @@ def _admit_override(
     values: _GraphValues[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
     plan = _require_node_materialization(graph, node_id)
-    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in values.items()),
-        declarations,
+        plan.descriptor.declarations,
     )
 
 
@@ -245,8 +244,7 @@ def materialize_node_input(
                 binding.publication,
             )
         entries.append(NamedValue(binding.destination.local_name, value))
-    declarations = tuple((entry.name, entry.descriptor) for entry in plan.descriptor.declarations.entries)
-    return _make_node_input_frame(tuple(entries), declarations)
+    return _make_node_input_frame(tuple(entries), plan.descriptor.declarations)
 
 
 __all__ = ["_require_node_materialization", "_resume_input_coordinate"]

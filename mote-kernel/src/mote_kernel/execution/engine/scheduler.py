@@ -62,30 +62,22 @@ def _project_outcome(
         return TaskInterrupt(executable.task, outcome.request_payload)
     routing = ContinueGraphRouting() if route is None else SelectGraphRoute(GraphRouteId(route))
     validate_routing_contribution(graph, executable.task.node_id, routing)
-    descriptor = graph.transition.publications[executable.task.node_id]
-    declarations = tuple((item.name, item.descriptor) for item in descriptor.declarations.entries)
     return TaskSuccess(
         executable.task,
-        _make_node_output_frame(output, declarations),
+        _make_node_output_frame(output, graph.transition.publications[executable.task.node_id].declarations),
         route,
     )
 
 
 async def _execute_task(
     graph: CompiledGraph[GraphValueT], executable: ExecutableTask[GraphValueT]
-) -> TaskResult[GraphValueT]:
-    definition = graph.nodes[executable.task.node_id]
-    if isinstance(definition, NestedGraphNodeDefinition):
-        raise NodeExecutionContractError("nested task must be projected to a precomputed terminal outcome")
-    outcome = await definition.operation(_public_node_input(executable.effective_input))
-    return _project_outcome(graph, executable, outcome)
-
-
-async def _capture(
-    graph: CompiledGraph[GraphValueT], executable: ExecutableTask[GraphValueT]
 ) -> TaskResult[GraphValueT] | TaskRaised:
     try:
-        return await _execute_task(graph, executable)
+        definition = graph.nodes[executable.task.node_id]
+        if isinstance(definition, NestedGraphNodeDefinition):
+            raise NodeExecutionContractError("nested task must be projected to a precomputed terminal outcome")
+        outcome = await definition.operation(_public_node_input(executable.effective_input))
+        return _project_outcome(graph, executable, outcome)
     except asyncio.CancelledError as error:
         if error.args and error.args[0] is _SCHEDULER_CLOSE_CANCEL:
             raise
@@ -101,13 +93,7 @@ class TaskScheduler(Generic[GraphValueT]):
 
     def __init__(self, graph: CompiledGraph[GraphValueT]) -> None:
         self._graph = graph
-        self._live: dict[
-            TaskId,
-            tuple[
-                ExecutableTask[GraphValueT],
-                asyncio.Task[TaskResult[GraphValueT] | TaskRaised],
-            ],
-        ] = {}
+        self._live: dict[TaskId, asyncio.Task[TaskResult[GraphValueT] | TaskRaised]] = {}
         self._events: deque[TaskResult[GraphValueT] | TaskRaised] = deque()
 
     @property
@@ -125,38 +111,36 @@ class TaskScheduler(Generic[GraphValueT]):
         return errors, completions
 
     def submit(self, executables: tuple[ExecutableTask[GraphValueT], ...]) -> None:
-        task_ids = tuple(executable.task.task_id for executable in executables)
+        submitted = {executable.task.task_id for executable in executables}
         existing = set(self._live)
         existing.update(event.task.task_id for event in self._events)
-        if len(task_ids) != len(set(task_ids)) or existing.intersection(task_ids):
+        if len(submitted) != len(executables) or not existing.isdisjoint(submitted):
             raise NodeExecutionContractError("a graph task was submitted more than once")
         for executable in executables:
             task_id = executable.task.task_id
-            handle = asyncio.create_task(_capture(self._graph, executable), name=f"mote-graph:{task_id}")
-            self._live[task_id] = (executable, handle)
+            handle = asyncio.create_task(_execute_task(self._graph, executable), name=f"mote-graph:{task_id}")
+            self._live[task_id] = handle
 
     async def next_completion(self) -> TaskResult[GraphValueT] | TaskRaised:
         if self._events:
             return self._events.popleft()
         if not self._live:
             raise NodeExecutionContractError("there are no live graph tasks")
-        by_handle = {handle: executable for executable, handle in self._live.values()}
         done, _pending = await asyncio.wait(
-            tuple(by_handle),
+            tuple(self._live.values()),
             return_when=asyncio.FIRST_COMPLETED,
         )
-        events: list[tuple[tuple[int, str, TaskId], TaskResult[GraphValueT] | TaskRaised]] = []
+        events: list[TaskResult[GraphValueT] | TaskRaised] = []
         for handle in done:
-            executable = by_handle[handle]
-            self._live.pop(executable.task.task_id, None)
             event = handle.result()
-            events.append((executable.task.sort_key, event))
-        events.sort(key=lambda item: item[0])
-        self._events.extend(event for _key, event in events[1:])
-        return events[0][1]
+            self._live.pop(event.task.task_id)
+            events.append(event)
+        events.sort(key=lambda event: event.task.sort_key)
+        self._events.extend(events[1:])
+        return events[0]
 
     async def aclose(self) -> None:
-        handles = tuple(handle for _executable, handle in self._live.values())
+        handles = tuple(self._live.values())
         for handle in handles:
             handle.cancel(_SCHEDULER_CLOSE_CANCEL)
         if handles:

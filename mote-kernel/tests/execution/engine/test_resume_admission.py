@@ -93,7 +93,7 @@ def _substitution(graph: CompiledGraph[str], state: GraphRunState) -> AdmittedSu
         ),
         _make_node_output_frame(
             Graph.values(value="replacement"),
-            tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries),
+            publication.declarations,
         ),
         SkipSubstitutionProvenance(),
         state.revision + 1,

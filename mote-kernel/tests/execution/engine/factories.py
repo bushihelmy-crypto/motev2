@@ -8,7 +8,6 @@ from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    canonical_nominal_type,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -46,7 +45,7 @@ async def identity(values: Graph.Values[str]) -> Graph.Values[str]:
 def node_output(value: ValueT) -> NodeOutputFrame[ValueT]:
     return _make_node_output_frame(
         Graph.values(value=value),
-        (("value", canonical_nominal_type(type(value))),),
+        normalize_output_declarations({"value": type(value)}),
     )
 
 

@@ -273,7 +273,7 @@ def test_pending_input_availability_accepts_state_and_acknowledged_overrides() -
     plan = graph.transition.materializations[node_id]
     frame = _make_node_input_frame(
         (NamedValue("value", "admitted"),),
-        tuple((item.destination.local_name, item.descriptor) for item in plan.bindings.entries),
+        plan.descriptor.declarations,
     )
     coordinate: ResumeInputAvailabilityCoordinate[str] = ResumeInputAvailabilityCoordinate(
         StableActivation(scope_run, state.superstep, node_id),

@@ -1,5 +1,5 @@
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, canonical_nominal_type
+from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     NamedValue,
     _make_graph_input_frame,
@@ -26,7 +26,7 @@ def test_child_boundary_lookup_distinguishes_repeated_scoped_runs() -> None:
     descriptor = FrameDescriptorIdentity("child.graph", 1, FrameKind.GRAPH_OUTPUT, 0)
     frame = _make_graph_output_view(
         (NamedValue("value", "output"),),
-        (("value", canonical_nominal_type(str)),),
+        normalize_output_declarations({"value": str}),
     )
     first_coordinate: ChildBoundaryAvailabilityCoordinate[str] = ChildBoundaryAvailabilityCoordinate(
         root_scope_run(GraphRunId("child-a")),
@@ -52,7 +52,8 @@ def test_candidate_availability_delegates_non_publication_segments_and_overlays_
     graph_input_coordinate: GraphInputAvailabilityCoordinate[str] = GraphInputAvailabilityCoordinate(
         scope_run, descriptor
     )
-    frame = _make_graph_input_frame(Graph.values(value="input"), (("value", canonical_nominal_type(str)),))
+    declarations = normalize_output_declarations({"value": str})
+    frame = _make_graph_input_frame(Graph.values(value="input"), declarations)
     confirmed = ScopedFrameIndex[str]().add_graph_input(AdmittedGraphInput(graph_input_coordinate, frame))
     publication_coordinate: PublicationAvailabilityCoordinate[str] = PublicationAvailabilityCoordinate(
         StableActivation(scope_run, 0, GraphNodeId("source")),
@@ -60,7 +61,7 @@ def test_candidate_availability_delegates_non_publication_segments_and_overlays_
     )
     substitution = AdmittedSubstitution(
         publication_coordinate,
-        _make_node_output_frame(Graph.values(value="replacement"), (("value", canonical_nominal_type(str)),)),
+        _make_node_output_frame(Graph.values(value="replacement"), declarations),
         SkipSubstitutionProvenance(),
         2,
     )

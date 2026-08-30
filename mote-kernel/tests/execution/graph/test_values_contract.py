@@ -5,7 +5,7 @@ import pytest
 import mote_kernel.execution.graph.values as values_owner
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValueAdmissionError
-from mote_kernel.execution.graph.ports import canonical_nominal_type
+from mote_kernel.execution.graph.ports import normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
     NamedValue,
@@ -41,14 +41,14 @@ def test_values_construction_rejects_a_forged_owner_seal() -> None:
 
 
 def test_frame_admission_requires_exact_not_subclass_types() -> None:
-    declarations = (("value", canonical_nominal_type(int)),)
+    declarations = normalize_output_declarations({"value": int})
 
     with pytest.raises(GraphValueAdmissionError, match="exact declared type"):
         _make_graph_input_frame(Graph.values(value=True), declarations)
 
 
 def test_values_and_frame_admission_rejects_each_malformed_internal_shape() -> None:
-    declarations = (("value", canonical_nominal_type(int)),)
+    declarations = normalize_output_declarations({"value": int})
     values = Graph.values(value=1)
     object.__setattr__(values, "_entries", (NamedValue(" malformed", 1),))
     with pytest.raises(GraphValueAdmissionError, match="malformed canonical names"):
@@ -64,7 +64,7 @@ def test_values_and_frame_admission_rejects_each_malformed_internal_shape() -> N
 
 
 def test_each_frame_admission_rejects_a_foreign_nominal_frame() -> None:
-    declarations = (("value", canonical_nominal_type(int)),)
+    declarations = normalize_output_declarations({"value": int})
     graph_input = _make_graph_input_frame(Graph.values(value=1), declarations)
 
     with pytest.raises(GraphValueAdmissionError, match="node input frame has the wrong nominal type"):
@@ -76,10 +76,7 @@ def test_each_frame_admission_rejects_a_foreign_nominal_frame() -> None:
 
 
 def test_frame_helpers_preserve_entries_and_find_later_named_values() -> None:
-    declarations = (
-        ("first", canonical_nominal_type(int)),
-        ("second", canonical_nominal_type(int)),
-    )
+    declarations = normalize_output_declarations({"first": int, "second": int})
     frame = _make_graph_input_frame(Graph.values(first=1, second=2), declarations)
 
     assert tuple(entry.name for entry in frame.entries) == ("first", "second")
@@ -89,7 +86,7 @@ def test_frame_helpers_preserve_entries_and_find_later_named_values() -> None:
 def test_frame_value_rejects_a_name_absent_from_the_compiled_descriptor() -> None:
     frame = _make_graph_input_frame(
         Graph.values(value=1),
-        (("value", canonical_nominal_type(int)),),
+        normalize_output_declarations({"value": int}),
     )
 
     with pytest.raises(GraphValueAdmissionError, match="does not contain"):

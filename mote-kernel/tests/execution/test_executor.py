@@ -238,8 +238,10 @@ def output_value(result: TaskSuccess[str]) -> str:
 
 
 def child_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_output_descriptor.declarations.entries)
-    return _make_graph_output_view((NamedValue("value", value),), declarations)
+    return _make_graph_output_view(
+        (NamedValue("value", value),),
+        graph.graph_output_descriptor.declarations,
+    )
 
 
 async def run_frontier(

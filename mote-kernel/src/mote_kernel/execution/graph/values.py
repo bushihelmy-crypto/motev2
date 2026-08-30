@@ -5,7 +5,7 @@ from dataclasses import InitVar, dataclass, field
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.errors import GraphValueAdmissionError
-from mote_kernel.execution.graph.ports import NominalTypeDescriptor, canonical_port_name
+from mote_kernel.execution.graph.ports import OutputDeclarations, canonical_port_name
 
 FactoryValueT = TypeVar("FactoryValueT")
 GraphValueT = TypeVar("GraphValueT")
@@ -151,7 +151,7 @@ def _entries_of(values: _GraphValues[GraphValueT]) -> tuple[NamedValue[GraphValu
 
 def _admit_entries(
     entries: tuple[NamedValue[GraphValueT], ...],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
     *,
     kind: str,
 ) -> tuple[NamedValue[GraphValueT], ...]:
@@ -159,21 +159,21 @@ def _admit_entries(
         raise GraphValueAdmissionError(f"{kind} contains malformed canonical entries")
     if any(type(entry.name) is not str for entry in entries):
         raise GraphValueAdmissionError(f"{kind} contains malformed canonical names")
-    expected_names = tuple(name for name, _descriptor in declarations)
+    expected_names = tuple(declaration.name for declaration in declarations.entries)
     actual_names = tuple(entry.name for entry in entries)
     if actual_names != expected_names:
         raise GraphValueAdmissionError(
             f"{kind} names do not match the compiled descriptor: expected {expected_names!r}, got {actual_names!r}"
         )
-    for entry, (_name, descriptor) in zip(entries, declarations, strict=True):
-        if type(entry.value) is not descriptor.value_type:
+    for entry, declaration in zip(entries, declarations.entries, strict=True):
+        if type(entry.value) is not declaration.descriptor.value_type:
             raise GraphValueAdmissionError(f"{kind} value for {entry.name!r} does not have its exact declared type")
     return entries
 
 
 def _admit_graph_input_frame(
     frame: GraphInputFrame[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
     if type(frame) is not GraphInputFrame:
         raise GraphValueAdmissionError("graph input frame has the wrong nominal type")
@@ -183,7 +183,7 @@ def _admit_graph_input_frame(
 
 def _admit_node_input_frame(
     frame: NodeInputFrame[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
     if type(frame) is not NodeInputFrame:
         raise GraphValueAdmissionError("node input frame has the wrong nominal type")
@@ -193,7 +193,7 @@ def _admit_node_input_frame(
 
 def _admit_node_output_frame(
     frame: NodeOutputFrame[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
     if type(frame) is not NodeOutputFrame:
         raise GraphValueAdmissionError("node output frame has the wrong nominal type")
@@ -203,7 +203,7 @@ def _admit_node_output_frame(
 
 def _admit_graph_output_view(
     frame: GraphOutputView[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> GraphOutputView[GraphValueT]:
     if type(frame) is not GraphOutputView:
         raise GraphValueAdmissionError("graph output view has the wrong nominal type")
@@ -213,7 +213,7 @@ def _admit_graph_output_view(
 
 def _make_graph_input_frame(
     values: _GraphValues[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="graph input")
     return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
@@ -221,7 +221,7 @@ def _make_graph_input_frame(
 
 def _graph_input_from_node_input(
     frame: NodeInputFrame[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(frame.entries, declarations, kind="nested graph input")
     return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
@@ -229,7 +229,7 @@ def _graph_input_from_node_input(
 
 def _make_node_input_frame(
     entries: tuple[NamedValue[GraphValueT], ...],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="node input")
     return NodeInputFrame(entries=admitted, _seal=_FRAME_SEAL)
@@ -237,7 +237,7 @@ def _make_node_input_frame(
 
 def _make_node_output_frame(
     values: _GraphValues[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="node output")
     return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
@@ -245,7 +245,7 @@ def _make_node_output_frame(
 
 def _node_output_from_view(
     view: GraphOutputView[GraphValueT],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(view.entries, declarations, kind="nested node output")
     return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
@@ -253,7 +253,7 @@ def _node_output_from_view(
 
 def _make_graph_output_view(
     entries: tuple[NamedValue[GraphValueT], ...],
-    declarations: tuple[tuple[str, NominalTypeDescriptor[GraphValueT]], ...],
+    declarations: OutputDeclarations[GraphValueT],
 ) -> GraphOutputView[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="graph output")
     return GraphOutputView(entries=admitted, _seal=_FRAME_SEAL)

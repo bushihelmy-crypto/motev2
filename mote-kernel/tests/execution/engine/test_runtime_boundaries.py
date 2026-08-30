@@ -51,7 +51,6 @@ from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallabl
 from mote_kernel.execution.graph.ports import (
     FrameDescriptorIdentity,
     FrameKind,
-    canonical_nominal_type,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -236,8 +235,10 @@ def executable_input(graph: CompiledGraph[str], state: GraphRunState, node_id: s
 
 
 def child_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_output_descriptor.declarations.entries)
-    return _make_graph_output_view((NamedValue("value", value),), declarations)
+    return _make_graph_output_view(
+        (NamedValue("value", value),),
+        graph.graph_output_descriptor.declarations,
+    )
 
 
 def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
@@ -472,8 +473,7 @@ def test_resume_input_narrow_guards() -> None:
         require_resume_input_binding(resumable, mismatched)
 
     trap = ConcreteValueTrap()
-    descriptor = canonical_nominal_type(ConcreteValueTrap)
-    declarations = (("value", descriptor),)
+    declarations = normalize_output_declarations({"value": ConcreteValueTrap})
     entries = (NamedValue("value", trap),)
     graph_input_frame: GraphInputFrame[ConcreteValueTrap] = _make_graph_input_frame(
         Graph.values(value=trap),
@@ -1130,7 +1130,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
     failed = replace(failed, execution=None)
     scope_run = root_scope_run(parent.run_id)
     publication = graph.transition.publications[GraphNodeId("nested")]
-    declarations = tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries)
+    declarations = publication.declarations
     command = ResumeGraphNodes(
         failed.revision,
         (
@@ -1197,7 +1197,7 @@ def test_repeated_child_activations_isolate_parent_boundary_substitutions() -> N
     graph = nested_graph(with_consumer=True)
     scope_run = root_scope_run(GraphRunId("repeated-parent"))
     publication = graph.transition.publications[GraphNodeId("nested")]
-    declarations = tuple((declaration.name, declaration.descriptor) for declaration in publication.declarations.entries)
+    declarations = publication.declarations
     candidates: list[ScopedResumeCandidate[str]] = []
     substitutions: list[AdmittedSubstitution[str]] = []
     child_runs: list[ScopeRunCoordinate] = []

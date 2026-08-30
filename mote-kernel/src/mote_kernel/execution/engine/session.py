@@ -14,7 +14,7 @@ from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.scheduler import TaskRaised, TaskScheduler
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches_graph
-from mote_kernel.execution.engine.task import ExecutableTask, GraphTask, TaskId
+from mote_kernel.execution.engine.task import ExecutableTask, TaskId
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.result import ExecutedGraphNode, TaskResult
@@ -67,7 +67,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         "_awaiting_ack",
         "_close_lock",
         "_disposition",
-        "_errors",
+        "_error",
         "_executables",
         "_graph",
         "_limits",
@@ -89,17 +89,14 @@ class _GraphExecutionSession(Generic[GraphValueT]):
         self._limits = preparation.request.limits
         self._executables = preparation.executables
         self._state = state
-        self._queued_results: deque[_QueuedCompletion[GraphValueT]] = deque()
+        self._queued_results = deque(_QueuedCompletion(result) for result in preparation.nested_results)
         self._started: set[GraphNodeId] = set()
-        for result in preparation.nested_results:
-            self._started.add(result.task.node_id)
-            self._queued_results.append(_QueuedCompletion(result))
         self._scheduler = TaskScheduler(graph)
         self._awaiting_ack: SettleGraphNode | None = None
         self._next_in_progress = False
         self._close_lock = asyncio.Lock()
         self._disposition = _SessionDisposition.OPEN
-        self._errors: list[tuple[GraphTask, BaseException]] = []
+        self._error: TaskRaised | None = None
         self._node_origin_cancellation: asyncio.CancelledError | None = None
 
     async def __aenter__(self) -> GraphExecutionSession[GraphValueT]:
@@ -143,17 +140,17 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             self._state.resources,
             self._limits,
             active_count=self._scheduler.live_count,
-            started_node_ids=frozenset(self._started),
+            started_node_ids=self._started,
         )
         by_task_id: dict[TaskId, ExecutableTask[GraphValueT]] = {
             executable.task.task_id: executable for executable in executables
         }
         return tuple(by_task_id[task.task_id] for task in selected)
 
-    def _record_error(self, task: GraphTask, error: BaseException) -> None:
-        self._errors.append((task, error))
-        self._errors.sort(key=lambda item: item[0].sort_key)
-        first = self._errors[0][1]
+    def _record_error(self, raised: TaskRaised) -> None:
+        if self._error is None or raised.task.sort_key < self._error.task.sort_key:
+            self._error = raised
+        first = self._error.error
         self._node_origin_cancellation = first if isinstance(first, asyncio.CancelledError) else None
         self._disposition = _SessionDisposition.ERROR_DRAINING
 
@@ -166,7 +163,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
     def _drain_scheduler_events(self) -> None:
         errors, completions = self._scheduler.drain_pending_events()
         for raised in errors:
-            self._record_error(raised.task, raised.error)
+            self._record_error(raised)
         self._queued_results.extend(_QueuedCompletion(result, True) for result in completions)
 
     def _schedule_ordinary(self) -> bool:
@@ -205,9 +202,9 @@ class _GraphExecutionSession(Generic[GraphValueT]):
 
                 self._schedule_ordinary()
                 if self._scheduler.live_count == 0:
-                    if self._errors:
+                    if self._error is not None:
                         self._disposition = _SessionDisposition.QUIESCENT
-                        raise self._errors[0][1]
+                        raise self._error.error
                     if not pending_node_ids(self._state.frontier):
                         self._disposition = _SessionDisposition.QUIESCENT
                         raise StopAsyncIteration
@@ -215,7 +212,7 @@ class _GraphExecutionSession(Generic[GraphValueT]):
 
                 event = await self._scheduler.next_completion()
                 if isinstance(event, TaskRaised):
-                    self._record_error(event.task, event.error)
+                    self._record_error(event)
                     continue
                 return self._project(event)
         except asyncio.CancelledError:

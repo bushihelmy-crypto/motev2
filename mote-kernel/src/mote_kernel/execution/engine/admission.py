@@ -39,16 +39,14 @@ def admit_graph_input(
     graph: CompiledGraph[GraphValueT],
     values: _GraphValues[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries)
-    return _make_graph_input_frame(values, declarations)
+    return _make_graph_input_frame(values, graph.graph_input_descriptor.declarations)
 
 
 def admit_child_graph_input(
     graph: CompiledGraph[GraphValueT],
     frame: NodeInputFrame[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_input_descriptor.declarations.entries)
-    return _graph_input_from_node_input(frame, declarations)
+    return _graph_input_from_node_input(frame, graph.graph_input_descriptor.declarations)
 
 
 def project_graph_outputs(
@@ -80,8 +78,7 @@ def project_graph_outputs(
                 ) from error
             value = _frame_value(frame, source.output_name)
         entries.append(NamedValue(binding.destination.boundary_name, value))
-    declarations = tuple((item.name, item.descriptor) for item in graph.graph_output_descriptor.declarations.entries)
-    return _make_graph_output_view(tuple(entries), declarations)
+    return _make_graph_output_view(tuple(entries), graph.graph_output_descriptor.declarations)
 
 
 def initial_resource_snapshot(graph: CompiledGraph[GraphValueT]) -> ResourceSnapshot:
@@ -160,7 +157,7 @@ def select_executable_tasks(
     limits: ExecutionLimits,
     *,
     active_count: int,
-    started_node_ids: frozenset[GraphNodeId],
+    started_node_ids: set[GraphNodeId] | frozenset[GraphNodeId],
 ) -> tuple[GraphTask, ...]:
     """Select the next ordinary tasks using the runtime/recovery shared policy."""
 

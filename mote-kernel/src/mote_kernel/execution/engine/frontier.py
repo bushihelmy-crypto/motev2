@@ -54,10 +54,7 @@ def prepare_frontier(
         if isinstance(projection, ActiveChild):
             active.append(projection)
         elif isinstance(projection, CompletedChild):
-            declarations = tuple(
-                (item.name, item.descriptor)
-                for item in graph.transition.publications[task.node_id].declarations.entries
-            )
+            declarations = graph.transition.publications[task.node_id].declarations
             nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
         else:
             nested_results.append(TaskFailure(task, projection.reason))

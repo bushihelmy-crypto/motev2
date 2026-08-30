@@ -579,8 +579,6 @@ class _GraphRun(Generic[GraphValueT]):
         self._install_terminal(index, boundary)
 
     async def _retire_child(self, result: TaskResult[GraphValueT]) -> None:
-        if result.task.node_id not in self._graph.nested_graphs:
-            return
         parent = ParentGraphActivation(result.task.run_id, result.task.superstep, result.task.node_id)
         index = self._call_index(parent)
         if index is None:
@@ -597,11 +595,10 @@ class _GraphRun(Generic[GraphValueT]):
         session: GraphExecutionSession[GraphValueT],
         execution_token: GraphExecutionToken,
     ) -> None:
-        state = self._state
         async with session:
             while True:
                 try:
-                    completed = await session.next(state)
+                    completed = await session.next(self._state)
                 except StopAsyncIteration:
                     return
                 except asyncio.CancelledError as error:
@@ -619,27 +616,25 @@ class _GraphRun(Generic[GraphValueT]):
                     await session.aclose()
                     await self._fence(execution_token)
                     raise
-                confirmed = await self._transition(completed.command, completed.result)
-                if isinstance(completed.result, TaskSuccess):
-                    activation = StableActivation(
-                        self._scope_run,
-                        state.superstep,
-                        completed.result.task.node_id,
-                    )
+                result = completed.result
+                await self._transition(completed.command, result)
+                task = result.task
+                if isinstance(result, TaskSuccess):
+                    publication = self._graph.transition.publications[task.node_id]
                     coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                        activation,
-                        self._graph.transition.publications[completed.result.task.node_id].identity,
+                        StableActivation(self._scope_run, task.superstep, task.node_id),
+                        publication.identity,
                     )
                     self._frames = self._frames.add_publication(
                         ConfirmedPublication(
                             coordinate,
-                            completed.result.output,
-                            confirmed.revision,
+                            result.output,
+                            self._state.revision,
                             ExecutionPublicationProvenance(completed.command.execution),
                         )
                     )
-                await self._retire_child(completed.result)
-                state = confirmed
+                if task.node_id in self._graph.nested_graphs:
+                    await self._retire_child(result)
 
     async def _execute_frontier(
         self,
