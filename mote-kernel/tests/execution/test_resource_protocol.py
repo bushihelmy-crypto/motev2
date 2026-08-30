@@ -161,12 +161,12 @@ def internal_resource_graph(
     )
 
 
-async def claimed_internal_state(
+def claimed_internal_state(
     graph: CompiledGraph[str],
 ) -> tuple[GraphExecutor[str], Graph.State, ExecutableFrontier[str]]:
     executor = GraphExecutor(graph)
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
-    prepared = await executor.prepare(step_request(graph, state, "input").execution_request())
+    prepared = executor.prepare(step_request(graph, state, "input").execution_request())
     assert isinstance(prepared, ExecutableFrontier)
     return executor, reduce_graph_run(state, prepared.claim.command), prepared
 
@@ -520,7 +520,7 @@ async def test_compiled_resource_requirement_drift_fails_before_scheduling() -> 
         resource_order=(file_resource, database),
         requirement=(file_resource,),
     )
-    _executor, claimed, _prepared = await claimed_internal_state(original)
+    _executor, claimed, _prepared = claimed_internal_state(original)
     drifted = internal_resource_graph(
         resource_order=(file_resource, database),
         requirement=(database,),
@@ -538,7 +538,7 @@ async def test_committed_resource_snapshot_rejects_each_authority_mismatch(case:
         resource_order=(file_resource, database),
         requirement=(file_resource,),
     )
-    _executor, claimed, _prepared = await claimed_internal_state(original)
+    _executor, claimed, _prepared = claimed_internal_state(original)
     if case == "stale-participant":
         stale = replace(
             claimed,
@@ -585,7 +585,7 @@ async def test_competing_resource_claims_have_one_durable_winner() -> None:
     executor = GraphExecutor(graph)
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     execution_request = step_request(graph, state, "input").execution_request()
-    first, second = await asyncio.gather(
+    first, second = (
         executor.prepare(execution_request),
         executor.prepare(execution_request),
     )
@@ -603,11 +603,11 @@ async def test_claimed_resource_session_revalidates_exact_participants() -> None
         resource_order=(file_resource,),
         requirement=(file_resource,),
     )
-    executor, claimed, prepared = await claimed_internal_state(graph)
+    executor, claimed, prepared = claimed_internal_state(graph)
     forged = replace(claimed, resources=None)
     with pytest.raises(InvalidExecutionSnapshotError, match="compiled resource"):
-        await executor.execute(prepared.claim, forged)
-    session = await executor.execute(prepared.claim, claimed)
+        executor.issue_session(prepared.claim, forged)
+    session = executor.issue_session(prepared.claim, claimed)
     await session.aclose()
 
 

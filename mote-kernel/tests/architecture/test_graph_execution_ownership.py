@@ -352,7 +352,7 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
         node.name
         for node in graph_executor.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
-    } == {"execute", "prepare"}
+    } == {"issue_session", "prepare"}
 
     forbidden_names = {"reduce_graph_run", "store", "state_store"}
     assert not {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id in forbidden_names}

@@ -1,6 +1,5 @@
 """Linear execution claims owned by one assembled graph executor."""
 
-import asyncio
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.frontier import FrontierPreparation
@@ -71,7 +70,7 @@ def _require_committed_claim_state(
 
 
 class PreparedExecutionClaim(Generic[GraphValueT]):
-    __slots__ = ("_command", "_consumed", "_gate", "_owner", "_preparation")
+    __slots__ = ("_command", "_consumed", "_owner", "_preparation")
 
     def __init__(
         self,
@@ -82,7 +81,6 @@ class PreparedExecutionClaim(Generic[GraphValueT]):
         self._command = command
         self._owner = owner
         self._preparation = preparation
-        self._gate = asyncio.Lock()
         self._consumed = False
 
     @property
@@ -93,19 +91,18 @@ class PreparedExecutionClaim(Generic[GraphValueT]):
     def scope_run(self) -> ScopeRunCoordinate:
         return self._preparation.request.scope_run
 
-    async def consume(
+    def consume(
         self,
         owner: ExecutionClaimOwner,
         state: GraphRunState,
     ) -> ConsumedExecutionClaim[GraphValueT]:
-        async with self._gate:
-            if self._consumed:
-                raise ResultCollectionError("execution claim has already been consumed")
-            if owner is not self._owner:
-                raise ResultCollectionError("execution claim does not match committed graph state")
-            _require_committed_claim_state(self._command, state, self._preparation)
-            self._consumed = True
-            return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, state, self._preparation)
+        if self._consumed:
+            raise ResultCollectionError("execution claim has already been consumed")
+        if owner is not self._owner:
+            raise ResultCollectionError("execution claim does not match committed graph state")
+        _require_committed_claim_state(self._command, state, self._preparation)
+        self._consumed = True
+        return ConsumedExecutionClaim(_CLAIM_CONSUMPTION_AUTHORITY, state, self._preparation)
 
 
 __all__ = ["ExecutionClaimOwner", "PreparedExecutionClaim"]

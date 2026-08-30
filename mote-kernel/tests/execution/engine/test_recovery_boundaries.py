@@ -51,16 +51,16 @@ def graph(
     )
 
 
-async def claim(
+def claim(
     graph: CompiledGraph[str],
     executor: GraphExecutor[str],
     state: GraphRunState,
 ) -> tuple[GraphRunState, GraphExecutionSession[str]]:
     request = step_request(graph, state, "input").execution_request()
-    prepared = await executor.prepare(request)
+    prepared = executor.prepare(request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, claimed)
+    session = executor.issue_session(prepared.claim, claimed)
     return claimed, session
 
 
@@ -68,7 +68,7 @@ async def test_completion_before_command_apply_is_replayable_after_crash() -> No
     compiled = graph("a")
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    claimed, session = await claim(compiled, executor, initial)
+    claimed, session = claim(compiled, executor, initial)
     try:
         _ = await session.next(claimed)
         # The command is intentionally dropped.  The durable state remains Pending.
@@ -79,7 +79,7 @@ async def test_completion_before_command_apply_is_replayable_after_crash() -> No
         await session.aclose()
     assert claimed.execution is not None
     fenced = reduce_graph_run(claimed, FenceGraphExecution(claimed.revision, claimed.execution.token))
-    retry_claimed, retry_session = await claim(compiled, executor, fenced)
+    retry_claimed, retry_session = claim(compiled, executor, fenced)
     try:
         replay = await retry_session.next(retry_claimed)
         assert isinstance(replay.result, TaskSuccess)
@@ -92,7 +92,7 @@ async def test_applied_settlement_survives_crash_before_waiter_start() -> None:
     compiled = graph("a", "b", entries=("a", "b"))
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    claimed, session = await claim(compiled, executor, initial)
+    claimed, session = claim(compiled, executor, initial)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
@@ -107,14 +107,14 @@ async def test_final_settlement_recovers_as_ready_to_resolve_without_reexecution
     compiled = graph("a", edges=(DirectEdge(GraphNodeId("a"), END),))
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    claimed, session = await claim(compiled, executor, initial)
+    claimed, session = claim(compiled, executor, initial)
     try:
         result = await session.next(claimed)
         settled = reduce_graph_run(claimed, result.command)
     finally:
         await session.aclose()
     assert settled.execution is None
-    ready = await executor.prepare(step_request(compiled, settled, "input").execution_request())
+    ready = executor.prepare(step_request(compiled, settled, "input").execution_request())
     assert isinstance(ready, ReadyToResolve)
     completed = reduce_graph_run(settled, ready.command)
     assert completed.status.name == "COMPLETED"
@@ -124,7 +124,7 @@ async def test_session_rejects_state_that_skips_the_acknowledged_revision() -> N
     compiled = graph("a", "b", entries=("a", "b"))
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    claimed, session = await claim(compiled, executor, initial)
+    claimed, session = claim(compiled, executor, initial)
     try:
         first = await session.next(claimed)
         with pytest.raises(ResultCollectionError, match="exact reducer successor"):
@@ -140,7 +140,7 @@ async def test_exact_fence_after_partial_settlement_does_not_reset_siblings() ->
     compiled = graph("a", "b", entries=("a", "b"))
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
-    claimed, session = await claim(compiled, executor, initial)
+    claimed, session = claim(compiled, executor, initial)
     try:
         result = await session.next(claimed)
         partial = reduce_graph_run(claimed, result.command)
@@ -176,10 +176,10 @@ async def test_ordinary_error_after_applied_sibling_settlement_preserves_that_si
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     request = step_request(compiled, initial, "input").execution_request()
-    prepared = await executor.prepare(request)
+    prepared = executor.prepare(request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(initial, prepared.claim.command)
-    session = await executor.execute(prepared.claim, claimed)
+    session = executor.issue_session(prepared.claim, claimed)
     try:
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)

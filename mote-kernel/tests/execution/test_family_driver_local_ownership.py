@@ -981,7 +981,7 @@ async def test_drive_rejects_an_active_projection_without_a_child_call(
 ) -> None:
     _graph, _state, owner, parent, _child_scope, _activation, _child_state = nested_runtime()
 
-    async def forged_prepare(
+    def forged_prepare(
         _executor: GraphExecutor[str],
         _request: StepRequest[str],
     ) -> WaitingForChildren[str]:

@@ -648,7 +648,7 @@ class _GraphRun(Generic[GraphValueT]):
         claimed = await self._transition(prepared.claim.command)
         execution = cast(GraphExecutionLease, claimed.execution)
         try:
-            session = await self._executor.execute(prepared.claim, claimed)
+            session = self._executor.issue_session(prepared.claim, claimed)
         except Exception:
             await self._fence(execution.token)
             raise
@@ -660,7 +660,7 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def drive_quantum(self) -> GraphBoundary:
         while True:
-            disposition = await self._executor.prepare(
+            disposition = self._executor.prepare(
                 StepRequest(
                     self._state,
                     self._scope_run,

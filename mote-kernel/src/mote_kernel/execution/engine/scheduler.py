@@ -1,6 +1,7 @@
 """The single dynamic async task pool used by graph execution."""
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
@@ -107,7 +108,7 @@ class TaskScheduler(Generic[GraphValueT]):
                 asyncio.Task[TaskResult[GraphValueT] | TaskRaised],
             ],
         ] = {}
-        self._events: list[TaskResult[GraphValueT] | TaskRaised] = []
+        self._events: deque[TaskResult[GraphValueT] | TaskRaised] = deque()
 
     @property
     def live_count(self) -> int:
@@ -136,7 +137,7 @@ class TaskScheduler(Generic[GraphValueT]):
 
     async def next_completion(self) -> TaskResult[GraphValueT] | TaskRaised:
         if self._events:
-            return self._events.pop(0)
+            return self._events.popleft()
         if not self._live:
             raise NodeExecutionContractError("there are no live graph tasks")
         by_handle = {handle: executable for executable, handle in self._live.values()}

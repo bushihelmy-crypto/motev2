@@ -78,11 +78,11 @@ async def execute_step(
 ) -> PrepareDisposition[GraphValueT] | ClaimedStep[GraphValueT]:
     executor = GraphExecutor(request.graph)
     execution_request = request.execution_request()
-    prepared = await executor.prepare(execution_request)
+    prepared = executor.prepare(execution_request)
     if not isinstance(prepared, ExecutableFrontier):
         return prepared
     claimed = apply_command(request.state, prepared.claim.command)
-    session = await executor.execute(prepared.claim, claimed)
+    session = executor.issue_session(prepared.claim, claimed)
     result = await session.next(claimed)
     return ClaimedStep(claimed, session, result)
 

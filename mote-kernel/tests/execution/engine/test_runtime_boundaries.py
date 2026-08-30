@@ -212,7 +212,7 @@ def request(
     return step_request(graph, state, value, projections, limits).execution_request()
 
 
-async def prepare_execution_frontier(
+def prepare_execution_frontier(
     graph: CompiledGraph[str],
     state: GraphRunState,
     projections: tuple[ChildProjection[str], ...] = (),
@@ -999,28 +999,26 @@ def test_scoped_snapshot_guard_rejects_a_parent_activation_outside_the_compiled_
         )
 
 
-@pytest.mark.asyncio
-async def test_session_request_validation_rejects_a_claim_with_the_wrong_task_scope() -> None:
+def test_session_request_validation_rejects_a_claim_with_the_wrong_task_scope() -> None:
     graph = compiled_graph("a", "b", entries=("a", "b"))
     state = running_state(frontier=("a", "b"))
     executor = GraphExecutor(graph)
     execution_request = request(graph, state)
-    prepared = await executor.prepare(execution_request)
+    prepared = executor.prepare(execution_request)
     assert isinstance(prepared, ExecutableFrontier)
     claimed = reduce_graph_run(state, prepared.claim.command)
     forged = replace(claimed, frontier=GraphFrontierState((claimed.frontier.nodes[0],)))
 
     for _ in range(2):
         with pytest.raises(ResultCollectionError, match="committed graph state"):
-            await executor.execute(prepared.claim, forged)
+            executor.issue_session(prepared.claim, forged)
 
 
-@pytest.mark.asyncio
-async def test_session_request_validation_rejects_a_claim_that_still_has_an_active_child() -> None:
+def test_session_request_validation_rejects_a_claim_that_still_has_an_active_child() -> None:
     graph = nested_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
-    disposition = await GraphExecutor(graph).prepare(request(graph, state, (ActiveChild(activation),)))
+    disposition = GraphExecutor(graph).prepare(request(graph, state, (ActiveChild(activation),)))
 
     assert isinstance(disposition, WaitingForChildren)
     assert disposition.active == (ActiveChild(activation),)
@@ -1030,7 +1028,7 @@ async def test_session_request_validation_rejects_a_claim_that_still_has_an_acti
 async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
     graph = compiled_graph("a")
     state = running_state()
-    owner, prepared = await prepare_execution_frontier(graph, state)
+    owner, prepared = prepare_execution_frontier(graph, state)
     claimed = reduce_graph_run(state, prepared.claim.command)
     assert claimed.execution is not None
     forged = replace(
@@ -1043,9 +1041,9 @@ async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
         ),
     )
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await prepared.claim.consume(owner, forged)
+        prepared.claim.consume(owner, forged)
 
-    receipt = await prepared.claim.consume(owner, claimed)
+    receipt = prepared.claim.consume(owner, claimed)
     session = issue_execution_session(graph, receipt)
     try:
         with pytest.raises(ResultCollectionError, match="already issued"):
@@ -1054,35 +1052,33 @@ async def test_consumed_claim_receipt_can_issue_only_one_session() -> None:
         await session.aclose()
 
 
-@pytest.mark.asyncio
-async def test_claim_receipt_requires_exact_owner_identity() -> None:
+def test_claim_receipt_requires_exact_owner_identity() -> None:
     graph = compiled_graph("a")
     state = running_state()
-    _owner, prepared = await prepare_execution_frontier(graph, state)
+    _owner, prepared = prepare_execution_frontier(graph, state)
     claimed = reduce_graph_run(state, prepared.claim.command)
 
     with pytest.raises(ResultCollectionError, match="committed graph state"):
-        await prepared.claim.consume(ExecutionClaimOwner(), claimed)
+        prepared.claim.consume(ExecutionClaimOwner(), claimed)
 
 
-@pytest.mark.asyncio
-async def test_missing_child_takes_priority_over_an_active_sibling() -> None:
+def test_missing_child_takes_priority_over_an_active_sibling() -> None:
     graph = parallel_nested_graph()
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     a = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("a"))
     b = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("b"))
-    both_missing = await executor.prepare(request(graph, parent, (MissingChild(a), MissingChild(b))))
+    both_missing = executor.prepare(request(graph, parent, (MissingChild(a), MissingChild(b))))
     assert isinstance(both_missing, WaitingForChildren)
     assert both_missing.missing == (MissingChild(a), MissingChild(b))
 
-    disposition = await executor.prepare(request(graph, parent, (MissingChild(a), ActiveChild(b))))
+    disposition = executor.prepare(request(graph, parent, (MissingChild(a), ActiveChild(b))))
 
     assert isinstance(disposition, WaitingForChildren)
     assert disposition.missing == (MissingChild(a),)
     assert disposition.active == (ActiveChild(b),)
 
-    reverse = await executor.prepare(request(graph, parent, (ActiveChild(a), MissingChild(b))))
+    reverse = executor.prepare(request(graph, parent, (ActiveChild(a), MissingChild(b))))
 
     assert isinstance(reverse, WaitingForChildren)
     assert reverse.missing == (MissingChild(b),)

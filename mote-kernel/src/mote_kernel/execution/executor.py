@@ -20,16 +20,16 @@ class GraphExecutor(Generic[GraphValueT]):
         self._graph = graph
         self._claim_owner = ExecutionClaimOwner()
 
-    async def prepare(self, request: StepRequest[GraphValueT]) -> PrepareDisposition[GraphValueT]:
+    def prepare(self, request: StepRequest[GraphValueT]) -> PrepareDisposition[GraphValueT]:
         return prepare_superstep(self._claim_owner, self._graph, request)
 
-    async def execute(
+    def issue_session(
         self,
         claim: PreparedExecutionClaim[GraphValueT],
         state: GraphRunState,
     ) -> GraphExecutionSession[GraphValueT]:
         require_scoped_snapshot_matches_graph(self._graph, state, claim.scope_run)
-        consumed = await claim.consume(self._claim_owner, state)
+        consumed = claim.consume(self._claim_owner, state)
         return issue_execution_session(self._graph, consumed)
 
 
