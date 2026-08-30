@@ -99,7 +99,6 @@ from mote_kernel.execution.run_context import (
     _CompiledFamilyIdentity,
     _continuation_recovered,
     _GraphContinuation,
-    _new_family_identity,
 )
 from mote_kernel.state.graph_state import (
     GraphAbortReason,
@@ -547,7 +546,7 @@ class Graph(Generic[GraphValueT]):
             owner: compile_graph(definition) for owner, definition in definitions.items()
         }
         installations = {
-            owner: _CompiledOwner(graph, _new_family_identity())
+            owner: _CompiledOwner(graph, _CompiledFamilyIdentity())
             for owner, graph in compiled.items()
             if owner._compiled_owner is None
         }

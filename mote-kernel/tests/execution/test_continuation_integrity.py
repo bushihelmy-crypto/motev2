@@ -29,7 +29,7 @@ from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
     _admit_continuation,
-    _new_family_identity,
+    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -89,7 +89,7 @@ def test_continuation_adapter_rejects_a_foreign_runtime_value() -> None:
     continuation = cast(Graph.Continuation[str], object())
 
     with pytest.raises(Graph.SnapshotMismatchError, match="admitted by their Graph owner"):
-        _admit_continuation(_new_family_identity(), state, continuation)
+        _admit_continuation(_CompiledFamilyIdentity(), state, continuation)
 
 
 class LostSettlementError(RuntimeError):
@@ -226,7 +226,7 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
     graph = compiled_graph("a")
     running = running_state()
     aborted = reduce_graph_run(running, AbortGraphRun(running.revision, GraphAbortReason("aborted")))
-    identity = _new_family_identity()
+    identity = _CompiledFamilyIdentity()
     root, evidence_reader = await admit_continued_root(
         graph,
         aborted,

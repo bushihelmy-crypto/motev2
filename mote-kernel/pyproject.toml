@@ -103,86 +103,69 @@ ignore = ["ANN401"]
 docstring-code-format = true
 quote-style = "double"
 
-# The ratchet keeps legacy debt from growing. It is not a health target.
+# High-recall indicators are independently ratcheted: every improvement becomes
+# the new ceiling, while regressions require an explicit architecture decision.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 499
+top_level_definitions = 498
 type_definitions = 290
 dataclass_types = 172
 dataclass_fields = 485
-decision_points = 1366
+decision_points = 1365
 logical_clone_pairs = 10
+statement_clone_pairs = 10
+near_clone_pairs = 10
 record_shape_clone_pairs = 20
-thin_single_use_helpers = 14
-single_use_private_dataclasses = 1
+thin_single_use_helpers = 1
+single_use_private_dataclasses = 7
 test_only_private_definitions = 0
+function_definitions = 381
+method_definitions = 152
+nested_function_definitions = 21
+semantic_nodes = 27694
+cognitive_complexity = 1952
+await_points = 87
+exception_handlers = 47
+attribute_writes = 85
+task_creations = 12
+max_cyclomatic_complexity = 74
+max_cognitive_complexity = 120
+max_nesting_depth = 6
+internal_call_edges = 594
+recursive_call_components = 5
+max_call_fan_out = 19
+max_call_chain_depth = 16
+max_call_chain_cognitive = 327
+internal_import_edges = 309
+import_cycle_components = 0
+max_module_fan_out = 24
+max_module_dependency_depth = 26
+ambiguous_internal_dispatches = 50
+transparent_private_definitions = 29
+thin_single_use_methods = 12
+low_usage_private_definitions = 129
+linear_private_call_chain_links = 30
+production_unreferenced_definitions = 11
+low_cohesion_classes = 1
+max_methods_per_class = 26
+max_fields_per_class = 32
+max_class_components = 5
+complexity_hotspots = 49
+stateful_async_hotspots = 6
+unused_private_definitions = 0
+unread_private_fields = 0
+unconsumed_internal_async_calls = 0
+unowned_internal_coroutine_handles = 0
+orphaned_task_handles = 0
 
-# Unreviewed structural-smell targets are zero. `make complexity` checks these
-# targets; `make complexity-ratchet` is the non-regression CI gate.
+# Proven violations have no baseline and no exception inventory.
 [tool.mote_kernel.complexity_health]
-logical_clone_pairs = 0
-record_shape_clone_pairs = 0
-thin_single_use_helpers = 0
-single_use_private_dataclasses = 0
+import_cycle_components = 0
 test_only_private_definitions = 0
-
-# These identities are reviewed, intentional nominal-owner boundaries. The
-# health gate fails for any new identity and for stale entries that no longer
-# exist, so this list cannot silently become a second complexity baseline.
-[tool.mote_kernel.complexity_reviewed]
-logical_clone_pairs = [
-  "[branch] execution/engine/resume_input.py:153:node_inputs_available <-> execution/engine/routing.py:132:graph_outputs_available",
-  "[branch] execution/engine/resume_input.py:159:node_inputs_available <-> execution/engine/routing.py:138:graph_outputs_available",
-  "[function] execution/graph/ports.py:202:normalize_input_bindings <-> execution/graph/ports.py:230:normalize_graph_output_declarations",
-  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:184:_admit_node_input_frame",
-  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:194:_admit_node_output_frame",
-  "[function] execution/graph/values.py:174:_admit_graph_input_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
-  "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:194:_admit_node_output_frame",
-  "[function] execution/graph/values.py:184:_admit_node_input_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
-  "[function] execution/graph/values.py:194:_admit_node_output_frame <-> execution/graph/values.py:204:_admit_graph_output_view",
-  "[function] state/graph_state/resource_reducer.py:19:_require_identity <-> state/graph_state/validation.py:26:_require_identity",
-]
-record_shape_clone_pairs = [
-  "execution/engine/recovery.py:128:ExecutionControlCoordinate <-> state/graph_state/model.py:32:GraphExecutionToken",
-  "execution/engine/recovery.py:169:RecoveryAvailabilityCoordinates <-> execution/run_context.py:170:ScopedFrameIndex",
-  "execution/facade.py:143:_NestedNodeCandidate <-> execution/graph/definition.py:17:NestedGraphNodeDefinition",
-  "execution/graph/ports.py:43:GraphInputRef <-> execution/graph/ports.py:98:OutputDeclaration",
-  "execution/graph/ports.py:150:ResolvedInputBinding <-> execution/graph/ports.py:163:GraphOutputBinding",
-  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:87:GraphInputFrame",
-  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:97:NodeInputFrame",
-  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:107:NodeOutputFrame",
-  "execution/graph/values.py:29:_ValuesConstruction <-> execution/graph/values.py:117:GraphOutputView",
-  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:97:NodeInputFrame",
-  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:107:NodeOutputFrame",
-  "execution/graph/values.py:87:GraphInputFrame <-> execution/graph/values.py:117:GraphOutputView",
-  "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:107:NodeOutputFrame",
-  "execution/graph/values.py:97:NodeInputFrame <-> execution/graph/values.py:117:GraphOutputView",
-  "execution/graph/values.py:107:NodeOutputFrame <-> execution/graph/values.py:117:GraphOutputView",
-  "execution/run_context.py:30:PublicationAvailabilityCoordinate <-> execution/run_context.py:36:ResumeInputAvailabilityCoordinate",
-  "execution/run_context.py:48:AdmittedGraphInput <-> execution/run_context.py:96:AdmittedResumeInput",
-  "execution/run_context.py:48:AdmittedGraphInput <-> execution/run_context.py:105:ConfirmedChildBoundary",
-  "execution/run_context.py:96:AdmittedResumeInput <-> execution/run_context.py:105:ConfirmedChildBoundary",
-  "execution/run_context.py:315:_CompleteContinuationSnapshot <-> execution/run_context.py:323:_RecoveredContinuationSnapshot",
-]
-thin_single_use_helpers = [
-  "execution/engine/routing.py:100:_success_routes",
-  "execution/graph/values.py:214:_make_graph_input_frame",
-  "execution/graph/values.py:222:_graph_input_from_node_input",
-  "execution/graph/values.py:246:_node_output_from_view",
-  "execution/graph/values.py:254:_make_graph_output_view",
-  "execution/graph/values.py:262:_public_values",
-  "execution/graph/values.py:267:_public_node_output",
-  "execution/graph/values.py:272:_public_node_input",
-  "execution/result.py:64:_partial_commit_error",
-  "execution/result.py:326:_completed_result",
-  "execution/result.py:339:_aborted_result",
-  "execution/result.py:352:_awaiting_result",
-  "execution/run_context.py:372:_new_family_identity",
-  "execution/run_context.py:386:_continuation_recovered",
-]
-single_use_private_dataclasses = [
-  "execution/facade.py:163:_ResumeCodec",
-]
-test_only_private_definitions = []
+unused_private_definitions = 0
+unread_private_fields = 0
+unconsumed_internal_async_calls = 0
+unowned_internal_coroutine_handles = 0
+orphaned_task_handles = 0
 
 [tool.pyright]
 include = ["src", "tests", "example"]

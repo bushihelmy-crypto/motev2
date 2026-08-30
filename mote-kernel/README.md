@@ -67,13 +67,11 @@ pytest --cov=mote_kernel
 
 Run `pre-commit install` and `pre-commit run --all-files` from the monorepo root.
 
-The structural-complexity checks compare AST structure rather than source text, so renaming identifiers or changing
-literals does not hide a logic clone. `make complexity-ratchet` is the blocking non-regression gate for production
-type/field/decision counts and structural-smell counts. `make complexity` is the blocking review gate: it compares the
-current candidate identities with the explicit `complexity_reviewed` inventory in `pyproject.toml` and passes only when
-there are no unreviewed or stale identities. Reviewed nominal boundaries remain visible in the report, while a new
-candidate still fails the gate. `make complexity-report` prints every candidate and its review status. The ratchet is
-not a health claim; lower it whenever debt is removed so the improvement cannot regress. Both gates run from `make check`.
+The repository-wide AST gate combines independent high-recall detectors for exact, statement-level, and near-miss
+clones; symbol and field usage; function complexity and effects; call chains; import cycles; and asynchronous ownership.
+`make complexity` enforces zero proven debt without exception inventories. `make complexity-ratchet` prevents every
+high-recall metric from growing and requires its ceiling to be lowered after an improvement. `make complexity-report`
+prints the candidates behind the metrics. Both gates run from `make check`.
 
 Run all repository checks with:
 

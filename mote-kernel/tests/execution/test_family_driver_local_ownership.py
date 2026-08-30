@@ -58,7 +58,7 @@ from mote_kernel.execution.run_context import (
     ChildStateBinding,
     ConfirmedChildBoundary,
     ScopedFrameIndex,
-    _new_family_identity,
+    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -204,7 +204,7 @@ async def admit_continuation_root(
         commit,
         fences,
         (),
-        _new_family_identity(),
+        _CompiledFamilyIdentity(),
         recovered=True,
     )
 

@@ -112,7 +112,7 @@ from mote_kernel.execution.run_context import (
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
     SkipSubstitutionProvenance,
-    _new_family_identity,
+    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -1339,7 +1339,7 @@ async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         None,
         (),
         (),
-        _new_family_identity(),
+        _CompiledFamilyIdentity(),
         recovered=True,
     )
 
