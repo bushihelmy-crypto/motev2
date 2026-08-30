@@ -21,8 +21,7 @@ class GraphExecutor(Generic[GraphValueT]):
         self._claim_owner = ExecutionClaimOwner()
 
     async def prepare(self, request: StepRequest[GraphValueT]) -> PrepareDisposition[GraphValueT]:
-        require_scoped_snapshot_matches_graph(self._graph, request.state, request.scope_run)
-        return await prepare_superstep(self._claim_owner, self._graph, request)
+        return prepare_superstep(self._claim_owner, self._graph, request)
 
     async def execute(
         self,

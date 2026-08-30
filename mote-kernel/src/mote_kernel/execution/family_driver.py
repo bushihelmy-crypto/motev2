@@ -933,6 +933,8 @@ async def admit_continued_root(
     recovered: bool,
 ) -> OwnerHandoff[GraphValueT]:
     scope_run = root_scope_run(state.run_id)
+    fences_by_scope = {candidate.scope_run: candidate for candidate in fences}
+    resumes_by_scope = {candidate.scope_run: candidate for candidate in resumes}
     evidence_publisher, evidence_reader = _evidence_adapter(child_states, frames)
     root_child_constructor = _make_child_constructor(scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
@@ -1064,11 +1066,8 @@ async def admit_continued_root(
                 owner.accept_child_call(position, parent, phase, None)
                 continue
 
-            fence = next((candidate for candidate in fences if candidate.scope_run == binding.coordinate), None)
-            resume = next(
-                (candidate for candidate in resumes if candidate.scope_run == binding.coordinate),
-                None,
-            )
+            fence = fences_by_scope.get(binding.coordinate)
+            resume = resumes_by_scope.get(binding.coordinate)
             handle = await construct_child(parent, binding, child_graph, position, fence, resume)
             try:
                 owner.accept_child_call(position, parent, ActiveChild(parent), handle)
@@ -1095,8 +1094,8 @@ async def admit_continued_root(
             None,
             evidence_publisher,
         )
-        root_fence = next((candidate for candidate in fences if candidate.scope_run == scope_run), None)
-        root_resume = next((candidate for candidate in resumes if candidate.scope_run == scope_run), None)
+        root_fence = fences_by_scope.get(scope_run)
+        root_resume = resumes_by_scope.get(scope_run)
         await apply_admission(root, root_fence, root_resume, ())
         await admit_children(root, graph, scope_run, state)
         return root, evidence_reader

@@ -23,7 +23,6 @@ from mote_kernel.execution.engine.settlement import (
     project_failure_settlement,
     project_success_settlement,
 )
-from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
     ExecutionLimitError,
     GraphValueUnavailableError,
@@ -598,22 +597,6 @@ def _publication_coordinate(
     )
 
 
-def _claim(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    tasks: tuple[GraphTask, ...],
-) -> GraphRunState:
-    attempt_id = GraphExecutionAttemptId("recovery-preflight")
-    return reduce_graph_run(
-        state,
-        project_claim_command(
-            state,
-            attempt_id,
-            claim_resource_snapshot(graph, tasks),
-        ),
-    )
-
-
 def _select_live(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -897,7 +880,14 @@ def _expand_quiescent_executable(
                 f"for pending nodes {unavailable_inputs!r} at {scope_run!r}; "
                 "node input or nested boundary materialization is unavailable"
             )
-        claimed = _claim(graph, state, tasks)
+        claimed = reduce_graph_run(
+            state,
+            project_claim_command(
+                state,
+                GraphExecutionAttemptId("recovery-preflight"),
+                claim_resource_snapshot(graph, tasks),
+            ),
+        )
         settled, availability = _settle_nested_outcomes(
             graph,
             claimed,

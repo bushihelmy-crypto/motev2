@@ -127,7 +127,8 @@ family_driver._execute_frontier(...)
   |     `-- GraphRunState 安装 execution lease / resources
   |
   +-- GraphExecutor.execute(prepared_claim, claimed_state)
-  |     +-- 校验 claimed State 与 preparation 的唯一任务范围
+  |     +-- 校验 claimed State 是 claim command 的精确 reducer 后继
+  |     +-- 校验 preparation 的完整 canonical GraphTask 序列
   |     +-- 线性消费 PreparedExecutionClaim（不重建 frontier）
   |     `-- issue_execution_session(...)
   |
@@ -135,7 +136,7 @@ family_driver._execute_frontier(...)
         |
         `-- loop: session.next(authoritative_state)
               |
-              +-- acknowledge 上一条 settlement 已提交
+              +-- acknowledge State 是上一条 settlement command 的精确 reducer 后继
               +-- select_executable_tasks(...)
               +-- 复用 prepare 阶段的 ExecutableTask / effective input
               +-- TaskScheduler.submit(...)
@@ -160,7 +161,7 @@ family_driver._execute_frontier(...)
 ```
 
 `GraphExecutor.prepare()` 只准备 disposition 和 claim，不执行节点，也不调用 reducer。
-`GraphExecutor.execute()` 只签发由 claim 授权的 session，不拥有持久化或 State 变更。
+`GraphExecutor.execute()` 只验证精确 reducer 后继并签发由 claim 授权的 session，不拥有持久化或 State 变更。
 普通 callable node 的唯一调用点是 `TaskScheduler`。
 
 ## 5. 并发执行、逐节点提交
@@ -308,7 +309,7 @@ authoritative transition、commit 和确认都经过 `commit_transition()`。
 | --- | --- | --- |
 | `Graph` | Execution | 唯一公开构图与运行门面 |
 | `CompiledGraph` | Execution | immutable topology、端口、routing 和 resource requirements |
-| `GraphExecutor` | Execution | prepare、claim 校验和 session 签发 |
+| `GraphExecutor` | Execution | prepare、精确 claim 后继校验和 session 签发 |
 | `GraphExecutionSession` | Execution | 单消费者 completion/ack 协议和 transient task lifecycle |
 | `TaskScheduler` | Execution | 唯一普通节点 invocation owner |
 | `_GraphRun` / `ScopedFrameIndex` | Execution | owner-local State binding 与 concrete value availability |

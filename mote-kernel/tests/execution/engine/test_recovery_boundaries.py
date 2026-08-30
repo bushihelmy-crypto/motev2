@@ -7,6 +7,7 @@ from tests.execution.engine.factories import callable_node, output_value
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
+from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
@@ -126,7 +127,7 @@ async def test_session_rejects_state_that_skips_the_acknowledged_revision() -> N
     claimed, session = await claim(compiled, executor, initial)
     try:
         first = await session.next(claimed)
-        with pytest.raises(Exception, match="successor revision"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(claimed)
         acknowledged = reduce_graph_run(claimed, first.command)
         second = await session.next(acknowledged)

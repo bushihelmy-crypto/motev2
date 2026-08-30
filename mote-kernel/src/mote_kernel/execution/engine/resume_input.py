@@ -1,6 +1,6 @@
 """Scoped node-input materialization and graph-local resume codecs."""
 
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
 from mote_kernel.execution.errors import (
@@ -64,14 +64,6 @@ def _resume_input_coordinate(
     )
 
 
-def _require_decoded_values(
-    candidate: _GraphValues[GraphValueT] | bytes,
-) -> _GraphValues[GraphValueT]:
-    if not isinstance(candidate, _GraphValues):
-        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
-    return candidate
-
-
 def require_resume_input_binding(graph: CompiledGraph[GraphValueT], state: GraphRunState) -> None:
     binding = graph.resume_input
     codec = state.resume_input_codec
@@ -119,10 +111,12 @@ def decode_resume_input(
     if binding is None:
         raise SnapshotMismatchError("input override is missing its compiled graph decoder")
     try:
-        candidate = binding.decoder.decode(payload)
+        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder.decode(payload))
     except Exception as error:
         raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
-    return _admit_override(graph, node_id, _require_decoded_values(candidate))
+    if not isinstance(candidate, _GraphValues):
+        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
+    return _admit_override(graph, node_id, candidate)
 
 
 def _publication_value(

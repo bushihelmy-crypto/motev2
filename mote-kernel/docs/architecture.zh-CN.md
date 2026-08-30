@@ -20,7 +20,7 @@ Mote Kernel 将领域流程、图执行、状态转换与外部能力实现分�
 
 门面内部的 `GraphExecutor.execute()` 是唯一受支持的 session 创建入口。它线性消费 prepared claim 后签发单消费者
 `GraphExecutionSession`；内部 session contract 是不可直接构造的协议。每次 `next(authoritative_state)` 先确认上一条 reducer command
-已经提交，再至多交付一个 typed node completion 和一个 `SettleGraphNode`。并发 `next()` 在进入 scheduler 前 fail closed；`aclose()`
+产生的精确后继已经提交，再至多交付一个 typed node completion 和一个 `SettleGraphNode`。并发 `next()` 在进入 scheduler 前 fail closed；`aclose()`
 幂等，并等待所有 live task 停止。
 取消 `next()` 会先完成 close 再传播 cancellation；cleanup 期间再次取消同一 task 也不能中断 close。
 

@@ -219,7 +219,7 @@ async def prepare_execution_frontier(
 ) -> tuple[ExecutionClaimOwner, ExecutableFrontier[str]]:
     owner = ExecutionClaimOwner()
     execution_request = request(graph, state, projections)
-    disposition = await prepare_superstep(owner, graph, execution_request)
+    disposition = prepare_superstep(owner, graph, execution_request)
     assert isinstance(disposition, ExecutableFrontier)
     return owner, disposition
 

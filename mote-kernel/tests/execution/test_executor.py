@@ -13,7 +13,7 @@ from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_in
 from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.resume_admission import prepare_resume
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
-from mote_kernel.execution.engine.task import GraphTask, TaskId
+from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
     GraphValidationError,
     GraphValueAdmissionError,
@@ -95,12 +95,14 @@ from mote_kernel.state.graph_state import (
     GraphJoinProgress,
     GraphNodeId,
     GraphResumeInputCodecId,
+    GraphResumeInputPayload,
     GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
     InterruptedGraphNode,
+    OverrideGraphNodeInput,
     ParentGraphActivation,
     PendingGraphNode,
     ResourceId,
@@ -516,20 +518,20 @@ async def test_claim_is_one_shot_and_bound_to_committed_state() -> None:
         await executor.execute(prepared.claim, claimed)
 
 
-async def test_claim_rejects_a_forged_prepared_task_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_claim_rejects_forged_prepared_task_coordinates(monkeypatch: pytest.MonkeyPatch) -> None:
     graph = graph_with_nodes(node("a"))
     initial = started(graph)
     original_plan = frontier_module.plan_tasks
 
-    def forge_task_identity(
+    def forge_task_coordinates(
         graph: CompiledGraph[str],
         state: GraphRunState,
         limits: ExecutionLimits,
     ) -> tuple[GraphTask, ...]:
         tasks = original_plan(graph, state, limits)
-        return (replace(tasks[0], task_id=TaskId("forged")),)
+        return (replace(tasks[0], run_id=GraphRunId("forged")),)
 
-    monkeypatch.setattr(frontier_module, "plan_tasks", forge_task_identity)
+    monkeypatch.setattr(frontier_module, "plan_tasks", forge_task_coordinates)
     executor = GraphExecutor(graph)
     prepared = await executor.prepare(string_request(graph, initial, "input"))
     assert isinstance(prepared, ExecutableFrontier)
@@ -538,6 +540,35 @@ async def test_claim_rejects_a_forged_prepared_task_identity(monkeypatch: pytest
     for _ in range(2):
         with pytest.raises(ResultCollectionError, match="committed graph state"):
             await executor.execute(prepared.claim, claimed)
+
+
+async def test_claim_rejects_a_committed_state_with_a_different_pending_input() -> None:
+    codec = _Codec()
+    graph = graph_with_nodes(
+        node("a"),
+        resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
+    )
+    executor = GraphExecutor(graph)
+    initial = started(graph)
+    prepared = await executor.prepare(string_request(graph, initial, "input"))
+    assert isinstance(prepared, ExecutableFrontier)
+    claimed = reduce_graph_run(initial, prepared.claim.command)
+    forged = replace(
+        claimed,
+        frontier=replace(
+            claimed.frontier,
+            nodes=(
+                replace(
+                    claimed.frontier.nodes[0],
+                    settlement=PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"forged"))),
+                ),
+            ),
+        ),
+    )
+
+    for _ in range(2):
+        with pytest.raises(ResultCollectionError, match="committed graph state"):
+            await executor.execute(prepared.claim, forged)
 
 
 async def test_concurrent_consumers_of_one_prepared_claim_have_exactly_one_winner() -> None:

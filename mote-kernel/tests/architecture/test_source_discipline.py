@@ -221,12 +221,11 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
     }
 
 
-def test_graph_execution_contract_remains_async_only() -> None:
+def test_graph_runtime_contract_remains_async_and_preparation_is_synchronous() -> None:
     execution_functions = (
         _class_method("execution/facade.py", "Graph", "run"),
         _class_method("execution/executor.py", "GraphExecutor", "prepare"),
         _class_method("execution/executor.py", "GraphExecutor", "execute"),
-        _top_level_function("execution/engine/superstep.py", "prepare_superstep"),
         _class_method("execution/engine/session.py", "GraphExecutionSession", "next"),
         _class_method("execution/engine/session.py", "GraphExecutionSession", "aclose"),
         _class_method("execution/engine/scheduler.py", "TaskScheduler", "next_completion"),
@@ -235,3 +234,7 @@ def test_graph_execution_contract_remains_async_only() -> None:
     )
 
     assert all(isinstance(definition, ast.AsyncFunctionDef) for definition in execution_functions)
+    assert isinstance(
+        _top_level_function("execution/engine/superstep.py", "prepare_superstep"),
+        ast.FunctionDef,
+    )

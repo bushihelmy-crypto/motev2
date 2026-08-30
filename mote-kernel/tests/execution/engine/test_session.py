@@ -686,7 +686,7 @@ async def test_session_acknowledgement_rejects_a_target_that_remains_pending() -
     try:
         _ = await session.next(claimed)
         invalid = replace(claimed, revision=claimed.revision + 1)
-        with pytest.raises(ResultCollectionError, match="did not settle"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -713,7 +713,7 @@ async def test_session_acknowledgement_rejects_an_unrelated_settlement_change() 
             ),
             execution=None,
         )
-        with pytest.raises(ResultCollectionError, match="unrelated node"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(unrelated)
     finally:
         await session.aclose()
@@ -739,7 +739,7 @@ async def test_session_acknowledgement_rejects_a_mismatched_settlement_variant()
                 ),
             ),
         )
-        with pytest.raises(ResultCollectionError, match="does not match"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -756,7 +756,7 @@ async def test_session_acknowledgement_rejects_a_missing_partial_execution_token
         first = await session.next(claimed)
         after = reduce_graph_run(claimed, first.command)
         invalid = replace(after, execution=None)
-        with pytest.raises(ResultCollectionError, match="retain its execution"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(invalid)
     finally:
         await session.aclose()
@@ -779,7 +779,7 @@ async def test_session_acknowledgement_rejects_a_changed_execution_token() -> No
                 GraphExecutionToken(after.execution.token.generation, GraphExecutionAttemptId("other"))
             ),
         )
-        with pytest.raises(ResultCollectionError, match="active execution token"):
+        with pytest.raises(ResultCollectionError, match="exact reducer successor"):
             await session.next(changed)
     finally:
         await session.aclose()
