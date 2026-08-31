@@ -11,8 +11,7 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.graph.ports import (
     GraphInputPort,
     MaterializationPlan,
-    NodeOutputPort,
-    PublicationSelection,
+    ResolvedInputBinding,
     require_publication_selection,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
@@ -25,6 +24,8 @@ from mote_kernel.execution.graph.values import (
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.run_context import (
+    GraphInputAvailabilityCoordinate,
+    PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameAvailability,
     ScopedFrameIndex,
@@ -118,27 +119,20 @@ def decode_resume_input(
     return _admit_override(graph, node_id, candidate)
 
 
-def _publication_value(
+def _input_binding_coordinate(
     graph: CompiledGraph[GraphValueT],
-    frames: ScopedFrameIndex[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    source: NodeOutputPort,
-    output_name: str,
     anchor_superstep: int,
-    selection: PublicationSelection | None,
-) -> GraphValueT:
+    binding: ResolvedInputBinding[GraphValueT],
+) -> GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT]:
+    source = binding.source
+    if isinstance(source, GraphInputPort):
+        return _graph_input_coordinate(graph, scope_run)
     selection = require_publication_selection(
-        selection,
+        binding.publication,
         SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
     )
-    coordinate = _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
-    try:
-        frame = frames.lookup(coordinate).frame
-    except SnapshotMismatchError as error:
-        raise GraphValueUnavailableError(
-            f"node output {source.node_id!r}.{output_name!r} is unavailable at {scope_run!r}"
-        ) from error
-    return _frame_value(frame, output_name)
+    return _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
 
 
 def node_inputs_available(
@@ -150,21 +144,12 @@ def node_inputs_available(
 ) -> bool:
     plan = _require_node_materialization(graph, node_id)
     for binding in plan.bindings.entries:
-        source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
-            if not frames.has_graph_input(graph_input_coordinate):
+        coordinate = _input_binding_coordinate(graph, scope_run, activation_superstep, binding)
+        if isinstance(coordinate, GraphInputAvailabilityCoordinate):
+            if not frames.has_graph_input(coordinate):
                 return False
-        else:
-            selection = require_publication_selection(
-                binding.publication,
-                SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
-            )
-            publication_coordinate = _node_output_coordinate(
-                graph, scope_run, source, selection.resolve(activation_superstep)
-            )
-            if not frames.has_publication(publication_coordinate):
-                return False
+        elif not frames.has_publication(coordinate):
+            return False
     return True
 
 
@@ -225,24 +210,18 @@ def materialize_node_input(
     entries: list[NamedValue[GraphValueT]] = []
     for binding in plan.bindings.entries:
         source = binding.source
+        coordinate = _input_binding_coordinate(graph, scope_run, state.superstep, binding)
         if isinstance(source, GraphInputPort):
-            coordinate = _graph_input_coordinate(graph, scope_run)
-            try:
-                value = _frame_value(frames.lookup(coordinate).frame, source.name)
-            except SnapshotMismatchError as error:
-                raise GraphValueUnavailableError(
-                    f"graph input {source.name!r} is unavailable at {scope_run!r}"
-                ) from error
+            value_name = source.name
+            unavailable = f"graph input {source.name!r}"
         else:
-            value = _publication_value(
-                graph,
-                frames,
-                scope_run,
-                source,
-                source.output_name,
-                state.superstep,
-                binding.publication,
-            )
+            value_name = source.output_name
+            unavailable = f"node output {source.node_id!r}.{source.output_name!r}"
+        try:
+            frame = frames.lookup(coordinate).frame
+        except SnapshotMismatchError as error:
+            raise GraphValueUnavailableError(f"{unavailable} is unavailable at {scope_run!r}") from error
+        value = _frame_value(frame, value_name)
         entries.append(NamedValue(binding.destination.local_name, value))
     return _make_node_input_frame(tuple(entries), plan.descriptor.declarations)
 
