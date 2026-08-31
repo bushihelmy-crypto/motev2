@@ -1,9 +1,9 @@
 # Mote Container
 
 `mote-resource/container` contains providers for Agent/Kernel execution hosts.
-It registers, locates, and invokes a Container behind a narrow handle while
-leaving Agent Flow semantics to `mote-kernel` and assignment authority to
-`mote-control`.
+It registers and locates a Container, then exposes a narrow typed handle while
+leaving invocation infrastructure to `mote-infra/invocation`, Agent Flow
+semantics to `mote-kernel`, and assignment authority to `mote-control`.
 
 Container providers may be local, Docker, Cloudflare, or another hosting
 environment. The host may inject a narrow runtime context and Port resolver
@@ -24,6 +24,5 @@ mote-resource/container/
     └── ts/        TypeScript Worker and Durable Object host
 ```
 
-The project is pre-alpha. Shared assignment and invocation contracts are
-introduced only with a concrete `mote-control` consumer and matching
-`conformance` cases.
+The project is pre-alpha. Shared assignment and handle contracts are introduced
+only with a concrete `mote-control` consumer and matching `conformance` cases.

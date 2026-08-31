@@ -1,7 +1,7 @@
 # Mote Infrastructure Persistence engineering rules
 
 - This boundary owns concrete persistence, compare-and-swap, schema, migration, serialization, and transaction mechanisms.
-- It is the `persistence` child of `mote-infra`; RPC transport implementations live in the sibling `mote-infra/rpc` boundary.
+- It is the sole storage infrastructure owner under `mote-infra`; invocation contracts, resolution, and local/RPC implementations live in the parallel `mote-infra/invocation` boundary.
 - `mote-kernel` owns the `Commit` Port contract and Agent flow semantics. Persistence implementations satisfy the contract structurally and must not import Kernel, Container, Control, Product, or Runtime code.
 - Persistence-backend selection belongs to Port configuration and is independent of Container selection. A Container may expose platform capabilities, but it must not select or require a Persistence backend.
 - A backend constructor accepts only the capabilities it needs. Cloudflare SQLite accepts Durable Object storage; a remote backend accepts its client or endpoint configuration.

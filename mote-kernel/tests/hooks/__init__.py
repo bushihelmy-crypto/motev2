@@ -1,0 +1,1 @@
+"""Hook contract tests."""

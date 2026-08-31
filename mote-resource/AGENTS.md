@@ -17,9 +17,9 @@
 - Container selection and persistence selection are independent. Kernel Port
   configuration selects the `Commit` backend; a Container may expose optional
   platform capabilities without selecting or requiring that backend.
-- Concrete persistence and transaction mechanisms belong to
-  `mote-infra/persistence`; RPC transport mechanics belong to
-  `mote-infra/rpc`.
+- Concrete persistence and transaction mechanisms belong only to
+  `mote-infra/persistence`; invocation contracts, resolution, and local/RPC
+  mechanics belong only to `mote-infra/invocation`.
 - Do not invent cross-layer request DTOs, identity encodings, or Embodiment
   wire protocols outside `conformance/` and their owning component.
 - Preserve user changes and inspect the relevant Git diff before editing.

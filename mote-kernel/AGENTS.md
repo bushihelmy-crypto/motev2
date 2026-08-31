@@ -4,7 +4,7 @@
 
 - `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; executor, session, request/result, topology, and state-command types remain owner-internal infrastructure and must not be re-exported as parallel public entry points.
 - `execution` is the only graph execution engine; domain packages define topology but never create private runners.
-- `GraphState` records recoverable execution position. `DomainState` records established business facts. They evolve separately and commit atomically as one `AgentState`.
+- `GraphRunState` is the only runtime state model currently defined by the kernel. Keep execution position and any future node/Hook or business facts in that same snapshot and atomic commit boundary. Organize implementation modules by concern only; do not create a parallel state model or split state owner.
 - State transitions are pure. Services and tools return typed results and commands; they never mutate state directly.
 - The persistent state store is authoritative. Update durable state first and replace the Python memory snapshot only after a confirmed commit.
 - Concrete capabilities enter through narrow typed ports. Missing required ports fail assembly; missing optional ports remove their steps when the graph is assembled.

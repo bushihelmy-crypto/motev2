@@ -6,7 +6,7 @@
 - Do not freeze the provisional layout with dependency guards, public imports, or compatibility promises. Confirm boundaries from the first complete consumer-driven vertical slice.
 - If retained, durable is the candidate home for language-neutral reliability mechanisms implemented in Rust. Persistence must not interpret Agent flow, Think, Act, Context, Spawn intent, or other owner-specific business semantics.
 - If retained, protocol implements the Rust side of contracts owned by the monorepo root conformance directory. Persistence must not introduce independent wire DTOs, versions, identity rules, or error semantics.
-- If retained, persistenced is a candidate persistence composition boundary for configuration, telemetry, and graceful shutdown rather than state and transaction rules. RPC listeners belong to `mote-infra/rpc` when a concrete transport consumer exists.
+- If retained, persistenced is a candidate persistence composition boundary for configuration, telemetry, and graceful shutdown rather than state and transaction rules. RPC listeners belong to `mote-infra/invocation/rpc` when a concrete transport consumer exists.
 - Persistence-backend selection belongs to the caller's Port configuration and is independent of local, Docker, or Cloudflare Container selection.
 - SQLite, local CAS, and future storage engines are private adapters behind narrow typed ports. Raw SQL connections, storage-engine transaction types, and generated wire types must not cross owner-facing boundaries.
 - Do not create generic common, shared, utils, helpers, or models modules. Put a type with the invariant it represents.

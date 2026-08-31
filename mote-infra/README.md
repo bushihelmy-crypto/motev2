@@ -1,18 +1,22 @@
 # Mote Infrastructure
 
-`mote-infra` is the infrastructure boundary for concrete adapters used by Mote. It groups persistence and RPC implementations without turning them into Kernel semantics or Resource behavior.
+`mote-infra` has two parallel concrete infrastructure owners. `invocation/` is the only place for invocation contracts, resolution, and local or remote implementations; `persistence/` is the only place for storage and transaction implementations. Neither owns Kernel semantics or Resource facts.
 
 ```text
 mote-infra/
-├── persistence/
+├── invocation/
+│   ├── contract/              narrow typed invocation contracts
+│   ├── resolver/              explicit implementation resolution
+│   ├── local/                 local invocation implementation
+│   └── rpc/                   remote invocation implementations
+│       ├── http/
+│       ├── grpc/
+│       └── websocket/
+└── persistence/
 │   ├── local/                 Rust local persistence adapter
 │   └── cloudflare/            Cloudflare Durable Object persistence adapters
 │       ├── python/
 │       └── ts/
-└── rpc/
-    ├── http/                  reserved HTTP transport adapter
-    ├── grpc/                  reusable gRPC transport adapter
-    └── websocket/             reserved WebSocket transport adapter
 ```
 
 The dependency direction is capability-based:
@@ -22,14 +26,14 @@ mote-control  →  mote-resource/container  →  mote-kernel
                          │                         │
                          │ ctx/config              ▼
                          └──────────────────── mote-port  ←  mote-infra
-                                                            ├── persistence
-                                                            └── rpc
+                                                            ├── invocation
+                                                            └── persistence
               └→ mote-resource/embodiment (capability handle)
 ```
 
 `mote-resource/container` allocates or locates a host, prepares the runtime
 context and Port configuration, and starts Kernel. `mote-resource/embodiment`
 resolves physical-body capability handles; neither resource boundary selects a
-persistence backend or interprets RPC payloads.
+persistence backend nor owns invocation contracts, resolution, or transport.
 
-The RPC directories are intentionally scaffolds. Transport code and wire contracts will be added with their first concrete consumer and corresponding conformance cases.
+The invocation directories are ownership scaffolds. Concrete contracts and implementations are added only with a real consumer; cross-language observable schemas remain in `conformance/`.
