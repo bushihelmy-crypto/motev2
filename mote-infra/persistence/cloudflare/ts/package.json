@@ -27,12 +27,12 @@
         "types:check": "wrangler types tests/worker-configuration.d.ts --config wrangler.test.jsonc --include-runtime false --check"
     },
     "devDependencies": {
-        "@cloudflare/vitest-plugin": "1.0.0",
-        "@cloudflare/workers-types": "5.20260820.1",
-        "oxlint": "1.79.0",
+        "@cloudflare/vitest-plugin": "1.1.2",
+        "@cloudflare/workers-types": "5.20260828.1",
+        "oxlint": "1.80.0",
         "prettier": "3.9.6",
         "typescript": "7.0.2",
         "vitest": "4.1.11",
-        "wrangler": "4.125.0"
+        "wrangler": "4.127.1"
     }
 }
