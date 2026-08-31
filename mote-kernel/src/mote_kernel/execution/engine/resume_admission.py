@@ -48,7 +48,6 @@ from mote_kernel.state.graph_state import (
     ResumeInterruptedNode,
     SelectGraphRoute,
     SkipFailedNode,
-    SkippedGraphNode,
     UseStepRequestInput,
     frontier_node,
     graph_interrupt_id,
@@ -172,11 +171,11 @@ def admit_resume_candidates(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> CandidateFrameAvailability[GraphValueT]:
     substitutions = tuple(substitution for candidate in candidates for substitution in candidate.substitutions)
-    candidate_skip_actions = tuple(
-        tuple(action for action in candidate.command.actions if isinstance(action, SkipFailedNode))
+    candidate_skip_node_ids = tuple(
+        frozenset(action.node_id for action in candidate.command.actions if isinstance(action, SkipFailedNode))
         for candidate in candidates
     )
-    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
+    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
         if candidate.previous.run_id != candidate.scope_run.graph_run_id or candidate.successor.run_id != (
             candidate.scope_run.graph_run_id
         ):
@@ -189,22 +188,13 @@ def admit_resume_candidates(
                 publication = candidate.graph.transition.publications[activation.node_id]
             except KeyError as error:
                 raise SnapshotMismatchError("resume substitution references an unknown publication node") from error
-            node = frontier_node(candidate.successor.frontier, activation.node_id)
-            action = next(
-                (action for action in skip_actions if action.node_id == activation.node_id),
-                None,
-            )
             if (
                 activation.scope_run != candidate.scope_run
                 or activation.superstep != candidate.previous.superstep
                 or substitution.expected_revision != candidate.successor.revision
                 or type(substitution.provenance) is not SkipSubstitutionProvenance
                 or substitution.coordinate.descriptor != publication.identity
-                or node is None
-                or not isinstance(node.settlement, SkippedGraphNode)
-                or action is None
-                or node.settlement.reason != action.reason
-                or node.settlement.routing != action.routing
+                or activation.node_id not in skip_node_ids
             ):
                 raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
     canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
@@ -230,7 +220,7 @@ def admit_resume_candidates(
             f"resume substitution nodes {collisions!r} collide with confirmed publications"
         )
     availability = CandidateFrameAvailability(frames, canonical)
-    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
+    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
         facts = resolve_routing_facts(candidate.graph, candidate.successor, candidate.scope_run, availability)
         unavailable = tuple(
             sorted(
@@ -244,21 +234,12 @@ def admit_resume_candidates(
         if unavailable:
             raise GraphValueUnavailableError(
                 f"resume of scoped graph {candidate.scope_run.scope!r} "
-                f"for actions {tuple(action.node_id for action in skip_actions)!r} "
+                f"for actions {tuple(sorted(skip_node_ids))!r} "
                 f"leaves required nodes and consumer inputs {unavailable!r} unavailable"
             )
-        skip_publication_coordinates: set[PublicationAvailabilityCoordinate[GraphValueT]] = {
-            PublicationAvailabilityCoordinate(
-                StableActivation(candidate.scope_run, candidate.previous.superstep, action.node_id),
-                candidate.graph.transition.publications[action.node_id].identity,
-            )
-            for action in skip_actions
-        }
-        pure_skip_coordinates = skip_publication_coordinates.difference(
-            substitution.coordinate for substitution in candidate.substitutions
-        )
+        substituted_node_ids = {substitution.coordinate.activation.node_id for substitution in candidate.substitutions}
         if (
-            pure_skip_coordinates
+            not skip_node_ids.issubset(substituted_node_ids)
             and not any(
                 (
                     facts.control_targets,
@@ -268,7 +249,7 @@ def admit_resume_candidates(
             )
             and facts.unavailable_graph_outputs
         ):
-            actions = tuple(action.node_id for action in skip_actions)
+            actions = tuple(sorted(skip_node_ids))
             raise GraphValueUnavailableError(
                 f"resume actions {actions!r} in scoped graph {candidate.scope_run.scope!r} "
                 f"leave graph outputs/bindings {facts.unavailable_graph_outputs!r} unavailable"
