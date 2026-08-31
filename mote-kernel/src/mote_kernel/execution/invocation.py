@@ -424,6 +424,95 @@ def admit_state_owned_overrides(
                 )
 
 
+def _validate_graph_input_records(
+    graph: CompiledGraph[GraphValueT],
+    coordinates: frozenset[ScopeRunCoordinate],
+    records: tuple[AdmittedGraphInput[GraphValueT], ...],
+) -> None:
+    for record in records:
+        coordinate = record.coordinate
+        if coordinate.scope_run not in coordinates:
+            raise SnapshotMismatchError("continuation graph input belongs to an unknown scoped run")
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
+        if coordinate.descriptor != scoped_graph.graph_input_descriptor.identity:
+            raise SnapshotMismatchError("continuation graph input descriptor does not match its scope")
+        try:
+            _admit_graph_input_frame(record.frame, scoped_graph.graph_input_descriptor.declarations)
+        except GraphValueAdmissionError as error:
+            raise SnapshotMismatchError("continuation graph input frame does not match its descriptor") from error
+
+
+def _validate_publication_records(
+    graph: CompiledGraph[GraphValueT],
+    states: tuple[_PlannedState, ...],
+    records: tuple[ConfirmedPublication[GraphValueT], ...],
+) -> None:
+    for record in records:
+        coordinate = record.coordinate
+        binding = _planned_state(states, coordinate.activation.scope_run)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
+        publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
+        if (
+            publication is None
+            or coordinate.descriptor != publication.identity
+            or coordinate.activation.superstep > binding.state.superstep
+            or not 1 <= record.acknowledged_revision <= binding.state.revision
+            or type(record.provenance) not in (ExecutionPublicationProvenance, SkipSubstitutionProvenance)
+        ):
+            raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
+        if (
+            isinstance(record.provenance, ExecutionPublicationProvenance)
+            and record.provenance.execution_token.generation < 1
+        ):
+            raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
+        try:
+            _admit_node_output_frame(record.frame, publication.declarations)
+        except GraphValueAdmissionError as error:
+            raise SnapshotMismatchError("continuation publication frame does not match its descriptor") from error
+
+
+def _validate_resume_input_records(
+    graph: CompiledGraph[GraphValueT],
+    states: tuple[_PlannedState, ...],
+    records: tuple[AdmittedResumeInput[GraphValueT], ...],
+) -> None:
+    for record in records:
+        coordinate = record.coordinate
+        binding = _planned_state(states, coordinate.activation.scope_run)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
+        materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
+        if (
+            materialization is None
+            or coordinate.descriptor != materialization.descriptor.identity
+            or coordinate.activation.superstep > binding.state.superstep
+        ):
+            raise SnapshotMismatchError("continuation resume input has inconsistent coordinates")
+        try:
+            _admit_node_input_frame(record.frame, materialization.descriptor.declarations)
+        except GraphValueAdmissionError as error:
+            raise SnapshotMismatchError("continuation resume input frame does not match its descriptor") from error
+
+
+def _validate_child_boundary_records(
+    graph: CompiledGraph[GraphValueT],
+    states: tuple[_PlannedState, ...],
+    records: tuple[ConfirmedChildBoundary[GraphValueT], ...],
+) -> None:
+    for record in records:
+        coordinate = record.coordinate
+        binding = _planned_state(states, coordinate.child_scope_run)
+        scoped_graph = _compiled_graph_at_scope(graph, coordinate.child_scope_run.scope)
+        if (
+            coordinate.descriptor != scoped_graph.graph_output_descriptor.identity
+            or binding.state.status is not GraphRunStatus.COMPLETED
+        ):
+            raise SnapshotMismatchError("continuation child boundary has inconsistent coordinates")
+        try:
+            _admit_graph_output_view(record.frame, scoped_graph.graph_output_descriptor.declarations)
+        except GraphValueAdmissionError as error:
+            raise SnapshotMismatchError("continuation child boundary frame does not match its descriptor") from error
+
+
 def _validate_frame_index(
     graph: CompiledGraph[GraphValueT],
     states: tuple[_PlannedState, ...],
@@ -458,68 +547,10 @@ def _validate_frame_index(
         raise SnapshotMismatchError("continuation resume input coordinates are not unique and canonical")
     if any(previous.coordinate >= current.coordinate for previous, current in pairwise(frames.child_boundaries)):
         raise SnapshotMismatchError("continuation child boundary coordinates are not unique and canonical")
-    for record in frames.graph_inputs:
-        coordinate = record.coordinate
-        if coordinate.scope_run not in coordinates:
-            raise SnapshotMismatchError("continuation graph input belongs to an unknown scoped run")
-        scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
-        if coordinate.descriptor != scoped_graph.graph_input_descriptor.identity:
-            raise SnapshotMismatchError("continuation graph input descriptor does not match its scope")
-        try:
-            _admit_graph_input_frame(record.frame, scoped_graph.graph_input_descriptor.declarations)
-        except GraphValueAdmissionError as error:
-            raise SnapshotMismatchError("continuation graph input frame does not match its descriptor") from error
-    for record in frames.publications:
-        coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.activation.scope_run)
-        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
-        publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
-        if (
-            publication is None
-            or coordinate.descriptor != publication.identity
-            or coordinate.activation.superstep > binding.state.superstep
-            or record.acknowledged_revision < 1
-            or record.acknowledged_revision > binding.state.revision
-            or type(record.provenance) not in (ExecutionPublicationProvenance, SkipSubstitutionProvenance)
-        ):
-            raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
-        if (
-            isinstance(record.provenance, ExecutionPublicationProvenance)
-            and record.provenance.execution_token.generation < 1
-        ):
-            raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
-        try:
-            _admit_node_output_frame(record.frame, publication.declarations)
-        except GraphValueAdmissionError as error:
-            raise SnapshotMismatchError("continuation publication frame does not match its descriptor") from error
-    for record in frames.resume_inputs:
-        coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.activation.scope_run)
-        scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
-        materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
-        if (
-            materialization is None
-            or coordinate.descriptor != materialization.descriptor.identity
-            or coordinate.activation.superstep > binding.state.superstep
-        ):
-            raise SnapshotMismatchError("continuation resume input has inconsistent coordinates")
-        try:
-            _admit_node_input_frame(record.frame, materialization.descriptor.declarations)
-        except GraphValueAdmissionError as error:
-            raise SnapshotMismatchError("continuation resume input frame does not match its descriptor") from error
-    for record in frames.child_boundaries:
-        coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.child_scope_run)
-        scoped_graph = _compiled_graph_at_scope(graph, coordinate.child_scope_run.scope)
-        if (
-            coordinate.descriptor != scoped_graph.graph_output_descriptor.identity
-            or binding.state.status is not GraphRunStatus.COMPLETED
-        ):
-            raise SnapshotMismatchError("continuation child boundary has inconsistent coordinates")
-        try:
-            _admit_graph_output_view(record.frame, scoped_graph.graph_output_descriptor.declarations)
-        except GraphValueAdmissionError as error:
-            raise SnapshotMismatchError("continuation child boundary frame does not match its descriptor") from error
+    _validate_graph_input_records(graph, coordinates, frames.graph_inputs)
+    _validate_publication_records(graph, states, frames.publications)
+    _validate_resume_input_records(graph, states, frames.resume_inputs)
+    _validate_child_boundary_records(graph, states, frames.child_boundaries)
 
 
 def _validate_complete_context(

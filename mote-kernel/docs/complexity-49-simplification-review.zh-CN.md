@@ -20,10 +20,10 @@
 本次审查的对象是 `src/mote_kernel` 当前复杂度报告列出的 49 个定义。结论不是“门禁通过所以无需处理”：
 
 - `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；同一个函数通常同时触发多个指标。
-- 49 项中有 **13 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3 已完成**，剩余 12 项。
-- `A` 的编号是：**3（已完成）、11、12、14、15、16、19、20、34、38、39、40、41**。
+- 49 项中有 **11 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#40 已完成**，剩余 9 项。
+- `A` 的编号是：**3（已完成）、11、12、14、15、16、20、38、39、40（已完成）、41**。
 - 另有 **12 项有局部整理方向，但尚未证明会减少总复杂度**（标为 `B`）。只有做出净删除、保留唯一事实源后才实施。
-- **24 项应保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer 或领域异常优先级。为压指标机械拆函数会使代码更难维护。
+- **26 项应保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。为压指标机械拆函数会使代码更难维护。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
@@ -94,7 +94,7 @@ make check                      926 passed, coverage 100%
 |---:|---|---|---|
 | 17 | `execution/engine/session.py:180` `_GraphExecutionSession.next`（12/21/3/2/176） | ack 上一条 reducer successor、排空 scheduler、处理 node-origin cancellation、一次交付一个 completion。 | **K**：这是单消费者 session 协议和 cancellation 时序；把循环拆散会掩盖 ack/close 顺序。 |
 | 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（24/31/3/2/233） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **B**：可以按 identity/frontier/routing/resource phase 整理，并让 compiled resource requirement 只计算一次；不能重复实现 `validate_graph_run_state` 或改变异常类型。 |
-| 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **A（允许破坏性 API 迁移）**：改为 `add_callable_node(...)` 与 `add_nested_graph_node(...)` 两个显式入口，删除 union 分支和无效参数组合。两者仍属于唯一 `Graph` facade；迁移 examples/tests 后不保留 legacy alias。 |
+| 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **K（评审后保留，2026-08-31）**：现有两个 `@overload` 已分别表达 callable 与 nested graph 的合法参数，对外保留统一的 `add_node` 更友好；union 分支是 Python 动态调用所需的运行时校验，不拆公共入口，也不为降指标增加转发 helper。 |
 | 20 | `execution/facade.py:594` `Graph.run`（28/42/3/9/444） | 新运行、state-only recovery、continuation admission、preflight、owner drive、取消、partial commit 和 cleanup 全部串在一个公共方法。 | **A**：保留 `Graph` 唯一 lifecycle owner，拆为“invocation preparation”和“drive/project/finish”两段；取消矩阵必须原样保留（setup、node-origin、commit-origin、partial commit、cleanup）。不创建第二 runner。 |
 | 21 | `execution/family_driver.py:269` `_frames_for_owner`（12/14/2/3/126） | 将全局 continuation frame index 投影到一个 owner，并验证 child binding。 | **K（指标误报型）**：是短而清晰的 scoped projection；抽象成泛型过滤器会丢掉 child-boundary 领域检查。 |
 | 22 | `execution/family_driver.py:352` `_GraphRun.__init__`（1/0/0/11/134） | 注入一个 live owner 真正需要的 graph、state、frames、commit、child constructor、position 和 evidence publisher。 | **K（参数误报型）**：11 个依赖是 ownership wiring，不应为了参数门禁引入宽 `RunContext`。 |
@@ -114,7 +114,7 @@ make check                      926 passed, coverage 100%
 | 31 | `execution/graph/compiler.py:411` `_absolute_activation_levels`（13/23/4/3/142） | 对非循环节点求绝对 activation level，供 publication selection 使用。 | **K**：这是确定性 level fixed point；拆 helper 不会改变算法复杂度。 |
 | 32 | `execution/graph/compiler.py:464` `_compile_graph`（74/120/4/2/1238） | 递归 nested compile、解析 ports、建 data/control topology、验证可达性、计算 guarantees/levels、构造所有 descriptors。 | **B（最高设计收益）**：应考虑“输入解析 → 拓扑证明 → publication/materialization → immutable plan”四个纯 phase，以窄的 `CompilationFacts` 传递；只有能删除当前大段交叉循环才实施，不能机械拆成十几个 forwarding helper。 |
 | 33 | `execution/graph/validation.py:44` `_validate_resources`（11/14/2/1/133） | 校验 graph resource catalog 的 identity、first-seen order 和 node requirements。 | **B**：可让编译后的 typed resource catalog 成为 order 的唯一来源；Execution/State 仍各自包装领域异常，不能把 graph definition 和 runtime snapshot 混成一个 validator。 |
-| 34 | `execution/graph/validation.py:64` `_validate_edges`（23/33/3/2/293） | 校验 direct/conditional/join edge 的 endpoint、重复、route 和 nested-source 规则。 | **A**：使用三个窄的 edge-kind validator 加一个共享 endpoint 检查，保留 `DuplicateEdgeError`、`InvalidJoinError`、`UnknownNodeError` 的原有边界和检查顺序；不引入 generic visitor。 |
+| 34 | `execution/graph/validation.py:64` `_validate_edges`（23/33/3/2/293） | 校验 direct/conditional/join edge 的 endpoint、重复、route 和 nested-source 规则。 | **K（评审后保留，2026-08-31）**：当前单次循环按声明顺序就地校验三种边，错误类型和优先级清晰且已有确定性测试保护；拆成三个 validator 只会增加参数传递和跳转，不删除规则，也不共享 join 的不同错误语义。 |
 | 35 | `execution/graph/validation.py:109` `_validate_definition`（14/18/2/2/232） | 递归校验 graph identity/version、节点、资源、边、codec，并区分递归与 identity collision。 | **B**：可把“visit 状态/递归”与“当前 definition shape”分成两个纯 phase；必须保留 duplicate-definition 与 recursive-definition 的不同错误。 |
 | 36 | `execution/graph/values.py:152` `_admit_entries`（11/11/2/3/144） | 所有 frame wrapper 共用的 canonical entry/name/exact-type 校验。 | **K（已是共享基础设计）**：它正是唯一 entry rule owner；四个外层 wrapper 只保留 graph-input/node-input/node-output/graph-output 的异常边界，不再泛化。 |
 
@@ -125,7 +125,7 @@ make check                      926 passed, coverage 100%
 | 37 | `execution/invocation.py:165` `lineage_states`（9/8/1/2/151） | 校验 child binding 的 canonical order、唯一 scope/activation，并形成 root + descendants lineage。 | **K（指标误报型）**：代码是直白的 canonicality guard；不应为了 151 个节点增加 lineage abstraction。 |
 | 38 | `execution/invocation.py:188` `plan_fences`（10/16/3/2/193） | 校验每个 scoped state 的 parent/coordinate，并计算 active execution 的 fence successor。 | **A（随 resume owner）**：用一个窄的 canonical `PlannedLineage` index，复用 scope lookup；fence 仍是独立 command，不能与 resume action 合并。 |
 | 39 | `execution/invocation.py:311` `plan_resumes`（13/16/2/4/376） | 按 scope 排序 action、生成 candidate state/frame/facts，并调用 resume admission。 | **A（随 #11/#12）**：一次 canonical action normalization、一次 scope index、一次 candidate admission；删除跨函数重复的 next/scan，不改变 duplicate 优先级。 |
-| 40 | `execution/invocation.py:427` `_validate_frame_index`（45/49/2/3/529） | 校验四种 nominal frame segment 的类型、坐标 canonicality、descriptor/provenance 和 scope membership。 | **A**：固定入口按 graph input → publication → resume input → child boundary 调用四个窄 validator；结构校验与跨-state 语义校验分层，禁用 generic callback/reflection。 |
+| 40 | `execution/invocation.py:427` `_validate_frame_index`（45/49/2/3/529） | 校验四种 nominal frame segment 的类型、坐标 canonicality、descriptor/provenance 和 scope membership。 | **A（已完成，2026-08-31）**：主函数保留全 segment 的 nominal shape → canonical order 检查，再按固定顺序调用四个 typed record validator；未使用 generic callback/reflection，原有错误优先级不变。 |
 | 41 | `execution/invocation.py:525` `_validate_complete_context`（16/34/5/3/215） | 在非 recovered continuation 中检查每个成功 publication、pending input、completed output 和 child boundary。 | **A（随 #40）**：保留 `recovered` 与 `complete` 两条语义路径，只把 frame structural proof 和 context completeness 分开；不改变 State/continuation shape。 |
 | 42 | `execution/run_context.py:227` `ScopedFrameIndex.lookup`（12/36/5/2/80） | 按四种 coordinate 的 nominal 类型查找对应 frame record。 | **K**：四个分支代表四个类型安全边界；改成一个裸 map/字符串 tag 会丢失 overload 和领域错误。 |
 | 43 | `state/graph_state/execution_transitions.py:150` `settle_graph_node`（17/23/3/2/247） | 校验 execution lease，转换 success/failure/interrupt，释放资源并原子更新 frontier。 | **K**：一个 command 必须原子完成 settlement + resource release + lease 清理；不能拆成可独立提交的路径。 |
@@ -138,7 +138,7 @@ make check                      926 passed, coverage 100%
 
 ## 明确可化简项目的目标设计
 
-下面只展开 `A` 项；这些不是泛泛的“可以重构”，而是可以据此写设计和测试的目标。
+下面展开 `A` 项的目标设计，并保留讨论后改判为 `K` 的决策记录；实施项必须可以据此写出明确设计和测试，不能停留在泛泛的“可以重构”。
 
 ### 1. Resume admission：一个 owner、五个阶段（#11、#12、#38、#39）
 
@@ -172,7 +172,7 @@ canonical actions
 
 不能把 `node_inputs_available` 和 `graph_outputs_available` 合成一个“万能 available”函数：前者是 pending node 的短路判断，后者是 graph output 检查，调用方和异常边界不同。`unavailable_graph_outputs` 仍需完整扫描并保留诊断顺序。
 
-### 3. Frame validation：先结构、后语义（#40、#41）
+### 3. Frame validation：先结构、后语义（#40 已完成、#41 待评审）
 
 目标总入口顺序固定为：
 
@@ -183,22 +183,22 @@ nominal record type
   -> complete-context semantic completeness (only !recovered)
 ```
 
-四个 segment validator 必须是窄的、静态可读的 typed 代码；不使用 `object`、反射、字符串 discriminator 或通用 callback。若将结构检查下沉到 `ScopedFrameIndex` 的 owner factory，必须同时删除 invocation 中相同检查，不能两处都保留。恢复型 continuation 仍允许历史缺口，完整 continuation 仍必须有当前 publication/input/boundary。
+#40 已按此顺序完成：结构与 canonicality 仍由 `_validate_frame_index` 统一检查，四类 record 的 scope/descriptor/provenance/frame 内容分别由窄 typed validator 校验；没有下沉到 `ScopedFrameIndex`，也没有引入 `object`、反射、字符串 discriminator 或通用 callback。#41 仍待单独评审；恢复型 continuation 继续允许历史缺口，完整 continuation 继续要求当前 publication/input/boundary。
 
-### 4. Graph facade 与生命周期：减少分支，不增加入口（#19、#20）
+### 4. Graph facade 与生命周期：保留统一 builder，简化生命周期（#19、#20）
 
 `Graph` 继续是唯一 public facade，`_GraphRun` 继续是唯一 live owner。目标只是让职责显式：
 
-- builder 侧用 `add_callable_node` / `add_nested_graph_node` 两个明确操作，迁移旧测试的语义后删除 `add_node` 的 union/optional 分支；不保留兼容 alias；
+- builder 侧保留统一的 `add_node`，由现有两个 `@overload` 分别约束 callable 与 nested graph；运行时 union 分支继续为动态调用提供明确校验，不拆公共入口；
 - `Graph.run` 只做 mode dispatch，调用纯 preparation，再调用统一的 drive/project/finish 流程；
 - cleanup 仍按 abort → release，setup cancellation、node-origin cancellation、commit-origin cancellation 和 partial commit 的观察顺序不变；
 - authoritative state 仍在 commit 返回 exact successor 后才写回 `_GraphRun`，不能为了简化把 candidate 先写入内存。
 
-### 5. Frontier preparation 与 edge validation：按领域变体窄化（#3、#34）
+### 5. Frontier preparation 与 edge validation：直接表达阻断与错误顺序（#3、#34）
 
 **#3 已完成。** `prepare_frontier` 校验并投影 child 后，遇到 missing/active child 直接返回已有的 `WaitingForChildren`；只有 child 全部终结才物化 executable。这样阻断结果由发现它的 owner 直接表达，也删除了 `FrontierPreparation` 中仅供上层转发的重复字段。
 
-`_validate_edges` 可以使用 direct/conditional/join 三个窄 validator 和一个共享 endpoint existence 原语。共享的只能是事实（节点存在、边重复键），不能共享错误类型或把 join 语义降成 generic edge visitor。
+**#34 评审后保留。** `_validate_edges` 在同一次声明顺序遍历中就地表达 direct、conditional、join 的不同错误边界；endpoint 文本相似，但 join 必须保留 `InvalidJoinError`，而 direct/conditional 使用 `UnknownNodeError`。拆 helper 不会删除规则，反而分散错误顺序。
 
 ## 从 `Graph.run` 出发的完整调用链审查
 
@@ -211,7 +211,7 @@ nominal record type
 1. 以 `execution.facade.Graph.run` 为根，使用仓库 semantic index 展开所有能静态解析的内部调用，得到 **232 个函数/方法定义**。
 2. 对 Python 静态索引无法解析的 protocol、闭包和局部 receiver 调用逐点补边，包括 `root.*`、`current.*`、`handle.*`、`session.*`、`scoped_commit.confirm`、child constructor、evidence reader/publisher、resume codec wrapper 和 nested `graph._definition`；补边后的显式内部闭包为 **296 个定义、37 个模块**。
 3. 构造器、property 和 dataclass `__post_init__` 不一定表现为 call-graph 函数边，因此另行检查 `_GraphRun`、session/scheduler、coordinate、frame、result 和 transition 的隐式构造/封印校验。
-4. 49 个热点中，**47 个位于显式闭包内，`_GraphRun.__init__` 是隐式构造可达；只有 `Graph.add_node` 不从 `Graph.run` 可达**，因为它是运行前 builder API。也就是说，从运行入口应审的 48 个热点全部纳入本节；#19 仍在前面的 49 项逐项审查中。
+4. 49 个热点中，**47 个位于显式闭包内，`_GraphRun.__init__` 是隐式构造可达；只有 `Graph.add_node` 不从 `Graph.run` 可达**，因为它是运行前 builder API。也就是说，从运行入口应审的 48 个热点全部纳入本节；#19 已在前面的逐项审查中评审为保留。
 5. 调用链在四类真正的外部边界停止：用户 node callable、用户 commit port、用户 resume encoder/decoder，以及 Python/`asyncio` 标准库。审查覆盖内核对这些返回值、异常和取消的全部处理，但不声称审查用户实现或标准库内部。
 
 完整覆盖层次如下：
@@ -652,9 +652,9 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 ## 推荐实施顺序与门禁账本
 
 1. 先为 A 组补/确认状态转换、恢复边界、frame provenance、异常优先级和 cancellation 的确定性测试。
-2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#41）的小步替换；每步删除旧路径后再测。
-3. 再做 `Graph.run` 生命周期和 builder API（#19、#20），同步迁移 tests/examples，不加兼容层。
-4. #3 frontier preparation 已完成；后续做 #34 edge validation。
+2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#41）的小步替换；#40 已完成，其余每步删除旧路径后再测。
+3. 再做 `Graph.run` 生命周期（#20）；builder API（#19）保留现状。
+4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
 5. 最后才评估 B 组，特别是 compiler/recovery；任何没有净删除的拆分都退回设计阶段。
 6. 每个可合并提交运行 `make complexity-report`、`make complexity-ratchet`、`git diff --check`；实际下降后立即降低 `pyproject.toml` ratchet 上限。
 
