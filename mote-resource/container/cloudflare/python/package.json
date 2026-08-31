@@ -9,6 +9,6 @@
   },
   "packageManager": "pnpm@10.30.3",
   "devDependencies": {
-    "wrangler": "4.125.0"
+    "wrangler": "4.127.1"
   }
 }
