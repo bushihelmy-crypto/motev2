@@ -651,20 +651,20 @@ class Graph(Generic[GraphValueT]):
                 recovered = _continuation_recovered(snapshot)
             lineage = lineage_states(invocation, child_states)
             validate_context(graph, lineage, frames, recovered=recovered)
-            planned_states, fences = plan_fences(graph, lineage)
-            planned_states, candidate_frames, planned_resumes, facts = plan_resumes(
+            planned_lineage, fences = plan_fences(graph, lineage)
+            planned_lineage, candidate_frames, planned_resumes, facts = plan_resumes(
                 graph,
-                planned_states,
+                planned_lineage,
                 frames,
                 resume,
             )
-            admit_state_owned_overrides(graph, planned_states, candidate_frames.confirmed)
+            admit_state_owned_overrides(graph, planned_lineage, candidate_frames.confirmed)
             if recovered or any(
                 action.output is None for action in resume if isinstance(action, SkipFailedNodeRequest)
             ):
                 preflight_recovery(
                     graph,
-                    recovery_seed(planned_states, candidate_frames, limits, facts),
+                    recovery_seed(planned_lineage, candidate_frames, limits, facts),
                 )
             root_admission = admit_continued_root(
                 graph,

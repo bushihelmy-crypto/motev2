@@ -20,14 +20,14 @@
 本次审查的对象是 `src/mote_kernel` 基线复杂度报告列出的 49 个定义。结论不是“门禁通过所以无需处理”：
 
 - 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后已降为 48。
-- 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#11、#12、#14、#20、#40 已完成**，剩余 #38/#39 两项。
-- `A` 的编号是：**3（已完成）、11（已完成）、12（已完成）、14（已完成）、20（已完成）、38、39、40（已完成）**。#15/#16 复核后改判为 `K`。
+- 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#11、#12、#14、#20、#40 已完成**，#38/#39 已有实现但仍待验收。
+- `A` 的编号是：**3（已完成）、11（已完成）、12（已完成）、14（已完成）、20（已完成）、38（待验收）、39（待验收）、40（已完成）**。#15/#16 复核后改判为 `K`。
 - 另有 **12 项有局部整理方向，但尚未证明会减少总复杂度**（标为 `B`）。只有做出净删除、保留唯一事实源后才实施。
 - 原始 49 项中现有 **29 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
-本文件以设计审查为主，并同步记录实施状态。截至 2026-08-31，#3、#11、#12、#14、#20、#40 已完成；#15、#16、#19、#34、#41 复核后保留现状。
+本文件以设计审查为主，并同步记录实施状态。截至 2026-08-31，#3、#11、#12、#14、#20、#40 已完成；#38/#39 已实现但待验收；#15、#16、#19、#34、#41 复核后保留现状。
 
 ## 门禁基线与判定口径
 
@@ -122,9 +122,9 @@ make check                      926 passed, coverage 100%
 
 | # | 位置（指标） | 当前职责 | 判断与目标 |
 |---:|---|---|---|
-| 37 | `execution/invocation.py:165` `lineage_states`（9/8/1/2/151） | 校验 child binding 的 canonical order、唯一 scope/activation，并形成 root + descendants lineage。 | **K（指标误报型）**：代码是直白的 canonicality guard；不应为了 151 个节点增加 lineage abstraction。 |
-| 38 | `execution/invocation.py:188` `plan_fences`（10/16/3/2/193） | 校验每个 scoped state 的 parent/coordinate，并计算 active execution 的 fence successor。 | **A（随 resume owner）**：用一个窄的 canonical `PlannedLineage` index，复用 scope lookup；fence 仍是独立 command，不能与 resume action 合并。 |
-| 39 | `execution/invocation.py:311` `plan_resumes`（13/16/2/4/376） | 按 scope 排序 action、生成 candidate state/frame/facts，并调用 resume admission。 | **A（随 #11/#12）**：一次 canonical action normalization、一次 scope index、一次 candidate admission；删除跨函数重复的 next/scan，不改变 duplicate 优先级。 |
+| 37 | `execution/invocation.py:166` `lineage_states`（9/8/1/2/151 → 9/8/1/2/150） | 校验 child binding 的 canonical order、唯一 scope/activation，并形成 root + descendants lineage。 | **K（指标误报型）**：canonicality guard 本身保持直白；#38/#39 只消费它生成的窄索引，不改变 lineage 的状态语义。 |
+| 38 | `execution/invocation.py:189` `plan_fences`（10/16/3/2/193 → 10/16/3/2/186） | 校验每个 scoped state 的 parent/coordinate，并计算 active execution 的 fence successor。 | **A（实现待验收）**：消费只保存 canonical bindings 的不可变 `_PlannedLineage` 索引；父子校验仍按原顺序，fence 仍是独立 command。替换 state 时按已知位置更新，不再整表扫描并排序。 |
+| 39 | `execution/invocation.py:311` `plan_resumes`（13/16/2/4/376 → 10/12/2/4/356） | 按 scope 排序 action、生成 candidate state/frame/facts，并调用 resume admission。 | **A（实现待验收）**：canonical action 仍只做一次；直接迭代 `groupby`，每次只物化当前 scope 的 actions，并复用同一个 `_PlannedLineage`；duplicate 优先级不变。 |
 | 40 | `execution/invocation.py:427` `_validate_frame_index`（45/49/2/3/529） | 校验四种 nominal frame segment 的类型、坐标 canonicality、descriptor/provenance 和 scope membership。 | **A（已完成，2026-08-31）**：主函数保留全 segment 的 nominal shape → canonical order 检查，再按固定顺序调用四个 typed record validator；未使用 generic callback/reflection，原有错误优先级不变。 |
 | 41 | `execution/invocation.py:525` `_validate_complete_context`（16/34/5/3/215） | 在非 recovered continuation 中检查每个成功 publication、pending input、completed output 和 child boundary。 | **K（复核后纠正，2026-08-31）**：`validate_context` 已先执行 frame validation，再只对非 recovered continuation 执行 completeness audit；初审描述的分层原本就存在。当前单次 state 顺序遍历集中表达缺失数据的错误优先级，不再拆 helper。 |
 | 42 | `execution/run_context.py:227` `ScopedFrameIndex.lookup`（12/36/5/2/80） | 按四种 coordinate 的 nominal 类型查找对应 frame record。 | **K**：四个分支代表四个类型安全边界；改成一个裸 map/字符串 tag 会丢失 overload 和领域错误。 |
@@ -140,7 +140,7 @@ make check                      926 passed, coverage 100%
 
 下面展开 `A` 项的目标设计，并保留讨论后改判为 `K` 的决策记录；实施项必须可以据此写出明确设计和测试，不能停留在泛泛的“可以重构”。
 
-### 1. Resume admission：一个 owner、五个阶段（#11/#12 已完成，#38/#39 待评审）
+### 1. Resume admission：一个 owner、五个阶段（#11/#12 已完成；#38/#39 待验收）
 
 目标调用链：
 
@@ -155,12 +155,14 @@ canonical actions
 
 具体约束：
 
-1. `plan_resumes` 只负责按 scope 编排并调用唯一 reducer 生成 exact successor；`prepare_resume` 只负责一个 scope 的 action 与 evidence；`admit_resume_candidates` 只负责跨 scope 证据和 availability。#11 已删除 `prepare_resume` 中手工模拟 frontier 的第二套表达；#12 已让 reducer proof 继续作为 successor 唯一事实，只保留 substitution 授权和 pure-skip 判断真正需要的当前 skip 节点 ID。
+1. `plan_resumes` 只负责按 scope 编排并调用唯一 reducer 生成 exact successor；`prepare_resume` 只负责一个 scope 的 action 与 evidence；`admit_resume_candidates` 只负责跨 scope 证据和 availability。#11 已删除 `prepare_resume` 中手工模拟 frontier 的第二套表达；#12 已让 reducer proof 继续作为 successor 唯一事实，只保留 substitution 授权和 pure-skip 判断真正需要的当前 skip 节点 ID。#38/#39 又把 lineage lookup 与 action 分组收敛到一次准备结果。
 2. canonical action、duplicate、successor、substitution、publication、routing 的检查顺序固定，不以“更早返回”换取更短代码。
 3. `SnapshotMismatchError`（状态/坐标/证据）、`GraphValuePublicationError`（duplicate/collision）和 `GraphValueUnavailableError`（历史值不可得）继续各自归属原边界。
 4. 删除旧的重复 normalization/lookup 路径后，才允许增加少量窄 record；不得把所有 action 或 frame 塞进一个宽 `InvocationContext`。
 
 最小行为测试集：多 scope canonical order、重复 action、重复 substitution、已确认 publication collision、不可用历史 input、skip 无 output、skip 有 output、interrupt ID 错误，以及每一种错误的优先级。
+
+#38/#39 的当前实现只新增一个私有、不可变的 `_PlannedLineage` 索引记录；记录里仍是原有 `GraphRunState`，没有第二套运行时状态。它只保存 canonical bindings，fence/resume/continuation 校验共用同一份查找规则；恢复 action 先按 canonical 顺序逐组迭代 `groupby`，再交给现有 reducer。该实现目前待验收；clean baseline 的 `complexity_hotspots` 为 47、`semantic_nodes` 为 27499，ratchet 已同步到这组值。
 
 ### 2. Routing 与 materialization：共享坐标事实，不合并解释器（#14 已完成，#15/#16 保留）
 
@@ -376,7 +378,7 @@ state-only
   -> admit_continued_root（按 scope 真正 commit fence/resume）
 ```
 
-`plan_fences` 必须先于 `plan_resumes`，frame structural proof 必须先于 completeness，candidate successor 必须由同一 reducer 重算，preflight 必须先于真实 admission。这些都是必要顺序。#11 已删除手工 frontier 模拟，#12 已删除 skip action 的重复证明；#38/#39 的 scope lookup/action normalization 仍待评审。#40 已完成，#41 复核后确认现有 recovered/complete 分层已足够清楚。不能把两种 continuation 合成一个“缺 frame 就忽略”的路径。
+`plan_fences` 必须先于 `plan_resumes`，frame structural proof 必须先于 completeness，candidate successor 必须由同一 reducer 重算，preflight 必须先于真实 admission。这些都是必要顺序。#11 已删除手工 frontier 模拟，#12 已删除 skip action 的重复证明；#38/#39 的实现仍待验收，目标是让 canonical lineage lookup 与 scope action grouping 各做一次，同时保留原有顺序。#40 已完成，#41 复核后确认现有 recovered/complete 分层已足够清楚。不能把两种 continuation 合成一个“缺 frame 就忽略”的路径。
 
 ### 4. `prepare_superstep`：分支树清楚，复杂度是状态机本身
 
@@ -611,7 +613,7 @@ drive boundary
 |---|---|---|---|
 | compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #30/#32 B |
 | `Graph.run` mode + preparation + lifecycle | 是 | 已分为 admission preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 已完成 |
-| continuation/frame/resume admission | 部分否 | 顺序保留；共享 canonical lineage/action index，frame 先结构后语义 | #11/#12/#40 已完成；#38/#39 A；#41 K |
+| continuation/frame/resume admission | 是 | 顺序保留；目标是共享不可变 canonical lineage index，并按需形成 scope action groups，frame 先结构后语义 | #11/#12/#40 已完成；#38/#39 待验收；#41 K |
 | `prepare_superstep` 状态分支 | 是 | 状态叶子和错误顺序清晰，不再泛化 dispatcher | #4、#8、#17、#25 等 K |
 | `drive_quantum` 唯一 runner | 是（sentinel 语义可再评估） | 保留循环；仅研究 `ChildrenQuiescent` 内部变体 | #25 K，B 候选 |
 | claim/session/scheduler/resource | 是（admission view 可原型） | ack/error-drain/FIFO 是必要协议，不合并 owner | #1/#2 B，#17/#24/#47 K |
@@ -654,7 +656,7 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 ## 推荐实施顺序与门禁账本
 
 1. 先为 A 组补/确认状态转换、恢复边界、frame provenance、异常优先级和 cancellation 的确定性测试。
-2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#40）的小步替换；#11/#12/#14/#40 已完成，#15/#16/#41 保留，#38/#39 仍待评审；其余每步删除旧路径后再测。
+2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#40）的小步替换；#11/#12/#14/#40 已完成，#38/#39 待验收，#15/#16/#41 保留；其余每步删除旧路径后再测。
 3. `Graph.run` 生命周期（#20）已完成；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
 5. 最后才评估 B 组，特别是 compiler/recovery；任何没有净删除的拆分都退回设计阶段。

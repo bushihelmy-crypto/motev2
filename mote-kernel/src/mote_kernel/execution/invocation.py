@@ -1,7 +1,8 @@
 """Recovery invocation validation and fence-resume planning."""
 
+from bisect import bisect_left
 from dataclasses import dataclass
-from itertools import pairwise
+from itertools import groupby, pairwise
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.recovery import (
@@ -94,6 +95,28 @@ class _PlannedState:
 
 
 @dataclass(frozen=True, slots=True)
+class _PlannedLineage:
+    """Immutable lookup index over the canonical planned-state bindings."""
+
+    bindings: tuple[_PlannedState, ...]
+
+    def _position(self, coordinate: ScopeRunCoordinate) -> int:
+        position = bisect_left(self.bindings, coordinate, key=lambda binding: binding.scope_run)
+        if position == len(self.bindings) or self.bindings[position].scope_run != coordinate:
+            raise SnapshotMismatchError(f"lineage does not contain one state at {coordinate!r}")
+        return position
+
+    def binding_at(self, coordinate: ScopeRunCoordinate) -> _PlannedState:
+        return self.bindings[self._position(coordinate)]
+
+    def replace(self, replacement: _PlannedState) -> "_PlannedLineage":
+        position = self._position(replacement.scope_run)
+        return _PlannedLineage(
+            (*self.bindings[:position], replacement, *self.bindings[position + 1 :]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedFence:
     scope_run: ScopeRunCoordinate
     command: FenceGraphExecution
@@ -129,28 +152,6 @@ def project_resume_frames(
     return installed
 
 
-def _planned_state(
-    states: tuple[_PlannedState, ...],
-    coordinate: ScopeRunCoordinate,
-) -> _PlannedState:
-    match = next((binding for binding in states if binding.scope_run == coordinate), None)
-    if match is None:
-        raise SnapshotMismatchError(f"lineage does not contain one state at {coordinate!r}")
-    return match
-
-
-def _replace_planned_state(
-    states: tuple[_PlannedState, ...],
-    replacement: _PlannedState,
-) -> tuple[_PlannedState, ...]:
-    return tuple(
-        sorted(
-            (replacement if binding.scope_run == replacement.scope_run else binding for binding in states),
-            key=lambda binding: binding.scope_run,
-        )
-    )
-
-
 def is_current_child_activation(
     parent_state: GraphRunState,
     activation: StableActivation,
@@ -165,7 +166,7 @@ def is_current_child_activation(
 def lineage_states(
     root_state: GraphRunState,
     child_states: tuple[ChildStateBinding, ...],
-) -> tuple[_PlannedState, ...]:
+) -> _PlannedLineage:
     if child_states != tuple(sorted(child_states, key=lambda binding: binding.coordinate)):
         raise SnapshotMismatchError("continuation child bindings are not in canonical scoped order")
     child_coordinates = tuple(binding.coordinate for binding in child_states)
@@ -182,16 +183,16 @@ def lineage_states(
     coordinates = tuple(binding.scope_run for binding in canonical)
     if len(coordinates) != len(set(coordinates)):
         raise SnapshotMismatchError("lineage repeats one scoped graph run")
-    return canonical
+    return _PlannedLineage(canonical)
 
 
 def plan_fences(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
-) -> tuple[tuple[_PlannedState, ...], tuple[PlannedFence, ...]]:
-    planned = states
+    lineage: _PlannedLineage,
+) -> tuple[_PlannedLineage, tuple[PlannedFence, ...]]:
+    planned = lineage
     fences: list[PlannedFence] = []
-    for binding in states:
+    for binding in lineage.bindings:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
         activation = binding.parent_activation
@@ -211,7 +212,7 @@ def plan_fences(
                 != binding.scope_run
             ):
                 raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
-            parent_state = _planned_state(states, activation.scope_run).state
+            parent_state = lineage.binding_at(activation.scope_run).state
             if activation.superstep > parent_state.superstep:
                 raise SnapshotMismatchError("child lineage binding is from a future parent frontier")
             if binding.state.status is GraphRunStatus.RUNNING and not is_current_child_activation(
@@ -225,8 +226,7 @@ def plan_fences(
         command = FenceGraphExecution(binding.state.revision, execution.token)
         candidate = reduce_graph_run(binding.state, command)
         fences.append(PlannedFence(binding.scope_run, command))
-        planned = _replace_planned_state(
-            planned,
+        planned = planned.replace(
             _PlannedState(binding.scope_run, candidate, binding.parent_activation),
         )
     return planned, tuple(fences)
@@ -234,21 +234,21 @@ def plan_fences(
 
 def _resolve_scope_run(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     scope: tuple[GraphNodeId, ...],
 ) -> ScopeRunCoordinate:
-    root = states[0]
+    root = lineage.bindings[0]
     coordinate = root.scope_run
     scoped_graph = graph
     for segment in scope:
-        state = _planned_state(states, coordinate).state
+        state = lineage.binding_at(coordinate).state
         nested = scoped_graph.nested_graphs.get(segment)
         node = frontier_node(state.frontier, segment)
         if nested is None or node is None or not isinstance(node.settlement, PendingGraphNode):
             raise SnapshotMismatchError(f"resume scope segment {segment!r} is not one current nested activation")
         parent = ParentGraphActivation(state.run_id, state.superstep, segment)
         coordinate = child_scope_run_for_activation(coordinate, parent)
-        _planned_state(states, coordinate)
+        lineage.binding_at(coordinate)
         scoped_graph = nested
     return coordinate
 
@@ -293,7 +293,7 @@ def _resume_facts(
 
 def _forbid_aborted_child_restart(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     scope_run: ScopeRunCoordinate,
     state: GraphRunState,
     actions: tuple[ResumeNodeRequest[GraphValueT], ...],
@@ -304,23 +304,23 @@ def _forbid_aborted_child_restart(
             continue
         parent = ParentGraphActivation(state.run_id, state.superstep, action.node_id)
         child_coordinate = child_scope_run_for_activation(scope_run, parent)
-        _planned_state(states, child_coordinate)
+        lineage.binding_at(child_coordinate)
         raise SnapshotMismatchError("an aborted nested child cannot be restarted with the same run identity")
 
 
 def plan_resumes(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
     resume: tuple[ResumeNodeRequest[GraphValueT], ...],
 ) -> tuple[
-    tuple[_PlannedState, ...],
+    _PlannedLineage,
     CandidateFrameAvailability[GraphValueT],
     tuple[PlannedResume[GraphValueT], ...],
     tuple[AdmittedResumeFact, ...],
 ]:
     if not resume:
-        return states, CandidateFrameAvailability(frames, ()), (), ()
+        return lineage, CandidateFrameAvailability(frames, ()), (), ()
     if type(resume) is not tuple:
         raise SnapshotMismatchError("resume actions must be supplied as a tuple")
     canonical = tuple(sorted(resume, key=lambda action: (action.scope, action.node_id)))
@@ -338,17 +338,16 @@ def plan_resumes(
         raise GraphValuePublicationError(
             f"resume action nodes {tuple(duplicate_coordinates)!r} supplied duplicate candidate coordinates"
         )
-    planned_states = states
+    planned_lineage = lineage
     candidate_frames = frames
     plans: list[PlannedResume[GraphValueT]] = []
     facts: list[AdmittedResumeFact] = []
     candidates: list[ScopedResumeCandidate[GraphValueT]] = []
-    scopes = tuple(dict.fromkeys(action.scope for action in canonical))
-    for scope in scopes:
-        actions = tuple(action for action in canonical if action.scope == scope)
-        scope_run = _resolve_scope_run(graph, planned_states, scope)
-        binding = _planned_state(planned_states, scope_run)
-        _forbid_aborted_child_restart(graph, planned_states, scope_run, binding.state, actions)
+    for scope, grouped_actions in groupby(canonical, key=lambda action: action.scope):
+        actions = tuple(grouped_actions)
+        scope_run = _resolve_scope_run(graph, planned_lineage, scope)
+        binding = planned_lineage.binding_at(scope_run)
+        _forbid_aborted_child_restart(graph, planned_lineage, scope_run, binding.state, actions)
         scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
         prepared = prepare_resume(scoped_graph, ResumeRequest(binding.state, scope_run, candidate_frames, actions))
         candidate = reduce_graph_run(binding.state, prepared.command)
@@ -376,22 +375,21 @@ def plan_resumes(
             )
         )
         facts.extend(action_facts)
-        planned_states = _replace_planned_state(
-            planned_states,
+        planned_lineage = planned_lineage.replace(
             _PlannedState(scope_run, candidate, binding.parent_activation),
         )
     availability = admit_resume_candidates(tuple(candidates), candidate_frames)
-    return planned_states, availability, tuple(plans), tuple(facts)
+    return planned_lineage, availability, tuple(plans), tuple(facts)
 
 
 def recovery_seed(
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT],
     limits: ExecutionLimits,
     facts: tuple[AdmittedResumeFact, ...],
 ) -> RecoveryInvocationSeed[GraphValueT]:
-    root = states[0]
-    children = tuple(binding for binding in states if binding.scope_run.scope)
+    root = lineage.bindings[0]
+    children = tuple(binding for binding in lineage.bindings if binding.scope_run.scope)
     return RecoveryInvocationSeed(
         RecoveryStateBinding(root.scope_run, root.state),
         tuple(RecoveryStateBinding(binding.scope_run, binding.state) for binding in children),
@@ -403,10 +401,10 @@ def recovery_seed(
 
 def admit_state_owned_overrides(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
 ) -> None:
-    for binding in states:
+    for binding in lineage.bindings:
         if binding.state.status is not GraphRunStatus.RUNNING:
             continue
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
@@ -444,12 +442,12 @@ def _validate_graph_input_records(
 
 def _validate_publication_records(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     records: tuple[ConfirmedPublication[GraphValueT], ...],
 ) -> None:
     for record in records:
         coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.activation.scope_run)
+        binding = lineage.binding_at(coordinate.activation.scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         publication = scoped_graph.transition.publications.get(coordinate.activation.node_id)
         if (
@@ -473,12 +471,12 @@ def _validate_publication_records(
 
 def _validate_resume_input_records(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     records: tuple[AdmittedResumeInput[GraphValueT], ...],
 ) -> None:
     for record in records:
         coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.activation.scope_run)
+        binding = lineage.binding_at(coordinate.activation.scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.activation.scope_run.scope)
         materialization = scoped_graph.transition.materializations.get(coordinate.activation.node_id)
         if (
@@ -495,12 +493,12 @@ def _validate_resume_input_records(
 
 def _validate_child_boundary_records(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     records: tuple[ConfirmedChildBoundary[GraphValueT], ...],
 ) -> None:
     for record in records:
         coordinate = record.coordinate
-        binding = _planned_state(states, coordinate.child_scope_run)
+        binding = lineage.binding_at(coordinate.child_scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.child_scope_run.scope)
         if (
             coordinate.descriptor != scoped_graph.graph_output_descriptor.identity
@@ -515,10 +513,10 @@ def _validate_child_boundary_records(
 
 def _validate_frame_index(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
 ) -> None:
-    coordinates = frozenset(binding.scope_run for binding in states)
+    coordinates = frozenset(binding.scope_run for binding in lineage.bindings)
     if any(
         type(record) is not AdmittedGraphInput or type(record.coordinate) is not GraphInputAvailabilityCoordinate
         for record in frames.graph_inputs
@@ -548,20 +546,20 @@ def _validate_frame_index(
     if any(previous.coordinate >= current.coordinate for previous, current in pairwise(frames.child_boundaries)):
         raise SnapshotMismatchError("continuation child boundary coordinates are not unique and canonical")
     _validate_graph_input_records(graph, coordinates, frames.graph_inputs)
-    _validate_publication_records(graph, states, frames.publications)
-    _validate_resume_input_records(graph, states, frames.resume_inputs)
-    _validate_child_boundary_records(graph, states, frames.child_boundaries)
+    _validate_publication_records(graph, lineage, frames.publications)
+    _validate_resume_input_records(graph, lineage, frames.resume_inputs)
+    _validate_child_boundary_records(graph, lineage, frames.child_boundaries)
 
 
 def _validate_complete_context(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
 ) -> None:
     admitted_inputs = frozenset(record.coordinate.scope_run for record in frames.graph_inputs)
-    if admitted_inputs != frozenset(binding.scope_run for binding in states):
+    if admitted_inputs != frozenset(binding.scope_run for binding in lineage.bindings):
         raise SnapshotMismatchError("complete continuation must retain every scoped graph input")
-    for binding in states:
+    for binding in lineage.bindings:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         state = binding.state
         for node in state.frontier.nodes:
@@ -576,7 +574,7 @@ def _validate_complete_context(
                 if node.node_id in scoped_graph.nested_graphs:
                     parent = ParentGraphActivation(state.run_id, state.superstep, node.node_id)
                     child_coordinate = child_scope_run_for_activation(binding.scope_run, parent)
-                    _planned_state(states, child_coordinate)
+                    lineage.binding_at(child_coordinate)
                 elif not pending_node_input_available(
                     scoped_graph,
                     state,
@@ -603,14 +601,14 @@ def _validate_complete_context(
 
 def validate_context(
     graph: CompiledGraph[GraphValueT],
-    states: tuple[_PlannedState, ...],
+    lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
     *,
     recovered: bool,
 ) -> None:
-    _validate_frame_index(graph, states, frames)
+    _validate_frame_index(graph, lineage, frames)
     if not recovered:
-        _validate_complete_context(graph, states, frames)
+        _validate_complete_context(graph, lineage, frames)
 
 
 __all__: list[str] = []
