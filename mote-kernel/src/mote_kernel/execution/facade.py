@@ -621,17 +621,12 @@ class Graph(Generic[GraphValueT]):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
             input_candidate = admit_graph_input(graph, invocation)
-
-            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
-                asyncio.create_task(
-                    fresh_root(
-                        graph,
-                        scope_run,
-                        input_candidate,
-                        limits,
-                        commit,
-                    )
-                )
+            root_admission = fresh_root(
+                graph,
+                scope_run,
+                input_candidate,
+                limits,
+                commit,
             )
         else:
             if continuation is None:
@@ -671,71 +666,66 @@ class Graph(Generic[GraphValueT]):
                     graph,
                     recovery_seed(planned_states, candidate_frames, limits, facts),
                 )
-
-            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(
-                asyncio.create_task(
-                    admit_continued_root(
-                        graph,
-                        invocation,
-                        child_states,
-                        frames,
-                        limits,
-                        commit,
-                        fences,
-                        planned_resumes,
-                        owner.family_identity,
-                        recovered=recovered,
-                    )
-                )
-            )
-
-        async def finish(abort_reason: GraphAbortReason | None) -> None:
-            async def cleanup() -> None:
-                primary: BaseException | None = None
-                if abort_reason is not None:
-                    try:
-                        await root.abort(abort_reason)
-                    except BaseException as error:
-                        primary = error
-                try:
-                    await root.release()
-                except BaseException as error:
-                    if primary is None:
-                        primary = error
-                if primary is not None:
-                    raise primary
-
-            cleanup_task = asyncio.create_task(cleanup())
-            await wait_for_owner_task(cleanup_task)
-
-        try:
-            if setup_cancellation is not None:
-                raise setup_cancellation
-            disposition = await root.drive_quantum()
-            result = project_graph_result(
+            root_admission = admit_continued_root(
                 graph,
+                invocation,
+                child_states,
+                frames,
+                limits,
+                commit,
+                fences,
+                planned_resumes,
                 owner.family_identity,
-                root,
-                evidence_reader,
-                disposition,
                 recovered=recovered,
             )
-        except asyncio.CancelledError as error:
-            if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):
-                with suppress(BaseException):
-                    await finish(None)
-                raise
+        (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))
+
+        async def finish_root(abort_reason: GraphAbortReason | None) -> None:
+            primary: BaseException | None = None
+            if abort_reason is not None:
+                try:
+                    await wait_for_owner_task(asyncio.create_task(root.abort(abort_reason)))
+                except BaseException as error:
+                    primary = error
             try:
-                await finish(GraphAbortReason("graph invocation was cancelled"))
-            except BaseException as cleanup_error:
-                raise error from cleanup_error
-            raise
-        except BaseException:
-            with suppress(BaseException):
-                await finish(None)
-            raise
-        await finish(None)
-        return result
+                await wait_for_owner_task(asyncio.create_task(root.release()))
+            except BaseException as error:
+                if primary is None:
+                    primary = error
+            if primary is not None:
+                raise primary
+
+        async def drive_project_finish() -> GraphResult[GraphValueT]:
+            try:
+                if setup_cancellation is not None:
+                    raise setup_cancellation
+                disposition = await root.drive_quantum()
+                result = project_graph_result(
+                    graph,
+                    owner.family_identity,
+                    root,
+                    evidence_reader,
+                    disposition,
+                    recovered=recovered,
+                )
+            except asyncio.CancelledError as error:
+                if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):
+                    with suppress(BaseException):
+                        await finish_root(None)
+                    raise
+                try:
+                    await finish_root(GraphAbortReason("graph invocation was cancelled"))
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                raise
+            except BaseException:
+                with suppress(BaseException):
+                    await finish_root(None)
+                raise
+            await finish_root(None)
+            return result
+
+        return await drive_project_finish()
 
 
 __all__ = ["Graph"]

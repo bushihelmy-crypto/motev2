@@ -20,14 +20,14 @@
 本次审查的对象是 `src/mote_kernel` 基线复杂度报告列出的 49 个定义。结论不是“门禁通过所以无需处理”：
 
 - 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后已降为 48。
-- 49 项中有 **10 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#11、#12、#14、#40 已完成**，剩余 5 项。
-- `A` 的编号是：**3（已完成）、11（已完成）、12（已完成）、14（已完成）、15、16、20、38、39、40（已完成）**。
+- 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#11、#12、#14、#20、#40 已完成**，剩余 #38/#39 两项。
+- `A` 的编号是：**3（已完成）、11（已完成）、12（已完成）、14（已完成）、20（已完成）、38、39、40（已完成）**。#15/#16 复核后改判为 `K`。
 - 另有 **12 项有局部整理方向，但尚未证明会减少总复杂度**（标为 `B`）。只有做出净删除、保留唯一事实源后才实施。
-- 原始 49 项中有 **27 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除。
+- 原始 49 项中现有 **29 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
-本文件以设计审查为主，并同步记录实施状态。截至 2026-08-31，#3、#11、#12、#14、#40 已完成；#19、#34、#41 复核后保留现状。
+本文件以设计审查为主，并同步记录实施状态。截至 2026-08-31，#3、#11、#12、#14、#20、#40 已完成；#15、#16、#19、#34、#41 复核后保留现状。
 
 ## 门禁基线与判定口径
 
@@ -85,8 +85,8 @@ make check                      926 passed, coverage 100%
 | 12 | `execution/engine/resume_admission.py:190` `admit_resume_candidates`（40/50/3/2/499 → 31/38/3/2/419） | 跨 scope 校验候选 successor/substitution，检查 duplicate、publication collision、routing availability。 | **A（已完成，2026-08-31）**：每个 candidate 只保留一次生成的当前 skip 节点 ID 集合；删除逐 substitution 查找完整 action、reducer 已证明的 settlement/reason/routing 二次核对，以及只为判断 pure skip 重建 publication 坐标。三组组合测试锁定 **evidence → duplicate publication → confirmed collision → unavailable** 的异常优先级。 |
 | 13 | `execution/engine/resume_input.py:121` `_publication_value`（2/1/1/7/73） | 根据一个 compiled binding 和 activation selection 读取单个 publication。 | **K（随 #14 净删除，2026-08-31）**：独立看不应为降参数机械包装；#14 直接复用已有 `ResolvedInputBinding` 后，这条单用途读取路径不再需要，也没有引入 context bag。 |
 | 14 | `execution/engine/resume_input.py:194` `materialize_node_input`（9/10/3/6/208 → 9/9/2/6/223） | 校验当前 settlement，优先 override/resume frame，否则逐 binding 读取 graph input/publication 并构造 NodeInputFrame。 | **A（已完成，2026-08-31）**：新增一个消费 compiled binding 的窄坐标解析步骤，由 `node_inputs_available` 与 materializer 共用；删除 `_publication_value` 及重复坐标计算。materializer 仍独占具体 frame 读取和 `GraphValueUnavailableError` 包装，缺失 publication selection 仍抛 `SnapshotMismatchError`。 |
-| 15 | `execution/engine/routing.py:176` `resolve_routing_facts`（15/20/3/4/283） | 校验 join progress、收集 control/join arrivals、计算 required targets 和 graph-output diagnostics。 | **A**：保留 routing owner，但分成“arrival accumulation → cached required target → output diagnostics”三段；只共享坐标/fact 构造，不合并短路检查和完整诊断。 |
-| 16 | `execution/engine/routing.py:213` `resolve_routing_facts.required`（10/14/3/1/180） | 为一个 target 计算历史输入缺失、可用 publication 和诊断名称。 | **A（随 #15）**：改为 routing-owned 的窄 target index，复用 materialization coordinate；保留首次访问顺序、缓存和 unavailable 诊断，不单独创建第二 owner。 |
+| 15 | `execution/engine/routing.py:176` `resolve_routing_facts`（15/20/3/4/283） | 校验 join progress、收集 control/join arrivals、计算 required targets 和 graph-output diagnostics。 | **K（评审后保留，2026-08-31）**：现有函数已经按 arrival accumulation、cached required target、output diagnostics 三个连续区块表达；拆 helper 不能删除规则或 owner，只会增加跳转并分散校验顺序。 |
+| 16 | `execution/engine/routing.py:213` `resolve_routing_facts.required`（10/14/3/1/180） | 为一个 target 计算历史输入缺失、可用 publication 和诊断名称。 | **K（随 #15 评审后保留，2026-08-31）**：局部函数和局部缓存已经是最窄的 target index，同一 target 被 direct/join 同时引用时只扫描一次；提取新 class/helper 不会净删逻辑，且 routing 与 materialization 的异常边界不同。 |
 
 ### B. session / facade / family driver（17–28）
 
@@ -95,7 +95,7 @@ make check                      926 passed, coverage 100%
 | 17 | `execution/engine/session.py:180` `_GraphExecutionSession.next`（12/21/3/2/176） | ack 上一条 reducer successor、排空 scheduler、处理 node-origin cancellation、一次交付一个 completion。 | **K**：这是单消费者 session 协议和 cancellation 时序；把循环拆散会掩盖 ack/close 顺序。 |
 | 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（24/31/3/2/233） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **B**：可以按 identity/frontier/routing/resource phase 整理，并让 compiled resource requirement 只计算一次；不能重复实现 `validate_graph_run_state` 或改变异常类型。 |
 | 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **K（评审后保留，2026-08-31）**：现有两个 `@overload` 已分别表达 callable 与 nested graph 的合法参数，对外保留统一的 `add_node` 更友好；union 分支是 Python 动态调用所需的运行时校验，不拆公共入口，也不为降指标增加转发 helper。 |
-| 20 | `execution/facade.py:594` `Graph.run`（28/42/3/9/444） | 新运行、state-only recovery、continuation admission、preflight、owner drive、取消、partial commit 和 cleanup 全部串在一个公共方法。 | **A**：保留 `Graph` 唯一 lifecycle owner，拆为“invocation preparation”和“drive/project/finish”两段；取消矩阵必须原样保留（setup、node-origin、commit-origin、partial commit、cleanup）。不创建第二 runner。 |
+| 20 | `execution/facade.py:594` `Graph.run`（28/42/3/9/444 → 22/34/3/9/356） | 新运行、state-only recovery、continuation admission、preflight、owner drive、取消、partial commit 和 cleanup 全部串在一个公共方法。 | **A（已完成，2026-08-31）**：公开 `run` 与三个 overload 不变；fresh/continued 分支只生成各自的 root admission，再共用一次 owner-task 等待，驱动、结果投影和取消矩阵收进局部 `drive_project_finish` 阶段。没有新增 context、模块级 helper 或第二 runner，abort → release 与 cleanup 错误优先级不变。 |
 | 21 | `execution/family_driver.py:269` `_frames_for_owner`（12/14/2/3/126） | 将全局 continuation frame index 投影到一个 owner，并验证 child binding。 | **K（指标误报型）**：是短而清晰的 scoped projection；抽象成泛型过滤器会丢掉 child-boundary 领域检查。 |
 | 22 | `execution/family_driver.py:352` `_GraphRun.__init__`（1/0/0/11/134） | 注入一个 live owner 真正需要的 graph、state、frames、commit、child constructor、position 和 evidence publisher。 | **K（参数误报型）**：11 个依赖是 ownership wiring，不应为了参数门禁引入宽 `RunContext`。 |
 | 23 | `execution/family_driver.py:558` `_GraphRun._drive_child`（12/12/2/2/139） | 读取 child handle 结果，检查 awaiting/terminal 类型对应关系并安装 boundary。 | **K**：这些分支是 terminal projection 不变量，不是可合并的重复路径。 |
@@ -162,7 +162,7 @@ canonical actions
 
 最小行为测试集：多 scope canonical order、重复 action、重复 substitution、已确认 publication collision、不可用历史 input、skip 无 output、skip 有 output、interrupt ID 错误，以及每一种错误的优先级。
 
-### 2. Routing 与 materialization：共享坐标事实，不合并解释器（#14 已完成，#15/#16 待评审）
+### 2. Routing 与 materialization：共享坐标事实，不合并解释器（#14 已完成，#15/#16 保留）
 
 已为 node input 建立一个纯的窄坐标解析步骤（输入是 compiled binding、scope 和 anchor superstep，输出是明确的 graph-input 或 publication coordinate）。不同 owner 继续各自消费：
 
@@ -171,6 +171,8 @@ canonical actions
 - recovery 复用同一坐标事实，但不复制 runtime materialization 流程。
 
 不能把 `node_inputs_available` 和 `graph_outputs_available` 合成一个“万能 available”函数：前者是 pending node 的短路判断，后者是 graph output 检查，调用方和异常边界不同。`unavailable_graph_outputs` 仍需完整扫描并保留诊断顺序。
+
+#15/#16 复核后保留：`resolve_routing_facts` 已用连续区块表达 arrival、required target 和 output diagnostics，内部 `required` 也已用局部缓存避免 direct/join 对同一 target 重复扫描。继续拆分只会增加函数跳转或新 owner；强行与 materialization 共用更宽 helper 还会混合 `InvalidRoutingCommandError` 与 `SnapshotMismatchError` 的边界。
 
 ### 3. Frame validation：先结构、后语义（#40 已完成、#41 保留）
 
@@ -185,12 +187,12 @@ nominal record type
 
 #40 已按此顺序完成：结构与 canonicality 仍由 `_validate_frame_index` 统一检查，四类 record 的 scope/descriptor/provenance/frame 内容分别由窄 typed validator 校验；没有下沉到 `ScopedFrameIndex`，也没有引入 `object`、反射、字符串 discriminator 或通用 callback。#41 复核后改判为保留：`validate_context` 原本就将完整性检查限制在非 recovered continuation，继续保持这一条清晰路径。
 
-### 4. Graph facade 与生命周期：保留统一 builder，简化生命周期（#19、#20）
+### 4. Graph facade 与生命周期：保留统一 builder，简化生命周期（#19 保留、#20 已完成）
 
 `Graph` 继续是唯一 public facade，`_GraphRun` 继续是唯一 live owner。目标只是让职责显式：
 
 - builder 侧保留统一的 `add_node`，由现有两个 `@overload` 分别约束 callable 与 nested graph；运行时 union 分支继续为动态调用提供明确校验，不拆公共入口；
-- `Graph.run` 只做 mode dispatch，调用纯 preparation，再调用统一的 drive/project/finish 流程；
+- `Graph.run` 保留统一的 overload 与 mode dispatch；fresh/continued 分支分别准备 root admission，随后共用 owner-task 等待和 `drive_project_finish` 流程；
 - cleanup 仍按 abort → release，setup cancellation、node-origin cancellation、commit-origin cancellation 和 partial commit 的观察顺序不变；
 - authoritative state 仍在 commit 返回 exact successor 后才写回 `_GraphRun`，不能为了简化把 candidate 先写入内存。
 
@@ -202,7 +204,7 @@ nominal record type
 
 ## 从 `Graph.run` 出发的完整调用链审查
 
-这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；真正还不够简单的是 `Graph.run` 的上游编排，以及 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 24 个 `K` 项一概视为调用链问题。
+这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，剩余可研究点是 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 29 个 `K` 项一概视为调用链问题。
 
 ### 0. 覆盖口径：什么叫“全部遍历”
 
@@ -230,7 +232,7 @@ nominal record type
 
 因此，“完整”在这里指所有内核语义分支和异常出口，不指把每个 `tuple()`、`sorted()` 或 `asyncio` 内部实现展开。
 
-### 1. 顶层入口：四个阶段被压在一个公共方法里
+### 1. 顶层入口：#20 已把准备与公共生命周期分段
 
 当前实际路径如下（箭头表示调用，不表示可以跨越提交边界）：
 
@@ -263,7 +265,7 @@ Graph.run
    └─ finish：必要时 abort，再 release
 ```
 
-这里有一个明确的链级问题：入口同时承担 **mode dispatch、恢复准备、owner admission、驱动、结果投影和清理**。`recovered`、`setup_cancellation`、`transition_attempted` 等变量把多个阶段的状态带在同一作用域内，读者必须回看前面的分支才能判断后面的 cleanup 语义。这正是 #20 的 `A` 结论，不是“把条件改写成更短的布尔表达式”可以解决的。
+#20 实施前，入口同时承担 **mode dispatch、恢复准备、owner admission、驱动、结果投影和清理**，读者必须回看 fresh/continued 分支才能判断后面的 cleanup 语义。现已让两个入口分支只生成各自的 `root_admission`，再共用一次 cancellation-safe owner-task 等待；后半段由局部 `drive_project_finish` 独占驱动、投影和 cleanup 矩阵。`Graph.run` 的指标从 28/42/3/9/444 降至 22/34/3/9/356，新增的两个局部阶段分别为 6/7/2/1/65 与 7/8/2/0/90，均未形成新热点。
 
 入口的分支清单也可以逐项对照：
 
@@ -288,18 +290,18 @@ Graph.run
 | 其他异常 | 下层已负责 fence/transition 的领域清理 | 只 `release`，保留首个异常 |
 | 正常 boundary | state/evidence 已冻结并投影 | `release`，返回 result |
 
-这张矩阵说明：`Graph.run` 不是单纯的“调用一下 runner”。它确实混入了太多阶段，但取消分支本身有清晰的 ownership 语义；重构目标应是把矩阵搬到一个可读的 lifecycle owner，而不是删掉矩阵。
+这张矩阵说明：`Graph.run` 不是单纯的“调用一下 runner”。取消分支本身有清晰的 ownership 语义；#20 将矩阵原样收进一个可读的局部 lifecycle 阶段，没有删除或合并这些分支。
 
-更简单的目标边界应是：
+实施后的边界是：
 
 ```text
 Graph.run
-  -> prepare_invocation (只做 mode/compile/admission plan，不驱动)
-  -> admit_root (只做有副作用的 owner/state admission)
+  -> mode/compile/admission preparation（fresh/continued 语义仍显式分开）
+  -> root_admission（共用 cancellation-safe owner-task 等待）
   -> drive_project_finish (唯一驱动、投影和生命周期出口)
 ```
 
-这里的 `prepare_invocation` 不能变成装所有字段的 `InvocationContext`。可接受的是两个显式、窄的 typed 变体（fresh admission 与 continued admission），或者按阶段传递已有的 `PlannedLineage`、`PlannedResume` 等记录；不能用一个宽 context 抹平“新建 state”和“从已有 state 恢复”的不同语义。setup cancellation 也必须在 admission 完成后、drive 开始前单独观察，不能偷偷降级为普通 invocation cancellation。
+实现没有新增 `InvocationContext` 或 typed wrapper，而是直接复用 fresh/continued 现有返回类型；“新建 state”和“从已有 state 恢复”的不同语义仍留在相邻分支中。setup cancellation 仍在 admission 完成后、drive 开始前单独观察，没有降级为普通 invocation cancellation。
 
 ### 2. 编译链：全部可达，但 `_compile_graph` 仍是最高优先级 B
 
@@ -493,7 +495,7 @@ resource 路径同样只有一份规则：`admit_tasks` 按 canonical task 顺�
   -> drive_quantum 下一轮
 ```
 
-settlement 和 routing 分成两个 command/commit 是恢复屏障：前者记录事实，后者依据已提交事实作决定。不能为了少一个函数或少一次循环，把 routing decision 塞进 `settle_graph_node`。#15/#16 仍可在 routing owner 内按 accumulation、required-target 和 diagnostics 三段整理；这是局部 A，不是外部调用链合并。
+settlement 和 routing 分成两个 command/commit 是恢复屏障：前者记录事实，后者依据已提交事实作决定。不能为了少一个函数或少一次循环，把 routing decision 塞进 `settle_graph_node`。#15/#16 已经在 routing owner 内按 accumulation、required-target 和 diagnostics 三个连续区块表达；继续拆 helper 不会净删规则，因此评审后保留。
 
 所有 durable command 最终只进入一次 `reduce_graph_run` dispatch：
 
@@ -601,26 +603,26 @@ drive boundary
      └─ 总是 root.release
 ```
 
-这个出口顺序是可读的：结果只从冻结后的 evidence 投影，cleanup 先 abort 后 release，并保留首个 cleanup 错误。问题在于同样的“构造失败后按条件 abort/release、必要时生成 partial continuation”逻辑分别出现在 `Graph.run.finish`、`fresh_root`、`admit_continued_root` 和 child constructor 中。它们的政策并不完全相同，因此不能抽成 `cleanup(ignore_errors=True)`；可研究一个显式 typed cleanup policy（是否已尝试 transition、是否允许 abort、是否必须保留 partial commit），列为 B。
+这个出口顺序是可读的：结果只从冻结后的 evidence 投影，`finish_root` 先 abort 后 release，并保留首个 cleanup 错误。#20 已把 facade 的公共出口收拢，但构造失败 cleanup 仍分别存在于 `fresh_root`、`admit_continued_root` 和 child constructor；它们的政策并不完全相同，因此不能抽成 `cleanup(ignore_errors=True)`。可研究一个显式 typed cleanup policy（是否已尝试 transition、是否允许 abort、是否必须保留 partial commit），列为 B。
 
 ### 11. 调用链级结论矩阵
 
 | 调用链 | 当前是否足够简单 | 结论 | 对应项目 |
 |---|---|---|---|
 | compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #30/#32 B |
-| `Graph.run` mode + preparation + lifecycle | 否 | 拆 preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 A |
+| `Graph.run` mode + preparation + lifecycle | 是 | 已分为 admission preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 已完成 |
 | continuation/frame/resume admission | 部分否 | 顺序保留；共享 canonical lineage/action index，frame 先结构后语义 | #11/#12/#40 已完成；#38/#39 A；#41 K |
 | `prepare_superstep` 状态分支 | 是 | 状态叶子和错误顺序清晰，不再泛化 dispatcher | #4、#8、#17、#25 等 K |
 | `drive_quantum` 唯一 runner | 是（sentinel 语义可再评估） | 保留循环；仅研究 `ChildrenQuiescent` 内部变体 | #25 K，B 候选 |
 | claim/session/scheduler/resource | 是（admission view 可原型） | ack/error-drain/FIFO 是必要协议，不合并 owner | #1/#2 B，#17/#24/#47 K |
 | settlement/reducer/state validation | 是 | 原子提交和 snapshot guard 是必要边界 | #43–#49 多数 K |
-| settlement -> routing -> next frontier | 是 | 两个 commit 屏障不可合并；routing owner 内部可阶段化 | #15/#16 A |
+| settlement -> routing -> next frontier | 是 | 两个 commit 屏障不可合并；routing owner 内三个连续阶段已足够清楚 | #15/#16 K |
 | fresh/continued root/child admission | 否（有重复 wiring） | 共享窄 owner primitive，保留两种 admission 语义 | #27/#28 B |
 | child drive/terminal handoff | 是 | 类型检查和一次性 evidence 是必要不变量 | #23 K |
 | recovery proof | 是 | bounded worklist/fixed point 是算法本体，不建第二 runner | #4–#10 多数 K/B |
-| result projection + final cleanup | 基本是；准备失败 cleanup 否 | 结果出口保留，cleanup policy 可显式化 | #26 K，#20/#27 B |
+| result projection + final cleanup | 是；owner 构造失败 cleanup 仍可研究 | facade 结果出口已收拢，owner admission policy 继续独立评审 | #20 已完成，#26 K，#27 B |
 
-所以，对“整个调用链是否足够简单”的直接回答是：**主状态推进链已经足够简单；入口编排和 owner admission 生命周期还没有。** 继续优化时应先收敛这两个链级热点，再重新评估局部函数指标；不要为了让每个函数都低于阈值而拆散状态机、reducer 或 recovery 证明器。
+所以，对“整个调用链是否足够简单”的直接回答是：**主状态推进链和统一入口现在都足够清楚；剩余可研究项是 fresh/continued owner admission 的构造失败 cleanup。** 后续只在能净删 wiring 时继续，不为让每个函数都低于阈值而拆散状态机、reducer 或 recovery 证明器。
 
 ## 条件可化简项目：先做设计，不把希望写进生产代码
 
@@ -652,8 +654,8 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 ## 推荐实施顺序与门禁账本
 
 1. 先为 A 组补/确认状态转换、恢复边界、frame provenance、异常优先级和 cancellation 的确定性测试。
-2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#40）的小步替换；#11/#12/#14/#40 已完成、#41 保留，其余每步删除旧路径后再测。
-3. 再做 `Graph.run` 生命周期（#20）；builder API（#19）保留现状。
+2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#40）的小步替换；#11/#12/#14/#40 已完成，#15/#16/#41 保留，#38/#39 仍待评审；其余每步删除旧路径后再测。
+3. `Graph.run` 生命周期（#20）已完成；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
 5. 最后才评估 B 组，特别是 compiler/recovery；任何没有净删除的拆分都退回设计阶段。
 6. 每个可合并提交运行 `make complexity-report`、`make complexity-ratchet`、`git diff --check`；实际下降后立即降低 `pyproject.toml` ratchet 上限。
