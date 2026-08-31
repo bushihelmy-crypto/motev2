@@ -64,8 +64,8 @@ def prepare_superstep(
     if state.execution is not None:
         raise ResultCollectionError("active execution requires its original execution session")
     frontier = prepare_frontier(graph, request)
-    if frontier.missing_children or frontier.active_children:
-        return WaitingForChildren(frontier.missing_children, frontier.active_children)
+    if isinstance(frontier, WaitingForChildren):
+        return frontier
     claim = prepare_claim(
         owner,
         frontier,
