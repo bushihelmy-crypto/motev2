@@ -33,7 +33,7 @@ dev = [
   "ruff>=0.16",
   "twine>=7.0",
   "workers-py==1.16.7",
-  "workers-runtime-sdk==1.6.15",
+  "workers-runtime-sdk==1.8.0",
 ]
 
 [tool.hatch.build.targets.wheel]
