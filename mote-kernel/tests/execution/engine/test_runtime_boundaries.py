@@ -11,7 +11,7 @@ from tests.execution.engine.factories import compiled_graph, running_state
 import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.claim import ExecutionClaimOwner
-from mote_kernel.execution.engine.frontier import prepare_frontier
+from mote_kernel.execution.engine.frontier import FrontierPreparation, prepare_frontier
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
 from mote_kernel.execution.engine.resume_input import (
@@ -589,10 +589,12 @@ def test_child_projection_coverage_and_variant_guards_fail_closed() -> None:
         prepare_frontier(graph, request(graph, state))
 
     missing = prepare_frontier(graph, request(graph, state, (MissingChild(activation),)))
-    assert missing.missing_children == (MissingChild(activation),)
+    assert isinstance(missing, WaitingForChildren)
+    assert missing.missing == (MissingChild(activation),)
     child_graph = graph.nested_graphs[GraphNodeId("nested")]
     active = prepare_frontier(graph, request(graph, state, (ActiveChild(activation),)))
-    assert active.active_children == (ActiveChild(activation),)
+    assert isinstance(active, WaitingForChildren)
+    assert active.active == (ActiveChild(activation),)
     completed = prepare_frontier(
         graph,
         request(graph, state, (CompletedChild(activation, child_output(child_graph, "output")),)),
@@ -601,9 +603,11 @@ def test_child_projection_coverage_and_variant_guards_fail_closed() -> None:
         graph,
         request(graph, state, (AbortedChild(activation, GraphAbortReason("aborted")),)),
     )
+    assert isinstance(completed, FrontierPreparation)
+    assert isinstance(aborted, FrontierPreparation)
     assert isinstance(completed.nested_results[0], TaskSuccess)
     assert isinstance(aborted.nested_results[0], TaskFailure)
-    assert not hasattr(active.active_children[0], "child_state")
+    assert not hasattr(active.active[0], "child_state")
     assert not hasattr(
         request(graph, state, (CompletedChild(activation, child_output(child_graph, "output")),)).child_projections[0],
         "child_state",
@@ -697,8 +701,9 @@ def test_running_awaiting_resume_child_remains_active_without_rebuild() -> None:
     activation = ParentGraphActivation(state.run_id, state.superstep, GraphNodeId("nested"))
     prepared = prepare_frontier(graph, request(graph, state, (ActiveChild(activation),)))
 
-    assert prepared.missing_children == ()
-    assert prepared.active_children == (ActiveChild(activation),)
+    assert isinstance(prepared, WaitingForChildren)
+    assert prepared.missing == ()
+    assert prepared.active == (ActiveChild(activation),)
 
 
 def test_active_child_must_match_its_compiled_resume_codec() -> None:
@@ -1102,6 +1107,7 @@ def test_terminal_child_projects_its_matching_parent_result_variant(variant: str
 
     prepared = prepare_frontier(graph, request(graph, parent, (projection,)))
 
+    assert isinstance(prepared, FrontierPreparation)
     assert len(prepared.nested_results) == 1
     assert isinstance(prepared.nested_results[0], result_type)
 
@@ -1121,6 +1127,7 @@ def test_terminal_aborted_child_remains_unchanged_while_parent_boundary_substitu
         graph,
         request(graph, parent, (AbortedChild(activation, GraphAbortReason("child aborted")),)),
     )
+    assert isinstance(prepared, FrontierPreparation)
     claimed = reduce_graph_run(
         parent,
         ClaimGraphExecution(parent.revision, GraphExecutionAttemptId("parent-attempt"), None),
@@ -1286,6 +1293,7 @@ def test_mixed_completed_and_aborted_children_keep_canonical_parent_order() -> N
         ),
     )
 
+    assert isinstance(prepared, FrontierPreparation)
     assert tuple(type(result) for result in prepared.nested_results) == (TaskSuccess, TaskFailure)
     assert tuple(result.task.node_id for result in prepared.nested_results) == (
         GraphNodeId("a"),

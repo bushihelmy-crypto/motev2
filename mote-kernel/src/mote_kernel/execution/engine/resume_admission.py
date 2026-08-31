@@ -36,29 +36,23 @@ from mote_kernel.execution.run_context import (
 from mote_kernel.state.graph_state import (
     ContinueGraphRouting,
     FailedGraphNode,
-    GraphFrontierNode,
-    GraphFrontierState,
     GraphNodeId,
-    GraphNodeSettlement,
     GraphRouteId,
     GraphRunState,
     GraphRunStatus,
     GraphSkipReason,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
-    PendingGraphNode,
     ResumeFailedNode,
     ResumeGraphNodes,
     ResumeInterruptedNode,
     SelectGraphRoute,
     SkipFailedNode,
-    SkippedGraphNode,
     UseStepRequestInput,
     frontier_node,
     graph_interrupt_id,
     reduce_graph_run,
 )
-from mote_kernel.state.graph_state.validation import validate_graph_frontier
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -92,7 +86,6 @@ def prepare_resume(
     ):
         raise SnapshotMismatchError("resume actions must be non-empty, distinct, canonical, and scoped")
     actions: list[ResumeFailedNode | ResumeInterruptedNode | SkipFailedNode] = []
-    replacements: dict[GraphNodeId, GraphNodeSettlement] = {}
     admitted_inputs: list[AdmittedResumeInput[GraphValueT]] = []
     substitutions: list[PreparedSubstitution[GraphValueT]] = []
     for requested in request.actions:
@@ -118,7 +111,6 @@ def prepare_resume(
                         failed_retry_input=binding,
                     )
                 actions.append(ResumeFailedNode(requested.node_id, binding))
-                replacements[requested.node_id] = PendingGraphNode(binding)
             else:
                 if not isinstance(current.settlement, InterruptedGraphNode):
                     raise SnapshotMismatchError("interrupt resume requires an interrupted node")
@@ -132,7 +124,6 @@ def prepare_resume(
                     raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
                 binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
                 actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
-                replacements[requested.node_id] = PendingGraphNode(binding)
             admitted_inputs.append(
                 AdmittedResumeInput(
                     _resume_input_coordinate(activation, plan),
@@ -148,11 +139,6 @@ def prepare_resume(
             validate_routing_contribution(graph, requested.node_id, routing)
             reason = GraphSkipReason(requested.reason)
             actions.append(SkipFailedNode(requested.node_id, reason, routing))
-            replacements[requested.node_id] = SkippedGraphNode(
-                current.settlement.failure,
-                reason,
-                routing,
-            )
             if requested.output is not None:
                 publication = graph.transition.publications[requested.node_id]
                 frame = _make_node_output_frame(requested.output, publication.declarations)
@@ -163,13 +149,6 @@ def prepare_resume(
                         SkipSubstitutionProvenance(),
                     )
                 )
-    simulated = GraphFrontierState(
-        tuple(
-            GraphFrontierNode(node.node_id, replacements.get(node.node_id, node.settlement))
-            for node in state.frontier.nodes
-        )
-    )
-    validate_graph_frontier(state, simulated)
     return PreparedResume(
         ResumeGraphNodes(state.revision, tuple(actions)),
         tuple(admitted_inputs),
@@ -192,11 +171,11 @@ def admit_resume_candidates(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> CandidateFrameAvailability[GraphValueT]:
     substitutions = tuple(substitution for candidate in candidates for substitution in candidate.substitutions)
-    candidate_skip_actions = tuple(
-        tuple(action for action in candidate.command.actions if isinstance(action, SkipFailedNode))
+    candidate_skip_node_ids = tuple(
+        frozenset(action.node_id for action in candidate.command.actions if isinstance(action, SkipFailedNode))
         for candidate in candidates
     )
-    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
+    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
         if candidate.previous.run_id != candidate.scope_run.graph_run_id or candidate.successor.run_id != (
             candidate.scope_run.graph_run_id
         ):
@@ -209,22 +188,13 @@ def admit_resume_candidates(
                 publication = candidate.graph.transition.publications[activation.node_id]
             except KeyError as error:
                 raise SnapshotMismatchError("resume substitution references an unknown publication node") from error
-            node = frontier_node(candidate.successor.frontier, activation.node_id)
-            action = next(
-                (action for action in skip_actions if action.node_id == activation.node_id),
-                None,
-            )
             if (
                 activation.scope_run != candidate.scope_run
                 or activation.superstep != candidate.previous.superstep
                 or substitution.expected_revision != candidate.successor.revision
                 or type(substitution.provenance) is not SkipSubstitutionProvenance
                 or substitution.coordinate.descriptor != publication.identity
-                or node is None
-                or not isinstance(node.settlement, SkippedGraphNode)
-                or action is None
-                or node.settlement.reason != action.reason
-                or node.settlement.routing != action.routing
+                or activation.node_id not in skip_node_ids
             ):
                 raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
     canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
@@ -250,7 +220,7 @@ def admit_resume_candidates(
             f"resume substitution nodes {collisions!r} collide with confirmed publications"
         )
     availability = CandidateFrameAvailability(frames, canonical)
-    for candidate, skip_actions in zip(candidates, candidate_skip_actions, strict=True):
+    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
         facts = resolve_routing_facts(candidate.graph, candidate.successor, candidate.scope_run, availability)
         unavailable = tuple(
             sorted(
@@ -264,21 +234,12 @@ def admit_resume_candidates(
         if unavailable:
             raise GraphValueUnavailableError(
                 f"resume of scoped graph {candidate.scope_run.scope!r} "
-                f"for actions {tuple(action.node_id for action in skip_actions)!r} "
+                f"for actions {tuple(sorted(skip_node_ids))!r} "
                 f"leaves required nodes and consumer inputs {unavailable!r} unavailable"
             )
-        skip_publication_coordinates: set[PublicationAvailabilityCoordinate[GraphValueT]] = {
-            PublicationAvailabilityCoordinate(
-                StableActivation(candidate.scope_run, candidate.previous.superstep, action.node_id),
-                candidate.graph.transition.publications[action.node_id].identity,
-            )
-            for action in skip_actions
-        }
-        pure_skip_coordinates = skip_publication_coordinates.difference(
-            substitution.coordinate for substitution in candidate.substitutions
-        )
+        substituted_node_ids = {substitution.coordinate.activation.node_id for substitution in candidate.substitutions}
         if (
-            pure_skip_coordinates
+            not skip_node_ids.issubset(substituted_node_ids)
             and not any(
                 (
                     facts.control_targets,
@@ -288,7 +249,7 @@ def admit_resume_candidates(
             )
             and facts.unavailable_graph_outputs
         ):
-            actions = tuple(action.node_id for action in skip_actions)
+            actions = tuple(sorted(skip_node_ids))
             raise GraphValueUnavailableError(
                 f"resume actions {actions!r} in scoped graph {candidate.scope_run.scope!r} "
                 f"leave graph outputs/bindings {facts.unavailable_graph_outputs!r} unavailable"

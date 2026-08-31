@@ -84,11 +84,15 @@ def _controlled_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
     )
 
 
-def _substitution(graph: CompiledGraph[str], state: GraphRunState) -> AdmittedSubstitution[str]:
-    publication = graph.transition.publications[GraphNodeId("source")]
+def _substitution(
+    graph: CompiledGraph[str],
+    state: GraphRunState,
+    node_id: str = "source",
+) -> AdmittedSubstitution[str]:
+    publication = graph.transition.publications[GraphNodeId(node_id)]
     return AdmittedSubstitution(
         PublicationAvailabilityCoordinate(
-            StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId("source")),
+            StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId(node_id)),
             publication.identity,
         ),
         _make_node_output_frame(
@@ -97,6 +101,18 @@ def _substitution(graph: CompiledGraph[str], state: GraphRunState) -> AdmittedSu
         ),
         SkipSubstitutionProvenance(),
         state.revision + 1,
+    )
+
+
+def _confirmed_publication(
+    substitution: AdmittedSubstitution[str],
+    state: GraphRunState,
+) -> ConfirmedPublication[str]:
+    return ConfirmedPublication(
+        substitution.coordinate,
+        substitution.frame,
+        state.revision,
+        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("confirmed"))),
     )
 
 
@@ -159,13 +175,40 @@ def test_resume_admission_rejects_duplicate_and_confirmed_substitution_coordinat
     with pytest.raises(GraphValuePublicationError, match=r"source.*duplicate"):
         admit_resume_candidates((candidate,), ScopedFrameIndex())
 
-    publication = ConfirmedPublication(
-        substitution.coordinate,
-        substitution.frame,
-        state.revision,
-        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("confirmed"))),
-    )
+    publication = _confirmed_publication(substitution, state)
     candidate = replace(candidate, substitutions=(substitution,))
+    with pytest.raises(GraphValuePublicationError, match="confirmed publication"):
+        admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
+
+
+def test_resume_admission_evidence_precedes_duplicate_publication() -> None:
+    graph = topology("source")
+    state = _failed_state(running_state(frontier=("source",)))
+    invalid = replace(_substitution(graph, state), expected_revision=state.revision)
+    candidate = _candidate(graph, state, (invalid, invalid), (_skip_action(),))
+
+    with pytest.raises(SnapshotMismatchError, match="evidence does not match"):
+        admit_resume_candidates((candidate,), ScopedFrameIndex())
+
+
+def test_resume_admission_duplicate_publication_precedes_confirmed_collision() -> None:
+    graph = topology("source")
+    state = _failed_state(running_state(frontier=("source",)))
+    substitution = _substitution(graph, state)
+    candidate = _candidate(graph, state, (substitution, substitution), (_skip_action(),))
+    publication = _confirmed_publication(substitution, state)
+
+    with pytest.raises(GraphValuePublicationError, match=r"source.*duplicate"):
+        admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
+
+
+def test_resume_admission_confirmed_collision_precedes_unavailable_input() -> None:
+    graph = _controlled_graph(target_uses_graph_input=True)
+    state = _failed_state(running_state(frontier=("source",)))
+    substitution = _substitution(graph, state)
+    candidate = _candidate(graph, state, (substitution,), (_skip_action(),))
+    publication = _confirmed_publication(substitution, state)
+
     with pytest.raises(GraphValuePublicationError, match="confirmed publication"):
         admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
 
@@ -217,6 +260,35 @@ def test_resume_admission_rejects_a_successor_not_produced_by_its_exact_command(
     )
 
     with pytest.raises(SnapshotMismatchError, match="exact command reduction"):
+        admit_resume_candidates((candidate,), ScopedFrameIndex())
+
+
+def test_resume_admission_rejects_substitution_for_a_previously_skipped_node() -> None:
+    graph = topology("previous", "source", entries=("previous", "source"))
+    state = replace(
+        running_state(frontier=("previous", "source")),
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("previous"),
+                    SkippedGraphNode(
+                        GraphFailure("earlier failure"),
+                        GraphSkipReason("earlier skip"),
+                        ContinueGraphRouting(),
+                    ),
+                ),
+                GraphFrontierNode(GraphNodeId("source"), FailedGraphNode(GraphFailure("failed"))),
+            )
+        ),
+    )
+    candidate = _candidate(
+        graph,
+        state,
+        (_substitution(graph, state, "previous"),),
+        (_skip_action(),),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="evidence does not match"):
         admit_resume_candidates((candidate,), ScopedFrameIndex())
 
 

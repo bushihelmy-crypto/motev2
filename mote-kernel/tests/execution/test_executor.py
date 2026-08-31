@@ -398,7 +398,10 @@ async def test_frontier_preparation_and_inputs_are_reused_by_session(monkeypatch
     original_prepare = superstep_module.prepare_frontier
     original_materialize = frontier_module.materialize_node_input
 
-    def track_prepare(graph: CompiledGraph[str], request: StepRequest[str]) -> FrontierPreparation[str]:
+    def track_prepare(
+        graph: CompiledGraph[str],
+        request: StepRequest[str],
+    ) -> FrontierPreparation[str] | WaitingForChildren[str]:
         nonlocal prepare_calls
         prepare_calls += 1
         return original_prepare(graph, request)
@@ -588,7 +591,22 @@ async def test_prepared_claim_can_issue_exactly_one_session() -> None:
     await session.aclose()
 
 
-async def test_missing_and_active_nested_children_block_parent_claim() -> None:
+async def test_missing_and_active_nested_children_block_parent_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    materialize_calls = 0
+    original_materialize = frontier_module.materialize_node_input
+
+    def track_materialize(
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+        frames: ScopedFrameIndex[str],
+        node_id: GraphNodeId,
+    ) -> NodeInputFrame[str]:
+        nonlocal materialize_calls
+        materialize_calls += 1
+        return original_materialize(graph, state, scope_run, frames, node_id)
+
+    monkeypatch.setattr(frontier_module, "materialize_node_input", track_materialize)
     graph = nested_graph()
     executor = GraphExecutor(graph)
     parent = started(graph)
@@ -601,6 +619,7 @@ async def test_missing_and_active_nested_children_block_parent_claim() -> None:
     assert isinstance(active, WaitingForChildren)
     assert active.missing == ()
     assert active.active == (ActiveChild(activation),)
+    assert materialize_calls == 0
 
 
 async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_path() -> None:

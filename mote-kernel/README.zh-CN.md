@@ -39,7 +39,7 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 
 ## 文档导航
 
-- [可运行图示例](example/graph/README.md)通过公开 `Graph` 门面覆盖线性、条件、并行、嵌套与仅凭状态恢复；
+- [可运行图示例](example/graph/README.md)通过公开 `Graph` 门面完整演示拓扑、循环、嵌套作用域、并行 run、全部恢复 action、检查点、预算、取消、部分提交交接与版本化部署；
 - [架构说明](docs/architecture.zh-CN.md)记录当前公共门面、execution/state owner 与持久化边界；
 - [Execution / State / Frontier 核心调用链](docs/execution-state-frontier-call-chain.zh-CN.md)说明当前 command、reducer、commit 与 frontier 流程。
 
