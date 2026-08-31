@@ -40,7 +40,7 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 
 ## Documentation
 
-- [Runnable graph examples](example/graph/README.md) cover linear, conditional, parallel, nested, and state-only resume flows through the public `Graph` facade.
+- [Runnable graph examples](example/graph/README.md) cover the public `Graph` facade end to end: topology, loops, nested scopes, concurrent runs, every resume action, checkpoints, limits, cancellation, partial commit handoff, and versioned deployment.
 - [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
 - [Execution/state frontier call chain](docs/execution-state-frontier-call-chain.zh-CN.md) explains the current command, reducer, commit, and frontier flow.
 
