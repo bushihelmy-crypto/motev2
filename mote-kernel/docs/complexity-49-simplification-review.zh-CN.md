@@ -20,10 +20,10 @@
 本次审查的对象是 `src/mote_kernel` 当前复杂度报告列出的 49 个定义。结论不是“门禁通过所以无需处理”：
 
 - `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；同一个函数通常同时触发多个指标。
-- 49 项中有 **11 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#40 已完成**，剩余 9 项。
-- `A` 的编号是：**3（已完成）、11、12、14、15、16、20、38、39、40（已完成）、41**。
+- 49 项中有 **10 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`）；其中 **#3、#11、#40 已完成**，剩余 7 项。
+- `A` 的编号是：**3（已完成）、11（已完成）、12、14、15、16、20、38、39、40（已完成）**。
 - 另有 **12 项有局部整理方向，但尚未证明会减少总复杂度**（标为 `B`）。只有做出净删除、保留唯一事实源后才实施。
-- **26 项应保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。为压指标机械拆函数会使代码更难维护。
+- **27 项应保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。为压指标机械拆函数会使代码更难维护。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
@@ -81,7 +81,7 @@ make check                      926 passed, coverage 100%
 | 8 | `execution/engine/recovery.py:933` `_resolve_quiescent`（12/15/2/4/178） | 将 routing facts 投影为 advance/complete/abort，并区分历史值缺失与正常 abort。 | **K**：错误优先级和 `GraphValueUnavailableError` 边界是恢复契约；额外 helper 不会使规则更简单。 |
 | 9 | `execution/engine/recovery.py:978` `_prove_scope`（12/25/3/5/319） | 有界 worklist、seen transfer state、terminal boundary 收集和递归 successor 入队。 | **K**：这是恢复状态空间算法的唯一 owner；不能按分支复制 runner。 |
 | 10 | `execution/engine/recovery.py:1082` `preflight_recovery`（21/33/3/2/315） | 校验 seed/binding/action 证据，构造 availability，再启动全 scope proof。 | **B**：可把输入证据校验与 proof seed 组装分成两个纯阶段；只有删除重复校验且不改变 proof 顺序时才做。 |
-| 11 | `execution/engine/resume_admission.py:76` `prepare_resume`（21/40/4/2/471） | 校验单 scope resume action，构造 exact reducer successor、resume input 和 skip substitution。 | **A**：纳入一个 resume owner 的“canonical action → exact successor → evidence”阶段；动作类型分支保留领域错误，不让 action 污染宽 context。 |
+| 11 | `execution/engine/resume_admission.py:76` `prepare_resume`（21/40/4/2/471） | 校验单 scope resume action，构造 resume command、resume input 和 skip substitution。 | **A（已完成，2026-08-31）**：删除手工 `replacements`、模拟 `GraphFrontierState` 和重复 frontier validation；`plan_resumes` 继续只用唯一 reducer 生成 exact successor，`admit_resume_candidates` 在证据边界用同一 reducer 复核。动作分支与错误顺序不变。 |
 | 12 | `execution/engine/resume_admission.py:190` `admit_resume_candidates`（40/50/3/2/499） | 跨 scope 校验候选 successor/substitution，检查 duplicate、publication collision、routing availability。 | **A**：与 #11 组成同一 admission pipeline；明确固定顺序为 **duplicate action/evidence → duplicate publication → confirmed collision → unavailable**，保留三类异常边界。 |
 | 13 | `execution/engine/resume_input.py:121` `_publication_value`（2/1/1/7/73） | 根据一个 compiled binding 和 activation selection 读取单个 publication。 | **K（指标误报型）**：7 个参数分别是 scope、anchor、source、output 和 selection 等必要坐标；函数很短且直白，不应为降参数引入 context bag。 |
 | 14 | `execution/engine/resume_input.py:194` `materialize_node_input`（9/10/3/6/208） | 校验当前 settlement，优先 override/resume frame，否则逐 binding 读取 graph input/publication 并构造 NodeInputFrame。 | **A**：复用一个窄 binding-coordinate resolver；materializer 仍是 concrete input 唯一 owner，缺值分别包装为 `GraphValueUnavailableError`，不吞 `SnapshotMismatchError`。 |
@@ -126,7 +126,7 @@ make check                      926 passed, coverage 100%
 | 38 | `execution/invocation.py:188` `plan_fences`（10/16/3/2/193） | 校验每个 scoped state 的 parent/coordinate，并计算 active execution 的 fence successor。 | **A（随 resume owner）**：用一个窄的 canonical `PlannedLineage` index，复用 scope lookup；fence 仍是独立 command，不能与 resume action 合并。 |
 | 39 | `execution/invocation.py:311` `plan_resumes`（13/16/2/4/376） | 按 scope 排序 action、生成 candidate state/frame/facts，并调用 resume admission。 | **A（随 #11/#12）**：一次 canonical action normalization、一次 scope index、一次 candidate admission；删除跨函数重复的 next/scan，不改变 duplicate 优先级。 |
 | 40 | `execution/invocation.py:427` `_validate_frame_index`（45/49/2/3/529） | 校验四种 nominal frame segment 的类型、坐标 canonicality、descriptor/provenance 和 scope membership。 | **A（已完成，2026-08-31）**：主函数保留全 segment 的 nominal shape → canonical order 检查，再按固定顺序调用四个 typed record validator；未使用 generic callback/reflection，原有错误优先级不变。 |
-| 41 | `execution/invocation.py:525` `_validate_complete_context`（16/34/5/3/215） | 在非 recovered continuation 中检查每个成功 publication、pending input、completed output 和 child boundary。 | **A（随 #40）**：保留 `recovered` 与 `complete` 两条语义路径，只把 frame structural proof 和 context completeness 分开；不改变 State/continuation shape。 |
+| 41 | `execution/invocation.py:525` `_validate_complete_context`（16/34/5/3/215） | 在非 recovered continuation 中检查每个成功 publication、pending input、completed output 和 child boundary。 | **K（复核后纠正，2026-08-31）**：`validate_context` 已先执行 frame validation，再只对非 recovered continuation 执行 completeness audit；初审描述的分层原本就存在。当前单次 state 顺序遍历集中表达缺失数据的错误优先级，不再拆 helper。 |
 | 42 | `execution/run_context.py:227` `ScopedFrameIndex.lookup`（12/36/5/2/80） | 按四种 coordinate 的 nominal 类型查找对应 frame record。 | **K**：四个分支代表四个类型安全边界；改成一个裸 map/字符串 tag 会丢失 overload 和领域错误。 |
 | 43 | `state/graph_state/execution_transitions.py:150` `settle_graph_node`（17/23/3/2/247） | 校验 execution lease，转换 success/failure/interrupt，释放资源并原子更新 frontier。 | **K**：一个 command 必须原子完成 settlement + resource release + lease 清理；不能拆成可独立提交的路径。 |
 | 44 | `state/graph_state/recovery_transitions.py:29` `resume_graph_nodes`（22/34/5/2/258） | 校验三种 resume action，按 node identity 更新 frontier，并保留 interrupt/codec 约束。 | **K**：action variant 与失败顺序就是 State 的领域异常边界；Execution 不能复制一份 reducer。 |
@@ -140,14 +140,14 @@ make check                      926 passed, coverage 100%
 
 下面展开 `A` 项的目标设计，并保留讨论后改判为 `K` 的决策记录；实施项必须可以据此写出明确设计和测试，不能停留在泛泛的“可以重构”。
 
-### 1. Resume admission：一个 owner、五个阶段（#11、#12、#38、#39）
+### 1. Resume admission：一个 owner、五个阶段（#11 已完成，#12、#38、#39 待评审）
 
 目标调用链：
 
 ```text
 canonical actions
-  -> current settlement / exact reducer successor
-  -> resume-input or skip-substitution evidence
+  -> current settlement / resume-input or skip-substitution evidence
+  -> exact reducer successor
   -> publication duplicate / confirmed collision
   -> routing availability
   -> PlannedResume + CandidateFrameAvailability + facts
@@ -155,7 +155,7 @@ canonical actions
 
 具体约束：
 
-1. `plan_resumes` 只负责按 scope 编排；`prepare_resume` 只负责一个 scope 的 action 与 exact successor；`admit_resume_candidates` 只负责跨 scope 证据和 availability。三者共享同一个窄 `PlannedLineage`/action index，不各自线性扫描同一批 state。
+1. `plan_resumes` 只负责按 scope 编排并调用唯一 reducer 生成 exact successor；`prepare_resume` 只负责一个 scope 的 action 与 evidence；`admit_resume_candidates` 只负责跨 scope 证据和 availability。#11 已删除 `prepare_resume` 中手工模拟 frontier 的第二套表达。
 2. canonical action、duplicate、successor、substitution、publication、routing 的检查顺序固定，不以“更早返回”换取更短代码。
 3. `SnapshotMismatchError`（状态/坐标/证据）、`GraphValuePublicationError`（duplicate/collision）和 `GraphValueUnavailableError`（历史值不可得）继续各自归属原边界。
 4. 删除旧的重复 normalization/lookup 路径后，才允许增加少量窄 record；不得把所有 action 或 frame 塞进一个宽 `InvocationContext`。
@@ -172,7 +172,7 @@ canonical actions
 
 不能把 `node_inputs_available` 和 `graph_outputs_available` 合成一个“万能 available”函数：前者是 pending node 的短路判断，后者是 graph output 检查，调用方和异常边界不同。`unavailable_graph_outputs` 仍需完整扫描并保留诊断顺序。
 
-### 3. Frame validation：先结构、后语义（#40 已完成、#41 待评审）
+### 3. Frame validation：先结构、后语义（#40 已完成、#41 保留）
 
 目标总入口顺序固定为：
 
@@ -183,7 +183,7 @@ nominal record type
   -> complete-context semantic completeness (only !recovered)
 ```
 
-#40 已按此顺序完成：结构与 canonicality 仍由 `_validate_frame_index` 统一检查，四类 record 的 scope/descriptor/provenance/frame 内容分别由窄 typed validator 校验；没有下沉到 `ScopedFrameIndex`，也没有引入 `object`、反射、字符串 discriminator 或通用 callback。#41 仍待单独评审；恢复型 continuation 继续允许历史缺口，完整 continuation 继续要求当前 publication/input/boundary。
+#40 已按此顺序完成：结构与 canonicality 仍由 `_validate_frame_index` 统一检查，四类 record 的 scope/descriptor/provenance/frame 内容分别由窄 typed validator 校验；没有下沉到 `ScopedFrameIndex`，也没有引入 `object`、反射、字符串 discriminator 或通用 callback。#41 复核后改判为保留：`validate_context` 原本就将完整性检查限制在非 recovered continuation，继续保持这一条清晰路径。
 
 ### 4. Graph facade 与生命周期：保留统一 builder，简化生命周期（#19、#20）
 
@@ -374,7 +374,7 @@ state-only
   -> admit_continued_root（按 scope 真正 commit fence/resume）
 ```
 
-`plan_fences` 必须先于 `plan_resumes`，frame structural proof 必须先于 completeness，candidate successor 必须由同一 reducer 重算，preflight 必须先于真实 admission。这些都是必要顺序。明确可化简的是 #11/#12/#38/#39 的重复 scope lookup/action normalization，以及 #40/#41 的四段 frame 结构重复；目标设计已在前文列为 A。不能把 recovered/complete continuation 合成一个“缺 frame 就忽略”的路径。
+`plan_fences` 必须先于 `plan_resumes`，frame structural proof 必须先于 completeness，candidate successor 必须由同一 reducer 重算，preflight 必须先于真实 admission。这些都是必要顺序。#11 已删除手工 frontier 模拟；#12/#38/#39 的 scope lookup/action normalization 仍待评审。#40 已完成，#41 复核后确认现有 recovered/complete 分层已足够清楚。不能把两种 continuation 合成一个“缺 frame 就忽略”的路径。
 
 ### 4. `prepare_superstep`：分支树清楚，复杂度是状态机本身
 
@@ -609,7 +609,7 @@ drive boundary
 |---|---|---|---|
 | compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #30/#32 B |
 | `Graph.run` mode + preparation + lifecycle | 否 | 拆 preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 A |
-| continuation/frame/resume admission | 部分否 | 顺序保留；共享 canonical lineage/action index，frame 先结构后语义 | #11/#12/#38–#41 A |
+| continuation/frame/resume admission | 部分否 | 顺序保留；共享 canonical lineage/action index，frame 先结构后语义 | #11/#40 已完成；#12/#38/#39 A；#41 K |
 | `prepare_superstep` 状态分支 | 是 | 状态叶子和错误顺序清晰，不再泛化 dispatcher | #4、#8、#17、#25 等 K |
 | `drive_quantum` 唯一 runner | 是（sentinel 语义可再评估） | 保留循环；仅研究 `ChildrenQuiescent` 内部变体 | #25 K，B 候选 |
 | claim/session/scheduler/resource | 是（admission view 可原型） | ack/error-drain/FIFO 是必要协议，不合并 owner | #1/#2 B，#17/#24/#47 K |
@@ -652,7 +652,7 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 ## 推荐实施顺序与门禁账本
 
 1. 先为 A 组补/确认状态转换、恢复边界、frame provenance、异常优先级和 cancellation 的确定性测试。
-2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#41）的小步替换；#40 已完成，其余每步删除旧路径后再测。
+2. 先做 resume admission 与 routing/materialization（#11–#16、#38–#40）的小步替换；#11/#40 已完成、#41 保留，其余每步删除旧路径后再测。
 3. 再做 `Graph.run` 生命周期（#20）；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
 5. 最后才评估 B 组，特别是 compiler/recovery；任何没有净删除的拆分都退回设计阶段。
