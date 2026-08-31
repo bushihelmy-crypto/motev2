@@ -931,12 +931,57 @@ async def admit_continued_root(
     fences_by_scope = {candidate.scope_run: candidate for candidate in fences}
     resumes_by_scope = {candidate.scope_run: candidate for candidate in resumes}
     evidence_publisher, evidence_reader = _evidence_adapter(child_states, frames)
-    root_child_constructor = _make_child_constructor(scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
     root: _GraphRun[GraphValueT] | None = None
     confirmed_prefix = False
     transition_attempted = False
     failed_scope: tuple[str, ...] | None = None
+
+    def build_owner(
+        owner_graph: CompiledGraph[GraphValueT],
+        owner_scope_run: ScopeRunCoordinate,
+        owner_state: GraphRunState,
+        owner_commit: GraphCommit[GraphValueT],
+        position: tuple[int, ...],
+        parent_activation: StableActivation | None,
+    ) -> _GraphRun[GraphValueT]:
+        owner_frames = _frames_for_owner(frames, child_states, owner_scope_run)
+        return _GraphRun(
+            owner_graph,
+            owner_scope_run,
+            owner_state,
+            owner_frames,
+            limits,
+            owner_commit,
+            _make_child_constructor(owner_scope_run, limits, commit, evidence_publisher),
+            position,
+            parent_activation,
+            evidence_publisher,
+        )
+
+    async def cleanup_owner(
+        owner: _GraphRun[GraphValueT] | None,
+        owner_scope_run: ScopeRunCoordinate,
+        owner_state: GraphRunState,
+        owner_commit: GraphCommit[GraphValueT],
+    ) -> None:
+        reason = GraphAbortReason("continued graph owner construction failed")
+        if owner is None:
+            if not transition_attempted and owner_state.status is GraphRunStatus.RUNNING:
+                with suppress(BaseException):
+                    await commit_transition(
+                        owner_scope_run,
+                        owner_state,
+                        AbortGraphRun(owner_state.revision, reason),
+                        None,
+                        owner_commit,
+                    )
+            return
+        if not transition_attempted:
+            with suppress(BaseException):
+                await owner.abort(reason)
+        with suppress(BaseException):
+            await owner.release()
 
     async def apply_admission(
         owner: _GraphRun[GraphValueT],
@@ -970,18 +1015,13 @@ async def admit_continued_root(
         child: _GraphRun[GraphValueT] | None = None
         child_commit = scoped_commit(binding.coordinate, commit)
         try:
-            child_frames = _frames_for_owner(frames, child_states, binding.coordinate)
-            child = _GraphRun(
+            child = build_owner(
                 child_graph,
                 binding.coordinate,
                 binding.state,
-                child_frames,
-                limits,
                 child_commit,
-                _make_child_constructor(binding.coordinate, limits, commit, evidence_publisher),
                 position,
                 binding.parent_activation,
-                evidence_publisher,
             )
             await apply_admission(child, fence, resume, tuple(binding.coordinate.scope))
             await admit_children(child, child_graph, binding.coordinate, binding.state)
@@ -990,26 +1030,7 @@ async def admit_continued_root(
             if failed_scope is None:
                 failed_scope = tuple(binding.coordinate.scope)
 
-            async def cleanup_candidate(candidate: _GraphRun[GraphValueT] | None) -> None:
-                reason = GraphAbortReason("continued graph owner construction failed")
-                if candidate is None:
-                    if not transition_attempted:
-                        with suppress(BaseException):
-                            await commit_transition(
-                                binding.coordinate,
-                                binding.state,
-                                AbortGraphRun(binding.state.revision, reason),
-                                None,
-                                child_commit,
-                            )
-                    return
-                if not transition_attempted:
-                    with suppress(BaseException):
-                        await candidate.abort(reason)
-                with suppress(BaseException):
-                    await candidate.release()
-
-            cleanup_task = asyncio.create_task(cleanup_candidate(child))
+            cleanup_task = asyncio.create_task(cleanup_owner(child, binding.coordinate, binding.state, child_commit))
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
             raise
@@ -1021,21 +1042,17 @@ async def admit_continued_root(
         owner_state: GraphRunState,
     ) -> None:
         nonlocal failed_scope
-        admitted: list[tuple[ChildStateBinding, ParentGraphActivation, CompiledGraph[GraphValueT]]] = []
+        # lineage_states validates coordinate order; filtering preserves child node order for this owner.
         for binding in child_states:
             activation = binding.parent_activation
-            if activation.scope_run != owner_scope_run:
-                continue
-            if not is_current_child_activation(owner_state, activation):
+            if activation.scope_run != owner_scope_run or not is_current_child_activation(owner_state, activation):
                 continue
             parent = ParentGraphActivation(
                 owner_state.run_id,
                 activation.superstep,
                 activation.node_id,
             )
-            admitted.append((binding, parent, owner_graph.nested_graphs[activation.node_id]))
-        admitted.sort(key=lambda item: item[1].node_id)
-        for binding, parent, child_graph in admitted:
+            child_graph = owner_graph.nested_graphs[activation.node_id]
             position = owner.child_position(parent)
             if binding.state.status is not GraphRunStatus.RUNNING:
                 if binding.state.status is GraphRunStatus.COMPLETED:
@@ -1070,18 +1087,13 @@ async def admit_continued_root(
                 raise
 
     try:
-        root_frames = _frames_for_owner(frames, child_states, scope_run)
-        root = _GraphRun(
+        root = build_owner(
             graph,
             scope_run,
             state,
-            root_frames,
-            limits,
             root_commit,
-            root_child_constructor,
             (),
             None,
-            evidence_publisher,
         )
         root_fence = fences_by_scope.get(scope_run)
         root_resume = resumes_by_scope.get(scope_run)
@@ -1114,26 +1126,7 @@ async def admit_continued_root(
                 await root.release()
             raise partial from primary
 
-        async def cleanup_root() -> None:
-            reason = GraphAbortReason("continued graph owner construction failed")
-            if root is not None:
-                if not transition_attempted:
-                    with suppress(BaseException):
-                        await root.abort(reason)
-                with suppress(BaseException):
-                    await root.release()
-                return
-            if not transition_attempted and state.status is GraphRunStatus.RUNNING:
-                with suppress(BaseException):
-                    await commit_transition(
-                        scope_run,
-                        state,
-                        AbortGraphRun(state.revision, reason),
-                        None,
-                        root_commit,
-                    )
-
-        cleanup_task = asyncio.create_task(cleanup_root())
+        cleanup_task = asyncio.create_task(cleanup_owner(root, scope_run, state, root_commit))
         with suppress(BaseException):
             await wait_for_owner_task(cleanup_task)
         raise
