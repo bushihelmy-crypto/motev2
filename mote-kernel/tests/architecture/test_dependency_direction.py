@@ -9,18 +9,15 @@ CORE_FLOW_PACKAGES = frozenset(
     {
         "act",
         "events",
-        "extensions",
         "failover",
         "hooks",
         "logging",
+        "loop",
         "observability",
         "observe",
         "operations",
         "role",
         "think",
-        "tools",
-        "turn_context",
-        "workflow",
     }
 )
 
@@ -84,18 +81,6 @@ def test_graph_definition_layer_does_not_depend_on_runtime_execution_modules() -
             if imported_module in forbidden_modules:
                 violations.append(f"{relative}:{node.lineno} imports execution.{imported_module}")
     assert not violations, f"graph definitions must remain below runtime execution: {violations}"
-
-
-def test_workflow_does_not_depend_on_tools_or_act() -> None:
-    violations: list[str] = []
-    for path, tree in _production_modules():
-        relative = path.relative_to(PACKAGE_ROOT)
-        if relative.parts[0] != "workflow":
-            continue
-        for line, imported_root in _internal_import_roots(tree):
-            if imported_root in {"act", "tools"}:
-                violations.append(f"{relative}:{line} imports {imported_root}")
-    assert not violations, f"workflow receives node execution through a narrow injected boundary: {violations}"
 
 
 def test_graph_state_model_layers_remain_acyclic() -> None:

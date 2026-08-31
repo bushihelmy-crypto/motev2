@@ -20,7 +20,8 @@ resource or package.
 `mote-runtime` owns live action, sensor, driver, and other domain providers.
 Resource providers resolve narrow typed handles and inject only the context a
 consumer needs; they do not become a runtime scheduler, Agent Flow engine, or
-persistence owner.
+persistence or invocation owner. Concrete invocation is resolved and executed
+only by `mote-infra/invocation`.
 
 ```text
 mote-control

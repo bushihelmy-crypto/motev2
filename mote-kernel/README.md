@@ -47,7 +47,7 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 ## Design principles
 
 - One execution engine for every agent flow.
-- Graph state and domain state evolve independently and commit atomically.
+- `GraphRunState` is the single state snapshot; execution position, node results, and business facts commit atomically together.
 - Durable state is committed before the in-memory snapshot advances.
 - Every node activation receives one immutable, descriptor-checked named input frame.
 - Concrete model, prompt, tool, storage, and extension capabilities enter through narrow typed ports.

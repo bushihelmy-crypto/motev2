@@ -1,6 +1,6 @@
 # gRPC transport
 
-This directory is the reusable gRPC transport adapter for Mote infrastructure.
+This directory is the gRPC implementation under Mote's sole invocation infrastructure owner.
 
 It may provide gRPC clients, servers, channel setup, deadlines, metadata, and generated-code integration. It must not become the owner of Agent flow, lineage, persistence transactions, or Container/Embodiment placement semantics.
 

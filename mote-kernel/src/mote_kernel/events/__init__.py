@@ -1,1 +1,1 @@
-"""Asynchronous tool-use notification contracts."""
+"""Typed, fire-and-observe event publication primitives."""

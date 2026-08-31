@@ -1,6 +1,6 @@
 # Mote Infrastructure Persistence
 
-`mote-infra/persistence` contains the concrete backends behind Mote's persistence Ports. It owns durable storage and transaction mechanisms, while `mote-kernel` owns Agent state-transition semantics and the callable `Commit` contract. RPC transport implementations are kept in the sibling `mote-infra/rpc` boundary.
+`mote-infra/persistence` is Mote's sole storage infrastructure owner. It contains the concrete backends behind persistence Ports and owns durable storage and transaction mechanisms, while `mote-kernel` owns Agent state-transition semantics and the callable `Commit` contract. Invocation contracts, resolution, and local/RPC implementations live in the parallel `mote-infra/invocation` boundary.
 
 Container and Persistence are independent choices:
 

@@ -1,1 +1,1 @@
-"""Model-turn routing, prompting, inference, and interpretation flow."""
+"""Configurable Think node and its cognition-owned subnodes."""
