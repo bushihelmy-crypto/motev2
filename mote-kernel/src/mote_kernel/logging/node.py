@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter_ns
 from typing import Generic, Protocol, TypeAlias, TypeVar
 
+from mote_kernel.logging._emit import write_best_effort
 from mote_kernel.logging.level import LogLevel
 from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogContractError, LogField, LogRecord, require_log_label
@@ -31,6 +32,8 @@ def _merge_fields(
 ) -> tuple[LogField, ...]:
     if type(dynamic) is not tuple or any(type(field) is not LogField for field in dynamic):
         raise LogContractError("node log fields factory must return a tuple of LogField values")
+    if any(field.name in _LIFECYCLE_FIELD_NAMES for field in dynamic):
+        raise LogContractError("node log dynamic fields cannot use lifecycle field names")
     fields = (*fixed, *dynamic, *extra)
     names = tuple(field.name for field in fields)
     if len(names) != len(set(names)):
@@ -39,19 +42,13 @@ def _merge_fields(
 
 
 @dataclass(frozen=True, slots=True)
-class LoggedNode(Generic[InputT, OutputT]):
-    """Wrap one node callable with best-effort lifecycle diagnostics.
+class LoggedNode:
+    """Configure best-effort lifecycle diagnostics for one node callable."""
 
-    The wrapper never changes the callable's result or exception.  Diagnostic
-    construction and sink failures are deliberately ignored because logging
-    is a side-channel, not part of graph state or settlement semantics.
-    """
-
-    inner: NodeOperation[InputT, OutputT]
     sink: LogSinkPort
-    event: str = "node"
-    fields: tuple[LogField, ...] = ()
-    fields_factory: NodeLogFields | None = None
+    event: str = field(default="node", kw_only=True)
+    fields: tuple[LogField, ...] = field(default=(), kw_only=True)
+    fields_factory: NodeLogFields | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         require_log_label(self.event, "node log event")
@@ -62,40 +59,45 @@ class LoggedNode(Generic[InputT, OutputT]):
         if any(field.name in _LIFECYCLE_FIELD_NAMES for field in self.fields):
             raise LogContractError("node log fixed fields cannot use lifecycle field names")
 
-    def _invocation_fields(self) -> tuple[LogField, ...]:
-        try:
-            dynamic = () if self.fields_factory is None else self.fields_factory()
-            fields = _merge_fields(self.fields, dynamic)
-            if any(field.name in _LIFECYCLE_FIELD_NAMES for field in dynamic):
-                raise LogContractError("node log dynamic fields cannot use lifecycle field names")
-            return fields
-        except (asyncio.CancelledError, Exception):
-            return self.fields
-
-    def _write(
+    def __call__(
         self,
-        level: LogLevel,
-        event: str,
-        fields: tuple[LogField, ...],
-        *,
-        error: BaseException | None = None,
-    ) -> None:
-        try:
-            diagnostic_fields = fields if error is None else (*fields, LogField("error_type", type(error).__name__))
-            self.sink.write(LogRecord(level, event, fields=diagnostic_fields))
-        except (asyncio.CancelledError, Exception):
-            return
+        inner: NodeOperation[InputT, OutputT],
+    ) -> NodeOperation[InputT, OutputT]:
+        return _LoggedNode(inner, self)
+
+
+def _invocation_fields(config: LoggedNode) -> tuple[LogField, ...]:
+    factory = config.fields_factory
+    if factory is None:
+        return config.fields
+    try:
+        dynamic = factory()
+    except Exception:
+        return config.fields
+    try:
+        return _merge_fields(config.fields, dynamic)
+    except LogContractError:
+        return config.fields
+
+
+@dataclass(frozen=True, slots=True)
+class _LoggedNode(Generic[InputT, OutputT]):
+    """Apply one immutable logging configuration to a typed node callable."""
+
+    inner: NodeOperation[InputT, OutputT]
+    config: LoggedNode
 
     async def __call__(self, value: InputT, /) -> OutputT:
-        fields = self._invocation_fields()
-        self._write(LogLevel.DEBUG, f"{self.event}.started", fields)
+        fields = _invocation_fields(self.config)
+        write_best_effort(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
         started = perf_counter_ns()
         try:
             result = await self.inner(value)
         except asyncio.CancelledError as error:
-            self._write(
+            write_best_effort(
+                self.config.sink,
                 LogLevel.WARNING,
-                f"{self.event}.cancelled",
+                f"{self.config.event}.cancelled",
                 _merge_fields(
                     fields,
                     (),
@@ -108,9 +110,10 @@ class LoggedNode(Generic[InputT, OutputT]):
             )
             raise
         except Exception as error:
-            self._write(
+            write_best_effort(
+                self.config.sink,
                 LogLevel.ERROR,
-                f"{self.event}.failed",
+                f"{self.config.event}.failed",
                 _merge_fields(
                     fields,
                     (),
@@ -122,9 +125,10 @@ class LoggedNode(Generic[InputT, OutputT]):
                 error=error,
             )
             raise
-        self._write(
+        write_best_effort(
+            self.config.sink,
             LogLevel.INFO,
-            f"{self.event}.finished",
+            f"{self.config.event}.finished",
             _merge_fields(
                 fields,
                 (),

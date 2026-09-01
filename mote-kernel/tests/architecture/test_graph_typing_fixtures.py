@@ -16,6 +16,86 @@ class NegativeTypingCase:
 
 CASES = (
     NegativeTypingCase(
+        "logging_node_none_sink.py",
+        ('Argument of type "None"', 'parameter "sink"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "logging_node_async_sink.py",
+        ("AsyncSink", "CoroutineType", 'parameter "sink"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "logging_node_non_awaitable.py",
+        ("str", "Awaitable", 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "logging_node_none_inner.py",
+        ('Argument of type "None"', 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "observed_node_none_port.py",
+        ('Argument of type "None"', 'parameter "port"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "observed_node_none_factory.py",
+        ('Argument of type "None"', 'parameter "span_factory"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "observed_node_async_port.py",
+        ("AsyncPort", "CoroutineType", 'parameter "port"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "observed_node_non_awaitable.py",
+        ("str", "Awaitable", 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "observed_node_none_inner.py",
+        ('Argument of type "None"', 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "commit_none_sink.py",
+        ('Argument of type "None"', 'parameter "sink"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "logging_node_old_positional.py",
+        ("Expected 1 positional argument", "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "logging_node_old_keyword.py",
+        ('No parameter named "inner"', "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "logging_node_generic_subscript.py",
+        ('Expected no type arguments for class "LoggedNode"', "reportInvalidTypeArguments"),
+    ),
+    NegativeTypingCase(
+        "observed_node_old_positional.py",
+        ("Expected 2 positional arguments", "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "observed_node_old_keyword.py",
+        ('No parameter named "inner"', "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "observed_node_generic_subscript.py",
+        ('Expected no type arguments for class "ObservedNode"', "reportInvalidTypeArguments"),
+    ),
+    NegativeTypingCase(
+        "commit_old_positional.py",
+        ("Expected 1 positional argument", "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "commit_old_keyword.py",
+        ('No parameter named "inner"', "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "commit_generic_subscript.py",
+        ('Expected no type arguments for class "LoggedGraphCommit"', "reportInvalidTypeArguments"),
+    ),
+    NegativeTypingCase(
+        "commit_none_inner.py",
+        ('Argument of type "None"', 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
         "constructor_values.py",
         ("Arguments missing for parameters", "_construction", "_seal", "reportCallIssue"),
     ),
@@ -137,3 +217,16 @@ def test_factory_inference_is_exact_and_contains_no_unknown() -> None:
 
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "Unknown" not in completed.stdout
+
+
+def test_logging_observability_positive_fixture_is_exact_and_contains_no_unknown() -> None:
+    completed = subprocess.run(
+        ("pyright", "tests/typing_positive/logging_observability.py"),
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout

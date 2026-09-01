@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError, dataclass, field
+from dataclasses import FrozenInstanceError, dataclass, field, is_dataclass
 from typing import cast
 
 import pytest
 
 import mote_kernel.observability as observability_package
 from mote_kernel.execution import Graph
+from mote_kernel.logging import LoggedNode
+from mote_kernel.logging.record import LogRecord
 from mote_kernel.observability import ObservedNode
 from mote_kernel.observability.node import NodeSpanFactory
 from mote_kernel.observability.record import (
@@ -80,6 +82,15 @@ def test_observability_root_exposes_only_the_node_decorator() -> None:
     assert not hasattr(observability_package, "Span")
     assert not hasattr(observability_package, "observed_node")
     assert not hasattr(observability_package, "ObservedGraphCommit")
+
+
+def test_observed_node_is_a_non_generic_frozen_slot_configuration() -> None:
+    assert is_dataclass(ObservedNode)
+    assert not getattr(ObservedNode, "__parameters__", ())
+    assert "__dict__" not in ObservedNode.__slots__
+    config = ObservedNode(RecordingPort(), _span)
+    with pytest.raises(FrozenInstanceError):
+        config.port = RecordingPort()  # type: ignore[misc]
 
 
 def test_span_values_are_frozen_provider_neutral_and_parented() -> None:
@@ -225,7 +236,9 @@ async def test_observed_node_emits_one_start_and_finish_and_preserves_result() -
         factory_calls += 1
         return _span(f"span-{factory_calls}")
 
-    observed = ObservedNode(_echo, port, span_factory)
+    @ObservedNode(port, span_factory)
+    async def observed(value: str) -> str:
+        return await _echo(value)
 
     assert await observed("first") == "first"
     assert await observed("second") == "second"
@@ -260,7 +273,7 @@ async def test_observed_node_preserves_exception_and_cancellation_identity() -> 
         raise problem
 
     with pytest.raises(NodeError) as failed:
-        await ObservedNode(fail, failed_port, _span)("input")
+        await ObservedNode(failed_port, _span)(fail)("input")
     assert failed.value is problem
     assert len(failed_port.observations) == 2
     failed_finish = cast(SpanFinished, failed_port.observations[-1])
@@ -274,7 +287,7 @@ async def test_observed_node_preserves_exception_and_cancellation_identity() -> 
         raise cancellation
 
     with pytest.raises(asyncio.CancelledError) as cancelled:
-        await ObservedNode(cancel, cancelled_port, _span)("input")
+        await ObservedNode(cancelled_port, _span)(cancel)("input")
     assert cancelled.value is cancellation
     assert len(cancelled_port.observations) == 2
     cancelled_finish = cast(SpanFinished, cancelled_port.observations[-1])
@@ -285,7 +298,31 @@ async def test_observed_node_preserves_exception_and_cancellation_identity() -> 
 @pytest.mark.asyncio
 async def test_observation_port_failures_do_not_change_node_semantics() -> None:
     for port_error in (RuntimeError("port failed"), asyncio.CancelledError("port cancelled")):
-        assert await ObservedNode(_echo, RaisingPort(port_error), _span)("value") == "value"
+        assert await ObservedNode(RaisingPort(port_error), _span)(_echo)("value") == "value"
+
+
+@pytest.mark.asyncio
+async def test_observation_port_failures_do_not_replace_inner_primary_errors() -> None:
+    class NodeError(RuntimeError):
+        pass
+
+    problem = NodeError("node failed")
+
+    async def fail(_value: str) -> str:
+        raise problem
+
+    with pytest.raises(NodeError) as failed:
+        await ObservedNode(RaisingPort(asyncio.CancelledError("port cancelled")), _span)(fail)("value")
+    assert failed.value is problem
+
+    cancellation = asyncio.CancelledError("node cancelled")
+
+    async def cancel(_value: str) -> str:
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await ObservedNode(RaisingPort(asyncio.CancelledError("port cancelled")), _span)(cancel)("value")
+    assert cancelled.value is cancellation
 
 
 @pytest.mark.asyncio
@@ -301,8 +338,74 @@ async def test_observed_node_rejects_a_malformed_span_factory_before_calling_nod
         return cast(Span, object())
 
     with pytest.raises(ObservationContractError, match="span factory"):
-        await ObservedNode(operation, RecordingPort(), malformed_factory)("value")
+        await ObservedNode(RecordingPort(), malformed_factory)(operation)("value")
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_span_factory_runs_once_per_concurrent_invocation_and_setup_errors_stop_inner() -> None:
+    sequence = 0
+    calls = 0
+    port = RecordingPort()
+
+    def factory() -> Span:
+        nonlocal sequence, calls
+        calls += 1
+        sequence += 1
+        return _span(f"concurrent-{sequence}")
+
+    async def operation(value: str) -> str:
+        await asyncio.sleep(0)
+        return value
+
+    observed = ObservedNode(port, factory)(operation)
+    results = await asyncio.gather(observed("one"), observed("two"), observed("three"))
+
+    assert results == ["one", "two", "three"]
+    assert calls == 3
+    starts = [item for item in port.observations if type(item) is SpanStarted]
+    assert len({start.span.context.span_id for start in starts}) == 3
+
+    setup_error = RuntimeError("factory failed")
+    setup_calls = 0
+
+    def failing_factory() -> Span:
+        nonlocal setup_calls
+        setup_calls += 1
+        raise setup_error
+
+    inner_calls = 0
+
+    async def should_not_run(value: str) -> str:
+        nonlocal inner_calls
+        inner_calls += 1
+        return value
+
+    with pytest.raises(RuntimeError) as failed:
+        await ObservedNode(RecordingPort(), failing_factory)(should_not_run)("value")
+    assert failed.value is setup_error
+    assert setup_calls == 1
+    assert inner_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_span_factory_cancellation_is_setup_failure_and_does_not_call_inner() -> None:
+    cancellation = asyncio.CancelledError("span setup cancelled")
+    inner_calls = 0
+
+    def cancelled_factory() -> Span:
+        raise cancellation
+
+    async def operation(value: str) -> str:
+        nonlocal inner_calls
+        inner_calls += 1
+        return value
+
+    with pytest.raises(asyncio.CancelledError) as failed:
+        await ObservedNode(RecordingPort(), cancelled_factory)(operation)("value")
+
+    assert failed.value is cancellation
+    assert inner_calls == 0
 
 
 @pytest.mark.asyncio
@@ -321,7 +424,7 @@ async def test_observed_node_composes_with_the_public_graph_facade() -> None:
     graph = Graph[str]("observability.composed")
     graph.add_node(
         "work",
-        ObservedNode(operation, port, span_factory),
+        ObservedNode(port, span_factory)(operation),
         inputs={"value": Graph.graph_input("value", str)},
         outputs={"value": str},
     )
@@ -332,6 +435,28 @@ async def test_observed_node_composes_with_the_public_graph_facade() -> None:
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == "observed:input"
     assert tuple(type(item) for item in port.observations) == (SpanStarted, SpanFinished)
+
+
+@pytest.mark.asyncio
+async def test_logged_observed_decorator_order_is_logged_outside_observed() -> None:
+    timeline: list[str] = []
+
+    class OrderedPort:
+        def record(self, observation: Observation, /) -> None:
+            timeline.append(type(observation).__name__)
+
+    class OrderedSink:
+        def write(self, record: LogRecord, /) -> None:
+            timeline.append(record.event)
+
+    @LoggedNode(OrderedSink())
+    @ObservedNode(OrderedPort(), _span)
+    async def operation(value: str) -> str:
+        timeline.append("inner")
+        return value
+
+    assert await operation("value") == "value"
+    assert timeline == ["node.started", "SpanStarted", "inner", "SpanFinished", "node.finished"]
 
 
 def test_span_factory_and_observation_port_are_structural() -> None:

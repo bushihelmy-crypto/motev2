@@ -3,81 +3,96 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter_ns
 from typing import Generic, TypeVar
 
 from mote_kernel.execution import Graph
+from mote_kernel.logging._emit import write_best_effort
 from mote_kernel.logging.level import LogLevel
 from mote_kernel.logging.port import LogSinkPort
-from mote_kernel.logging.record import LogField, LogRecord, require_log_label
+from mote_kernel.logging.record import LogField, require_log_label
 
 GraphValueT = TypeVar("GraphValueT")
 
 
-def _transition_fields(transition: Graph.Transition[GraphValueT]) -> tuple[LogField, ...]:
+def _candidate_state(transition: Graph.Transition[GraphValueT]) -> Graph.State | None:
+    """Read the candidate once so diagnostic projection cannot re-read it later."""
+
+    try:
+        candidate = transition.candidate_state
+    except asyncio.CancelledError:
+        return None
+    except Exception:
+        return None
+    return candidate if type(candidate) is Graph.State else None
+
+
+def _transition_fields(
+    transition: Graph.Transition[GraphValueT],
+    candidate: Graph.State | None,
+) -> tuple[LogField, ...]:
     """Project optional coordinates without making diagnostics a commit precondition."""
 
+    if candidate is None:
+        return ()
     try:
         previous = transition.previous_state
         return (
-            LogField("run_id", str(transition.candidate_state.run_id)),
+            LogField("run_id", str(candidate.run_id)),
             LogField("scope", "/".join(transition.scope) if transition.scope else None),
             LogField("scope_depth", len(transition.scope)),
             LogField("command_type", type(transition.command).__name__),
-            LogField("candidate_revision", transition.candidate_state.revision),
+            LogField("candidate_revision", candidate.revision),
             LogField("previous_revision", None if previous is None else previous.revision),
         )
-    except (asyncio.CancelledError, Exception):
+    except asyncio.CancelledError:
+        return ()
+    except Exception:
         return ()
 
 
 @dataclass(frozen=True, slots=True)
-class LoggedGraphCommit(Generic[GraphValueT]):
-    """Log commit callback lifecycle without changing commit semantics.
+class LoggedGraphCommit:
+    """Configure lifecycle diagnostics for one caller-owned commit callback."""
 
-    ``inner`` may be ``None`` for the process-local confirmation behavior used
-    by ``Graph.run``.  A configured callback is called exactly once.  The
-    wrapper reports a mismatch but returns it unchanged so the Kernel's own
-    exact-successor check remains authoritative.
-    """
-
-    inner: Graph.Commit[GraphValueT] | None
     sink: LogSinkPort
-    event: str = "commit"
+    event: str = field(default="commit", kw_only=True)
 
     def __post_init__(self) -> None:
         require_log_label(self.event, "commit log event")
         require_log_label(f"{self.event}.cancelled", "commit log event")
 
-    def _write(
+    def __call__(
         self,
-        level: LogLevel,
-        event: str,
-        fields: tuple[LogField, ...],
-        *,
-        error: BaseException | None = None,
-    ) -> None:
-        try:
-            diagnostic_fields = fields if error is None else (*fields, LogField("error_type", type(error).__name__))
-            self.sink.write(LogRecord(level, event, fields=diagnostic_fields))
-        except (asyncio.CancelledError, Exception):
-            return
+        inner: Graph.Commit[GraphValueT],
+    ) -> Graph.Commit[GraphValueT]:
+        return _LoggedCommit(inner, self)
+
+
+@dataclass(frozen=True, slots=True)
+class _LoggedCommit(Generic[GraphValueT]):
+    """Apply one immutable logging configuration to a typed commit callback."""
+
+    inner: Graph.Commit[GraphValueT]
+    config: LoggedGraphCommit
 
     async def __call__(
         self,
         transition: Graph.Transition[GraphValueT],
         /,
     ) -> Graph.State:
-        fields = _transition_fields(transition)
-        self._write(LogLevel.DEBUG, f"{self.event}.started", fields)
+        candidate = _candidate_state(transition)
+        fields = _transition_fields(transition, candidate)
+        write_best_effort(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
         started = perf_counter_ns()
         try:
-            confirmed = transition.candidate_state if self.inner is None else await self.inner(transition)
+            returned = await self.inner(transition)
         except asyncio.CancelledError as error:
-            self._write(
+            write_best_effort(
+                self.config.sink,
                 LogLevel.WARNING,
-                f"{self.event}.cancelled",
+                f"{self.config.event}.cancelled",
                 (
                     *fields,
                     LogField("duration_ns", perf_counter_ns() - started),
@@ -86,9 +101,10 @@ class LoggedGraphCommit(Generic[GraphValueT]):
             )
             raise
         except Exception as error:
-            self._write(
+            write_best_effort(
+                self.config.sink,
                 LogLevel.ERROR,
-                f"{self.event}.failed",
+                f"{self.config.event}.failed",
                 (
                     *fields,
                     LogField("duration_ns", perf_counter_ns() - started),
@@ -96,17 +112,18 @@ class LoggedGraphCommit(Generic[GraphValueT]):
                 error=error,
             )
             raise
-        exact = type(confirmed) is Graph.State and confirmed == transition.candidate_state
-        self._write(
+        exact = candidate is not None and type(returned) is Graph.State and returned == candidate
+        write_best_effort(
+            self.config.sink,
             LogLevel.INFO if exact else LogLevel.ERROR,
-            f"{self.event}.accepted" if exact else f"{self.event}.mismatch",
+            f"{self.config.event}.accepted" if exact else f"{self.config.event}.mismatch",
             (
                 *fields,
                 LogField("outcome", "accepted" if exact else "mismatch"),
                 LogField("duration_ns", perf_counter_ns() - started),
             ),
         )
-        return confirmed
+        return returned
 
 
 __all__ = ["LoggedGraphCommit"]
