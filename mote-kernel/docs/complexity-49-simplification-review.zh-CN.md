@@ -22,12 +22,12 @@
 - 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后已降为 48。
 - 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`），现已全部完成并验收。
 - `A` 的编号是：**3、11、12、14、20、38、39、40（均已完成）**。#15/#16 复核后改判为 `K`。
-- 另有 **8 项有局部整理方向**（标为 `B`）；#27/#28 已完成并验收，剩余 6 项只有证明能净删除且保留唯一事实源后才实施。
-- 原始 49 项中现有 **33 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2 复核后确认资源阶段边界清楚，不为共享 view 增加额外 wiring；#7/#10 复核后确认恢复阶段顺序和证据封口各有独立语义，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除。
+- 另有 **7 项有局部整理方向**（标为 `B`）；#27/#28 已完成并验收，剩余 5 项只有证明能净删除且保留唯一事实源后才实施。
+- 原始 49 项中现有 **34 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2 复核后确认资源阶段边界清楚，不为共享 view 增加额外 wiring；#7/#10 复核后确认恢复阶段顺序和证据封口各有独立语义，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
-本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#20、#27、#28、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#41 复核后保留现状。
+本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#18、#20、#27、#28、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#41 复核后保留现状。
 
 ## 门禁基线与判定口径
 
@@ -93,7 +93,7 @@ make check                      926 passed, coverage 100%
 | # | 位置（指标） | 当前职责 | 判断与目标 |
 |---:|---|---|---|
 | 17 | `execution/engine/session.py:180` `_GraphExecutionSession.next`（12/21/3/2/176） | ack 上一条 reducer successor、排空 scheduler、处理 node-origin cancellation、一次交付一个 completion。 | **K**：这是单消费者 session 协议和 cancellation 时序；把循环拆散会掩盖 ack/close 顺序。 |
-| 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（24/31/3/2/233） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **B**：可以按 identity/frontier/routing/resource phase 整理，并让 compiled resource requirement 只计算一次；不能重复实现 `validate_graph_run_state` 或改变异常类型。 |
+| 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（22/21/2/2/212） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **K（局部净化完成，2026-09-01）**：无 active execution 时直接返回，资源参与者改为通过“节点 → 所需资源”映射一次比较；保留原有校验顺序、异常类型和 `validate_graph_run_state` 的唯一 owner，不再拆阶段 helper。 |
 | 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **K（评审后保留，2026-08-31）**：现有两个 `@overload` 已分别表达 callable 与 nested graph 的合法参数，对外保留统一的 `add_node` 更友好；union 分支是 Python 动态调用所需的运行时校验，不拆公共入口，也不为降指标增加转发 helper。 |
 | 20 | `execution/facade.py:594` `Graph.run`（28/42/3/9/444 → 22/34/3/9/356） | 新运行、state-only recovery、continuation admission、preflight、owner drive、取消、partial commit 和 cleanup 全部串在一个公共方法。 | **A（已完成，2026-08-31）**：公开 `run` 与三个 overload 不变；fresh/continued 分支只生成各自的 root admission，再共用一次 owner-task 等待，驱动、结果投影和取消矩阵收进局部 `drive_project_finish` 阶段。没有新增 context、模块级 helper 或第二 runner，abort → release 与 cleanup 错误优先级不变。 |
 | 21 | `execution/family_driver.py:269` `_frames_for_owner`（12/14/2/3/126） | 将全局 continuation frame index 投影到一个 owner，并验证 child binding。 | **K（指标误报型）**：是短而清晰的 scoped projection；抽象成泛型过滤器会丢掉 child-boundary 领域检查。 |
@@ -206,7 +206,7 @@ nominal record type
 
 ## 从 `Graph.run` 出发的完整调用链审查
 
-这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，剩余可研究点是 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 33 个 `K` 项一概视为调用链问题。
+这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，剩余可研究点是 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 34 个 `K` 项一概视为调用链问题。
 
 ### 0. 覆盖口径：什么叫“全部遍历”
 
@@ -632,7 +632,7 @@ drive boundary
 
 | 组 | 项目 | 需要证明的净收益 |
 |---|---|---|
-| snapshot/definition/resource validation | #18、#33、#35、#46 | 结构检查、compiled compatibility、durable replay 各有唯一 owner，异常边界不交叉。 |
+| snapshot/definition/resource validation | #33、#35、#46 | 结构检查、compiled compatibility、durable replay 各有唯一 owner，异常边界不交叉。 |
 | compiler proof | #30、#32 | typed phase result 比当前交叉循环更短、更易读，并且 ratchet 的总定义/节点数下降。 |
 
 特别是 #32（`_compile_graph`）虽然数值最高，但不能据此直接拆函数。先画出 phase 输入/输出和所有事实 owner，再用一个小图覆盖 direct、conditional、join、data dependency、nested graph、graph output 五类组合；没有这个证明时，保留现状比引入 `CompilationContext` 更简单。
