@@ -19,15 +19,15 @@
 
 本次审查的对象是 `src/mote_kernel` 基线复杂度报告列出的 49 个定义。结论不是“门禁通过所以无需处理”：
 
-- 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后已降为 48。
+- 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后降为 48，#33 完成后降为 47。
 - 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`），现已全部完成并验收。
 - `A` 的编号是：**3、11、12、14、20、38、39、40（均已完成）**。#15/#16 复核后改判为 `K`。
-- 另有 **8 项有局部整理方向**（标为 `B`）；#27/#28 已完成并验收，剩余 6 项只有证明能净删除且保留唯一事实源后才实施。
-- 原始 49 项中现有 **33 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2 复核后确认资源阶段边界清楚，不为共享 view 增加额外 wiring；#7/#10 复核后确认恢复阶段顺序和证据封口各有独立语义，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除。
+- 当前有 **4 项标为 `B`**（存在局部整理方向）；#27/#28/#32/#33 已完成并验收，本轮没有留下待实施的 B 项。
+- 原始 49 项中现有 **37 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2/#7/#10/#15/#16/#30/#35/#46 复核后确认各自的状态、恢复、资源、路径和错误边界清楚，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
-本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#20、#27、#28、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#41 复核后保留现状。
+本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#18、#20、#27、#28、#32、#33、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#35、#41、#46 复核后保留现状。
 
 ## 门禁基线与判定口径
 
@@ -93,8 +93,8 @@ make check                      926 passed, coverage 100%
 | # | 位置（指标） | 当前职责 | 判断与目标 |
 |---:|---|---|---|
 | 17 | `execution/engine/session.py:180` `_GraphExecutionSession.next`（12/21/3/2/176） | ack 上一条 reducer successor、排空 scheduler、处理 node-origin cancellation、一次交付一个 completion。 | **K**：这是单消费者 session 协议和 cancellation 时序；把循环拆散会掩盖 ack/close 顺序。 |
-| 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（24/31/3/2/233） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **B**：可以按 identity/frontier/routing/resource phase 整理，并让 compiled resource requirement 只计算一次；不能重复实现 `validate_graph_run_state` 或改变异常类型。 |
-| 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **K（评审后保留，2026-08-31）**：现有两个 `@overload` 已分别表达 callable 与 nested graph 的合法参数，对外保留统一的 `add_node` 更友好；union 分支是 Python 动态调用所需的运行时校验，不拆公共入口，也不为降指标增加转发 helper。 |
+| 18 | `execution/engine/snapshot_guard.py:22` `require_snapshot_matches_graph`（22/21/2/2/212） | 校验 state 自身、compiled identity、join/routing、resume codec 和 active resource participants。 | **K（局部净化完成，2026-09-01）**：无 active execution 时直接返回，资源参与者改为通过“节点 → 所需资源”映射一次比较；保留原有校验顺序、异常类型和 `validate_graph_run_state` 的唯一 owner，不再拆阶段 helper。 |
+| 19 | `execution/facade.py:298` `Graph.add_node`（10/15/2/6/216 → 9/13/2/6/201） | 一个 API 同时接受 callable node 和 nested graph，并用 `None`/运行时类型决定 outputs/resources 规则。 | **K（评审后保留，2026-08-31）**：现有两个 `@overload` 已分别表达 callable 与 nested graph 的合法参数，对外保留统一的 `add_node` 更友好；union 分支是 Python 动态调用所需的运行时校验，不拆公共入口，也不为降指标增加转发 helper。#33 顺带删除资源 order 的重复构造，但不改变这个公共 API 判断。 |
 | 20 | `execution/facade.py:594` `Graph.run`（28/42/3/9/444 → 22/34/3/9/356） | 新运行、state-only recovery、continuation admission、preflight、owner drive、取消、partial commit 和 cleanup 全部串在一个公共方法。 | **A（已完成，2026-08-31）**：公开 `run` 与三个 overload 不变；fresh/continued 分支只生成各自的 root admission，再共用一次 owner-task 等待，驱动、结果投影和取消矩阵收进局部 `drive_project_finish` 阶段。没有新增 context、模块级 helper 或第二 runner，abort → release 与 cleanup 错误优先级不变。 |
 | 21 | `execution/family_driver.py:269` `_frames_for_owner`（12/14/2/3/126） | 将全局 continuation frame index 投影到一个 owner，并验证 child binding。 | **K（指标误报型）**：是短而清晰的 scoped projection；抽象成泛型过滤器会丢掉 child-boundary 领域检查。 |
 | 22 | `execution/family_driver.py:352` `_GraphRun.__init__`（1/0/0/11/134） | 注入一个 live owner 真正需要的 graph、state、frames、commit、child constructor、position 和 evidence publisher。 | **K（参数误报型）**：11 个依赖是 ownership wiring，不应为了参数门禁引入宽 `RunContext`。 |
@@ -110,12 +110,12 @@ make check                      926 passed, coverage 100%
 | # | 位置（指标） | 当前职责 | 判断与目标 |
 |---:|---|---|---|
 | 29 | `execution/graph/compiler.py:190` `_guaranteed_sets`（11/27/5/3/160） | 计算每个节点在所有 activation gate 下都保证已经发生的 producer 集合。 | **K**：交集固定点是拓扑证明本身；`nest=5` 不表示可以改成一次线性遍历。 |
-| 30 | `execution/graph/compiler.py:316` `_validate_joint_activation_paths`（38/57/3/6/435） | 建依赖图、去除 cycle-reachable 节点、按拓扑顺序合并 route requirements，并验证 join 可共同到达。 | **B（高优先级设计）**：存在把 route requirement 建模成窄 lattice/phase result 的机会，但必须先独立设计；禁止用宽 bag、字符串 discriminator 或第二套 compiler。 |
+| 30 | `execution/graph/compiler.py:316` `_validate_joint_activation_paths`（38/57/3/6/435） | 建依赖图、去除 cycle-reachable 节点、按拓扑顺序合并 route requirements，并验证 join 可共同到达。 | **K（复核后保留，2026-09-01）**：这是联合路径可满足性证明，不是普通结构校验。现有 route helper 已分别表达同一路径取交集、可选路径取并集、指定 route 和 gate 合并；主函数的依赖图、固定节点拓扑序、约束传播、join 检查是一个连续证明。继续拆成 lattice/phase record 只会搬运中间事实，不能净删逻辑，还可能改变 cycle 跳过、join 错误优先级和确定性排序。 |
 | 31 | `execution/graph/compiler.py:411` `_absolute_activation_levels`（13/23/4/3/142） | 对非循环节点求绝对 activation level，供 publication selection 使用。 | **K**：这是确定性 level fixed point；拆 helper 不会改变算法复杂度。 |
-| 32 | `execution/graph/compiler.py:464` `_compile_graph`（74/120/4/2/1238） | 递归 nested compile、解析 ports、建 data/control topology、验证可达性、计算 guarantees/levels、构造所有 descriptors。 | **B（最高设计收益）**：应考虑“输入解析 → 拓扑证明 → publication/materialization → immutable plan”四个纯 phase，以窄的 `CompilationFacts` 传递；只有能删除当前大段交叉循环才实施，不能机械拆成十几个 forwarding helper。 |
-| 33 | `execution/graph/validation.py:44` `_validate_resources`（11/14/2/1/133） | 校验 graph resource catalog 的 identity、first-seen order 和 node requirements。 | **B**：可让编译后的 typed resource catalog 成为 order 的唯一来源；Execution/State 仍各自包装领域异常，不能把 graph definition 和 runtime snapshot 混成一个 validator。 |
+| 32 | `execution/graph/compiler.py:464` `_compile_graph`（74/120/4/2/1238 → 70/110/4/2/1203） | 递归 nested compile、解析 ports、建 data/control topology、验证可达性、计算 guarantees/levels、构造所有 descriptors。 | **B（局部净化已完成并验收，2026-09-01）**：资源顺序和 callable 节点在索引阶段一次规范化；嵌套边界直接比较 typed binding；publication selection 确定后按 `node_ids` 一次构造 materialization/publication descriptor。删除末尾重复 canonicalization、临时边界声明和第二次节点遍历；不引入宽 `CompilationFacts` 或第二套 topology owner。 |
+| 33 | `execution/graph/validation.py:44` `_validate_resources`（11/14/2/1/133 → 9/12/2/1/110） | 校验 graph resource catalog 的 identity、声明顺序和 node requirements。 | **B（已完成并验收，2026-09-01）**：删除 `ResourceDefinition.order`，让 `GraphDefinition.resources` tuple 顺序成为静态资源顺序的唯一来源；保留 identity、唯一 ID、节点要求和运行时 snapshot 的各自校验边界。 |
 | 34 | `execution/graph/validation.py:64` `_validate_edges`（23/33/3/2/293） | 校验 direct/conditional/join edge 的 endpoint、重复、route 和 nested-source 规则。 | **K（评审后保留，2026-08-31）**：当前单次循环按声明顺序就地校验三种边，错误类型和优先级清晰且已有确定性测试保护；拆成三个 validator 只会增加参数传递和跳转，不删除规则，也不共享 join 的不同错误语义。 |
-| 35 | `execution/graph/validation.py:109` `_validate_definition`（14/18/2/2/232） | 递归校验 graph identity/version、节点、资源、边、codec，并区分递归与 identity collision。 | **B**：可把“visit 状态/递归”与“当前 definition shape”分成两个纯 phase；必须保留 duplicate-definition 与 recursive-definition 的不同错误。 |
+| 35 | `execution/graph/validation.py:109` `_validate_definition`（14/18/2/2/232） | 递归校验 graph identity/version、节点、资源、边、codec，并区分递归与 identity collision。 | **K（复核后保留，2026-09-01）**：它是按声明顺序执行“身份 → 冲突/递归 → 当前层结构 → 子 definition → 完成”的单一 DFS 状态机；拆出 shape phase 不会删除规则，反而会增加遍历或参数传递，并可能改变父子错误、identity collision 与 recursive-definition 的优先级。 |
 | 36 | `execution/graph/values.py:152` `_admit_entries`（11/11/2/3/144） | 所有 frame wrapper 共用的 canonical entry/name/exact-type 校验。 | **K（已是共享基础设计）**：它正是唯一 entry rule owner；四个外层 wrapper 只保留 graph-input/node-input/node-output/graph-output 的异常边界，不再泛化。 |
 
 ### D. invocation / frame index / state reducer（37–49）
@@ -131,7 +131,7 @@ make check                      926 passed, coverage 100%
 | 43 | `state/graph_state/execution_transitions.py:150` `settle_graph_node`（17/23/3/2/247） | 校验 execution lease，转换 success/failure/interrupt，释放资源并原子更新 frontier。 | **K**：一个 command 必须原子完成 settlement + resource release + lease 清理；不能拆成可独立提交的路径。 |
 | 44 | `state/graph_state/recovery_transitions.py:29` `resume_graph_nodes`（22/34/5/2/258） | 校验三种 resume action，按 node identity 更新 frontier，并保留 interrupt/codec 约束。 | **K**：action variant 与失败顺序就是 State 的领域异常边界；Execution 不能复制一份 reducer。 |
 | 45 | `state/graph_state/reducer.py:30` `reduce_graph_run`（12/27/6/2/154） | 唯一 GraphRunCommand dispatch、revision 校验与 revision +1。 | **K**：这是唯一 reducer 入口；改成动态表或多个 reducer 会破坏单一真相。 |
-| 46 | `state/graph_state/resource_reducer.py:24` `_validate_snapshot`（29/50/3/1/356） | 校验 resource lock/waiter/acquisition 的形状、顺序、所有权和队列一致性。 | **B（谨慎）**：可分出“静态 shape”与“replay consistency”两个阶段，但两者都必须由 State resource owner 维护；不得把校验移到 Execution，也不能省略 replay。 |
+| 46 | `state/graph_state/resource_reducer.py:24` `_validate_snapshot`（29/50/3/1/356） | 校验 resource lock/waiter/acquisition 的形状、顺序、所有权和队列一致性。 | **K（复核后保留，2026-09-01）**：两级边界已经存在：`_validate_snapshot` 校验当前快照的结构和双向关系，`validate_resource_snapshot` 再从空快照按 acquisition 顺序重放并比较历史结果。拆分只会传递或重复建立共享索引、增加 wiring，并可能改变错误优先级；重放不能省略，也不能移出 State resource owner。 |
 | 47 | `state/graph_state/resource_reducer.py:123` `_release`（14/14/2/2/163） | 释放 admitted acquisition，按全局资源顺序推进 FIFO waiter。 | **K**：资源 FIFO 和多资源 prefix 是核心算法；任何泛化都容易改变 waiter 顺序。 |
 | 48 | `state/graph_state/validation.py:71` `validate_graph_frontier`（18/23/4/2/205） | 校验每个 frontier settlement、routing、interrupt payload 和 codec 必要性。 | **K**：这是 durable frontier 的总不变量，分支对应 nominal settlement 类型。 |
 | 49 | `state/graph_state/validation.py:125` `validate_graph_run_state`（33/43/2/1/357） | 校验 parent identity、join progress、resource/execution lease 和三种 lifecycle status。 | **K**：状态合法性矩阵必须集中在 State owner；拆开会产生状态真相分裂。 |
@@ -204,9 +204,15 @@ nominal record type
 
 **#34 评审后保留。** `_validate_edges` 在同一次声明顺序遍历中就地表达 direct、conditional、join 的不同错误边界；endpoint 文本相似，但 join 必须保留 `InvalidJoinError`，而 direct/conditional 使用 `UnknownNodeError`。拆 helper 不会删除规则，反而分散错误顺序。
 
+### 6. Resource validation：tuple 顺序是唯一来源（#33）
+
+**#33 已完成并验收。** `Graph.add_node` 本来就按资源首次出现顺序追加到 `GraphDefinition.resources`；原来的 `ResourceDefinition.order` 只是再存一份同样的数字，而编译器和运行时实际使用的是 tuple 派生出的 `transition.resource_order`。现在 `ResourceDefinition` 只保留 `resource_id`，校验器也不再检查无意义的 numeric order；重复 ID、非法 identity、重复或未声明的节点资源要求仍保持原有错误边界。`ResourceSnapshot` 及其 State 校验没有移动或合并。
+
+这是一次内部结构 breaking change：直接构造 `ResourceDefinition(resource_id, order)` 或读取 `.order` 的代码必须迁移为单参数构造，并把期望的获取顺序放在 `GraphDefinition.resources` tuple 中。旧字段、兼容 alias、wrapper 和双路径均不保留。当前仓库没有持久化 GraphDefinition 编解码格式；未来若引入外部或持久化定义，必须在其独立的 schema/version migration 中把旧 `order` 字段转换为 tuple 顺序后再加载，不能把旧字段重新带回 Kernel。
+
 ## 从 `Graph.run` 出发的完整调用链审查
 
-这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，剩余可研究点是 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 33 个 `K` 项一概视为调用链问题。
+这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，剩余可研究点是 fresh/continued owner admission 和 cleanup 的重复 wiring。** 因此不能把 49 个热点或 34 个 `K` 项一概视为调用链问题。
 
 ### 0. 覆盖口径：什么叫“全部遍历”
 
@@ -339,7 +345,7 @@ Graph._compile
 
 validation 的错误边界清楚，family installation 也保持“全部成功才冻结 owner”的原子语义。这里没有第二 compiler，也没有 runtime 重新解释 topology。
 
-真正的问题仍是 #32：`_compile_graph` 把 scope-independent topology proof 与 scope-dependent port/descriptor materialization 交叉在一个 1,238-node 函数中。完整调用链还暴露出同一个 nested definition 会以“可独立运行的 root scope”和“父图中的 nested scope”分别编译；scope-dependent descriptor 不能直接共用，但 identity、edge、reachability 和 activation proof 不应重复成为两份事实。B 级目标应进一步明确为：
+此前对 #32 的担忧集中在：`_compile_graph` 把 scope-independent topology proof 与 scope-dependent port/descriptor materialization 交叉在一个大函数中。局部净化已经删除了能明确证明为重复的 canonicalization、临时边界对象和第二次节点遍历；同一个 nested definition 仍会按 root scope/父图 scope 分别物化，这是 descriptor identity 的必要区别。没有足够证据证明可以安全共享 scope-neutral facts，因此本次不引入宽 `CompilationFacts` 或缓存一致性协议。保留的目标形状是：
 
 ```text
 validated definition
@@ -348,7 +354,7 @@ validated definition
   -> immutable CompiledGraph
 ```
 
-只有原型证明这个结构能删除交叉循环、且不会新增宽 `CompilationContext` 或缓存一致性协议，才将 #32 升为实施项。当前不能因它数值最高就机械拆 helper。
+本次原型只实施了上述可证明净删除的局部项；后续若要做 scope-neutral proof 分离，仍需单独证明不会改变 nested scope、错误优先级和 immutable plan 的 owner。不能因函数数值仍高就机械拆 helper。
 
 ### 3. continued/recovered admission：顺序必要，lookup/normalization 可收敛
 
@@ -471,7 +477,7 @@ session.next
      └─ 仍 pending -> ResultCollectionError（planner/session 不一致）
 ```
 
-resource 路径同样只有一份规则：`admit_tasks` 按 canonical task 顺序调用 `reduce_resources(AcquireResources)`，runtime/recovery 共同消费 `select_executable_tasks`；settlement 再由 State reducer 原子 `ReleaseResources` 并按 FIFO 推进 waiter。重复的 snapshot validate/replay 是 durable input、claim admission 和 state transition 各自的 fail-closed 边界，不是三套资源算法。#1/#2 已复核保留；#46 仍只能在不离开 State owner 的前提下研究阶段化或复用已验证 view，#47 的 FIFO/prefix 算法保留。
+resource 路径同样只有一份规则：`admit_tasks` 按 canonical task 顺序调用 `reduce_resources(AcquireResources)`，runtime/recovery 共同消费 `select_executable_tasks`；settlement 再由 State reducer 原子 `ReleaseResources` 并按 FIFO 推进 waiter。重复的 snapshot validate/replay 是 durable input、claim admission 和 state transition 各自的 fail-closed 边界，不是三套资源算法。#1/#2/#46 已复核保留：`_validate_snapshot` 负责中间结果的结构/关系封口，公共 `validate_resource_snapshot` 负责 durable acquisition history 的重放；两者不能合并成一个递归 validator。#47 的 FIFO/prefix 算法保留。
 
 外部 callable、commit 和 codec 是端口边界。内核已对它们分别执行 strict outcome admission、exact successor confirmation、bytes/`Graph.Values` nominal validation；进一步“遍历”端口实现会越过本项目 ownership scope。
 
@@ -611,7 +617,7 @@ drive boundary
 
 | 调用链 | 当前是否足够简单 | 结论 | 对应项目 |
 |---|---|---|---|
-| compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #30/#32 B |
+| compile/cache/family install | 是（保留单一 compiler owner） | 局部规范化和 descriptor 构造已合并；scope-neutral proof 不做未经证明的缓存共享 | #32 已完成 |
 | `Graph.run` mode + preparation + lifecycle | 是 | 已分为 admission preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 已完成 |
 | continuation/frame/resume admission | 是 | 顺序保留；共享不可变 canonical lineage index，并按需形成 scope action groups，frame 先结构后语义 | #11/#12/#38/#39/#40 已完成；#41 K |
 | `prepare_superstep` 状态分支 | 是 | 状态叶子和错误顺序清晰，不再泛化 dispatcher | #4、#8、#17、#25 等 K |
@@ -624,7 +630,7 @@ drive boundary
 | recovery proof | 是 | bounded worklist/fixed point 是算法本体，不建第二 runner | #4–#10 多数 K/B |
 | result projection + final cleanup | 是；owner 构造失败 cleanup 仍可研究 | facade 结果出口已收拢，owner admission policy 继续独立评审 | #20 已完成，#26 K，#27 B |
 
-所以，对“整个调用链是否足够简单”的直接回答是：**主状态推进链、统一入口和 continued owner admission 现在都足够清楚。** 剩余 B 项是 compiler 与 validation 的独立设计课题；后续只在能净删 wiring 时继续，不为让每个函数都低于阈值而拆散状态机、reducer 或 recovery 证明器。
+所以，对“整个调用链是否足够简单”的直接回答是：**主状态推进链、统一入口、continued owner admission 和 compiler 的可证明局部路径现在都足够清楚。** B 项已全部完成；如果未来重新研究 scope-neutral proof，仍须先证明能净删 wiring，不为让每个函数都低于阈值而拆散状态机、reducer 或 recovery 证明器。
 
 ## 条件可化简项目：先做设计，不把希望写进生产代码
 
@@ -632,10 +638,10 @@ drive boundary
 
 | 组 | 项目 | 需要证明的净收益 |
 |---|---|---|
-| snapshot/definition/resource validation | #18、#33、#35、#46 | 结构检查、compiled compatibility、durable replay 各有唯一 owner，异常边界不交叉。 |
-| compiler proof | #30、#32 | typed phase result 比当前交叉循环更短、更易读，并且 ratchet 的总定义/节点数下降。 |
+| snapshot/definition/resource validation | #35、#46 | 结构检查、compiled compatibility、durable replay 各有唯一 owner，异常边界不交叉。 |
+| compiler proof | #32（已完成局部净化） | 删除重复 canonicalization、临时边界对象和第二次节点遍历；未引入未经证明的 typed phase result。#30 已复核为 K：其交叉循环就是联合路径证明本身。 |
 
-特别是 #32（`_compile_graph`）虽然数值最高，但不能据此直接拆函数。先画出 phase 输入/输出和所有事实 owner，再用一个小图覆盖 direct、conditional、join、data dependency、nested graph、graph output 五类组合；没有这个证明时，保留现状比引入 `CompilationContext` 更简单。
+特别是 #32（`_compile_graph`）仍然数值较高，但局部净化后没有必要继续拆函数。若未来重新设计，仍要先画出 phase 输入/输出和所有事实 owner，并覆盖 direct、conditional、join、data dependency、nested graph、graph output 五类组合；没有净删除证明时，保留单一 compiler owner 比引入 `CompilationContext` 更简单。
 
 ## 复用与 clone 审查
 
@@ -656,7 +662,7 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 2. resume admission 与 routing/materialization（#11–#16、#38–#40）已完成治理；#11/#12/#14/#38/#39/#40 已验收，#15/#16/#41 保留。
 3. `Graph.run` 生命周期（#20）已完成；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
-5. 最后才评估 B 组，特别是 compiler/recovery；任何没有净删除的拆分都退回设计阶段。
+5. #33 resource validation 和 #32 compiler 局部净化已完成并验收；#35/#46 resource/definition snapshot validation 复核后保留现状；#30 joint activation proof 复核后保留现状。B 组已清空，任何未来没有净删除证明的拆分都退回设计阶段。
 6. 每个可合并提交运行 `make complexity-report`、`make complexity-ratchet`、`git diff --check`；实际下降后立即降低 `pyproject.toml` ratchet 上限。
 
 成功标准不是单纯把 49 改成更小的数字，而是同时满足：唯一事实 owner、无重复执行路径、异常边界稳定、状态先持久化确认再更新内存、生产代码没有 legacy 兼容债务，并且代码阅读者能从函数结构直接看出这些不变量。

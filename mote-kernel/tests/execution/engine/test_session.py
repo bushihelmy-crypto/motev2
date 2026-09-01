@@ -185,7 +185,7 @@ async def test_resource_release_makes_waiter_selectable_on_next_acknowledged_sta
             node("a", operation, resources=(resource,)),
             node("b", operation, resources=(resource,)),
         ),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(compiled, state)
@@ -216,7 +216,7 @@ async def test_resource_waiter_starts_only_after_the_settlement_successor_is_ack
             node("a", owner, resources=(resource,)),
             node("b", waiter, resources=(resource,)),
         ),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(compiled, state)
@@ -263,7 +263,7 @@ async def test_queued_typed_sibling_does_not_delay_a_newly_admitted_waiter() -> 
             node("b", waiter, resources=(resource,)),
             node("x", sibling),
         ),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(
@@ -324,7 +324,7 @@ async def test_queued_ordinary_error_prevents_newly_admitted_waiter_from_startin
             node("b", waiter, resources=(resource,)),
             node("x", failing_sibling),
         ),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
     )
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(

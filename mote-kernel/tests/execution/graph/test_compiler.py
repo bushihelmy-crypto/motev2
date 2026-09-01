@@ -176,12 +176,12 @@ def test_compiling_the_same_definition_is_idempotent() -> None:
     assert first is not second
 
 
-def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> None:
+def test_compilation_uses_declared_resource_tuple_order_for_requirements() -> None:
     definition = graph(
-        nodes=(replace(node("a"), resources=(ResourceId("file"), ResourceId("database"))),),
+        nodes=(replace(node("a"), resources=(ResourceId("database"), ResourceId("file"))),),
         resources=(
-            ResourceDefinition(ResourceId("database"), 0),
-            ResourceDefinition(ResourceId("file"), 1),
+            ResourceDefinition(ResourceId("file")),
+            ResourceDefinition(ResourceId("database")),
         ),
     )
 
@@ -189,6 +189,7 @@ def test_compilation_normalizes_node_requirements_by_graph_resource_order() -> N
     compiled_node = compiled.nodes[GraphNodeId("a")]
 
     assert isinstance(compiled_node, CallableNodeDefinition)
-    assert compiled.transition.resource_order == (ResourceId("database"), ResourceId("file"))
-    assert compiled_node.resources == (ResourceId("database"), ResourceId("file"))
+    assert compiled.transition.resource_order == (ResourceId("file"), ResourceId("database"))
+    assert compiled_node.resources == (ResourceId("file"), ResourceId("database"))
+    # The lookup map is key-sorted; runtime order comes from the declaration tuple above.
     assert tuple(compiled.resources) == (ResourceId("database"), ResourceId("file"))

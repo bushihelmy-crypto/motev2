@@ -233,11 +233,9 @@ def test_conditional_endpoint_error_precedes_nested_source_error() -> None:
 @pytest.mark.parametrize(
     "resources",
     [
-        (ResourceDefinition(ResourceId(""), 0),),
-        (ResourceDefinition(ResourceId(" file"), 0),),
-        (ResourceDefinition(ResourceId("file"), -1),),
-        (ResourceDefinition(ResourceId("file"), 0), ResourceDefinition(ResourceId("file"), 1)),
-        (ResourceDefinition(ResourceId("file"), 1), ResourceDefinition(ResourceId("database"), 1)),
+        (ResourceDefinition(ResourceId("")),),
+        (ResourceDefinition(ResourceId(" file")),),
+        (ResourceDefinition(ResourceId("file")), ResourceDefinition(ResourceId("file"))),
     ],
 )
 def test_invalid_resource_definitions_fail_closed(resources: tuple[ResourceDefinition, ...]) -> None:
@@ -246,7 +244,7 @@ def test_invalid_resource_definitions_fail_closed(resources: tuple[ResourceDefin
 
 
 def test_node_resource_requirements_must_be_unique_and_declared() -> None:
-    declared = (ResourceDefinition(ResourceId("file"), 0),)
+    declared = (ResourceDefinition(ResourceId("file")),)
 
     with pytest.raises(InvalidResourceDefinitionError, match="unknown"):
         compile_graph(

@@ -19,6 +19,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   longer maintains a separate `set_entry()` configuration path.
 - **Breaking:** Graph nodes now implement an async `Node` protocol, and callers must `await step_graph()`.
   Graph execution is async-only and does not provide a synchronous compatibility path.
+- **Breaking:** `ResourceDefinition` now contains only `resource_id`; its former `order` argument and
+  attribute are removed. The containing `GraphDefinition.resources` tuple is the sole source of static
+  resource-acquisition order. Callers that construct internal graph definitions must put resources in
+  their intended order; no legacy alias or compatibility wrapper is retained.
 - Concurrent nodes now share one immutable input snapshot, which node implementations must treat as read-only.
 
 ### Added

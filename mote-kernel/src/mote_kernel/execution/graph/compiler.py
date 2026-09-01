@@ -469,7 +469,22 @@ def _compile_graph(
     for node in definition.nodes:
         if isinstance(node, NestedGraphNodeDefinition):
             nested_graphs[node.node_id] = _compile_graph(node.graph, (*scope, node.node_id))
-    nodes = {node.node_id: node for node in definition.nodes}
+    resource_order = tuple(resource.resource_id for resource in definition.resources)
+    positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
+    nodes = {
+        node.node_id: (
+            CallableNodeDefinition(
+                node.node_id,
+                node.operation,
+                node.inputs,
+                node.outputs,
+                tuple(sorted(node.resources, key=positions.__getitem__)),
+            )
+            if isinstance(node, CallableNodeDefinition)
+            else node
+        )
+        for node in definition.nodes
+    }
     node_ids = tuple(sorted(nodes))
     graph_inputs = _collect_graph_inputs(definition)
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]] = {
@@ -480,7 +495,7 @@ def _compile_graph(
         )
         for node_id in node_ids
     }
-    resolved_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
+    input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
     data_dependencies = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for node_id in node_ids:
         node = nodes[node_id]
@@ -506,16 +521,13 @@ def _compile_graph(
         resolved_bindings = ResolvedInputBindings(tuple(resolved))
         if isinstance(node, NestedGraphNodeDefinition):
             expected = nested_graphs[node_id].graph_input_descriptor.declarations.entries
-            actual = tuple(
-                OutputDeclaration(binding.destination.local_name, binding.descriptor)
-                for binding in resolved_bindings.entries
-            )
-            if tuple(item.name for item in actual) != tuple(item.name for item in expected) or any(
-                left.descriptor.value_type is not right.descriptor.value_type
-                for left, right in zip(actual, expected, strict=True)
+            if len(resolved_bindings.entries) != len(expected) or any(
+                binding.destination.local_name != declaration.name
+                or binding.descriptor.value_type is not declaration.descriptor.value_type
+                for binding, declaration in zip(resolved_bindings.entries, expected, strict=True)
             ):
                 raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
-        resolved_by_node[node_id] = resolved_bindings
+        input_bindings_by_node[node_id] = resolved_bindings
     if _data_cycle(data_dependencies):
         raise GraphValidationError("ordinary node value bindings contain a data cycle")
 
@@ -607,8 +619,11 @@ def _compile_graph(
     )
     terminal_guarantees = _terminal_guarantees(guarantees, terminal_gates)
     absolute_levels = _absolute_activation_levels(node_ids, entries, successors)
-    for node_id, bindings in tuple(resolved_by_node.items()):
-        resolved_by_node[node_id] = ResolvedInputBindings(
+    materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
+    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {}
+    for ordinal, node_id in enumerate(node_ids):
+        bindings = input_bindings_by_node[node_id]
+        published_bindings = ResolvedInputBindings(
             tuple(
                 ResolvedInputBinding(
                     binding.destination,
@@ -625,6 +640,22 @@ def _compile_graph(
                 )
                 for binding in bindings.entries
             )
+        )
+        input_declarations = OutputDeclarations(
+            tuple(
+                OutputDeclaration(binding.destination.local_name, binding.descriptor)
+                for binding in published_bindings.entries
+            )
+        )
+        materializations[node_id] = MaterializationPlan(
+            published_bindings,
+            _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations),
+        )
+        publications[node_id] = _frame_descriptor(
+            definition,
+            FrameKind.NODE_OUTPUT,
+            ordinal,
+            node_outputs[node_id],
         )
     graph_output_bindings: list[GraphOutputBinding[GraphValueT]] = []
     for output in definition.outputs.entries:
@@ -651,26 +682,6 @@ def _compile_graph(
         )
     graph_outputs = GraphOutputBindings(tuple(graph_output_bindings))
 
-    materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
-    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {}
-    for ordinal, node_id in enumerate(node_ids):
-        input_declarations = OutputDeclarations(
-            tuple(
-                OutputDeclaration(binding.destination.local_name, binding.descriptor)
-                for binding in resolved_by_node[node_id].entries
-            )
-        )
-        materializations[node_id] = MaterializationPlan(
-            resolved_by_node[node_id],
-            _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations),
-        )
-        publications[node_id] = _frame_descriptor(
-            definition,
-            FrameKind.NODE_OUTPUT,
-            ordinal,
-            node_outputs[node_id],
-        )
-
     transition = FrontierTransitionPlan(
         entries,
         frozen_map({node_id: tuple(sorted(targets)) for node_id, targets in direct_targets.items()}),
@@ -684,28 +695,13 @@ def _compile_graph(
         frozen_map(materializations),
         frozen_map(publications),
         graph_outputs,
-        tuple(resource.resource_id for resource in definition.resources),
+        resource_order,
     )
-    positions = {resource_id: position for position, resource_id in enumerate(transition.resource_order)}
-    canonical_nodes = {
-        node_id: (
-            CallableNodeDefinition(
-                node.node_id,
-                node.operation,
-                node.inputs,
-                node.outputs,
-                tuple(sorted(node.resources, key=positions.__getitem__)),
-            )
-            if isinstance(node := nodes[node_id], CallableNodeDefinition)
-            else node
-        )
-        for node_id in node_ids
-    }
     return CompiledGraph(
         definition_id=definition.definition_id,
         version=definition.version,
         definition_scope=scope,
-        nodes=frozen_map(canonical_nodes),
+        nodes=frozen_map(nodes),
         nested_graphs=frozen_map(nested_graphs),
         graph_input_descriptor=_frame_descriptor(definition, FrameKind.GRAPH_INPUT, 0, graph_inputs),
         graph_output_descriptor=_frame_descriptor(

@@ -43,9 +43,8 @@ def require_graph_identity(value: str, *, kind: str) -> None:
 
 def _validate_resources(definition: GraphDefinition[GraphValueT]) -> None:
     resource_ids = tuple(resource.resource_id for resource in definition.resources)
-    orders = tuple(resource.order for resource in definition.resources)
-    if len(resource_ids) != len(set(resource_ids)) or orders != tuple(range(len(orders))):
-        raise InvalidResourceDefinitionError("graph resources require unique contiguous first-seen order")
+    if len(resource_ids) != len(set(resource_ids)):
+        raise InvalidResourceDefinitionError("graph resources require unique resource IDs")
     for resource_id in resource_ids:
         try:
             require_graph_identity(resource_id, kind="resource")

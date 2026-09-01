@@ -955,7 +955,7 @@ def test_snapshot_guard_rejects_unknown_and_mismatched_resource_participants() -
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
-            resources=(ResourceDefinition(resource, 0), ResourceDefinition(database, 1)),
+            resources=(ResourceDefinition(resource), ResourceDefinition(database)),
         )
     )
     state = running_state(definition_id="resource.graph")

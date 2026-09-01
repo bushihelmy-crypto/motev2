@@ -37,31 +37,25 @@ def require_snapshot_matches_graph(
     require_resume_input_binding(graph, state)
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)
-    if state.execution is not None:
-        required = {
-            node.node_id: definition.resources
-            for node in state.frontier.nodes
-            if isinstance(node.settlement, PendingGraphNode)
-            and isinstance(definition := graph.nodes[node.node_id], CallableNodeDefinition)
-            and definition.resources
-        }
-        resources = state.resources
-        if not required:
-            if resources is not None:
-                raise InvalidExecutionSnapshotError("resource-free pending nodes cannot retain acquisitions")
-            return
-        if (
-            resources is None
-            or tuple(lock.resource_id for lock in resources.resources) != graph.transition.resource_order
-        ):
-            raise InvalidExecutionSnapshotError("active resource participants require the compiled resource snapshot")
-        acquisitions = {item.node_id: item for item in resources.acquisitions}
-        if acquisitions.keys() != required.keys() or any(
-            acquisitions[node_id].required != requirements for node_id, requirements in required.items()
-        ):
-            raise InvalidExecutionSnapshotError(
-                "resource acquisitions do not exactly match pending compiled requirements"
-            )
+    if state.execution is None:
+        return
+    required = {
+        node.node_id: definition.resources
+        for node in state.frontier.nodes
+        if isinstance(node.settlement, PendingGraphNode)
+        and isinstance(definition := graph.nodes[node.node_id], CallableNodeDefinition)
+        and definition.resources
+    }
+    resources = state.resources
+    if not required:
+        if resources is not None:
+            raise InvalidExecutionSnapshotError("resource-free pending nodes cannot retain acquisitions")
+        return
+    if resources is None or tuple(lock.resource_id for lock in resources.resources) != graph.transition.resource_order:
+        raise InvalidExecutionSnapshotError("active resource participants require the compiled resource snapshot")
+    acquisitions = {item.node_id: item.required for item in resources.acquisitions}
+    if acquisitions != required:
+        raise InvalidExecutionSnapshotError("resource acquisitions do not exactly match pending compiled requirements")
 
 
 def require_scoped_snapshot_matches_graph(

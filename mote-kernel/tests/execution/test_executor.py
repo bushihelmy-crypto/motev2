@@ -329,7 +329,7 @@ def nested_graph() -> CompiledGraph[str]:
     return graph_with_nodes(
         node("ordinary", resources=(resource,)),
         nested_node("nested", child_definition()),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
     )
 
 
@@ -1286,7 +1286,7 @@ async def test_prepare_rejects_an_empty_resource_admission_projection(
     resource = ResourceId("file")
     graph = graph_with_nodes(
         node("a", resources=(resource,)),
-        resources=(ResourceDefinition(resource, 0),),
+        resources=(ResourceDefinition(resource),),
         definition_id="resource.empty-admission",
     )
 
