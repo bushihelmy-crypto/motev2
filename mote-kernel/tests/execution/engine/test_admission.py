@@ -60,7 +60,7 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
                 replace(callable_node("b"), resources=(FILE,)),
                 callable_node("c"),
             ),
-            resources=(ResourceDefinition(FILE, 0),),
+            resources=(ResourceDefinition(FILE),),
         )
     )
 
@@ -76,7 +76,7 @@ def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
     graph = compile_graph(
         definition(
             (replace(callable_node("a"), resources=(FILE,)),),
-            resources=(ResourceDefinition(FILE, 0),),
+            resources=(ResourceDefinition(FILE),),
         )
     )
     first = admit_tasks(graph, (task("a"),), ResourceSnapshot((ResourceLock(FILE),)))
@@ -100,7 +100,7 @@ def resource_graph() -> CompiledGraph[str]:
                 replace(callable_node("a"), resources=(FILE,)),
                 callable_node("free"),
             ),
-            resources=(ResourceDefinition(FILE, 0),),
+            resources=(ResourceDefinition(FILE),),
         )
     )
 
@@ -164,7 +164,7 @@ def test_admission_is_independent_of_input_task_order() -> None:
                 replace(callable_node("a"), resources=(FILE,)),
                 replace(callable_node("b"), resources=(FILE,)),
             ),
-            resources=(ResourceDefinition(FILE, 0),),
+            resources=(ResourceDefinition(FILE),),
         )
     )
     snapshot = ResourceSnapshot((ResourceLock(FILE),))
@@ -227,7 +227,7 @@ def test_shared_selector_skips_waiting_resource_and_nested_tasks() -> None:
                     normalize_input_bindings({"value": Graph.graph_input("value", str)}),
                 ),
             ),
-            resources=(ResourceDefinition(FILE, 0),),
+            resources=(ResourceDefinition(FILE),),
         )
     )
     snapshot = admit_tasks(

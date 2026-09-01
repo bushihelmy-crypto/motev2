@@ -156,7 +156,7 @@ def internal_resource_graph(
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
-            resources=tuple(ResourceDefinition(resource_id, order) for order, resource_id in enumerate(resource_order)),
+            resources=tuple(ResourceDefinition(resource_id) for resource_id in resource_order),
         )
     )
 

@@ -338,12 +338,7 @@ class Graph(Generic[GraphValueT]):
                 resource_ids,
             )
             known = {resource.resource_id for resource in state.resources}
-            added = tuple(
-                ResourceDefinition(resource_id, len(state.resources) + ordinal)
-                for ordinal, resource_id in enumerate(
-                    resource_id for resource_id in resource_ids if resource_id not in known
-                )
-            )
+            added = tuple(ResourceDefinition(resource_id) for resource_id in resource_ids if resource_id not in known)
             replacement = replace(
                 state,
                 nodes=(*state.nodes, candidate),
