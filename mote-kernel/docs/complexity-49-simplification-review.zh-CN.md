@@ -22,12 +22,12 @@
 - 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后降为 48，#33 完成后降为 47。
 - 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`），现已全部完成并验收。
 - `A` 的编号是：**3、11、12、14、20、38、39、40（均已完成）**。#15/#16 复核后改判为 `K`。
-- 另有 **7 项有局部整理方向**（标为 `B`）；#27/#28/#33 已完成并验收，剩余 4 项只有证明能净删除且保留唯一事实源后才实施。
-- 原始 49 项中现有 **34 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2 复核后确认资源阶段边界清楚，不为共享 view 增加额外 wiring；#7/#10 复核后确认恢复阶段顺序和证据封口各有独立语义，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
+- 当前有 **5 项标为 `B`**（存在局部整理方向）；#27/#28/#33 已完成并验收，剩余 #30/#32 只有证明能净删除且保留唯一事实源后才实施。
+- 原始 49 项中现有 **36 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2/#7/#10/#15/#16/#35/#46 复核后确认各自的状态、恢复、资源和错误边界清楚，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
-本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#18、#20、#27、#28、#33、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#41 复核后保留现状。
+本文件以设计审查为主，并同步记录实施状态。截至 2026-09-01，#3、#11、#12、#14、#18、#20、#27、#28、#33、#38、#39、#40 已完成并验收；#1、#2、#7、#10、#15、#16、#19、#34、#35、#41、#46 复核后保留现状。
 
 ## 门禁基线与判定口径
 
@@ -131,7 +131,7 @@ make check                      926 passed, coverage 100%
 | 43 | `state/graph_state/execution_transitions.py:150` `settle_graph_node`（17/23/3/2/247） | 校验 execution lease，转换 success/failure/interrupt，释放资源并原子更新 frontier。 | **K**：一个 command 必须原子完成 settlement + resource release + lease 清理；不能拆成可独立提交的路径。 |
 | 44 | `state/graph_state/recovery_transitions.py:29` `resume_graph_nodes`（22/34/5/2/258） | 校验三种 resume action，按 node identity 更新 frontier，并保留 interrupt/codec 约束。 | **K**：action variant 与失败顺序就是 State 的领域异常边界；Execution 不能复制一份 reducer。 |
 | 45 | `state/graph_state/reducer.py:30` `reduce_graph_run`（12/27/6/2/154） | 唯一 GraphRunCommand dispatch、revision 校验与 revision +1。 | **K**：这是唯一 reducer 入口；改成动态表或多个 reducer 会破坏单一真相。 |
-| 46 | `state/graph_state/resource_reducer.py:24` `_validate_snapshot`（29/50/3/1/356） | 校验 resource lock/waiter/acquisition 的形状、顺序、所有权和队列一致性。 | **B（谨慎）**：可分出“静态 shape”与“replay consistency”两个阶段，但两者都必须由 State resource owner 维护；不得把校验移到 Execution，也不能省略 replay。 |
+| 46 | `state/graph_state/resource_reducer.py:24` `_validate_snapshot`（29/50/3/1/356） | 校验 resource lock/waiter/acquisition 的形状、顺序、所有权和队列一致性。 | **K（复核后保留，2026-09-01）**：两级边界已经存在：`_validate_snapshot` 校验当前快照的结构和双向关系，`validate_resource_snapshot` 再从空快照按 acquisition 顺序重放并比较历史结果。拆分只会传递或重复建立共享索引、增加 wiring，并可能改变错误优先级；重放不能省略，也不能移出 State resource owner。 |
 | 47 | `state/graph_state/resource_reducer.py:123` `_release`（14/14/2/2/163） | 释放 admitted acquisition，按全局资源顺序推进 FIFO waiter。 | **K**：资源 FIFO 和多资源 prefix 是核心算法；任何泛化都容易改变 waiter 顺序。 |
 | 48 | `state/graph_state/validation.py:71` `validate_graph_frontier`（18/23/4/2/205） | 校验每个 frontier settlement、routing、interrupt payload 和 codec 必要性。 | **K**：这是 durable frontier 的总不变量，分支对应 nominal settlement 类型。 |
 | 49 | `state/graph_state/validation.py:125` `validate_graph_run_state`（33/43/2/1/357） | 校验 parent identity、join progress、resource/execution lease 和三种 lifecycle status。 | **K**：状态合法性矩阵必须集中在 State owner；拆开会产生状态真相分裂。 |
@@ -477,7 +477,7 @@ session.next
      └─ 仍 pending -> ResultCollectionError（planner/session 不一致）
 ```
 
-resource 路径同样只有一份规则：`admit_tasks` 按 canonical task 顺序调用 `reduce_resources(AcquireResources)`，runtime/recovery 共同消费 `select_executable_tasks`；settlement 再由 State reducer 原子 `ReleaseResources` 并按 FIFO 推进 waiter。重复的 snapshot validate/replay 是 durable input、claim admission 和 state transition 各自的 fail-closed 边界，不是三套资源算法。#1/#2 已复核保留；#46 仍只能在不离开 State owner 的前提下研究阶段化或复用已验证 view，#47 的 FIFO/prefix 算法保留。
+resource 路径同样只有一份规则：`admit_tasks` 按 canonical task 顺序调用 `reduce_resources(AcquireResources)`，runtime/recovery 共同消费 `select_executable_tasks`；settlement 再由 State reducer 原子 `ReleaseResources` 并按 FIFO 推进 waiter。重复的 snapshot validate/replay 是 durable input、claim admission 和 state transition 各自的 fail-closed 边界，不是三套资源算法。#1/#2/#46 已复核保留：`_validate_snapshot` 负责中间结果的结构/关系封口，公共 `validate_resource_snapshot` 负责 durable acquisition history 的重放；两者不能合并成一个递归 validator。#47 的 FIFO/prefix 算法保留。
 
 外部 callable、commit 和 codec 是端口边界。内核已对它们分别执行 strict outcome admission、exact successor confirmation、bytes/`Graph.Values` nominal validation；进一步“遍历”端口实现会越过本项目 ownership scope。
 
@@ -662,7 +662,7 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 2. resume admission 与 routing/materialization（#11–#16、#38–#40）已完成治理；#11/#12/#14/#38/#39/#40 已验收，#15/#16/#41 保留。
 3. `Graph.run` 生命周期（#20）已完成；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
-5. #33 resource validation 已完成并验收；剩余 B 组特别是 compiler/recovery，任何没有净删除的拆分都退回设计阶段。
+5. #33 resource validation 已完成并验收；#35/#46 resource/definition snapshot validation 复核后保留现状。剩余 B 组集中在 compiler（#30/#32），任何没有净删除的拆分都退回设计阶段。
 6. 每个可合并提交运行 `make complexity-report`、`make complexity-ratchet`、`git diff --check`；实际下降后立即降低 `pyproject.toml` ratchet 上限。
 
 成功标准不是单纯把 49 改成更小的数字，而是同时满足：唯一事实 owner、无重复执行路径、异常边界稳定、状态先持久化确认再更新内存、生产代码没有 legacy 兼容债务，并且代码阅读者能从函数结构直接看出这些不变量。
