@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **Breaking:** Logging and Observability now expose only two-stage diagnostic decorators:
+  `LoggedNode(sink, ...)(inner)`, `ObservedNode(port, span_factory)(inner)`, and
+  `LoggedGraphCommit(sink, ...)(inner)`. The former inner-first constructors, public generic subscripts, and
+  `LoggedGraphCommit(inner=None)` fallback are removed; `Graph.run(commit=None)` remains the execution-owned fallback.
 - **Breaking:** `mote_kernel.execution` now exports only the `Graph` facade; executor, session, request/result,
   topology, and state transition types remain internal owner-module contracts.
 - `Graph.run()` now rejects invalid execution limits before compilation or any authoritative transition, and

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError, dataclass, field, replace
+from collections.abc import Generator
+from dataclasses import FrozenInstanceError, dataclass, field, is_dataclass, replace
 from typing import cast
 
 import pytest
@@ -40,12 +41,25 @@ class RaisingFields:
         raise self.error
 
 
+@dataclass(frozen=True, slots=True)
+class DeferredString:
+    value: str
+
+    def __await__(self) -> Generator[None, None, str]:
+        yield from ()
+        return self.value
+
+
 def _fields(record: LogRecord) -> dict[str, LogValue]:
     return {field.name: field.value for field in record.fields}
 
 
 async def _echo(value: str) -> str:
     return value
+
+
+def _awaitable_echo(value: str) -> DeferredString:
+    return DeferredString(value)
 
 
 async def _capture_transitions(
@@ -84,6 +98,21 @@ def test_logging_root_exposes_only_the_two_decorators() -> None:
     assert not hasattr(logging_package, "LogRecord")
     assert not hasattr(logging_package, "LogSinkPort")
     assert not hasattr(logging_package, "logged_node")
+
+
+def test_logging_decorators_are_non_generic_frozen_slot_configurations() -> None:
+    assert is_dataclass(LoggedNode)
+    assert is_dataclass(LoggedGraphCommit)
+    assert not getattr(LoggedNode, "__parameters__", ())
+    assert not getattr(LoggedGraphCommit, "__parameters__", ())
+    assert "__dict__" not in LoggedNode.__slots__
+    assert "__dict__" not in LoggedGraphCommit.__slots__
+    node_config = LoggedNode(RecordingSink())
+    commit_config = LoggedGraphCommit(RecordingSink())
+    with pytest.raises(FrozenInstanceError):
+        node_config.sink = RecordingSink()  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        commit_config.sink = RecordingSink()  # type: ignore[misc]
 
 
 def test_log_values_are_frozen_structured_and_bounded() -> None:
@@ -139,19 +168,17 @@ async def test_logged_node_uses_one_invocation_field_snapshot_and_preserves_resu
         factory_calls += 1
         return (LogField("run_id", context[0]),)
 
+    @LoggedNode(
+        sink,
+        event="role.node",
+        fields=(LogField("node_id", "think"),),
+        fields_factory=invocation_fields,
+    )
     async def operation(value: str) -> str:
         context[0] = "changed-inside-node"
         return f"done:{value}"
 
-    logged = LoggedNode(
-        operation,
-        sink,
-        "role.node",
-        (LogField("node_id", "think"),),
-        invocation_fields,
-    )
-
-    assert await logged("input") == "done:input"
+    assert await operation("input") == "done:input"
     assert factory_calls == 1
     assert tuple(record.event for record in sink.records) == ("role.node.started", "role.node.finished")
     assert tuple(record.level for record in sink.records) == (LogLevel.DEBUG, LogLevel.INFO)
@@ -175,7 +202,7 @@ async def test_logged_node_preserves_ordinary_exception_and_cancellation() -> No
         raise problem
 
     with pytest.raises(NodeError) as failed:
-        await LoggedNode(fail, failure_sink)("input")
+        await LoggedNode(failure_sink)(fail)("input")
     assert failed.value is problem
     assert tuple(record.event for record in failure_sink.records) == ("node.started", "node.failed")
     failure_fields = _fields(failure_sink.records[-1])
@@ -189,7 +216,7 @@ async def test_logged_node_preserves_ordinary_exception_and_cancellation() -> No
         raise cancellation
 
     with pytest.raises(asyncio.CancelledError) as cancelled:
-        await LoggedNode(cancel, cancellation_sink)("input")
+        await LoggedNode(cancellation_sink)(cancel)("input")
     assert cancelled.value is cancellation
     assert tuple(record.event for record in cancellation_sink.records) == ("node.started", "node.cancelled")
     cancellation_fields = _fields(cancellation_sink.records[-1])
@@ -198,27 +225,53 @@ async def test_logged_node_preserves_ordinary_exception_and_cancellation() -> No
 
 
 @pytest.mark.asyncio
+async def test_logged_node_accepts_a_general_awaitable() -> None:
+    sink = RecordingSink()
+
+    assert await LoggedNode(sink)(_awaitable_echo)("input") == "input"
+    assert tuple(record.event for record in sink.records) == ("node.started", "node.finished")
+
+
+@pytest.mark.asyncio
 async def test_node_logging_failures_are_best_effort() -> None:
     for sink_error in (RuntimeError("sink failed"), asyncio.CancelledError("sink cancelled")):
-        assert await LoggedNode(_echo, RaisingSink(sink_error))("value") == "value"
+        assert await LoggedNode(RaisingSink(sink_error))(_echo)("value") == "value"
 
-    for factory_error in (RuntimeError("fields failed"), asyncio.CancelledError("fields cancelled")):
+    factory_error = RuntimeError("fields failed")
+    sink = RecordingSink()
+    logged = LoggedNode(
+        sink,
+        fields=(LogField("node_id", "node"),),
+        fields_factory=RaisingFields(factory_error),
+    )(_echo)
+    assert await logged("value") == "value"
+    assert all(_fields(record)["node_id"] == "node" for record in sink.records)
+
+    cancellation = asyncio.CancelledError("fields cancelled")
+    cancellation_calls = 0
+
+    async def counted_echo(value: str) -> str:
+        nonlocal cancellation_calls
+        cancellation_calls += 1
+        return value
+
+    with pytest.raises(asyncio.CancelledError) as fields_cancelled:
         sink = RecordingSink()
         logged = LoggedNode(
-            _echo,
             sink,
             fields=(LogField("node_id", "node"),),
-            fields_factory=RaisingFields(factory_error),
-        )
-        assert await logged("value") == "value"
-        assert all(_fields(record)["node_id"] == "node" for record in sink.records)
+            fields_factory=RaisingFields(cancellation),
+        )(counted_echo)
+        await logged("value")
+    assert fields_cancelled.value is cancellation
+    assert cancellation_calls == 0
 
     malformed_sink = RecordingSink()
 
     def malformed_fields() -> tuple[LogField, ...]:
         return cast(tuple[LogField, ...], [])
 
-    malformed = LoggedNode(_echo, malformed_sink, fields_factory=malformed_fields)
+    malformed = LoggedNode(malformed_sink, fields_factory=malformed_fields)(_echo)
     assert await malformed("value") == "value"
     assert _fields(malformed_sink.records[0]) == {}
 
@@ -228,11 +281,10 @@ async def test_node_logging_failures_are_best_effort() -> None:
         return (LogField("node_id", "dynamic"),)
 
     duplicate = LoggedNode(
-        _echo,
         duplicate_sink,
         fields=(LogField("node_id", "fixed"),),
         fields_factory=duplicate_fields,
-    )
+    )(_echo)
     assert await duplicate("value") == "value"
     assert _fields(duplicate_sink.records[0]) == {"node_id": "fixed"}
 
@@ -241,7 +293,7 @@ async def test_node_logging_failures_are_best_effort() -> None:
     def reserved_fields() -> tuple[LogField, ...]:
         return (LogField("outcome", "caller"),)
 
-    reserved = LoggedNode(_echo, reserved_sink, fields_factory=reserved_fields)
+    reserved = LoggedNode(reserved_sink, fields_factory=reserved_fields)(_echo)
     assert await reserved("value") == "value"
     assert _fields(reserved_sink.records[0]) == {}
     assert _fields(reserved_sink.records[-1])["outcome"] == "ok"
@@ -250,18 +302,18 @@ async def test_node_logging_failures_are_best_effort() -> None:
 def test_logged_node_rejects_invalid_static_configuration() -> None:
     sink = RecordingSink()
     with pytest.raises(LogContractError, match="node log event"):
-        LoggedNode(_echo, sink, event="")
+        LoggedNode(sink, event="")
     with pytest.raises(LogContractError, match="node log event"):
-        LoggedNode(_echo, sink, event="x" * 119)
+        LoggedNode(sink, event="x" * 119)
     with pytest.raises(LogContractError, match="tuple"):
-        LoggedNode(_echo, sink, fields=cast(tuple[LogField, ...], []))
+        LoggedNode(sink, fields=cast(tuple[LogField, ...], []))
     with pytest.raises(LogContractError, match="LogField"):
-        LoggedNode(_echo, sink, fields=(cast(LogField, object()),))
+        LoggedNode(sink, fields=(cast(LogField, object()),))
     with pytest.raises(LogContractError, match="unique"):
-        LoggedNode(_echo, sink, fields=(LogField("node_id", "a"), LogField("node_id", "b")))
+        LoggedNode(sink, fields=(LogField("node_id", "a"), LogField("node_id", "b")))
     for reserved in ("duration_ns", "error_type", "outcome"):
         with pytest.raises(LogContractError, match="lifecycle"):
-            LoggedNode(_echo, sink, fields=(LogField(reserved, "reserved"),))
+            LoggedNode(sink, fields=(LogField(reserved, "reserved"),))
 
 
 @pytest.mark.asyncio
@@ -271,8 +323,12 @@ async def test_logged_commit_reports_exact_return_and_transition_coordinates() -
     nested = next(transition for transition in transitions if transition.scope)
     sink = RecordingSink()
 
-    root_result = await LoggedGraphCommit[str](None, sink, "graph.commit")(root)
-    nested_result = await LoggedGraphCommit[str](None, sink, "graph.commit")(nested)
+    @LoggedGraphCommit(sink, event="graph.commit")
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        return transition.candidate_state
+
+    root_result = await commit(root)
+    nested_result = await commit(nested)
 
     assert root_result is root.candidate_state
     assert nested_result is nested.candidate_state
@@ -306,7 +362,7 @@ async def test_logged_commit_calls_inner_once_and_leaves_mismatch_for_graph_owne
         return received.candidate_state
 
     exact_sink = RecordingSink()
-    confirmed = await LoggedGraphCommit(exact, exact_sink)(transition)
+    confirmed = await LoggedGraphCommit(exact_sink)(exact)(transition)
     assert confirmed is transition.candidate_state
     assert calls == [transition]
 
@@ -314,7 +370,7 @@ async def test_logged_commit_calls_inner_once_and_leaves_mismatch_for_graph_owne
         return replace(received.candidate_state, revision=received.candidate_state.revision + 100)
 
     mismatch_sink = RecordingSink()
-    returned = await LoggedGraphCommit(mismatch, mismatch_sink)(transition)
+    returned = await LoggedGraphCommit(mismatch_sink)(mismatch)(transition)
     assert returned != transition.candidate_state
     assert mismatch_sink.records[-1].event == "commit.mismatch"
     assert mismatch_sink.records[-1].level is LogLevel.ERROR
@@ -331,13 +387,170 @@ async def test_unrepresentable_transition_fields_do_not_prevent_inner_commit() -
         return received.candidate_state
 
     sink = RecordingSink()
-    returned = await LoggedGraphCommit(exact, sink)(transition)
+    returned = await LoggedGraphCommit(sink)(exact)(transition)
 
     assert returned is transition.candidate_state
     assert calls == [transition]
     assert tuple(record.event for record in sink.records) == ("commit.started", "commit.accepted")
     assert _fields(sink.records[0]) == {}
     assert _fields(sink.records[-1])["outcome"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_transition_projection_isolated_from_commit_inner() -> None:
+    transition = (await _capture_transitions())[0]
+    projection_cancellation = asyncio.CancelledError("projection cancelled")
+
+    class ProjectionCancelledTransition:
+        @property
+        def previous_state(self) -> Graph.State | None:
+            raise projection_cancellation
+
+        @property
+        def candidate_state(self) -> Graph.State:
+            return transition.candidate_state
+
+        @property
+        def scope(self) -> tuple[str, ...]:
+            return transition.scope
+
+        @property
+        def command(self):
+            return transition.command
+
+    projected = cast(Graph.Transition[str], ProjectionCancelledTransition())
+    calls = 0
+
+    async def exact(received: Graph.Transition[str], /) -> Graph.State:
+        nonlocal calls
+        calls += 1
+        return received.candidate_state
+
+    sink = RecordingSink()
+    returned = await LoggedGraphCommit(sink)(exact)(projected)
+
+    assert returned is transition.candidate_state
+    assert calls == 1
+    assert tuple(record.event for record in sink.records) == ("commit.started", "commit.accepted")
+
+
+@pytest.mark.asyncio
+async def test_commit_transition_candidate_is_read_once_for_projection_and_classification() -> None:
+    transition = (await _capture_transitions())[0]
+    projection_cancellation = asyncio.CancelledError("candidate read twice")
+    candidate_reads = 0
+
+    class CandidateReadOnceTransition:
+        @property
+        def previous_state(self) -> Graph.State | None:
+            return transition.previous_state
+
+        @property
+        def candidate_state(self) -> Graph.State:
+            nonlocal candidate_reads
+            candidate_reads += 1
+            if candidate_reads > 1:
+                raise projection_cancellation
+            return transition.candidate_state
+
+        @property
+        def scope(self) -> tuple[str, ...]:
+            return transition.scope
+
+        @property
+        def command(self):
+            return transition.command
+
+    projected = cast(Graph.Transition[str], CandidateReadOnceTransition())
+
+    async def exact(_received: Graph.Transition[str], /) -> Graph.State:
+        return transition.candidate_state
+
+    sink = RecordingSink()
+    returned = await LoggedGraphCommit(sink)(exact)(projected)
+
+    assert returned is transition.candidate_state
+    assert candidate_reads == 1
+    assert tuple(record.event for record in sink.records) == ("commit.started", "commit.accepted")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "projection_error",
+    (RuntimeError("candidate projection failed"), asyncio.CancelledError("candidate projection cancelled")),
+    ids=("ordinary-error", "cancelled-error"),
+)
+async def test_commit_candidate_projection_failure_does_not_block_inner(projection_error: BaseException) -> None:
+    transition = (await _capture_transitions())[0]
+    calls = 0
+
+    class FailedCandidateTransition:
+        @property
+        def previous_state(self) -> Graph.State | None:
+            return transition.previous_state
+
+        @property
+        def candidate_state(self) -> Graph.State:
+            raise projection_error
+
+        @property
+        def scope(self) -> tuple[str, ...]:
+            return transition.scope
+
+        @property
+        def command(self):
+            return transition.command
+
+    projected = cast(Graph.Transition[str], FailedCandidateTransition())
+
+    async def inner(_received: Graph.Transition[str], /) -> Graph.State:
+        nonlocal calls
+        calls += 1
+        return transition.candidate_state
+
+    sink = RecordingSink()
+    returned = await LoggedGraphCommit(sink)(inner)(projected)
+
+    assert returned is transition.candidate_state
+    assert calls == 1
+    assert tuple(record.event for record in sink.records) == ("commit.started", "commit.mismatch")
+
+
+@pytest.mark.asyncio
+async def test_commit_invalid_candidate_projection_does_not_block_inner() -> None:
+    transition = (await _capture_transitions())[0]
+    calls = 0
+
+    class InvalidCandidateTransition:
+        @property
+        def previous_state(self) -> Graph.State | None:
+            return transition.previous_state
+
+        @property
+        def candidate_state(self) -> Graph.State:
+            return cast(Graph.State, object())
+
+        @property
+        def scope(self) -> tuple[str, ...]:
+            return transition.scope
+
+        @property
+        def command(self):
+            return transition.command
+
+    projected = cast(Graph.Transition[str], InvalidCandidateTransition())
+
+    async def inner(_received: Graph.Transition[str], /) -> Graph.State:
+        nonlocal calls
+        calls += 1
+        return transition.candidate_state
+
+    sink = RecordingSink()
+    returned = await LoggedGraphCommit(sink)(inner)(projected)
+
+    assert returned is transition.candidate_state
+    assert calls == 1
+    assert tuple(record.event for record in sink.records) == ("commit.started", "commit.mismatch")
 
 
 @pytest.mark.asyncio
@@ -354,7 +567,7 @@ async def test_logged_commit_preserves_inner_error_and_cancellation() -> None:
 
     failed_sink = RecordingSink()
     with pytest.raises(CommitError) as failed:
-        await LoggedGraphCommit(fail, failed_sink)(transition)
+        await LoggedGraphCommit(failed_sink)(fail)(transition)
     assert failed.value is problem
     assert failed_sink.records[-1].event == "commit.failed"
     assert _fields(failed_sink.records[-1])["error_type"] == "CommitError"
@@ -366,7 +579,7 @@ async def test_logged_commit_preserves_inner_error_and_cancellation() -> None:
 
     cancelled_sink = RecordingSink()
     with pytest.raises(asyncio.CancelledError) as cancelled:
-        await LoggedGraphCommit(cancel, cancelled_sink)(transition)
+        await LoggedGraphCommit(cancelled_sink)(cancel)(transition)
     assert cancelled.value is cancellation
     assert cancelled_sink.records[-1].event == "commit.cancelled"
     assert _fields(cancelled_sink.records[-1])["error_type"] == "CancelledError"
@@ -381,7 +594,7 @@ async def test_unrepresentable_error_diagnostics_preserve_wrapped_error_identity
         raise problem
 
     with pytest.raises(RuntimeError) as node_failure:
-        await LoggedNode(fail_node, RecordingSink())("input")
+        await LoggedNode(RecordingSink())(fail_node)("input")
     assert node_failure.value is problem
 
     transition = (await _capture_transitions())[0]
@@ -390,7 +603,7 @@ async def test_unrepresentable_error_diagnostics_preserve_wrapped_error_identity
         raise problem
 
     with pytest.raises(RuntimeError) as commit_failure:
-        await LoggedGraphCommit(fail_commit, RecordingSink())(transition)
+        await LoggedGraphCommit(RecordingSink())(fail_commit)(transition)
     assert commit_failure.value is problem
 
 
@@ -405,36 +618,81 @@ async def test_commit_logging_sink_failure_does_not_change_inner_result() -> Non
         return received.candidate_state
 
     for sink_error in (RuntimeError("sink failed"), asyncio.CancelledError("sink cancelled")):
-        returned = await LoggedGraphCommit(exact, RaisingSink(sink_error))(transition)
+        returned = await LoggedGraphCommit(RaisingSink(sink_error))(exact)(transition)
         assert returned is transition.candidate_state
     assert calls == 2
 
+    async def mismatch(received: Graph.Transition[str], /) -> Graph.State:
+        return replace(received.candidate_state, revision=received.candidate_state.revision + 1)
+
+    mismatched = await LoggedGraphCommit(RaisingSink(RuntimeError("sink failed")))(mismatch)(transition)
+    assert mismatched != transition.candidate_state
+
     with pytest.raises(LogContractError, match="commit log event"):
-        LoggedGraphCommit(exact, RecordingSink(), event="")
+        LoggedGraphCommit(RecordingSink(), event="")
     with pytest.raises(LogContractError, match="commit log event"):
-        LoggedGraphCommit(exact, RecordingSink(), event="x" * 119)
+        LoggedGraphCommit(RecordingSink(), event="x" * 119)
+
+
+@pytest.mark.asyncio
+async def test_logging_sink_failures_do_not_replace_inner_primary_errors() -> None:
+    class NodeError(RuntimeError):
+        pass
+
+    node_problem = NodeError("node failed")
+
+    async def fail_node(_value: str) -> str:
+        raise node_problem
+
+    with pytest.raises(NodeError) as node_failure:
+        await LoggedNode(RaisingSink(asyncio.CancelledError("diagnostic cancelled")))(fail_node)("value")
+    assert node_failure.value is node_problem
+
+    transition = (await _capture_transitions())[0]
+    commit_problem = NodeError("commit failed")
+
+    async def fail_commit(_transition: Graph.Transition[str], /) -> Graph.State:
+        raise commit_problem
+
+    with pytest.raises(NodeError) as commit_failure:
+        await LoggedGraphCommit(RaisingSink(asyncio.CancelledError("diagnostic cancelled")))(fail_commit)(transition)
+    assert commit_failure.value is commit_problem
+
+    cancellation = asyncio.CancelledError("business cancellation")
+
+    async def cancel_node(_value: str) -> str:
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as cancelled:
+        await LoggedNode(RaisingSink(asyncio.CancelledError("diagnostic cancelled")))(cancel_node)("value")
+    assert cancelled.value is cancellation
 
 
 @pytest.mark.asyncio
 async def test_both_logging_decorators_compose_with_the_public_graph_facade() -> None:
     sink = RecordingSink()
 
+    @LoggedNode(sink, fields=(LogField("node_id", "work"),))
     async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value=f"logged:{values['value']}")
 
     graph = Graph[str]("logging.composed")
     graph.add_node(
         "work",
-        LoggedNode(operation, sink, fields=(LogField("node_id", "work"),)),
+        operation,
         inputs={"value": Graph.graph_input("value", str)},
         outputs={"value": str},
     )
     graph.set_outputs({"value": Graph.node_output("work", "value")})
 
+    @LoggedGraphCommit(sink)
+    async def persistence_commit(transition: Graph.Transition[str], /) -> Graph.State:
+        return transition.candidate_state
+
     result = await graph.run(
         Graph.values(value="input"),
         run_id="composed-run",
-        commit=LoggedGraphCommit[str](None, sink),
+        commit=persistence_commit,
     )
 
     assert isinstance(result, Graph.CompletedResult)
@@ -444,6 +702,30 @@ async def test_both_logging_decorators_compose_with_the_public_graph_facade() ->
     assert "node.finished" in events
     assert "commit.started" in events
     assert "commit.accepted" in events
+
+
+@pytest.mark.asyncio
+async def test_graph_run_without_commit_uses_execution_fallback() -> None:
+    sink = RecordingSink()
+
+    @LoggedNode(sink)
+    async def operation(values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value=f"fallback:{values['value']}")
+
+    graph = Graph[str]("logging.fallback")
+    graph.add_node(
+        "work",
+        operation,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
+    graph.set_outputs({"value": Graph.node_output("work", "value")})
+
+    result = await graph.run(Graph.values(value="input"), run_id="fallback-run", commit=None)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == "fallback:input"
+    assert tuple(record.event for record in sink.records) == ("node.started", "node.finished")
 
 
 def test_node_fields_protocol_is_structural() -> None:

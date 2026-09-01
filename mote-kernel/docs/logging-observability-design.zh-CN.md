@@ -31,6 +31,10 @@ Observability 不提供 `Graph.Commit` 装饰器。若某个具体 commit adapte
 
 根包只暴露 Role/Flow 组装需要的包装器：
 
+Logging/Observability 的三个公开 decorator 都是非泛型、`frozen`、`slots` 配置对象；泛型只存在于方法级 `__call__` 和私有 wrapper，用于保持
+被装饰 callable 的精确类型。
+node callable 的真实返回契约是 `collections.abc.Awaitable`；执行引擎负责等待它，不另设只接受具体 coroutine 的静态分支。
+
 | 根包 | `__all__` |
 | --- | --- |
 | `mote_kernel.events` | `EventingGraphCommit` |
@@ -55,13 +59,18 @@ adapter/runtime；Port 的同步调用只应完成内存入队或等价的快速
 
 ## 4. 不改变执行语义
 
-日志字段投影、record 构造、sink 写入或 observation adapter 的普通错误都不会替换 node/commit 的结果，也不会吞掉被装饰
-callable 的异常与取消。无法投影成 bounded record 的诊断字段只会使当前记录降级或被丢弃。
+旁路字段投影、可丢弃的 record 构造、sink 写入或 observation adapter 的普通错误都不会替换 node/commit 的结果。同步 sink/port
+若适配器自己误抛普通异常或 `asyncio.CancelledError`，只丢弃当前诊断，不停止 inner、不改变业务结果/异常/取消/mismatch，
+也不触发重试或重放。只有已知诊断适配器/投影调用边界显式隔离其自有 `CancelledError`；无法投影成 bounded record 的诊断
+字段只会使当前记录降级或被丢弃。
+业务 inner 或 Graph execution 收到 `asyncio.CancelledError` 时，wrapper 先尽力记录诊断，再原样传播同一个取消对象。诊断
+边界不得用 `except BaseException` 吞掉 `KeyboardInterrupt`、`SystemExit` 等系统级中断。
+`span_factory` 的 setup/Span 值契约错误仍按其 required invocation setup 规则自然失败，不被伪装成 backend 旁路故障。
 `LoggedGraphCommit` 对 callback 的返回只做诊断：
 
 ```text
 transition
-  -> inner commit callback（恰好一次）
+  -> inner commit callback（单次 wrapper invocation 内不主动重试）
   -> 日志记录 accepted 或 mismatch
   -> 原样返回 callback 的结果
   -> Graph owner 执行 exact-candidate 校验
@@ -80,20 +89,34 @@ provider-neutral error category 和耗时。调用方若添加关联字段，仍
 裸字典或任意对象穿过 Port。`duration_ns`、`error_type` 和 `outcome` 由 node logging lifecycle 独占；动态字段若占用这些
 名称，本次调用会退回已验证的静态字段。
 
-Span/trace identity 由 Role/runtime 注入的每次调用 factory 提供；Kernel 不维护隐藏的全局 trace 状态。一个装饰器实例
-不保存 run snapshot，因此可以复用于并发 Graph run。
+Span/trace identity 由调用方通过闭包或调用方自己的 context 机制提供给每次调用 factory；Kernel 不维护隐藏的全局 trace
+状态，也不自动注入 scheduler context。一个装饰器实例不保存 run snapshot，因此可以复用于并发 Graph run。
+
+`fields_factory` 只补充可选动态字段；它自己的普通异常或非法字段结果回退静态 fields。`span_factory` 是
+`ObservedNode` 的必需 invocation setup，非法 `Span` 或实现错误自然失败且不执行 base node。两类 factory 都不访问网络、
+Store、backend 或 exporter。
 
 ## 6. 组装位置
 
-最终包装顺序由 Role assembly 决定。缺少可选 logging/observability Port 时，assembly 直接使用原 node 或 commit；
-不能在运行时创建另一张图、第二个 scheduler 或平行状态模型。典型组装形式为：
+最终包装顺序由 Role assembly 决定，规范/推荐顺序是 `Logged(Observed(base))`；普通 Python API 无法强制阻止反向嵌套。required
+capability 放在构造签名首位，示例按位置传入，不额外添加 positional-only `/` 约束。缺少
+可选 logging/observability capability 时，assembly 直接使用原 node 或 commit；不能在运行时创建另一张图、第二个 scheduler
+或平行状态模型。典型组装形式为：
 
 ```python
-node = ObservedNode(base_node, observability_port, span_factory)
-node = LoggedNode(node, log_sink, fields=node_fields)
+node = LoggedNode(
+    log_sink,
+    event="role.node",
+    fields=node_fields,
+)(ObservedNode(observability_port, span_factory)(base_node))
 
-commit = EventingGraphCommit(event_sink)(persistence_commit)
-commit = LoggedGraphCommit(commit, log_sink)
+commit = EventingGraphCommit(persistence_commit)
+commit = LoggedGraphCommit(log_sink)(commit)
 ```
+
+安装 `ObservedNode` 时，`ObservabilityPort + span_factory` 是完整 bundle：两者都缺则不安装节点观测，只缺一个时报
+assembly error，两者都有才安装。`ObservabilityPort` 仍可独立记录 usage/timing/error；decorator 自身不做 Port、factory 或
+inner 的反射探测、试调用或 assembly validation。`fields_factory=None` 合法，required 的 sink、port、span_factory 和
+inner 不接受 `None`；`Graph.run(commit=None)` 仍由 execution owner 提供 fallback。
 
 `execution.Graph` 仍是唯一构图与执行门面，`GraphRunState` 和原有 commit path 仍是唯一权威状态边界。

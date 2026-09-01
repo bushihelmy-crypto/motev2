@@ -1,5 +1,6 @@
 """Canonical callable graph-node definitions."""
 
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
@@ -13,11 +14,13 @@ GraphValueT = TypeVar("GraphValueT")
 
 
 class NodeCallable(Protocol[GraphValueT]):
-    async def __call__(
+    """A graph node returns an awaitable that the execution engine owns."""
+
+    def __call__(
         self,
         values: _GraphValues[GraphValueT],
         /,
-    ) -> _GraphValues[GraphValueT] | GraphOutcome[GraphValueT]: ...
+    ) -> Awaitable[_GraphValues[GraphValueT] | GraphOutcome[GraphValueT]]: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -222,16 +222,19 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
 
 
 def test_graph_runtime_waits_remain_async_and_session_issuance_is_synchronous() -> None:
-    execution_functions = (
+    runtime_wait_functions = (
         _class_method("execution/facade.py", "Graph", "run"),
         _class_method("execution/engine/session.py", "GraphExecutionSession", "next"),
         _class_method("execution/engine/session.py", "GraphExecutionSession", "aclose"),
         _class_method("execution/engine/scheduler.py", "TaskScheduler", "next_completion"),
         _class_method("execution/engine/scheduler.py", "TaskScheduler", "aclose"),
-        _class_method("execution/graph/node.py", "NodeCallable", "__call__"),
     )
 
-    assert all(isinstance(definition, ast.AsyncFunctionDef) for definition in execution_functions)
+    assert all(isinstance(definition, ast.AsyncFunctionDef) for definition in runtime_wait_functions)
+    node_callable = _class_method("execution/graph/node.py", "NodeCallable", "__call__")
+    assert isinstance(node_callable, ast.FunctionDef)
+    assert node_callable.returns is not None
+    assert ast.unparse(node_callable.returns).startswith("Awaitable[")
     assert all(
         isinstance(definition, ast.FunctionDef)
         for definition in (

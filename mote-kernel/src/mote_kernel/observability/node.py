@@ -33,43 +33,52 @@ def _record(port: ObservabilityPort, observation: SpanStarted | SpanFinished) ->
 
     try:
         port.record(observation)
-    except (asyncio.CancelledError, Exception):
+    except asyncio.CancelledError:
+        return
+    except Exception:
         return
 
 
 @dataclass(frozen=True, slots=True)
-class ObservedNode(Generic[InputT, OutputT]):
-    """Wrap one asynchronous operation with a start/finish span lifecycle.
+class ObservedNode:
+    """Configure a provider-neutral span lifecycle for one node callable."""
 
-    The wrapper observes invocation success, ordinary exceptions, and
-    cancellation.  It never converts or swallows the operation's result or
-    exception.  Graph-specific ``Success``/``Failure`` values remain the
-    execution/settlement concern; a returned value is an invocation success.
-    """
-
-    inner: NodeOperation[InputT, OutputT]
     port: ObservabilityPort
     span_factory: NodeSpanFactory
 
+    def __call__(
+        self,
+        inner: NodeOperation[InputT, OutputT],
+    ) -> NodeOperation[InputT, OutputT]:
+        return _ObservedNode(inner, self)
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedNode(Generic[InputT, OutputT]):
+    """Apply one immutable observation configuration to a typed node callable."""
+
+    inner: NodeOperation[InputT, OutputT]
+    config: ObservedNode
+
     async def __call__(self, value: InputT, /) -> OutputT:
-        span = self.span_factory()
+        span = self.config.span_factory()
         if type(span) is not Span:
             raise ObservationContractError("node span factory must return a Span")
-        _record(self.port, SpanStarted(span))
+        _record(self.config.port, SpanStarted(span))
         started = perf_counter_ns()
         try:
             result = await self.inner(value)
         except asyncio.CancelledError:
             error = ObservationError(category="node.cancelled")
             duration = perf_counter_ns() - started
-            _record(self.port, SpanFinished(span.context, SpanStatus.ERROR, duration, error))
+            _record(self.config.port, SpanFinished(span.context, SpanStatus.ERROR, duration, error))
             raise
         except Exception:
             error = ObservationError(category="node.exception")
             duration = perf_counter_ns() - started
-            _record(self.port, SpanFinished(span.context, SpanStatus.ERROR, duration, error))
+            _record(self.config.port, SpanFinished(span.context, SpanStatus.ERROR, duration, error))
             raise
-        _record(self.port, SpanFinished(span.context, SpanStatus.OK, perf_counter_ns() - started))
+        _record(self.config.port, SpanFinished(span.context, SpanStatus.OK, perf_counter_ns() - started))
         return result
 
 
