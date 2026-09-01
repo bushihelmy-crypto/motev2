@@ -22,8 +22,8 @@
 - 基线的 `complexity_hotspots=49` 确实成立，但它是“任一指标超阈值”的定义数量，不是 49 个互相独立的缺陷；#14 完成后降为 48，#33 完成后降为 47。
 - 49 项中有 **8 项存在可以现在就描述清楚的更简单目标设计**（表中标为 `A`），现已全部完成并验收。
 - `A` 的编号是：**3、11、12、14、20、38、39、40（均已完成）**。#15/#16 复核后改判为 `K`。
-- 当前有 **5 项标为 `B`**（存在局部整理方向）；#27/#28/#33 已完成并验收，剩余 #30/#32 只有证明能净删除且保留唯一事实源后才实施。
-- 原始 49 项中现有 **36 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2/#7/#10/#15/#16/#35/#46 复核后确认各自的状态、恢复、资源和错误边界清楚，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
+- 当前有 **4 项标为 `B`**（存在局部整理方向）；#27/#28/#33 已完成并验收，剩余 #32 只有证明能净删除且保留唯一事实源后才实施。
+- 原始 49 项中现有 **37 项判为保留**（标为 `K`）：复杂度直接表达固定点/图算法、资源 FIFO、异步状态机、原子 reducer、领域异常优先级或有意统一的友好公共 API。#1/#2/#7/#10/#15/#16/#30/#35/#46 复核后确认各自的状态、恢复、资源、路径和错误边界清楚，不为阶段化增加 helper；#13 独立看无需机械包装，但随后作为 #14 重复路径的一部分被净删除；#18 复核后只做局部 guard-clause 净化，不再列为独立 B 项。
 
 `A` 不是“可以偷偷加一层适配器”的许可。所有改动都必须满足：一个 owner、一份事实、纯 state transition、持久化确认后才替换内存快照、无第二 runner、无 legacy 兼容别名。
 
@@ -110,7 +110,7 @@ make check                      926 passed, coverage 100%
 | # | 位置（指标） | 当前职责 | 判断与目标 |
 |---:|---|---|---|
 | 29 | `execution/graph/compiler.py:190` `_guaranteed_sets`（11/27/5/3/160） | 计算每个节点在所有 activation gate 下都保证已经发生的 producer 集合。 | **K**：交集固定点是拓扑证明本身；`nest=5` 不表示可以改成一次线性遍历。 |
-| 30 | `execution/graph/compiler.py:316` `_validate_joint_activation_paths`（38/57/3/6/435） | 建依赖图、去除 cycle-reachable 节点、按拓扑顺序合并 route requirements，并验证 join 可共同到达。 | **B（高优先级设计）**：存在把 route requirement 建模成窄 lattice/phase result 的机会，但必须先独立设计；禁止用宽 bag、字符串 discriminator 或第二套 compiler。 |
+| 30 | `execution/graph/compiler.py:316` `_validate_joint_activation_paths`（38/57/3/6/435） | 建依赖图、去除 cycle-reachable 节点、按拓扑顺序合并 route requirements，并验证 join 可共同到达。 | **K（复核后保留，2026-09-01）**：这是联合路径可满足性证明，不是普通结构校验。现有 route helper 已分别表达同一路径取交集、可选路径取并集、指定 route 和 gate 合并；主函数的依赖图、固定节点拓扑序、约束传播、join 检查是一个连续证明。继续拆成 lattice/phase record 只会搬运中间事实，不能净删逻辑，还可能改变 cycle 跳过、join 错误优先级和确定性排序。 |
 | 31 | `execution/graph/compiler.py:411` `_absolute_activation_levels`（13/23/4/3/142） | 对非循环节点求绝对 activation level，供 publication selection 使用。 | **K**：这是确定性 level fixed point；拆 helper 不会改变算法复杂度。 |
 | 32 | `execution/graph/compiler.py:464` `_compile_graph`（74/120/4/2/1238） | 递归 nested compile、解析 ports、建 data/control topology、验证可达性、计算 guarantees/levels、构造所有 descriptors。 | **B（最高设计收益）**：应考虑“输入解析 → 拓扑证明 → publication/materialization → immutable plan”四个纯 phase，以窄的 `CompilationFacts` 传递；只有能删除当前大段交叉循环才实施，不能机械拆成十几个 forwarding helper。 |
 | 33 | `execution/graph/validation.py:44` `_validate_resources`（11/14/2/1/133 → 9/12/2/1/110） | 校验 graph resource catalog 的 identity、声明顺序和 node requirements。 | **B（已完成并验收，2026-09-01）**：删除 `ResourceDefinition.order`，让 `GraphDefinition.resources` tuple 顺序成为静态资源顺序的唯一来源；保留 identity、唯一 ID、节点要求和运行时 snapshot 的各自校验边界。 |
@@ -345,7 +345,7 @@ Graph._compile
 
 validation 的错误边界清楚，family installation 也保持“全部成功才冻结 owner”的原子语义。这里没有第二 compiler，也没有 runtime 重新解释 topology。
 
-真正的问题仍是 #32：`_compile_graph` 把 scope-independent topology proof 与 scope-dependent port/descriptor materialization 交叉在一个 1,238-node 函数中。完整调用链还暴露出同一个 nested definition 会以“可独立运行的 root scope”和“父图中的 nested scope”分别编译；scope-dependent descriptor 不能直接共用，但 identity、edge、reachability 和 activation proof 不应重复成为两份事实。B 级目标应进一步明确为：
+真正需要继续研究的是 #32：`_compile_graph` 把 scope-independent topology proof 与 scope-dependent port/descriptor materialization 交叉在一个 1,238-node 函数中。完整调用链还暴露出同一个 nested definition 会以“可独立运行的 root scope”和“父图中的 nested scope”分别编译；scope-dependent descriptor 不能直接共用，但 identity、edge、reachability 和 activation proof 不应重复成为两份事实。B 级目标应进一步明确为：
 
 ```text
 validated definition
@@ -617,7 +617,7 @@ drive boundary
 
 | 调用链 | 当前是否足够简单 | 结论 | 对应项目 |
 |---|---|---|---|
-| compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #30/#32 B |
+| compile/cache/family install | 部分否 | validation/install 清楚；scope-neutral proof 与 scoped materialization 值得原型 | #32 B |
 | `Graph.run` mode + preparation + lifecycle | 是 | 已分为 admission preparation 与统一 drive/project/finish；保留一个 `Graph` facade | #20 已完成 |
 | continuation/frame/resume admission | 是 | 顺序保留；共享不可变 canonical lineage index，并按需形成 scope action groups，frame 先结构后语义 | #11/#12/#38/#39/#40 已完成；#41 K |
 | `prepare_superstep` 状态分支 | 是 | 状态叶子和错误顺序清晰，不再泛化 dispatcher | #4、#8、#17、#25 等 K |
@@ -639,7 +639,7 @@ drive boundary
 | 组 | 项目 | 需要证明的净收益 |
 |---|---|---|
 | snapshot/definition/resource validation | #35、#46 | 结构检查、compiled compatibility、durable replay 各有唯一 owner，异常边界不交叉。 |
-| compiler proof | #30、#32 | typed phase result 比当前交叉循环更短、更易读，并且 ratchet 的总定义/节点数下降。 |
+| compiler proof | #32 | typed phase result 比当前交叉循环更短、更易读，并且 ratchet 的总定义/节点数下降。#30 已复核为 K：其交叉循环就是联合路径证明本身。 |
 
 特别是 #32（`_compile_graph`）虽然数值最高，但不能据此直接拆函数。先画出 phase 输入/输出和所有事实 owner，再用一个小图覆盖 direct、conditional、join、data dependency、nested graph、graph output 五类组合；没有这个证明时，保留现状比引入 `CompilationContext` 更简单。
 
@@ -662,7 +662,7 @@ legacy 测试只迁移其有价值的行为语义（尤其是错误顺序、恢�
 2. resume admission 与 routing/materialization（#11–#16、#38–#40）已完成治理；#11/#12/#14/#38/#39/#40 已验收，#15/#16/#41 保留。
 3. `Graph.run` 生命周期（#20）已完成；builder API（#19）保留现状。
 4. #3 frontier preparation 已完成；#34 edge validation 评审后保留现状。
-5. #33 resource validation 已完成并验收；#35/#46 resource/definition snapshot validation 复核后保留现状。剩余 B 组集中在 compiler（#30/#32），任何没有净删除的拆分都退回设计阶段。
+5. #33 resource validation 已完成并验收；#35/#46 resource/definition snapshot validation 复核后保留现状；#30 joint activation proof 复核后保留现状。剩余 B 组集中在 compiler 的 #32，任何没有净删除的拆分都退回设计阶段。
 6. 每个可合并提交运行 `make complexity-report`、`make complexity-ratchet`、`git diff --check`；实际下降后立即降低 `pyproject.toml` ratchet 上限。
 
 成功标准不是单纯把 49 改成更小的数字，而是同时满足：唯一事实 owner、无重复执行路径、异常边界稳定、状态先持久化确认再更新内存、生产代码没有 legacy 兼容债务，并且代码阅读者能从函数结构直接看出这些不变量。
