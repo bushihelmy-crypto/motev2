@@ -1,55 +1,53 @@
 """The graph-facing HookNode and its internal invocation Port."""
 
 from dataclasses import dataclass
-from typing import Generic, Literal, Protocol, TypeVar, cast
+from typing import Generic, Literal, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import (
     HookConfigSource,
     HookContractError,
     HookGraphValue,
+    HookInvocationRequest,
+    HookPayloadAdmission,
     HookPlanLoader,
     HookRequest,
     HookResult,
+    HookStageResult,
 )
-from mote_kernel.hooks.identity import HookPriority, HookSlotId
-from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.hooks.identity import HookPriority, HookSlotId, hook_definition_id
+from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
+from mote_kernel.invocation import Invocation
 
 ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
-_InvocationConfigT_contra = TypeVar("_InvocationConfigT_contra", contravariant=True)
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
 CommandT = TypeVar("CommandT")
 
 
-class _Invocation(Protocol[_InvocationConfigT_contra, ValueT, StateT, CommandT]):
-    """Kernel-side view implemented by the binding to the shared invocation engine."""
-
-    async def invoke(
-        self,
-        config: _InvocationConfigT_contra,
-        request: HookRequest[ValueT, StateT],
-        /,
-    ) -> HookResult[ValueT, CommandT]: ...
-
-
 @dataclass(frozen=True, slots=True)
-class _HookPort(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
+class _HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
     """Adapt one priority plan to one transport-independent invocation."""
 
-    invocation: _Invocation[PriorityConfigT, ValueT, StateT, CommandT]
+    admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
+    invocation: Invocation[
+        HookInvocationRequest[PriorityConfigT, ValueT, StateT],
+        HookStageResult[ValueT, CommandT],
+    ]
 
     async def execute(
         self,
         plan: HookPriorityPlan[PriorityConfigT],
         request: HookRequest[ValueT, StateT],
         /,
-    ) -> HookResult[ValueT, CommandT]:
-        result = await self.invocation.invoke(plan.config, request)
-        if type(result) is not HookResult:
-            raise HookContractError("hook invocation must return a HookResult")
-        return result
+    ) -> HookStageResult[ValueT, CommandT]:
+        admitted_request = self.admission.admit_request(request)
+        invocation_request = self.admission.admit_invocation_request(
+            HookInvocationRequest(plan.config, admitted_request)
+        )
+        result = await self.invocation.invoke(invocation_request)
+        return self.admission.admit_stage_result(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,19 +66,18 @@ class _PlanNode(
 ):
     config_source: HookConfigSource[ConfigT]
     plan_loader: HookPlanLoader[ConfigT, PriorityConfigT]
+    admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
 
     async def __call__(
         self,
         values: Graph.Values[HookGraphValue],
         /,
     ) -> Graph.Values[HookGraphValue]:
-        request = cast(HookRequest[ValueT, StateT], values["request"])
+        request = self.admission.admit_request(cast(HookRequest[ValueT, StateT], values["request"]))
         snapshot = self.config_source.snapshot()
-        if type(snapshot) is not HookConfigSnapshot:
-            raise HookContractError("hook config source must return a HookConfigSnapshot")
+        snapshot = self.admission.admit_snapshot(snapshot)
         plan = self.plan_loader.load(snapshot)
-        if type(plan) is not HookPlan:
-            raise HookContractError("hook plan loader must return a HookPlan")
+        plan = self.admission.admit_plan(plan)
         return Graph.values(
             progress=_HookProgress(
                 request,
@@ -91,9 +88,9 @@ class _PlanNode(
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedPriorityNode(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
+class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
     priority: Literal[HookPriority.P1, HookPriority.P2, HookPriority.P3]
-    port: _HookPort[PriorityConfigT, ValueT, StateT, CommandT]
+    port: _HookPort[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
 
     async def __call__(
         self,
@@ -111,14 +108,14 @@ class _PlannedPriorityNode(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
         else:
             priority_plan = progress.plan.p3
         result = await self.port.execute(priority_plan, progress.request)
-        combined_commands = (*progress.commands, *result.commands)
+        ordered_commands = progress.commands + result.commands
         if self.priority is HookPriority.P3:
-            return Graph.values(result=HookResult(result.value, combined_commands))
+            return Graph.values(result=self.port.admission.admit_result(HookResult(result.value, ordered_commands)))
         return Graph.values(
             progress=_HookProgress(
                 HookRequest(result.value, progress.request.state),
                 progress.plan,
-                combined_commands,
+                ordered_commands,
             )
         )
 
@@ -129,48 +126,56 @@ class HookNode(
 ):
     """A typed plan -> P1 -> P2 -> P3 Graph using one dynamic plan."""
 
-    __slots__ = ("slot",)
+    __slots__ = ("_slot",)
 
     def __init__(
         self,
         slot: HookSlotId,
         config_source: HookConfigSource[ConfigT] | None,
         plan_loader: HookPlanLoader[ConfigT, PriorityConfigT] | None,
-        invocation: _Invocation[PriorityConfigT, ValueT, StateT, CommandT] | None,
+        invocation: Invocation[
+            HookInvocationRequest[PriorityConfigT, ValueT, StateT],
+            HookStageResult[ValueT, CommandT],
+        ]
+        | None,
+        payload_admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT] | None,
     ) -> None:
         if type(slot) is not HookSlotId:
             raise HookContractError("hook node requires a HookSlotId")
-        if config_source is None:
+        if not isinstance(config_source, HookConfigSource) or not callable(config_source.snapshot):
             raise HookContractError("hook node requires a config source")
-        if plan_loader is None:
+        if not isinstance(plan_loader, HookPlanLoader) or not callable(plan_loader.load):
             raise HookContractError("hook node requires a plan loader")
-        if invocation is None:
+        if not isinstance(invocation, Invocation) or not callable(invocation.invoke):
             raise HookContractError("hook node requires an invocation capability")
+        if type(payload_admission) is not HookPayloadAdmission:
+            raise HookContractError("hook node requires a payload admission contract")
 
         super().__init__(
-            f"{slot.definition_id}.hook.{slot.node_id}.{slot.stage.name.lower()}",
+            hook_definition_id(slot),
             version=int(slot.definition_version),
         )
-        self.slot = slot
+        self._slot = slot
 
         request_type = cast(type[HookGraphValue], HookRequest)
         progress_type = cast(type[HookGraphValue], _HookProgress)
         result_type = cast(type[HookGraphValue], HookResult)
         request_input = Graph.graph_input("request", request_type)
-        port = _HookPort(invocation)
+        port = _HookPort(payload_admission, invocation)
         plan = _PlanNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
             config_source,
             plan_loader,
+            payload_admission,
         )
-        p1 = _PlannedPriorityNode[PriorityConfigT, ValueT, StateT, CommandT](
+        p1 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
             HookPriority.P1,
             port,
         )
-        p2 = _PlannedPriorityNode[PriorityConfigT, ValueT, StateT, CommandT](
+        p2 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
             HookPriority.P2,
             port,
         )
-        p3 = _PlannedPriorityNode[PriorityConfigT, ValueT, StateT, CommandT](
+        p3 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
             HookPriority.P3,
             port,
         )
@@ -204,6 +209,12 @@ class HookNode(
         self.add_edge("p2", "p3")
         self.add_edge("p3", Graph.END)
         self.set_outputs({"result": Graph.node_output("p3", "result")})
+
+    @property
+    def slot(self) -> HookSlotId:
+        """Return the immutable assembly slot used to define this HookNode."""
+
+        return self._slot
 
 
 __all__ = ["HookNode"]

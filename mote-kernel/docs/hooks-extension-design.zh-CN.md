@@ -7,7 +7,8 @@
 
 ## 0. 本轮范围
 
-本轮生产代码只修改 src/mote_kernel/hooks/，对应测试只放在 tests/hooks/。
+本轮生产代码修改 `src/mote_kernel/hooks/` 以及 Kernel 级通用调用契约
+`src/mote_kernel/invocation/`，对应测试只放在 `tests/hooks/`。
 除本设计文档和实施计划外，不修改 execution、state、failover、observe、role、
 loop、events、think、act 或其他目录。
 
@@ -43,7 +44,8 @@ P1、P2、P3 全程使用同一个 Plan。Kernel 固定 Plan → P1 → P2 → P
 
 - config snapshot：本次 HookNode 固定使用的配置值；
 - HookPlan：由该 snapshot 生成的本次执行计划；
-- invocation capability：根据当前优先级配置完成一次调用并返回最终类型化结果。
+- invocation capability：根据当前优先级配置完成一次调用并返回当前 priority 的
+  `HookStageResult`；最终 `HookResult` 由 HookNode 生成。
 
 不需要以下附加概念：
 
@@ -117,7 +119,11 @@ Kernel Hooks 只固定以下事实：
 - P1、P2、P3 是三个确定的优先级节点；
 - P1、P2、P3 使用同一个 `_PlannedPriorityNode` 实现并严格按顺序推进；
 - 上一优先级节点的最终类型化结果是下一优先级节点的输入；
+- 任何 command 或结果都不能让 P2/P3 短路，P3 才能结束该子图；
 - 四个节点都是普通图节点。
+
+四个节点在构造期间完成组装；拓扑冻结沿用 Graph 首次成功编译后的既有边界。本轮不在
+构造期主动调用私有 `_compile()`，不增加 Hooks 自己的 `seal/finalize` 或 mutation guard。
 
 配置事实的持久化属于 Observe。Plan 节点不建设第二套配置存储、订阅或恢复协议；
 它只读取 Observe 已经持久化并暴露的当前配置。把 Plan 装载独立成节点，是为了不把
@@ -133,26 +139,34 @@ Kernel Hooks 只固定以下事实：
 ## 4. 内部 Hook Port 与统一调用边界
 
 Hook Port 是 HookNode 内部的薄调用层，不是扩展需要实现或可以替换的 SPI，也不
-单独建立 `port.py`。HookNode 装配时接收统一 invocation capability，然后在内部
-构造同一个 Port 供 P1、P2、P3 使用；缺少 invocation capability 时立即装配失败。
+单独建立 `port.py`。统一的 `Invocation` 协议位于 `mote_kernel.invocation`；HookNode
+装配时接收一个符合该协议的 capability，然后在内部构造同一个 Port 供 P1、P2、P3
+使用；缺少 invocation capability 时立即装配失败。
 
 每个优先级节点只执行以下路径：
 
 ~~~text
 _HookPort.execute(priority_plan, request)
-→ invocation.invoke(priority_plan.config, request)
-→ 校验返回值是 HookResult
+→ invocation.invoke(HookInvocationRequest(priority_plan.config, request))
+→ 校验返回值是 HookStageResult
 → 返回
 ~~~
 
+Python 泛型参数在运行时会擦除。composition root 必须为一个 Hook 注入同一份
+`HookPayloadAdmission`，声明 `config_type`、`priority_config_type`、`value_type`、
+`state_type` 和 `command_type` 五个具体 nominal class。Plan 节点、内部 Port 和 P3
+最终结果都复用这份 contract：按 `type(payload) is declared_type` 检查 value、state、
+config、priority config 及每个 command 元素，并要求 stage/final commands 为 exact
+`tuple`。`object`、`Any`、Union 等擦除或非 nominal descriptor 在装配期拒绝；嵌套业务
+schema 仍由具体 invocation owner 负责，不在 Hooks 内引入深层反射或第二套 validator。
+
 每个优先级节点只发出一次统一调用。调用最终落到本地、HTTP、gRPC 或其他传输，
-由统一 invocation 层解析，Hook Port 不知道也不判断。当前 invocation 基础设施尚未
-提供可导入实现时，Hooks 只在 `node.py` 保留同形的私有类型化接缝，不建设 Resolver、
-注册表或传输占位实现。
+由 invocation capability 的具体实现解析，Hook Port 不知道也不判断。当前只提供
+可导入的窄 `Invocation` 协议，不建设 Resolver、注册表或传输占位实现。
 
 统一 invocation 引擎未来可以由 Rust 实现，但 Rust 不直接依赖或实现 Python 的
-`HookRequest`、`HookResult`。装配关系是：创建 HookNode 的 composition root 注入
-一个符合私有接缝的 invocation binding；binding 负责编解码并调用 Rust invocation
+`HookRequest`、`HookStageResult` 或 `HookResult`。装配关系是：创建 HookNode 的 composition root 注入
+一个符合 `Invocation` 协议的 invocation binding；binding 负责编解码并调用 Rust invocation
 引擎；Rust 只处理通用调用引用、跨语言 payload 和传输。真正需要跨语言稳定的调用
 引用、payload 和错误协议时，应由其 owner 与 `conformance/` 一起定义，不能把
 Python Hook 类型复制成 Rust 私有协议。
@@ -162,7 +176,7 @@ runtime 的具体调用实现拥有以下语义：
 - handler 的发现和选择；
 - 串行、并行、混合或其他调度方式；
 - handler 顺序；
-- 内部结果合并与冲突处理；
+- 内部结果合并与冲突处理，并在返回前形成有序 stage commands；
 - 内部取消和可容忍失败策略。
 
 内部 Hook Port 不做以下事情：
@@ -176,16 +190,21 @@ Kernel Hooks 拥有以下语义：
 
 - P1 → P2 → P3 的节点顺序；
 - Plan、invocation 输入输出的类型边界；
-- invocation 最终结果向下一优先级节点传递；
+- `HookStageResult.value` 向下一优先级节点传递；
+- 各 priority 的 commands 只按顺序追加为最终 `HookResult.commands`，不去重、不覆盖、
+  不 apply、不检测冲突；
+- 错误的 value、state、config、priority config 或 command 元素在对应边界失败，不进入下一
+  priority；
 - invocation 异常作为当前节点失败向外传播。
 
-因此不存在 Kernel 级统一合并算法。若扩展内部并行执行，怎样合并由扩展声明，
-并由 runtime 的具体调用实现在返回结果前完成。
+因此不存在 Kernel 级通用 command policy。若扩展内部并行执行，怎样合并由扩展声明，
+并由 runtime 的具体调用实现在返回 stage result 前完成。
 
 ## 5. 状态、持久化与失败边界
 
 runtime 调用只能通过类型化结果和 command 表达变化，不能直接修改统一运行状态。
-GraphRunState 的归约、提交和恢复由 execution/state owner 负责，本轮不修改。
+GraphRunState 的归约、提交和恢复由 execution/state owner 负责，本轮不修改；generic Hook
+commands 的业务消费由外部 command owner 负责。
 
 边界如下：
 
@@ -212,26 +231,36 @@ Hooks 最小模型只保留 Kernel 确实需要的坐标：
 具体扩展或 handler 的身份属于 runtime 内部。Graph 执行坐标属于 execution，
 均不复制到 Hook 请求中。
 
+HookNode 使用 `hooks.identity.hook_definition_id(slot)` 生成自己的嵌套 Graph definition
+ID；该函数采用稳定的长度前缀字段编码，Graph definition version 仍单独沿用 slot 的版本。
+
 ## 7. 包职责和公共 API
 
 目标包结构：
 
 ~~~text
+invocation/
+  __init__.py   # Kernel 级 Invocation 导出
+  contract.py   # 通用单 request/result 调用协议
 hooks/
   __init__.py   # 最小公共导出
   identity.py   # slot 和 priority
-  contract.py   # 请求、结果及配置读取/Plan 装载协议
+  contract.py   # 请求、阶段/最终结果及配置读取/Plan 装载协议
   plan.py       # config snapshot、HookPlan 和 HookPriorityPlan
   node.py       # HookNode、Plan 节点、内部薄 Port 和 P1/P2/P3 节点组合
 ~~~
 
 不建立单独的 `port.py`：当前 Port 只有一次转发和一次结果校验，只服务于 HookNode，
-放在 `node.py` 能准确表达其内部所有权。包级公共入口仍只有 HookNode；此前已经存在
-的类型化辅助值和协议本轮不再调整可见性，但不再提供外部 HookPort SPI。
+放在 `node.py` 能准确表达其内部所有权。`mote_kernel.invocation` 维护跨 Kernel
+domain 共用的最小 `Invocation` 协议；`hooks.contract` 维护 Hook-specific request、
+阶段/最终结果以及配置/Plan 契约。`mote_kernel.hooks` 包级公共入口仍只有 HookNode，
+不提供外部 HookPort SPI。
 
 旧的 manager.py、HookManager、HookBindingSnapshot、HookBindingGeneration、
-HookManagerNode 和 HookInvocation 属于已经放弃的模型，不保留兼容别名或第二条
-执行路径。
+HookManagerNode，以及携带 activation/执行坐标的旧 invocation 值模型均已放弃，
+不保留兼容别名或第二条执行路径。当前 `mote_kernel.invocation.Invocation` 只是
+Kernel domain 共用的最小 typed capability 协议；`HookInvocationRequest` 是 Hook 自己
+的 request envelope，不是旧模型的恢复。
 
 HookNode 使用现有 mote_kernel.execution.Graph 进行图组合，不创建私有 runner。
 Hooks 不拥有配置更新、路由、EventBus、统一状态 reducer、模型路由或 failover

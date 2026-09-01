@@ -14,7 +14,7 @@ from mote_kernel.state.graph_state.identity import (
 class HookStage(Enum):
     """The lifecycle boundary currently reserved for a hook node."""
 
-    AFTER_NODE = auto()
+    AFTER_NODE = "after_node"
 
 
 class HookPriority(Enum):
@@ -45,4 +45,21 @@ class HookSlotId:
             raise ValueError("hook slot stage must be a HookStage")
 
 
-__all__ = ["HookPriority", "HookSlotId", "HookStage"]
+_HOOK_DEFINITION_DOMAIN = "mote.hook.v1"
+
+
+def hook_definition_id(slot: HookSlotId) -> GraphDefinitionId:
+    """Project one Hook slot into an unambiguous nested Graph definition id."""
+
+    if type(slot) is not HookSlotId:
+        raise TypeError("hook definition identity requires a HookSlotId")
+    fields = (
+        _HOOK_DEFINITION_DOMAIN,
+        str(slot.definition_id),
+        str(slot.node_id),
+        slot.stage.value,
+    )
+    return GraphDefinitionId("".join(f"{len(field)}:{field}" for field in fields))
+
+
+__all__ = ["HookPriority", "HookSlotId", "HookStage", "hook_definition_id"]
