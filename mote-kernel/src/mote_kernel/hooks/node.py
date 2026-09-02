@@ -42,10 +42,7 @@ class _HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
         request: HookRequest[ValueT, StateT],
         /,
     ) -> HookStageResult[ValueT, CommandT]:
-        admitted_request = self.admission.admit_request(request)
-        invocation_request = self.admission.admit_invocation_request(
-            HookInvocationRequest(plan.config, admitted_request)
-        )
+        invocation_request = self.admission.admit_invocation_request(HookInvocationRequest(plan.config, request))
         result = await self.invocation.invoke(invocation_request)
         return self.admission.admit_stage_result(result)
 
