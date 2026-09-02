@@ -45,6 +45,12 @@ def test_confirmed_kernel_packages_exist() -> None:
     assert not missing, f"missing confirmed Kernel packages: {missing}"
 
 
+def test_kernel_invocation_is_one_module() -> None:
+    assert (PACKAGE_ROOT / "invocation.py").is_file()
+    assert not (PACKAGE_ROOT / "invocation" / "__init__.py").exists()
+    assert not (PACKAGE_ROOT / "invocation" / "contract.py").exists()
+
+
 def test_generic_ownerless_packages_are_forbidden() -> None:
     violations = sorted(
         path.relative_to(PACKAGE_ROOT).as_posix()

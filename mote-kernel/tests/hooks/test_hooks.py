@@ -933,7 +933,7 @@ def test_hook_node_is_the_only_package_level_api_and_external_port_spi_is_remove
     assert "HookInvocation" not in hooks_contract.__all__
     assert not hasattr(hooks_contract, "HookInvocation")
     assert invocation_package.__all__ == ["Invocation"]
-    assert Invocation.__module__ == "mote_kernel.invocation.contract"
+    assert Invocation.__module__ == "mote_kernel.invocation"
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("mote_kernel.hooks.manager")
 

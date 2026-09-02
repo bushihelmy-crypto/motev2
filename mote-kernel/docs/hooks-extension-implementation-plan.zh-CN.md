@@ -69,8 +69,9 @@ docs/hooks-extension-design.zh-CN.md
 docs/hooks-extension-implementation-plan.zh-CN.md
 docs/hooks-extension-improvement-plan.zh-CN.md
 src/mote_kernel/hooks/**
-src/mote_kernel/invocation/**
+src/mote_kernel/invocation.py
 tests/hooks/**
+tests/architecture/test_package_structure.py
 ```
 
 本轮不修改 `execution`、`state`、`failover`、`observe`、`role`、`loop`、`events`、
@@ -241,7 +242,7 @@ _HookPort.execute(priority_plan, request)
 ```text
 src/mote_kernel/hooks/identity.py
 src/mote_kernel/hooks/contract.py
-src/mote_kernel/invocation/contract.py
+src/mote_kernel/invocation.py
 ```
 
 任务：
@@ -396,7 +397,7 @@ admission：
 
 ## 6. 测试矩阵
 
-测试只放在 `tests/hooks/`。
+Hook 行为测试只放在 `tests/hooks/`；包结构门禁由架构测试维护。
 
 ### 6.1 归集
 
@@ -470,8 +471,9 @@ Python `HookRequest`/`HookResult`，不提前添加 FFI。
 ## 8. 约束清单
 
 1. 生产代码只修改 `src/mote_kernel/hooks/` 和 Kernel 级通用调用契约
-   `src/mote_kernel/invocation/`；
-2. 测试只修改 `tests/hooks/`；
+   `src/mote_kernel/invocation.py`；
+2. Hook 行为测试只修改 `tests/hooks/`；包结构门禁同步修改
+   `tests/architecture/test_package_structure.py`；
 3. `mote_kernel.execution.Graph` 是唯一图组合/执行门面；
 4. HookNode 只有固定 `Plan → P1 → P2 → P3` 外壳，任何 command/结果都不能短路；
 5. 一次调用只读取一个 snapshot、生成一个 Plan；

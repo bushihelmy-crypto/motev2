@@ -10,7 +10,9 @@
 评审对象：
 
 - `src/mote_kernel/hooks/`
+- `src/mote_kernel/invocation.py`
 - `tests/hooks/`
+- `tests/architecture/test_package_structure.py`
 - 与 Hooks 契约直接相关的设计/实施文档
 
 评审原则：0 负债、唯一真相、复用基础设施、代码直白清晰。测试通过只说明当前测试
@@ -129,7 +131,7 @@ class Invocation(Protocol[RequestT_contra, ResultT_co]):
 ### 3.1 Invocation 适配层（方向正确，集成时需验收）
 
 当前代码已经删除了 `hooks.contract.HookInvocation`，并用一个两参数泛型协议承载 Python
-适配形状；该协议定义在 [`src/mote_kernel/invocation/contract.py:1-15`](../src/mote_kernel/invocation/contract.py:1)，
+适配形状；该协议定义在 [`src/mote_kernel/invocation.py:1-15`](../src/mote_kernel/invocation.py:1)，
 由 `HookNode` 导入（[`node.py:19`](../src/mote_kernel/hooks/node.py:19)）。在 Rust
 基础设施方案下，这个位置是合理的 Python 接缝，不应把它误判为重复 owner。
 

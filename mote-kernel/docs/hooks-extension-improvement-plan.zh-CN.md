@@ -261,7 +261,8 @@ required capability 在构造期至少检查：
 
 ## 7. 测试计划
 
-所有测试仍只放在 `tests/hooks/`。
+Hook 行为测试仍只放在 `tests/hooks/`；模块/包结构断言由
+`tests/architecture/test_package_structure.py` 维护。
 
 ### P0：value 和 command 归集
 
