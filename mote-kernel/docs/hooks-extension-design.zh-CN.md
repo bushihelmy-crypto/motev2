@@ -8,7 +8,7 @@
 ## 0. 本轮范围
 
 本轮生产代码修改 `src/mote_kernel/hooks/` 以及 Kernel 级通用调用契约
-`src/mote_kernel/invocation/`，对应测试只放在 `tests/hooks/`。
+`src/mote_kernel/invocation.py`；Hook 行为测试放在 `tests/hooks/`，包结构门禁同步更新。
 除本设计文档和实施计划外，不修改 execution、state、failover、observe、role、
 loop、events、think、act 或其他目录。
 
@@ -236,12 +236,10 @@ ID；该函数采用稳定的长度前缀字段编码，Graph definition version
 
 ## 7. 包职责和公共 API
 
-目标包结构：
+目标结构：
 
 ~~~text
-invocation/
-  __init__.py   # Kernel 级 Invocation 导出
-  contract.py   # 通用单 request/result 调用协议
+invocation.py   # Kernel 级通用单 request/result 调用协议
 hooks/
   __init__.py   # 最小公共导出
   identity.py   # slot 和 priority
