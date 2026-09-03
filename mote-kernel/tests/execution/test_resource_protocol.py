@@ -558,11 +558,7 @@ async def test_active_child_does_not_block_resource_admission(max_parallel_tasks
     assert tuple(
         transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
     ) == (("nested",), ())
-    assert not any(
-        task.get_name().startswith("mote-graph-family:")
-        for task in asyncio.all_tasks()
-        if not task.done()
-    )
+    assert not any(task.get_name().startswith("mote-graph-family:") for task in asyncio.all_tasks() if not task.done())
 
 
 @pytest.mark.parametrize("max_parallel_tasks", [1, 64])
@@ -704,6 +700,157 @@ async def test_nested_child_boundaries_feed_one_parent_join_in_either_completion
     assert result.outputs["value"] == "left|right"
     assert target_calls == 1
     assert tuple(child_completion_order) == (first_child, "right" if first_child == "left" else "left")
+
+
+async def test_failed_child_does_not_cancel_active_child_or_pending_sibling() -> None:
+    active_started = asyncio.Event()
+    active_finished = asyncio.Event()
+    release_active = asyncio.Event()
+    calls: list[str] = []
+
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("failed-child")
+        return Graph.failure("child failed")
+
+    async def active(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("active-child")
+        active_started.set()
+        await release_active.wait()
+        active_finished.set()
+        return Graph.values()
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await active_started.wait()
+        calls.append("ordinary")
+        release_active.set()
+        return Graph.values()
+
+    failed_child = Graph[str]("resource.failed-child")
+    failed_child.add_node("leaf", fail, inputs={}, outputs={})
+    failed_child.set_outputs({})
+    active_child = Graph[str]("resource.active-child")
+    active_child.add_node("leaf", active, inputs={}, outputs={})
+    active_child.set_outputs({})
+
+    parent = Graph[str]("resource.failed-child-family")
+    parent.add_node("failed", failed_child, inputs={})
+    parent.add_node("active", active_child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.FailedResult)
+    assert calls.count("failed-child") == 1
+    assert calls.count("active-child") == 1
+    assert calls.count("ordinary") == 1
+    assert active_finished.is_set()
+    assert calls.index("active-child") < calls.index("ordinary")
+    assert tuple((failure.scope, failure.node_id) for failure in result.failures) == (
+        ((), "failed"),
+        (("failed",), "leaf"),
+    )
+
+
+async def test_awaiting_child_and_ordinary_sibling_reach_one_family_boundary() -> None:
+    ordinary_calls = 0
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"child-input")
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal ordinary_calls
+        ordinary_calls += 1
+        return Graph.values()
+
+    child = Graph[str]("resource.awaiting-child")
+    codec = Codec()
+    child.set_resume_codec("empty", 1, codec.encode, codec.decode)
+    child.add_node("leaf", interrupt, inputs={}, outputs={})
+    child.set_outputs({})
+
+    parent = Graph[str]("resource.awaiting-family")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert ordinary_calls == 1
+    assert tuple((interrupt.scope, interrupt.node_id) for interrupt in result.interrupts) == ((("child",), "leaf"),)
+
+
+async def test_failed_child_cleanup_waits_for_ordinary_sibling_before_aborting_awaiting_child() -> None:
+    failed_settled = asyncio.Event()
+    calls: list[str] = []
+    transition_order: list[Graph.Transition[str]] = []
+
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("failed-child")
+        return Graph.failure("child failed")
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("awaiting-child")
+        return Graph.interrupt(b"awaiting")
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await failed_settled.wait()
+        calls.append("ordinary")
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transition_order.append(transition)
+        if transition.scope == ("failed",) and isinstance(transition.command, SettleGraphNode):
+            failed_settled.set()
+        return transition.candidate_state
+
+    failed_child = Graph[str]("resource.failed-awaiting.failed")
+    failed_child.add_node("leaf", fail, inputs={}, outputs={})
+    failed_child.set_outputs({})
+    awaiting_child = Graph[str]("resource.failed-awaiting.awaiting")
+    awaiting_child.set_resume_codec("empty", 1, Codec().encode, Codec().decode)
+    awaiting_child.add_node("leaf", interrupt, inputs={}, outputs={})
+    awaiting_child.set_outputs({})
+
+    parent = Graph[str]("resource.failed-awaiting.parent")
+    parent.add_node("failed", failed_child, inputs={})
+    parent.add_node("awaiting", awaiting_child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), commit=commit, max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.FailedResult)
+    assert calls.count("failed-child") == 1
+    assert calls.count("awaiting-child") == 1
+    assert calls.count("ordinary") == 1
+    assert calls.index("ordinary") > calls.index("failed-child")
+    ordinary_position = next(
+        index
+        for index, transition in enumerate(transition_order)
+        if (
+            transition.scope == ()
+            and isinstance(transition.command, SettleGraphNode)
+            and isinstance(transition.result, Graph.SuccessResult)
+            and transition.result.node_id == "ordinary"
+        )
+    )
+    awaiting_abort_position = next(
+        index
+        for index, transition in enumerate(transition_order)
+        if transition.scope == ("awaiting",) and isinstance(transition.command, AbortGraphRun)
+    )
+    assert ordinary_position < awaiting_abort_position
 
 
 async def test_resource_sibling_settles_without_waiting_for_nested_completion() -> None:

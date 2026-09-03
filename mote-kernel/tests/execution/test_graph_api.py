@@ -37,6 +37,7 @@ from mote_kernel.state.graph_state import (
     GraphFrontierState,
     GraphNodeId,
     GraphRunState,
+    GraphRunStatus,
     PendingGraphNode,
     ResumeGraphNodes,
     SettleGraphNode,
@@ -635,6 +636,94 @@ async def test_public_builder_supports_conditional_routing_and_joins() -> None:
 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == "decision:input|input"
+
+
+@pytest.mark.asyncio
+async def test_fanout_conditional_branches_and_join_share_one_activation() -> None:
+    calls: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("choose")
+        return Graph.success(Graph.values(value="chosen"), route="left")
+
+    def branch(name: str):
+        async def run(values: Graph.Values[str]) -> Graph.Outcome[str]:
+            calls.append(name)
+            return Graph.success(Graph.values(value=f"{values['value']}:{name}"), route="go")
+
+        return run
+
+    def branch_result(name: str):
+        async def run(_values: Graph.Values[str]) -> Graph.Values[str]:
+            calls.append(name)
+            return Graph.values(value=name)
+
+        return run
+
+    async def merge(values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("merge")
+        return Graph.values(value=f"{values['left']}|{values['right']}")
+
+    graph = Graph[str]("public.fanout-conditional-join")
+    graph.add_node("choose", choose, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "left",
+        branch("left"),
+        inputs={"value": Graph.node_output("choose", "value")},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "right",
+        branch("right"),
+        inputs={"value": Graph.node_output("choose", "value")},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "shared",
+        branch_result("shared"),
+        inputs={},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "left-result",
+        branch_result("left-result"),
+        inputs={},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "right-result",
+        branch_result("right-result"),
+        inputs={},
+        outputs={"value": str},
+    )
+    graph.add_node(
+        "merge",
+        merge,
+        inputs={
+            "left": Graph.node_output("left-result", "value"),
+            "right": Graph.node_output("right-result", "value"),
+        },
+        outputs={"value": str},
+    )
+    graph.add_conditional_edge("choose", "left", "left")
+    graph.add_conditional_edge("choose", "right", "right")
+    graph.add_conditional_edge("left", "go", "shared")
+    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_edge("shared", "left-result")
+    graph.add_edge("shared", "right-result")
+    graph.add_join(("left-result", "right-result"), "merge")
+    graph.set_outputs({"value": Graph.node_output("merge", "value")})
+
+    result = await graph.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == "left-result|right-result"
+    assert calls.count("choose") == 1
+    assert calls.count("left") == 1
+    assert calls.count("right") == 0
+    assert calls.count("shared") == 1
+    assert calls.count("left-result") == calls.count("right-result") == 1
+    assert calls.count("merge") == 1
 
 
 @pytest.mark.asyncio
@@ -2030,6 +2119,12 @@ async def test_root_node_origin_cancellation_rethrows_without_invocation_abort()
     with pytest.raises(asyncio.CancelledError):
         await graph.run(Graph.values(), commit=commits)
 
+    assert tuple(type(transition.command) for transition in commits.transitions) == (
+        StartGraphRun,
+        ClaimGraphExecution,
+    )
+    assert commits.transitions[-1].candidate_state.execution is not None
+    assert not any(isinstance(transition.command, FenceGraphExecution) for transition in commits.transitions)
     assert not any(isinstance(transition.command, AbortGraphRun) for transition in commits.transitions)
 
 
@@ -2056,6 +2151,51 @@ async def test_nested_node_origin_cancellation_becomes_a_typed_parent_failure() 
         transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
     )
     assert abort_scopes == (("nested",),)
+
+
+@pytest.mark.asyncio
+async def test_root_node_origin_cancellation_preserves_active_child_lease() -> None:
+    child_started = asyncio.Event()
+    never = asyncio.Event()
+    child_cleaned = asyncio.Event()
+    original = asyncio.CancelledError("root node cancelled")
+    authoritative: dict[tuple[str, ...], Graph.State] = {}
+    transitions: list[Graph.Transition[str]] = []
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_started.set()
+        try:
+            await never.wait()
+        finally:
+            child_cleaned.set()
+        return Graph.values()
+
+    async def parent_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await child_started.wait()
+        raise original
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        authoritative[transition.scope] = transition.candidate_state
+        return transition.candidate_state
+
+    child = Graph[str]("public.root-node-cancellation-family.child")
+    child.add_node("leaf", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.root-node-cancellation-family.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", parent_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(parent.run(Graph.values(), commit=commit, max_parallel_tasks=2), timeout=1)
+
+    assert raised.value is original
+    assert child_cleaned.is_set()
+    assert authoritative[()].execution is not None
+    assert authoritative[("child",)].execution is not None
+    assert not any(isinstance(transition.command, FenceGraphExecution) for transition in transitions)
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
 
 
 @pytest.mark.asyncio
@@ -2406,6 +2546,249 @@ async def test_facade_drives_nested_graph_through_the_same_execution_owner() -> 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == "nested"
     assert any(transition.scope == ("child",) for transition in commits.transitions)
+
+
+@pytest.mark.asyncio
+async def test_parent_worker_failure_fences_active_descendants_without_terminalizing_them() -> None:
+    grandchild_started = asyncio.Event()
+    grandchild_cleaned = asyncio.Event()
+    child_started = asyncio.Event()
+    child_cleaned = asyncio.Event()
+    never = asyncio.Event()
+    original = RuntimeError("parent ordinary failure")
+    authoritative: dict[tuple[str, ...], Graph.State] = {}
+    transitions: list[Graph.Transition[str]] = []
+
+    async def grandchild_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        grandchild_started.set()
+        try:
+            await never.wait()
+        finally:
+            grandchild_cleaned.set()
+        return Graph.values()
+
+    async def parent_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await child_started.wait()
+        await grandchild_started.wait()
+        raise original
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_started.set()
+        await grandchild_started.wait()
+        try:
+            await never.wait()
+        finally:
+            child_cleaned.set()
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        authoritative[transition.scope] = transition.candidate_state
+        return transition.candidate_state
+
+    grandchild = Graph[str]("public.fan-in-failure.parent-child-grandchild")
+    grandchild.add_node("leaf", grandchild_operation, inputs={}, outputs={})
+    grandchild.set_outputs({})
+    child = Graph[str]("public.fan-in-failure.parent-child")
+    child.add_node("grandchild", grandchild, inputs={})
+    child.add_node("ordinary", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.fan-in-failure.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", parent_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    with pytest.raises(RuntimeError) as raised:
+        await asyncio.wait_for(parent.run(Graph.values(), commit=commit), timeout=1)
+
+    assert raised.value is original
+    assert grandchild_cleaned.is_set()
+    assert child_cleaned.is_set()
+    expected_scopes = ((), ("child",), ("child", "grandchild"))
+    for scope in expected_scopes:
+        assert any(
+            transition.scope == scope and isinstance(transition.command, ClaimGraphExecution)
+            for transition in transitions
+        )
+        assert authoritative[scope].execution is None
+        assert authoritative[scope].status is GraphRunStatus.RUNNING
+    assert {transition.scope for transition in transitions if isinstance(transition.command, FenceGraphExecution)} == {
+        (),
+        ("child",),
+        ("child", "grandchild"),
+    }
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
+
+
+@pytest.mark.asyncio
+async def test_child_worker_failure_fences_an_active_parent_without_terminalizing_it() -> None:
+    child_started = asyncio.Event()
+    parent_started = asyncio.Event()
+    parent_cleaned = asyncio.Event()
+    never = asyncio.Event()
+    original = RuntimeError("child ordinary failure")
+    authoritative: dict[tuple[str, ...], Graph.State] = {}
+    transitions: list[Graph.Transition[str]] = []
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_started.set()
+        raise original
+
+    async def parent_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        parent_started.set()
+        try:
+            await child_started.wait()
+            await never.wait()
+        finally:
+            parent_cleaned.set()
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        authoritative[transition.scope] = transition.candidate_state
+        return transition.candidate_state
+
+    child = Graph[str]("public.fan-in-failure.child-error")
+    child.add_node("leaf", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.fan-in-failure.child-parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", parent_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    with pytest.raises(RuntimeError) as raised:
+        await asyncio.wait_for(
+            parent.run(Graph.values(), commit=commit, max_parallel_tasks=2),
+            timeout=1,
+        )
+
+    assert raised.value is original
+    assert parent_started.is_set()
+    assert child_started.is_set()
+    assert parent_cleaned.is_set()
+    assert any(
+        transition.scope == ("child",) and isinstance(transition.command, ClaimGraphExecution)
+        for transition in transitions
+    )
+    assert any(
+        transition.scope == () and isinstance(transition.command, ClaimGraphExecution) for transition in transitions
+    )
+    assert authoritative[()].execution is None
+    assert authoritative[("child",)].execution is None
+    assert authoritative[()].status is GraphRunStatus.RUNNING
+    assert authoritative[("child",)].status is GraphRunStatus.RUNNING
+    assert {transition.scope for transition in transitions if isinstance(transition.command, FenceGraphExecution)} == {
+        (),
+        ("child",),
+    }
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
+
+
+@pytest.mark.asyncio
+async def test_child_worker_failure_fences_a_sibling_child_without_terminalizing_it() -> None:
+    sibling_started = asyncio.Event()
+    sibling_cleaned = asyncio.Event()
+    never = asyncio.Event()
+    original = RuntimeError("child sibling failure")
+    authoritative: dict[tuple[str, ...], Graph.State] = {}
+    transitions: list[Graph.Transition[str]] = []
+
+    async def failing_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await sibling_started.wait()
+        raise original
+
+    async def sibling_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        sibling_started.set()
+        try:
+            await never.wait()
+        finally:
+            sibling_cleaned.set()
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        authoritative[transition.scope] = transition.candidate_state
+        return transition.candidate_state
+
+    failing = Graph[str]("public.fan-in-failure.sibling-failing")
+    failing.add_node("leaf", failing_operation, inputs={}, outputs={})
+    failing.set_outputs({})
+    sibling = Graph[str]("public.fan-in-failure.sibling-blocked")
+    sibling.add_node("leaf", sibling_operation, inputs={}, outputs={})
+    sibling.set_outputs({})
+    parent = Graph[str]("public.fan-in-failure.sibling-parent")
+    parent.add_node("failing", failing, inputs={})
+    parent.add_node("sibling", sibling, inputs={})
+    parent.set_outputs({})
+
+    with pytest.raises(RuntimeError) as raised:
+        await asyncio.wait_for(
+            parent.run(Graph.values(), commit=commit, max_parallel_tasks=2),
+            timeout=1,
+        )
+
+    assert raised.value is original
+    assert sibling_cleaned.is_set()
+    for scope in (("failing",), ("sibling",)):
+        assert authoritative[scope].execution is None
+        assert authoritative[scope].status is GraphRunStatus.RUNNING
+    assert {transition.scope for transition in transitions if isinstance(transition.command, FenceGraphExecution)} == {
+        ("failing",),
+        ("sibling",),
+    }
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
+
+
+@pytest.mark.asyncio
+async def test_commit_origin_cancellation_preserves_active_family_leases() -> None:
+    child_started = asyncio.Event()
+    never = asyncio.Event()
+    child_cleaned = asyncio.Event()
+    original = asyncio.CancelledError("commit-origin cancellation")
+    authoritative: dict[tuple[str, ...], Graph.State] = {}
+    transitions: list[Graph.Transition[str]] = []
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_started.set()
+        try:
+            await never.wait()
+        finally:
+            child_cleaned.set()
+        return Graph.values()
+
+    async def parent_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await child_started.wait()
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transitions.append(transition)
+        authoritative[transition.scope] = transition.candidate_state
+        if (
+            transition.scope == ()
+            and isinstance(transition.command, SettleGraphNode)
+            and transition.result is not None
+            and transition.result.node_id == "ordinary"
+        ):
+            raise original
+        return transition.candidate_state
+
+    child = Graph[str]("public.commit-origin-family.child")
+    child.add_node("leaf", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+    parent = Graph[str]("public.commit-origin-family.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", parent_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(parent.run(Graph.values(), commit=commit, max_parallel_tasks=2), timeout=1)
+
+    assert raised.value is original
+    assert child_cleaned.is_set()
+    assert authoritative[()].execution is not None
+    assert authoritative[("child",)].execution is not None
+    assert not any(isinstance(transition.command, FenceGraphExecution) for transition in transitions)
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
 
 
 @pytest.mark.asyncio

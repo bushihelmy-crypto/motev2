@@ -200,18 +200,20 @@ _ChildWaitResult: TypeAlias = (
 
 @final
 class _ChildHandle(Generic[GraphValueT]):
-    """Opaque drive, abort, and release capabilities for one child call."""
+    """Opaque drive, fence, abort, and release capabilities for one child call."""
 
-    __slots__ = ("_abort", "_drive", "_release")
+    __slots__ = ("_abort", "_drive", "_fence", "_release")
 
     def __init__(
         self,
         drive: Callable[[], Awaitable[_ChildWaitResult[GraphValueT]]],
         abort: Callable[[GraphAbortReason], Awaitable[None]],
+        fence: Callable[[], Awaitable[None]],
         release: Callable[[], Awaitable[None]],
     ) -> None:
         self._drive = drive
         self._abort = abort
+        self._fence = fence
         self._release = release
 
     async def drive(self) -> _ChildWaitResult[GraphValueT]:
@@ -219,6 +221,9 @@ class _ChildHandle(Generic[GraphValueT]):
 
     async def abort(self, reason: GraphAbortReason) -> None:
         await self._abort(reason)
+
+    async def fence(self) -> None:
+        await self._fence()
 
     async def release(self) -> None:
         await self._release()
@@ -618,6 +623,40 @@ class _GraphRun(Generic[GraphValueT]):
             aborted = True
         return aborted
 
+    async def fence_after_worker_failure(self) -> None:
+        """Stop this family after a sibling worker failed normally.
+
+        The fan-in owner has already waited for every worker to stop before
+        entering this method.  Each still-owned child is fenced through the
+        same child owner, then this scope's session and execution lease are
+        fenced.  No lifecycle command is synthesized: the scopes remain
+        ``RUNNING`` so the confirmed snapshot can be recovered later.
+        """
+
+        errors: list[BaseException] = []
+        for _position, _parent, phase, handle in tuple(self._children):
+            if handle is None or isinstance(phase, CompletedChild | FailedChild | AbortedChild):
+                continue
+            try:
+                await handle.fence()
+            except BaseException as error:
+                errors.append(error)
+        session = self._session
+        if session is not None:
+            try:
+                await session.aclose()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                self._session = None
+        if self._state.status is GraphRunStatus.RUNNING and self._state.execution is not None:
+            try:
+                await self._fence(self._state.execution.token)
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
+
     async def _retire_child(self, result: TaskResult[GraphValueT]) -> None:
         parent = GraphActivationIdentity(result.task.run_id, result.task.superstep, result.task.node_id)
         index = self._call_index(parent)
@@ -719,6 +758,7 @@ class _GraphRun(Generic[GraphValueT]):
                 worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
 
+        worker_failures: tuple[tuple[int, BaseException], ...] = ()
         try:
             while pending:
                 done, pending = await asyncio.wait(
@@ -732,12 +772,41 @@ class _GraphRun(Generic[GraphValueT]):
                     except BaseException as error:
                         failures.append((order[worker], error))
                 if failures:
-                    raise min(failures, key=lambda item: item[0])[1]
+                    worker_failures = tuple(failures)
+                    break
         except BaseException:
             cleanup_task = asyncio.create_task(cancel_workers())
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
             raise
+
+        if not worker_failures:
+            return
+
+        primary = min(worker_failures, key=lambda item: item[0])[1]
+        cleanup_error: BaseException | None = None
+        cancellation_cleanup = asyncio.create_task(cancel_workers())
+        try:
+            await wait_for_owner_task(cancellation_cleanup)
+        except BaseException as error:
+            cleanup_error = error
+
+        # Commit- and node-origin cancellation deliberately keep their
+        # authoritative lease for caller handling or recovery.  Every other
+        # worker failure is a fan-in stop: fence the complete family after all
+        # Python tasks have settled.
+        family_failure = not (primary is self._commit_origin_cancellation or primary is self._node_origin_cancellation)
+        if family_failure:
+            fence_cleanup = asyncio.create_task(self.fence_after_worker_failure())
+            try:
+                await wait_for_owner_task(fence_cleanup)
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+
+        if cleanup_error is not None:
+            raise primary from cleanup_error
+        raise primary
 
     async def _execute_frontier(
         self,
@@ -1026,6 +1095,16 @@ def _opaque_handle(
         handed_off = True
         return disposition, terminal, boundary
 
+    async def fence() -> None:
+        current = owner
+        if current is None:
+            return
+        try:
+            await current.fence_after_worker_failure()
+        finally:
+            if current.state.execution is None:
+                current.handoff_evidence()
+
     async def abort(reason: GraphAbortReason) -> None:
         current = owner
         if current is None:
@@ -1043,7 +1122,7 @@ def _opaque_handle(
         await owner.release()
         owner = None
 
-    return _ChildHandle(drive, abort, release)
+    return _ChildHandle(drive, abort, fence, release)
 
 
 async def admit_continued_root(

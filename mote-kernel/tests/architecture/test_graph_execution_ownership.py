@@ -391,13 +391,14 @@ def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
     assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
         "_abort",
         "_drive",
+        "_fence",
         "_release",
     }
     assert {
         node.name
         for node in handle.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
-    } == {"abort", "drive", "release"}
+    } == {"abort", "drive", "fence", "release"}
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
