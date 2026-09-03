@@ -758,8 +758,8 @@ def test_terminal_join_completed_after_a_later_superstep_carries_consumption_pro
     )
 
 
-def test_join_rejects_a_second_activation_occurrence_of_one_source() -> None:
-    with pytest.raises(GraphValidationError, match="occurrence"):
+def test_join_rejects_a_source_with_two_coexisting_activation_paths() -> None:
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
         topology(
             "a",
             "b",

@@ -413,10 +413,12 @@ def _reject_repeatable_join_sources(
     """Reject Join sources that can be activated more than once in P1.
 
     Join progress currently identifies a source by its node identity.  A
-    source with two simultaneously satisfiable incoming gates could therefore
-    contribute two occurrences that cannot be distinguished.  Cyclic sources
-    are already rejected by ``_reject_cyclic_joins``; this pass closes the
-    acyclic fan-in case as well.
+    source reachable from a control cycle could therefore contribute two
+    occurrences that cannot be distinguished.  Incoming gates that survive
+    ``_reject_ambiguous_activation_gates`` are either a single gate or
+    statically mutually exclusive alternatives, so merely having more than
+    one gate does not make the source repeatable.  This pass propagates only
+    the actual repeatability of a cycle to its acyclic dependents.
     """
 
     repeatable = set(_cycle_reachable_nodes(tuple(sorted(successors)), successors))
@@ -430,7 +432,7 @@ def _reject_repeatable_join_sources(
                 repeatable.add(node_id)
                 changed = True
     for join in joins:
-        if any(source in repeatable or len(activation_gates[source]) > 1 for source in join.sources):
+        if any(source in repeatable for source in join.sources):
             raise GraphValidationError("a join source can have more than one activation occurrence")
 
 

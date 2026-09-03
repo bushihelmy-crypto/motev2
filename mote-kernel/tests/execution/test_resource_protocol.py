@@ -429,6 +429,59 @@ async def test_conditional_frontier_admits_only_the_selected_resource_target() -
     assert calls == ["left"]
 
 
+@pytest.mark.parametrize("selected_route", ["left", "right"])
+async def test_conditional_resource_branch_waits_with_its_sibling_before_join(
+    selected_route: str,
+) -> None:
+    calls: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(Graph.values(), route=selected_route)
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("ordinary")
+        return Graph.values()
+
+    def branch(node_id: str):
+        async def run(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+            calls.append(node_id)
+            return Graph.success(Graph.values(), route="go")
+
+        return run
+
+    async def shared(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("shared")
+        return Graph.values()
+
+    async def target(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("target")
+        return Graph.values()
+
+    graph = Graph[str](f"resource.conditional-join-{selected_route}")
+    graph.add_node("choose", choose, inputs={}, outputs={})
+    graph.add_node("ordinary", ordinary, inputs={}, outputs={}, resources=("database",))
+    for node_id in ("left", "right"):
+        graph.add_node(node_id, branch(node_id), inputs={}, outputs={}, resources=("database",))
+    graph.add_node("shared", shared, inputs={}, outputs={})
+    graph.add_node("target", target, inputs={}, outputs={})
+    graph.add_edge("choose", "ordinary")
+    graph.add_conditional_edge("choose", "left", "left")
+    graph.add_conditional_edge("choose", "right", "right")
+    graph.add_conditional_edge("left", "go", "shared")
+    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_join(("ordinary", "shared"), "target")
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values(), max_parallel_tasks=2)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert calls.count("ordinary") == 1
+    assert calls.count(selected_route) == 1
+    assert calls.count("left" if selected_route == "right" else "right") == 0
+    assert calls.count("shared") == 1
+    assert calls.count("target") == 1
+
+
 async def test_missing_child_precedes_resource_admission() -> None:
     graph = nested_resource_graph()
     commits = CommitLog()

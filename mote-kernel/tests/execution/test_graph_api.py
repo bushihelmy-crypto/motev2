@@ -638,6 +638,114 @@ async def test_public_builder_supports_conditional_routing_and_joins() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("selected_route", ["left", "right"])
+async def test_mutually_exclusive_routes_converge_without_repeating_the_shared_node(selected_route: str) -> None:
+    calls: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("choose")
+        return Graph.success(Graph.values(), route=selected_route)
+
+    def branch(node_id: str):
+        async def run(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+            calls.append(node_id)
+            return Graph.success(Graph.values(), route="go")
+
+        return run
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("ordinary")
+        return Graph.values()
+
+    async def shared(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("shared")
+        return Graph.values()
+
+    async def target(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("target")
+        return Graph.values()
+
+    graph = Graph[str](f"public.mutually-exclusive-{selected_route}")
+    graph.add_node("choose", choose, inputs={}, outputs={})
+    graph.add_node("left", branch("left"), inputs={}, outputs={})
+    graph.add_node("right", branch("right"), inputs={}, outputs={})
+    graph.add_node("ordinary", ordinary, inputs={}, outputs={})
+    graph.add_node("shared", shared, inputs={}, outputs={})
+    graph.add_node("target", target, inputs={}, outputs={})
+    graph.add_edge("choose", "ordinary")
+    graph.add_conditional_edge("choose", "left", "left")
+    graph.add_conditional_edge("choose", "right", "right")
+    graph.add_conditional_edge("left", "go", "shared")
+    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_join(("ordinary", "shared"), "target")
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert calls.count("shared") == 1
+    assert calls.count("target") == 1
+    assert calls.count(selected_route) == 1
+    assert calls.count("left" if selected_route == "right" else "right") == 0
+
+
+@pytest.mark.asyncio
+async def test_noncyclic_join_result_is_independent_of_branch_completion_order() -> None:
+    async def run_in_order(order: tuple[str, str]) -> tuple[str, tuple[str, ...]]:
+        started = {node_id: asyncio.Event() for node_id in ("left", "right")}
+        finished = {node_id: asyncio.Event() for node_id in ("left", "right")}
+        release = {node_id: asyncio.Event() for node_id in ("left", "right")}
+        calls: list[str] = []
+
+        def branch(node_id: str):
+            async def execute(_values: Graph.Values[str]) -> Graph.Values[str]:
+                started[node_id].set()
+                await release[node_id].wait()
+                calls.append(node_id)
+                finished[node_id].set()
+                return Graph.values(value=node_id)
+
+            return execute
+
+        async def combine(values: Graph.Values[str]) -> Graph.Values[str]:
+            calls.append("join")
+            return Graph.values(value=f"{values['left']}|{values['right']}")
+
+        graph = Graph[str](f"public.join-order-{order[0]}-{order[1]}")
+        graph.add_node("left", branch("left"), inputs={}, outputs={"value": str})
+        graph.add_node("right", branch("right"), inputs={}, outputs={"value": str})
+        graph.add_node(
+            "join",
+            combine,
+            inputs={
+                "left": Graph.node_output("left", "value"),
+                "right": Graph.node_output("right", "value"),
+            },
+            outputs={"value": str},
+        )
+        graph.add_join(("left", "right"), "join")
+        graph.set_outputs({"value": Graph.node_output("join", "value")})
+
+        running = asyncio.create_task(graph.run(Graph.values(), max_parallel_tasks=2))
+        await asyncio.gather(*(started[node_id].wait() for node_id in started))
+        for node_id in order:
+            release[node_id].set()
+            await finished[node_id].wait()
+        result = await running
+
+        assert isinstance(result, Graph.CompletedResult)
+        return result.outputs["value"], tuple(calls)
+
+    first = await run_in_order(("left", "right"))
+    second = await run_in_order(("right", "left"))
+
+    assert first[0] == second[0] == "left|right"
+    assert first[1][-1] == second[1][-1] == "join"
+    assert first[1][:2] == ("left", "right")
+    assert second[1][:2] == ("right", "left")
+
+
+@pytest.mark.asyncio
 async def test_interrupt_resume_actions_share_one_canonical_scope_commit() -> None:
     attempts = {"a": 0, "b": 0}
 

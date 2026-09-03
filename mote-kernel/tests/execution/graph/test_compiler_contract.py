@@ -587,7 +587,7 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
     left = node("left", inputs={}, outputs={})
     right = node("right", inputs={}, outputs={})
 
-    with pytest.raises(GraphValidationError, match="occurrence"):
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
         compile_graph(
             definition(
                 (decision, always, left, right),
@@ -663,6 +663,52 @@ def test_repeatable_join_source_propagation_reaches_acyclic_dependents() -> None
             (JoinEdge((dependent, other), target),),
             activation_gates,
             successors,
+        )
+
+
+def test_mutually_exclusive_incoming_routes_do_not_make_a_join_source_repeatable() -> None:
+    compiled = compile_graph(
+        definition(
+            tuple(
+                node(node_id, inputs={}, outputs={})
+                for node_id in (
+                    "decision",
+                    "left",
+                    "right",
+                    "shared",
+                    "other",
+                    "target",
+                )
+            ),
+            edges=(
+                DirectEdge(GraphNodeId("decision"), GraphNodeId("other")),
+                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
+                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
+                ConditionalEdge(GraphNodeId("left"), GraphRouteId("go"), GraphNodeId("shared")),
+                ConditionalEdge(GraphNodeId("right"), GraphRouteId("go"), GraphNodeId("shared")),
+                JoinEdge((GraphNodeId("other"), GraphNodeId("shared")), GraphNodeId("target")),
+            ),
+        )
+    )
+
+    assert compiled.transition.activation_gates[GraphNodeId("shared")] == (
+        ((GraphNodeId("left"), frozenset({GraphRouteId("go")})),),
+        ((GraphNodeId("right"), frozenset({GraphRouteId("go")})),),
+    )
+
+
+def test_coexisting_fanout_routes_require_an_explicit_join() -> None:
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
+        compile_graph(
+            definition(
+                tuple(node(node_id, inputs={}, outputs={}) for node_id in ("source", "left", "right", "target")),
+                edges=(
+                    DirectEdge(GraphNodeId("source"), GraphNodeId("left")),
+                    DirectEdge(GraphNodeId("source"), GraphNodeId("right")),
+                    DirectEdge(GraphNodeId("left"), GraphNodeId("target")),
+                    DirectEdge(GraphNodeId("right"), GraphNodeId("target")),
+                ),
+            )
         )
 
 
