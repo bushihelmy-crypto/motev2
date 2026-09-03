@@ -4,7 +4,13 @@ import pytest
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
-from mote_kernel.execution.family_driver import GraphTransition, fresh_root, project_graph_result
+from mote_kernel.execution.errors import GraphValueUnavailableError
+from mote_kernel.execution.family_driver import (
+    GraphTransition,
+    admit_continued_root,
+    fresh_root,
+    project_graph_result,
+)
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
@@ -18,7 +24,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.run_context import _CompiledFamilyIdentity
+from mote_kernel.execution.run_context import ScopedFrameIndex, _CompiledFamilyIdentity
 from mote_kernel.state.graph_state import (
     ActivationReference,
     AdvanceGraphFrontier,
@@ -40,6 +46,19 @@ class _TransitionLog:
 
     async def __call__(self, transition: GraphTransition[int], /) -> GraphRunState:
         self.transitions.append(transition)
+        return transition.candidate_state
+
+
+class _LoseAdvanceAcknowledgement(_TransitionLog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.candidate: GraphRunState | None = None
+
+    async def __call__(self, transition: GraphTransition[int], /) -> GraphRunState:
+        self.transitions.append(transition)
+        if isinstance(transition.command, AdvanceGraphFrontier):
+            self.candidate = transition.candidate_state
+            raise RuntimeError("advance acknowledgement was lost")
         return transition.candidate_state
 
 
@@ -208,3 +227,80 @@ async def test_self_feedback_execution_limit_is_only_a_safety_boundary() -> None
         await _run(loop, run_id="feedback-limit", max_supersteps=4)
 
     assert calls == 4
+
+
+@pytest.mark.asyncio
+async def test_feedback_continuation_reuses_transient_publication_after_lost_advance() -> None:
+    seen: list[int] = []
+
+    async def loop(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        value = values["value"]
+        seen.append(value)
+        return Graph.success(Graph.values(value=value + 1), route="continue" if value == 0 else "done")
+
+    graph = _compiled(loop)
+    scope_run = root_scope_run(GraphRunId("feedback-lost-advance"))
+    lost = _LoseAdvanceAcknowledgement()
+    root, _evidence_reader = await fresh_root(
+        graph,
+        scope_run,
+        admit_graph_input(graph, Graph.values(seed=0)),
+        ExecutionLimits(),
+        lost,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="acknowledgement was lost"):
+            await root.drive_quantum()
+        assert lost.candidate is not None
+        candidate = lost.candidate
+        transient_frames = root.frames
+    finally:
+        await root.release()
+
+    state_only_root, _state_only_evidence = await admit_continued_root(
+        graph,
+        candidate,
+        (),
+        ScopedFrameIndex(),
+        ExecutionLimits(),
+        None,
+        (),
+        (),
+        _CompiledFamilyIdentity(),
+        recovered=True,
+    )
+    try:
+        with pytest.raises(GraphValueUnavailableError, match="node output"):
+            await state_only_root.drive_quantum()
+    finally:
+        await state_only_root.release()
+    assert seen == [0]
+
+    continued_root, evidence_reader = await admit_continued_root(
+        graph,
+        candidate,
+        (),
+        transient_frames,
+        ExecutionLimits(),
+        None,
+        (),
+        (),
+        _CompiledFamilyIdentity(),
+        recovered=False,
+    )
+    try:
+        disposition = await continued_root.drive_quantum()
+        result = project_graph_result(
+            graph,
+            _CompiledFamilyIdentity(),
+            continued_root,
+            evidence_reader,
+            disposition,
+            recovered=False,
+        )
+    finally:
+        await continued_root.release()
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 2
+    assert seen == [0, 1]
