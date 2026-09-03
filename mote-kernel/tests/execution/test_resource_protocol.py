@@ -23,6 +23,7 @@ from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ClaimGraphExecution,
+    CompleteGraphFrontier,
     FenceGraphExecution,
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -557,6 +558,152 @@ async def test_active_child_does_not_block_resource_admission(max_parallel_tasks
     assert tuple(
         transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
     ) == (("nested",), ())
+    assert not any(
+        task.get_name().startswith("mote-graph-family:")
+        for task in asyncio.all_tasks()
+        if not task.done()
+    )
+
+
+@pytest.mark.parametrize("max_parallel_tasks", [1, 64])
+async def test_active_child_and_ordinary_sibling_are_driven_by_one_frontier_owner(
+    max_parallel_tasks: int,
+) -> None:
+    """A sibling may unblock a child while both belong to the same frontier."""
+
+    child_entered = asyncio.Event()
+    sibling_finished = asyncio.Event()
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_entered.set()
+        await sibling_finished.wait()
+        return Graph.values()
+
+    async def sibling_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await child_entered.wait()
+        sibling_finished.set()
+        return Graph.values()
+
+    child = Graph[str]("resource.concurrent-family.child")
+    child.add_node("leaf", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+
+    parent = Graph[str]("resource.concurrent-family.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("sibling", sibling_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=max_parallel_tasks),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+
+
+async def test_multiple_active_children_are_driven_without_a_serial_family_barrier() -> None:
+    left_entered = asyncio.Event()
+    right_entered = asyncio.Event()
+
+    async def left_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        left_entered.set()
+        await right_entered.wait()
+        return Graph.values()
+
+    async def right_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        right_entered.set()
+        await left_entered.wait()
+        return Graph.values()
+
+    left = Graph[str]("resource.concurrent-children.left")
+    left.add_node("leaf", left_operation, inputs={}, outputs={})
+    left.set_outputs({})
+    right = Graph[str]("resource.concurrent-children.right")
+    right.add_node("leaf", right_operation, inputs={}, outputs={})
+    right.set_outputs({})
+
+    parent = Graph[str]("resource.concurrent-children.parent")
+    parent.add_node("left", left, inputs={})
+    parent.add_node("right", right, inputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+
+
+@pytest.mark.parametrize("first_child", ["left", "right"])
+async def test_nested_child_boundaries_feed_one_parent_join_in_either_completion_order(
+    first_child: str,
+) -> None:
+    entered = {"left": asyncio.Event(), "right": asyncio.Event()}
+    release = {"left": asyncio.Event(), "right": asyncio.Event()}
+    first_completed = asyncio.Event()
+    child_completion_order: list[str] = []
+    target_calls = 0
+
+    def child(name: str) -> Graph[str]:
+        async def operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+            entered[name].set()
+            await release[name].wait()
+            return Graph.values(value=name)
+
+        graph = Graph[str](f"resource.join-child.{name}.{first_child}")
+        graph.add_node("leaf", operation, inputs={}, outputs={"value": str})
+        graph.set_outputs({"value": Graph.node_output("leaf", "value")})
+        return graph
+
+    async def combine(values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal target_calls
+        target_calls += 1
+        return Graph.values(value=f"{values['left']}|{values['right']}")
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        if transition.scope in (("left",), ("right",)) and isinstance(
+            transition.command,
+            CompleteGraphFrontier,
+        ):
+            child_completion_order.append(transition.scope[0])
+            if transition.scope == (first_child,):
+                first_completed.set()
+        return transition.candidate_state
+
+    parent = Graph[str](f"resource.join-parent.{first_child}")
+    parent.add_node("left", child("left"), inputs={})
+    parent.add_node("right", child("right"), inputs={})
+    parent.add_node(
+        "combine",
+        combine,
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={"value": str},
+    )
+    parent.add_join(("left", "right"), "combine")
+    parent.set_outputs({"value": Graph.node_output("combine", "value")})
+
+    running = asyncio.create_task(
+        parent.run(
+            Graph.values(),
+            commit=commit,
+            max_parallel_tasks=1,
+        )
+    )
+    await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), timeout=1)
+    release[first_child].set()
+    await asyncio.wait_for(first_completed.wait(), timeout=1)
+    release["right" if first_child == "left" else "left"].set()
+
+    result = await asyncio.wait_for(running, timeout=1)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == "left|right"
+    assert target_calls == 1
+    assert tuple(child_completion_order) == (first_child, "right" if first_child == "left" else "left")
 
 
 async def test_resource_sibling_settles_without_waiting_for_nested_completion() -> None:

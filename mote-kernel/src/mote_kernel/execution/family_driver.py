@@ -679,6 +679,66 @@ class _GraphRun(Generic[GraphValueT]):
                 if task.node_id in self._graph.nested_graphs:
                     await self._retire_child(result)
 
+    async def _drive_workers(
+        self,
+        workers_to_start: tuple[tuple[str, Coroutine[None, None, None]], ...],
+    ) -> None:
+        """Drive owner-local work while retaining every task handle.
+
+        A child is an independent graph owner, but it is not an independent
+        invocation.  The family owner keeps every worker here, so ordinary
+        sessions and child-only frontiers share the same cancellation and
+        error boundary without creating another scheduler.
+        """
+
+        if not workers_to_start:
+            return
+        workers_list: list[asyncio.Task[None]] = []
+        try:
+            for label, worker in workers_to_start:
+                workers_list.append(
+                    asyncio.create_task(
+                        worker,
+                        name=f"mote-graph-family:{self._scope_run.graph_run_id}:{label}",
+                    )
+                )
+        except BaseException:
+            for _label, worker in workers_to_start[len(workers_list) :]:
+                worker.close()
+            for worker in workers_list:
+                worker.cancel()
+            await asyncio.gather(*workers_list, return_exceptions=True)
+            raise
+        workers = tuple(workers_list)
+        order = {worker: position for position, worker in enumerate(workers)}
+        pending: set[asyncio.Task[None]] = set(workers)
+
+        async def cancel_workers() -> None:
+            live = tuple(worker for worker in workers if not worker.done())
+            for worker in live:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                failures: list[tuple[int, BaseException]] = []
+                for worker in sorted(done, key=order.__getitem__):
+                    try:
+                        worker.result()
+                    except BaseException as error:
+                        failures.append((order[worker], error))
+                if failures:
+                    raise min(failures, key=lambda item: item[0])[1]
+        except BaseException:
+            cleanup_task = asyncio.create_task(cancel_workers())
+            with suppress(BaseException):
+                await wait_for_owner_task(cleanup_task)
+            raise
+
     async def _execute_frontier(
         self,
         prepared: ExecutableFrontier[GraphValueT],
@@ -695,7 +755,20 @@ class _GraphRun(Generic[GraphValueT]):
             raise
         self._session = session
         try:
-            await self._consume_session(session, execution.token)
+            child_indexes = tuple(
+                index
+                for index, (_position, parent, phase, _handle) in enumerate(self._children)
+                if (
+                    isinstance(phase, ActiveChild)
+                    and parent.run_id == self._state.run_id
+                    and parent.superstep == self._state.superstep
+                )
+            )
+            workers = (
+                ("parent", self._consume_session(session, execution.token)),
+                *((f"child:{index}", self._drive_child(index)) for index in child_indexes),
+            )
+            await self._drive_workers(workers)
         finally:
             self._session = None
         if self._state.execution is not None:
@@ -723,15 +796,15 @@ class _GraphRun(Generic[GraphValueT]):
                     for missing in disposition.missing:
                         await self._start_child(missing)
                     continue
-                drove = False
+                child_workers: list[tuple[str, Coroutine[None, None, None]]] = []
                 for active in disposition.active:
                     index = self._call_index(active.parent)
                     if index is None:
                         raise ResultCollectionError("active child projection has no admitted child call")
                     if isinstance(self._children[index][2], ActiveChild):
-                        await self._drive_child(index)
-                        drove = True
-                if drove:
+                        child_workers.append((f"child:{index}", self._drive_child(index)))
+                if child_workers:
+                    await self._drive_workers(tuple(child_workers))
                     continue
                 if await self._abort_awaiting_children_after_failure():
                     continue
