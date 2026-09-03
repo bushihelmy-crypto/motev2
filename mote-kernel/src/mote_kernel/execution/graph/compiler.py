@@ -668,12 +668,10 @@ def _compile_activation_rules(
     if not declared:
         return CompiledActivationRules(())
     if scope:
-        raise GraphValidationError("the first feedback slice does not permit feedback in a nested graph")
-    if len(declared) != 1:
-        raise GraphValidationError("the first feedback slice permits exactly one feedback input")
-    target, input_name, resolution = declared[0]
+        raise GraphValidationError("feedback declarations are not permitted in a nested graph")
+    target = declared[0][0]
     if len(node_ids) != 1 or not isinstance(nodes[target], CallableNodeDefinition):
-        raise GraphValidationError("the first feedback slice permits one callable target node")
+        raise GraphValidationError("feedback graph requires one callable target node")
     if (
         direct_targets[target]
         or joins_by_source[target]
@@ -687,20 +685,24 @@ def _compile_activation_rules(
         raise GraphValidationError("feedback target requires exactly one self feedback route and one terminal route")
     if len(graph_outputs.entries) != 1:
         raise GraphValidationError("feedback target requires exactly one graph output")
+    if any(candidate.repeat.node_id != target for _declared_target, _name, candidate in declared):
+        raise GraphValidationError("feedback repeat source must be the target node output")
+    repeat_sources = frozenset(candidate.repeat for _declared_target, _name, candidate in declared)
     output = graph_outputs.entries[0]
-    if not isinstance(output.source, NodeOutputPort) or output.source != resolution.repeat:
+    if not isinstance(output.source, NodeOutputPort) or output.source not in repeat_sources:
         raise GraphValidationError("feedback graph output must publish the target repeat output")
     return CompiledActivationRules(
-        (
+        tuple(
             CompiledActivationRule(
-                target,
-                input_name,
-                resolution.initial,
-                resolution.repeat,
-                resolution.repeat_selection,
+                declared_target,
+                declared_input,
+                declared_resolution.initial,
+                declared_resolution.repeat,
+                declared_resolution.repeat_selection,
                 feedback_routes[0],
                 terminal_routes[0],
-            ),
+            )
+            for declared_target, declared_input, declared_resolution in declared
         )
     )
 

@@ -45,6 +45,7 @@ def _node(
 def _feedback_definition(
     *,
     inputs: Mapping[str, GraphInputRef[Value] | NodeOutputRef | FeedbackInputBinding[Value]] | None = None,
+    node_outputs: Mapping[str, type[Value]] | None = None,
     edges: tuple[Edge, ...] | None = None,
     outputs: GraphOutputDeclarations[Value] | None = None,
 ) -> GraphDefinition[Value]:
@@ -64,7 +65,7 @@ def _feedback_definition(
     return GraphDefinition(
         GraphDefinitionId("feedback.compiler"),
         GraphDefinitionVersion(1),
-        (_node("loop", loop_inputs, {"value": int}),),
+        (_node("loop", loop_inputs, {"value": int} if node_outputs is None else node_outputs),),
         loop_edges,
         (GraphNodeId("loop"),),
         loop_outputs if outputs is None else outputs,
@@ -175,16 +176,60 @@ def test_compiler_rejects_feedback_inside_a_nested_graph_in_the_first_slice() ->
         compile_graph(parent)
 
 
-def test_compiler_rejects_multiple_feedback_bindings() -> None:
-    seed = Graph.graph_input("seed", int)
+def test_compiler_builds_multiple_feedback_rules_with_fixed_repeat_sources() -> None:
+    left_seed = Graph.graph_input("left_seed", int)
+    right_seed = Graph.graph_input("right_seed", int)
+    compiled = compile_graph(
+        _feedback_definition(
+            inputs={
+                "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
+                "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "right")),
+            },
+            node_outputs={"left": int, "right": int},
+            outputs=normalize_graph_output_declarations({"result": Graph.node_output("loop", "left")}),
+        )
+    )
 
-    with pytest.raises(GraphValidationError, match="exactly one feedback input"):
+    rules = compiled.transition.activation_rules.entries
+    assert tuple(rule.input_name for rule in rules) == ("left", "right")
+    assert tuple(rule.repeat.output_name for rule in rules) == ("left", "right")
+    assert all(rule.feedback_route == GraphRouteId("continue") for rule in rules)
+    assert all(rule.terminal_route == GraphRouteId("done") for rule in rules)
+    assert compiled.transition.activation_rules.for_target(GraphNodeId("loop")) == rules
+    bindings = compiled.transition.materializations[GraphNodeId("loop")].bindings.entries
+    assert tuple(binding.source for binding in bindings) == rules
+
+
+def test_compiler_validates_every_feedback_repeat_binding() -> None:
+    left_seed = Graph.graph_input("left_seed", int)
+    right_seed = Graph.graph_input("right_seed", int)
+
+    with pytest.raises(GraphValidationError, match="unknown output port"):
         compile_graph(
             _feedback_definition(
                 inputs={
-                    "first": FeedbackInputBinding(seed, Graph.node_output("loop", "value")),
-                    "second": FeedbackInputBinding(seed, Graph.node_output("loop", "value")),
-                }
+                    "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
+                    "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "missing")),
+                },
+                node_outputs={"left": int, "right": int},
+                outputs=normalize_graph_output_declarations({"result": Graph.node_output("loop", "left")}),
+            )
+        )
+
+
+def test_compiler_requires_graph_output_to_match_one_of_the_repeat_sources() -> None:
+    left_seed = Graph.graph_input("left_seed", int)
+    right_seed = Graph.graph_input("right_seed", int)
+
+    with pytest.raises(GraphValidationError, match="repeat output"):
+        compile_graph(
+            _feedback_definition(
+                inputs={
+                    "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
+                    "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "right")),
+                },
+                node_outputs={"left": int, "right": int, "other": int},
+                outputs=normalize_graph_output_declarations({"result": Graph.node_output("loop", "other")}),
             )
         )
 

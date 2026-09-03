@@ -241,10 +241,6 @@ def require_feedback_activation_cause(
     return reference.activation
 
 
-def _feedback_rules(graph: CompiledGraph[GraphValueT]) -> dict[GraphNodeId, CompiledActivationRule[GraphValueT]]:
-    return {rule.target: rule for rule in graph.transition.activation_rules.entries}
-
-
 def _declared_joins(
     graph: CompiledGraph[GraphValueT],
 ) -> dict[tuple[tuple[GraphNodeId, ...], GraphNodeId], JoinEdge]:
@@ -277,17 +273,15 @@ def _frontier_gate_error(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
 ) -> str | None:
-    feedback_rules = _feedback_rules(graph)
     for node in state.frontier.nodes:
         if node.node_id not in graph.nodes:
             return f"frontier activation references unknown node {node.node_id!r}"
         cause = node.cause
-        feedback_rule = feedback_rules.get(node.node_id)
-        if feedback_rule is not None:
-            try:
+        try:
+            for feedback_rule in graph.transition.activation_rules.for_target(node.node_id):
                 require_feedback_activation_cause(state, node.node_id, feedback_rule)
-            except InvalidRoutingCommandError as error:
-                return str(error)
+        except InvalidRoutingCommandError as error:
+            return str(error)
         if type(cause) is StartActivationCause:
             if node.node_id not in graph.transition.entries:
                 return f"START activation {node.node_id!r} is not a compiled graph entry"
@@ -496,7 +490,6 @@ def resolve_routing_facts(
     admission_error = frontier_admission_error(graph, state)
     if admission_error is not None:
         raise InvalidRoutingCommandError(admission_error)
-    feedback_rules = _feedback_rules(graph)
     declared = _declared_joins(graph)
     arrivals: dict[tuple[tuple[GraphNodeId, ...], GraphNodeId], list[ActivationReference]] = {}
     for progress in state.join_progress:
@@ -516,8 +509,7 @@ def resolve_routing_facts(
 
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)
-        feedback_rule = feedback_rules.get(node_id)
-        if feedback_rule is not None:
+        for feedback_rule in graph.transition.activation_rules.for_target(node_id):
             require_feedback_activation_cause(state, node_id, feedback_rule)
         selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
         source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)

@@ -759,3 +759,39 @@ def test_feedback_compiler_rejects_a_multi_node_target_before_edge_checks() -> N
             edges,
             valid.transition.graph_outputs,
         )
+
+
+def test_feedback_compiler_rejects_a_repeat_source_outside_target_at_rule_boundary() -> None:
+    valid = compile_graph(
+        definition(
+            (node("loop", inputs={}, outputs={"value": int}),),
+            edges=(
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
+            ),
+            entries=("loop",),
+            outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
+        )
+    )
+    loop = GraphNodeId("loop")
+    resolution = _FeedbackResolution(
+        GraphInputPort((), "seed"),
+        NodeOutputPort((), GraphNodeId("other"), "value"),
+        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
+    )
+
+    with pytest.raises(GraphValidationError, match="feedback repeat source must be the target node output"):
+        _compile_activation_rules(
+            {loop: valid.nodes[loop]},
+            (loop,),
+            (),
+            {loop: (("value", resolution),)},
+            {loop: set()},
+            {loop: {GraphRouteId("continue"): loop, GraphRouteId("done"): END}},
+            {loop: []},
+            (
+                ConditionalEdge(loop, GraphRouteId("continue"), loop),
+                ConditionalEdge(loop, GraphRouteId("done"), END),
+            ),
+            valid.transition.graph_outputs,
+        )

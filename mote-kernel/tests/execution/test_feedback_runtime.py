@@ -87,6 +87,37 @@ def _compiled(operation: NodeCallable[int]):
     )
 
 
+def _compiled_multiple_feedback(operation: NodeCallable[int]):
+    left_seed = Graph.graph_input("left_seed", int)
+    right_seed = Graph.graph_input("right_seed", int)
+    loop = GraphNodeId("loop")
+    return compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("feedback.multiple-runtime"),
+            GraphDefinitionVersion(1),
+            (
+                CallableNodeDefinition(
+                    loop,
+                    operation,
+                    normalize_input_bindings(
+                        {
+                            "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
+                            "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "right")),
+                        }
+                    ),
+                    normalize_output_declarations({"left": int, "right": int}),
+                ),
+            ),
+            (
+                ConditionalEdge(loop, GraphRouteId("continue"), loop),
+                ConditionalEdge(loop, GraphRouteId("done"), END),
+            ),
+            (loop,),
+            normalize_graph_output_declarations({"value": Graph.node_output("loop", "left")}),
+        )
+    )
+
+
 async def _run(
     operation: NodeCallable[int],
     *,
@@ -135,6 +166,46 @@ async def test_self_feedback_runs_each_activation_from_the_previous_publication(
     assert result.outputs["value"] == 3
     assert seen == [0, 1, 2]
     assert result.state.superstep == 2
+
+
+@pytest.mark.asyncio
+async def test_multiple_feedback_inputs_read_their_own_fixed_repeat_publications() -> None:
+    seen: list[tuple[int, int]] = []
+
+    async def loop(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        current = (values["left"], values["right"])
+        seen.append(current)
+        return Graph.success(
+            Graph.values(left=current[0] + 1, right=current[1] + 10),
+            route="done" if current[0] >= 2 else "continue",
+        )
+
+    graph = _compiled_multiple_feedback(loop)
+    scope_run = root_scope_run(GraphRunId("multiple-feedback-run"))
+    root, evidence_reader = await fresh_root(
+        graph,
+        scope_run,
+        admit_graph_input(graph, Graph.values(left_seed=1, right_seed=100)),
+        ExecutionLimits(),
+        None,
+    )
+    try:
+        disposition = await root.drive_quantum()
+        result = project_graph_result(
+            graph,
+            _CompiledFamilyIdentity(),
+            root,
+            evidence_reader,
+            disposition,
+            recovered=False,
+        )
+    finally:
+        await root.release()
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert seen == [(1, 100), (2, 110)]
+    assert result.outputs["value"] == 3
+    assert result.state.superstep == 1
 
 
 @pytest.mark.asyncio

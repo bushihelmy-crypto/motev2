@@ -49,7 +49,7 @@ class FrozenMap(Mapping[KeyT, ValueT_co], Generic[KeyT, ValueT_co]):
 
 @dataclass(frozen=True, slots=True)
 class CompiledActivationRules(Generic[GraphValueT]):
-    """Compiler-admitted feedback rules indexed by target input."""
+    """Compiler-admitted feedback rules, one immutable rule per target input."""
 
     entries: tuple[CompiledActivationRule[GraphValueT], ...]
 
@@ -62,6 +62,14 @@ class CompiledActivationRules(Generic[GraphValueT]):
             (rule for rule in self.entries if rule.target == node_id and rule.input_name == input_name),
             None,
         )
+
+    def for_target(
+        self,
+        node_id: GraphNodeId,
+    ) -> tuple[CompiledActivationRule[GraphValueT], ...]:
+        """Return every feedback binding admitted for one target."""
+
+        return tuple(rule for rule in self.entries if rule.target == node_id)
 
 
 @dataclass(frozen=True, slots=True)
