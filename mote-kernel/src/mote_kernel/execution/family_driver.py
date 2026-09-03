@@ -137,12 +137,14 @@ async def commit_transition(
     result: TaskResult[GraphValueT] | None,
     commit: GraphCommit[GraphValueT],
     *,
+    graph: CompiledGraph[GraphValueT],
     admitted_successor: GraphRunState | None = None,
-    candidate_state: GraphRunState | None = None,
 ) -> GraphRunState:
     """Reduce, expose, and confirm one authoritative state transition."""
 
-    candidate = reduce_graph_run(previous_state, command) if candidate_state is None else candidate_state
+    candidate = reduce_graph_run(previous_state, command)
+    if admission_error := frontier_admission_error(graph, candidate):
+        raise SnapshotMismatchError(admission_error)
     if admitted_successor is not None and candidate != admitted_successor:
         raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     admitted = _commit_result(result) if result is not None else None
@@ -476,10 +478,6 @@ class _GraphRun(Generic[GraphValueT]):
         confirmed_frames: ScopedFrameIndex[GraphValueT] | None = None,
         handoff_evidence: bool = False,
     ) -> GraphRunState:
-        candidate = reduce_graph_run(self._state, command)
-        admission_error = frontier_admission_error(self._graph, candidate)
-        if admission_error is not None:
-            raise SnapshotMismatchError(admission_error)
         commit_task = asyncio.create_task(
             commit_transition(
                 self._scope_run,
@@ -488,7 +486,7 @@ class _GraphRun(Generic[GraphValueT]):
                 result,
                 self._commit,
                 admitted_successor=admitted_successor,
-                candidate_state=candidate,
+                graph=self._graph,
             )
         )
         confirmed, cancellation = await wait_for_owner_task(
@@ -878,7 +876,7 @@ def _make_child_constructor(
         activation = stable_activation(owner_scope_run, parent)
         child_commit = scoped_commit(coordinate, commit)
         command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
-        child_state = await commit_transition(coordinate, None, command, None, child_commit)
+        child_state = await commit_transition(coordinate, None, command, None, child_commit, graph=child_graph)
         child: _GraphRun[GraphValueT] | None = None
         try:
             child = _GraphRun(
@@ -906,6 +904,7 @@ def _make_child_constructor(
                         AbortGraphRun(child_state.revision, reason),
                         None,
                         child_commit,
+                        graph=child_graph,
                     )
                     return
                 with suppress(BaseException):
@@ -1021,6 +1020,7 @@ async def admit_continued_root(
 
     async def cleanup_owner(
         owner: _GraphRun[GraphValueT] | None,
+        owner_graph: CompiledGraph[GraphValueT],
         owner_scope_run: ScopeRunCoordinate,
         owner_state: GraphRunState,
         owner_commit: GraphCommit[GraphValueT],
@@ -1035,6 +1035,7 @@ async def admit_continued_root(
                         AbortGraphRun(owner_state.revision, reason),
                         None,
                         owner_commit,
+                        graph=owner_graph,
                     )
             return
         if not transition_attempted:
@@ -1090,7 +1091,9 @@ async def admit_continued_root(
             if failed_scope is None:
                 failed_scope = tuple(binding.coordinate.scope)
 
-            cleanup_task = asyncio.create_task(cleanup_owner(child, binding.coordinate, binding.state, child_commit))
+            cleanup_task = asyncio.create_task(
+                cleanup_owner(child, child_graph, binding.coordinate, binding.state, child_commit)
+            )
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
             raise
@@ -1188,7 +1191,7 @@ async def admit_continued_root(
                 await root.release()
             raise partial from primary
 
-        cleanup_task = asyncio.create_task(cleanup_owner(root, scope_run, state, root_commit))
+        cleanup_task = asyncio.create_task(cleanup_owner(root, graph, scope_run, state, root_commit))
         with suppress(BaseException):
             await wait_for_owner_task(cleanup_task)
         raise
@@ -1208,7 +1211,7 @@ async def fresh_root(
     root: _GraphRun[GraphValueT] | None = None
     try:
         command = project_start_graph_command(graph, scope_run.graph_run_id)
-        state = await commit_transition(scope_run, None, command, None, root_commit)
+        state = await commit_transition(scope_run, None, command, None, root_commit, graph=graph)
         root = _GraphRun(
             graph,
             scope_run,
@@ -1239,6 +1242,7 @@ async def fresh_root(
                         ),
                         None,
                         root_commit,
+                        graph=graph,
                     )
                 return
             with suppress(BaseException):

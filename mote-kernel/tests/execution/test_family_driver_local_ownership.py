@@ -5,7 +5,7 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
-from tests.execution.engine.factories import leased_state, running_state
+from tests.execution.engine.factories import compiled_graph, leased_state, running_state
 
 import mote_kernel.execution.family_driver as family_driver
 from mote_kernel.execution import Graph
@@ -259,6 +259,7 @@ async def test_scoped_commit_rejects_a_transition_for_another_owner() -> None:
         project_start_graph_command(graph, scope_run.graph_run_id),
         None,
         capture,
+        graph=graph,
     )
     foreign = ScopeRunCoordinate((GraphNodeId("foreign"),), scope_run.graph_run_id)
 
@@ -283,6 +284,7 @@ async def test_resume_transition_rejects_an_unadmitted_successor_before_commit()
             AbortGraphRun(state.revision, GraphAbortReason("abort")),
             None,
             capture,
+            graph=compiled_graph("a"),
             admitted_successor=state,
         )
 
@@ -299,7 +301,13 @@ async def test_owner_transition_rejects_a_candidate_that_fails_frontier_admissio
         version=graph.version,
         frontier=("nested",),
     )
-    owner = root_owner(graph, state)
+    commits: list[GraphTransition[str]] = []
+
+    async def capture(transition: GraphTransition[str], /) -> GraphRunState:
+        commits.append(transition)
+        return transition.candidate_state
+
+    owner = root_owner(graph, state, commit=capture)
 
     def reject_frontier_admission(_graph: CompiledGraph[str], _state: GraphRunState) -> str:
         return "admission failed"
@@ -308,6 +316,8 @@ async def test_owner_transition_rejects_a_candidate_that_fails_frontier_admissio
 
     with pytest.raises(SnapshotMismatchError, match="admission failed"):
         await owner._transition(AbortGraphRun(state.revision, GraphAbortReason("abort")))
+
+    assert commits == []
 
 
 @pytest.mark.asyncio
