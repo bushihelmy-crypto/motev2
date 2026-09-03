@@ -17,6 +17,7 @@ from mote_kernel.execution.graph.compiler import (
     _gates_can_coexist,
     _RawActivationGate,
     _reject_repeatable_join_sources,
+    _RouteRequirementProof,
     compile_graph,
 )
 from mote_kernel.execution.graph.constants import END
@@ -627,7 +628,12 @@ def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> 
     source = GraphNodeId("source")
     left = GraphRouteId("left")
     right = GraphRouteId("right")
-    requirements = {source: ((source, frozenset({left})),)}
+    requirements = {
+        source: _RouteRequirementProof(
+            ((source, frozenset({left})),),
+            True,
+        )
+    }
     conditional_targets = {source: {left: GraphNodeId("left"), right: GraphNodeId("right")}}
 
     assert not _gates_can_coexist(
@@ -661,8 +667,24 @@ def test_repeatable_join_source_propagation_reaches_acyclic_dependents() -> None
     with pytest.raises(GraphValidationError, match="more than one activation occurrence"):
         _reject_repeatable_join_sources(
             (JoinEdge((dependent, other), target),),
+            (),
             activation_gates,
             successors,
+        )
+
+
+def test_explicit_entry_with_an_incoming_gate_makes_descendants_repeatable() -> None:
+    with pytest.raises(GraphValidationError, match="more than one activation occurrence"):
+        compile_graph(
+            definition(
+                tuple(node(node_id, inputs={}, outputs={}) for node_id in ("a", "dependent", "other", "s", "target")),
+                edges=(
+                    DirectEdge(GraphNodeId("a"), GraphNodeId("s")),
+                    DirectEdge(GraphNodeId("s"), GraphNodeId("dependent")),
+                    JoinEdge((GraphNodeId("dependent"), GraphNodeId("other")), GraphNodeId("target")),
+                ),
+                entries=("s",),
+            )
         )
 
 
@@ -695,6 +717,28 @@ def test_mutually_exclusive_incoming_routes_do_not_make_a_join_source_repeatable
         ((GraphNodeId("left"), frozenset({GraphRouteId("go")})),),
         ((GraphNodeId("right"), frozenset({GraphRouteId("go")})),),
     )
+
+
+def test_branch_local_exit_cannot_leave_a_partial_join() -> None:
+    with pytest.raises(GraphValidationError, match="partial source set"):
+        compile_graph(
+            definition(
+                tuple(
+                    node(node_id, inputs={}, outputs={})
+                    for node_id in ("choose", "left", "ordinary", "right", "shared", "target")
+                ),
+                edges=(
+                    ConditionalEdge(GraphNodeId("choose"), GraphRouteId("left"), GraphNodeId("left")),
+                    ConditionalEdge(GraphNodeId("choose"), GraphRouteId("right"), GraphNodeId("right")),
+                    DirectEdge(GraphNodeId("choose"), GraphNodeId("ordinary")),
+                    ConditionalEdge(GraphNodeId("left"), GraphRouteId("go"), GraphNodeId("shared")),
+                    ConditionalEdge(GraphNodeId("left"), GraphRouteId("stop"), END),
+                    ConditionalEdge(GraphNodeId("right"), GraphRouteId("go"), GraphNodeId("shared")),
+                    ConditionalEdge(GraphNodeId("right"), GraphRouteId("stop"), END),
+                    JoinEdge((GraphNodeId("ordinary"), GraphNodeId("shared")), GraphNodeId("target")),
+                ),
+            )
+        )
 
 
 def test_coexisting_fanout_routes_require_an_explicit_join() -> None:

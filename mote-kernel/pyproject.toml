@@ -112,12 +112,15 @@ quote-style = "double"
 # P3-M2 adds the topology-owned target lookup needed to retain every typed
 # feedback binding; the compiler/routing change removes the previous target-map
 # helper and is ratcheted at its measured net shape.
+# The P3-M1 review hardening distinguishes a conservative route-domain summary
+# from an exact Join proof and propagates START-plus-incoming repeatability.  Its
+# measured compiler cost is retained here after the proof model review.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 694
-type_definitions = 408
-dataclass_types = 234
-dataclass_fields = 657
-decision_points = 2069
+top_level_definitions = 696
+type_definitions = 409
+dataclass_types = 235
+dataclass_fields = 659
+decision_points = 2082
 logical_clone_pairs = 16
 statement_clone_pairs = 22
 near_clone_pairs = 15
@@ -125,11 +128,11 @@ record_shape_clone_pairs = 24
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
-function_definitions = 526
+function_definitions = 527
 method_definitions = 222
 nested_function_definitions = 20
-semantic_nodes = 38512
-cognitive_complexity = 2795
+semantic_nodes = 38684
+cognitive_complexity = 2810
 await_points = 93
 exception_handlers = 69
 attribute_writes = 87
@@ -137,7 +140,7 @@ task_creations = 12
 max_cyclomatic_complexity = 78
 max_cognitive_complexity = 131
 max_nesting_depth = 6
-internal_call_edges = 739
+internal_call_edges = 740
 recursive_call_components = 5
 max_call_fan_out = 24
 max_call_chain_depth = 17
@@ -159,7 +162,7 @@ low_cohesion_classes = 2
 max_methods_per_class = 27
 max_fields_per_class = 33
 max_class_components = 2
-complexity_hotspots = 72
+complexity_hotspots = 73
 stateful_async_hotspots = 6
 unused_private_definitions = 0
 unread_private_fields = 0
