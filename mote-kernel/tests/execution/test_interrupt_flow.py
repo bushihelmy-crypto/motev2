@@ -116,7 +116,6 @@ async def test_interrupt_is_a_node_completion_and_creates_awaiting_resume_state(
     result = await graph.run(Graph.values(value="input"), run_id="run")
 
     assert isinstance(result, Graph.AwaitingResumeResult)
-    assert result.failures == ()
     assert len(result.interrupts) == 1
     assert result.interrupts[0].node_id == "a"
     assert result.interrupts[0].request_payload == b"question"
@@ -495,27 +494,36 @@ async def test_interrupt_round_trip_keeps_request_and_resume_payloads_distinct()
     assert received == ["initial", "resume-value"]
 
 
-async def test_failure_resume_delivers_default_and_override_inputs_per_node() -> None:
+async def test_interrupt_resume_delivers_distinct_inputs_per_node() -> None:
     received: dict[str, list[str]] = {"a": [], "b": []}
 
     def operation(node_id: str):
-        async def fail_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
             received[node_id].append(values["value"])
             if len(received[node_id]) == 1:
-                return Graph.failure(f"failed-{node_id}")
+                return Graph.interrupt(f"question-{node_id}".encode())
             return values
 
-        return fail_once
+        return interrupt_once
 
     graph = pair_graph(operation("a"), operation("b"))
     first = await graph.run(Graph.values(value="initial"))
     assert isinstance(first, Graph.AwaitingResumeResult)
+    by_node = {interrupt.node_id: interrupt for interrupt in first.interrupts}
     completed = await graph.run(
         state=first.state,
         continuation=first.continuation,
         resume=(
-            graph.resume_failed("a"),
-            graph.resume_failed_with("b", Graph.values(value="override")),
+            graph.resume_interrupted(
+                "a",
+                by_node["a"].interrupt_id,
+                Graph.values(value="initial"),
+            ),
+            graph.resume_interrupted(
+                "b",
+                by_node["b"].interrupt_id,
+                Graph.values(value="override"),
+            ),
         ),
     )
 
@@ -718,13 +726,13 @@ async def test_interrupt_resume_then_self_loop_starts_a_clean_activation() -> No
     assert received == ["initial", "answer", "initial"]
 
 
-async def test_mixed_frontier_selectively_resumes_without_rerunning_success() -> None:
+async def test_mixed_frontier_selectively_resumes_interrupt_without_rerunning_success() -> None:
     calls = {"a": 0, "b": 0}
 
-    async def fail_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["a"] += 1
         if calls["a"] == 1:
-            return Graph.failure("failed")
+            return Graph.interrupt(b"question")
         return values
 
     async def succeed(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -735,9 +743,11 @@ async def test_mixed_frontier_selectively_resumes_without_rerunning_success() ->
         return values
 
     graph = Graph[str]("interrupt.mixed")
+    codec = Codec()
+    graph.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
     graph.add_node(
         "a",
-        fail_once,
+        interrupt_once,
         inputs={"value": Graph.graph_input("value", str)},
         outputs={"value": str},
     )
@@ -760,7 +770,13 @@ async def test_mixed_frontier_selectively_resumes_without_rerunning_success() ->
     completed = await graph.run(
         state=first.state,
         continuation=first.continuation,
-        resume=(graph.resume_failed("a"),),
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                first.interrupts[0].interrupt_id,
+                Graph.values(value="input"),
+            ),
+        ),
     )
 
     assert isinstance(completed, Graph.CompletedResult)
@@ -939,54 +955,47 @@ async def test_multiple_interrupts_can_be_resumed_together_by_exact_ids() -> Non
     assert calls == {"a": 2, "b": 2}
 
 
-async def test_one_resume_request_atomically_resumes_skips_and_answers_nodes() -> None:
+async def test_one_resume_request_atomically_answers_multiple_nodes() -> None:
     calls = {"a": 0, "b": 0, "c": 0}
 
-    async def fail_a(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
-        calls["a"] += 1
-        if calls["a"] == 1:
-            return Graph.failure("failed-a")
-        return values
+    def operation(node_id: str) -> NodeCallable[str]:
+        async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+            calls[node_id] += 1
+            if calls[node_id] == 1:
+                return Graph.interrupt(f"question-{node_id}".encode())
+            return values
 
-    async def fail_b(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        calls["b"] += 1
-        return Graph.failure("failed-b")
-
-    async def interrupt_c(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
-        calls["c"] += 1
-        if calls["c"] == 1:
-            return Graph.interrupt(b"question-c")
-        return values
+        return interrupt_once
 
     graph = Graph[str]("interrupt.atomic")
     codec = Codec()
     graph.set_resume_codec("input.v1", 1, codec.encode, codec.decode)
-    for node_id, operation in (("a", fail_a), ("b", fail_b), ("c", interrupt_c)):
+    for node_id in calls:
         graph.add_node(
             node_id,
-            operation,
+            operation(node_id),
             inputs={"value": Graph.graph_input("value", str)},
             outputs={"value": str},
         )
     graph.set_outputs({})
     first = await graph.run(Graph.values(value="input"))
     assert isinstance(first, Graph.AwaitingResumeResult)
+    by_node = {interrupt.node_id: interrupt for interrupt in first.interrupts}
     completed = await graph.run(
         state=first.state,
         continuation=first.continuation,
-        resume=(
-            graph.resume_failed("a"),
-            graph.skip_failed("b", "operator skip"),
+        resume=tuple(
             graph.resume_interrupted(
-                "c",
-                first.interrupts[0].interrupt_id,
-                Graph.values(value="answer-c"),
-            ),
+                node_id,
+                by_node[node_id].interrupt_id,
+                Graph.values(value=f"answer-{node_id}"),
+            )
+            for node_id in calls
         ),
     )
 
     assert isinstance(completed, Graph.CompletedResult)
-    assert calls == {"a": 2, "b": 1, "c": 2}
+    assert calls == {"a": 2, "b": 2, "c": 2}
 
 
 async def test_aborted_override_is_neither_decoded_nor_scheduled() -> None:

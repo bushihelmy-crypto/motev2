@@ -121,6 +121,32 @@ class ModuleDependencyMetrics:
 
 
 @dataclass(frozen=True, order=True, slots=True)
+class RuntimeModuleCallPair:
+    """A production callable dependency between two different modules."""
+
+    source_module: str
+    target_module: str
+    symbol_edges: int
+    call_sites: int
+
+    def render(self) -> str:
+        return (
+            f"{self.source_module} -> {self.target_module} "
+            f"symbol_edges={self.symbol_edges} call_sites={self.call_sites}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModuleCallMetrics:
+    """High-recall coupling facts for resolved production callable calls."""
+
+    edge_count: int
+    module_pair_count: int
+    max_fan_out: int
+    pairs: tuple[RuntimeModuleCallPair, ...]
+
+
+@dataclass(frozen=True, order=True, slots=True)
 class ClassCohesion:
     site: CandidateSite
     methods: int
@@ -675,6 +701,55 @@ def call_graph_metrics(index: SemanticIndex) -> CallGraphMetrics:
     )
 
 
+def runtime_module_call_metrics(index: SemanticIndex) -> RuntimeModuleCallMetrics:
+    """Measure resolved callable calls that cross production module boundaries.
+
+    The metric intentionally follows the same conservative resolution policy as
+    the call graph, while retaining every resolved runtime-capable target:
+    functions, methods, nested functions, classes, and ``NewType`` aliases.
+    Unresolved dynamic dispatch remains outside the count and is reported by
+    the separate dispatch detector.
+    """
+
+    pair_edges: defaultdict[tuple[str, str], set[tuple[SymbolId, SymbolId]]] = defaultdict(set)
+    pair_sites: Counter[tuple[str, str]] = Counter()
+    target_modules: defaultdict[str, set[str]] = defaultdict(set)
+    runtime_kinds = frozenset(
+        {
+            SymbolKind.CLASS,
+            SymbolKind.FUNCTION,
+            SymbolKind.METHOD,
+            SymbolKind.NESTED_FUNCTION,
+            SymbolKind.TYPE_ALIAS,
+        }
+    )
+
+    for call in index.calls:
+        if (
+            call.in_tests
+            or call.source is None
+            or call.target is None
+            or call.target.kind not in runtime_kinds
+            or call.source.module == call.target.module
+        ):
+            continue
+        pair = (call.source.module, call.target.module)
+        pair_edges[pair].add((call.source, call.target))
+        pair_sites[pair] += 1
+        target_modules[call.source.module].add(call.target.module)
+
+    pairs = tuple(
+        RuntimeModuleCallPair(source, target, len(pair_edges[(source, target)]), pair_sites[(source, target)])
+        for source, target in sorted(pair_edges)
+    )
+    return RuntimeModuleCallMetrics(
+        edge_count=sum(len(edges) for edges in pair_edges.values()),
+        module_pair_count=len(pairs),
+        max_fan_out=max((len(targets) for targets in target_modules.values()), default=0),
+        pairs=pairs,
+    )
+
+
 def _absolute_import(module: str, path: str, imported: str | None, level: int) -> str:
     if level == 0:
         return imported or ""
@@ -798,6 +873,8 @@ __all__ = [
     "ComplexityHotspot",
     "CoroutineHandleViolation",
     "ModuleDependencyMetrics",
+    "RuntimeModuleCallMetrics",
+    "RuntimeModuleCallPair",
     "SymbolUsage",
     "TaskHandleViolation",
     "ambiguous_internal_dispatches",
@@ -811,6 +888,7 @@ __all__ = [
     "module_dependency_metrics",
     "orphaned_task_handles",
     "production_unreferenced_definitions",
+    "runtime_module_call_metrics",
     "single_use_private_dataclasses",
     "stateful_async_hotspots",
     "symbol_usages",

@@ -15,6 +15,7 @@ ALLOWED_IMPORT_ROOTS = frozenset(
         "math",
         "mote_kernel",
         "time",
+        "types",
         "typing",
     }
 )

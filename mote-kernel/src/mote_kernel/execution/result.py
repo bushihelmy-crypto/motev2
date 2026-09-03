@@ -12,22 +12,23 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _public_node_output,
 )
-from mote_kernel.execution.run_context import AdmittedResumeInput, PreparedSubstitution, _GraphContinuation
+from mote_kernel.execution.run_context import AdmittedResumeInput, _GraphContinuation
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
     CompleteGraphFrontier,
     GraphAbortReason,
+    GraphActivationIdentity,
     GraphInterruptId,
     GraphNodeId,
     GraphRunState,
-    ParentGraphActivation,
     ResumeGraphNodes,
     SettleGraphNode,
 )
 
 GraphValueT = TypeVar("GraphValueT")
 _PartialCommitCause: TypeAlias = Exception | asyncio.CancelledError
+SUPERSEDED_CHILD_ABORT_REASON = GraphAbortReason("nested graph was superseded by a sibling failure")
 
 
 class _PartialCommitSeal:
@@ -170,27 +171,33 @@ def _commit_result(result: TaskResult[GraphValueT]) -> GraphCommitResult[GraphVa
 
 @dataclass(frozen=True, slots=True)
 class MissingChild:
-    parent: ParentGraphActivation
+    parent: GraphActivationIdentity
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveChild:
-    parent: ParentGraphActivation
+    parent: GraphActivationIdentity
 
 
 @dataclass(frozen=True, slots=True)
 class CompletedChild(Generic[GraphValueT]):
-    parent: ParentGraphActivation
+    parent: GraphActivationIdentity
     output: GraphOutputView[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
+class FailedChild:
+    parent: GraphActivationIdentity
+    failure: str
+
+
+@dataclass(frozen=True, slots=True)
 class AbortedChild:
-    parent: ParentGraphActivation
+    parent: GraphActivationIdentity
     reason: GraphAbortReason
 
 
-ChildProjection: TypeAlias = MissingChild | ActiveChild | CompletedChild[GraphValueT] | AbortedChild
+ChildProjection: TypeAlias = MissingChild | ActiveChild | CompletedChild[GraphValueT] | FailedChild | AbortedChild
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +227,6 @@ class ReadyToResolve:
 
 @dataclass(frozen=True, slots=True)
 class AwaitingResume:
-    failed_node_ids: tuple[GraphNodeId, ...]
     interrupted_node_ids: tuple[GraphNodeId, ...]
 
 
@@ -230,11 +236,16 @@ class CompletedGraph:
 
 
 @dataclass(frozen=True, slots=True)
+class FailedGraph:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class AbortedGraph:
     pass
 
 
-GraphBoundary: TypeAlias = AwaitingResume | CompletedGraph | AbortedGraph
+GraphBoundary: TypeAlias = AwaitingResume | CompletedGraph | FailedGraph | AbortedGraph
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +258,6 @@ class ExecutedGraphNode(Generic[GraphValueT]):
 class PreparedResume(Generic[GraphValueT]):
     command: "ResumeGraphNodes"
     inputs: tuple[AdmittedResumeInput[GraphValueT], ...]
-    substitutions: tuple[PreparedSubstitution[GraphValueT], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,7 +316,7 @@ class _AbortedGraphResult(Generic[GraphValueT]):
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _AwaitingResumeGraphResult(Generic[GraphValueT]):
+class _FailedGraphResult(Generic[GraphValueT]):
     state: GraphRunState
     continuation: _GraphContinuation[GraphValueT]
     failures: tuple[GraphFailureView, ...]
@@ -315,11 +325,31 @@ class _AwaitingResumeGraphResult(Generic[GraphValueT]):
 
     def __post_init__(self, _seal: _ResultSeal) -> None:
         if _seal is not _RESULT_SEAL:
+            raise NodeExecutionContractError("failed results require the graph family driver")
+        if not self.failures:
+            raise NodeExecutionContractError("failed results require at least one failure")
+
+
+@final
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _AwaitingResumeGraphResult(Generic[GraphValueT]):
+    state: GraphRunState
+    continuation: _GraphContinuation[GraphValueT]
+    interrupts: tuple[GraphInterruptView, ...]
+    _seal: InitVar[_ResultSeal]
+
+    def __post_init__(self, _seal: _ResultSeal) -> None:
+        if _seal is not _RESULT_SEAL:
             raise NodeExecutionContractError("awaiting-resume results require the graph family driver")
+        if not self.interrupts:
+            raise NodeExecutionContractError("awaiting-resume results require at least one interrupt")
 
 
 GraphResult: TypeAlias = (
-    _CompletedGraphResult[GraphValueT] | _AbortedGraphResult[GraphValueT] | _AwaitingResumeGraphResult[GraphValueT]
+    _CompletedGraphResult[GraphValueT]
+    | _FailedGraphResult[GraphValueT]
+    | _AbortedGraphResult[GraphValueT]
+    | _AwaitingResumeGraphResult[GraphValueT]
 )
 
 
@@ -349,16 +379,29 @@ def _aborted_result(
     )
 
 
-def _awaiting_result(
+def _failed_result(
     state: GraphRunState,
     continuation: _GraphContinuation[GraphValueT],
     failures: tuple[GraphFailureView, ...],
+    interrupts: tuple[GraphInterruptView, ...],
+) -> _FailedGraphResult[GraphValueT]:
+    return _FailedGraphResult(
+        state=state,
+        continuation=continuation,
+        failures=failures,
+        interrupts=interrupts,
+        _seal=_RESULT_SEAL,
+    )
+
+
+def _awaiting_result(
+    state: GraphRunState,
+    continuation: _GraphContinuation[GraphValueT],
     interrupts: tuple[GraphInterruptView, ...],
 ) -> _AwaitingResumeGraphResult[GraphValueT]:
     return _AwaitingResumeGraphResult(
         state=state,
         continuation=continuation,
-        failures=failures,
         interrupts=interrupts,
         _seal=_RESULT_SEAL,
     )
@@ -368,6 +411,7 @@ __all__ = [
     "_AbortedGraphResult",
     "_AwaitingResumeGraphResult",
     "_CompletedGraphResult",
+    "_FailedGraphResult",
     "_GraphFailureResult",
     "_GraphInterruptResult",
     "_GraphSuccessResult",
@@ -376,5 +420,6 @@ __all__ = [
     "_awaiting_result",
     "_commit_result",
     "_completed_result",
+    "_failed_result",
     "_partial_commit_error",
 ]

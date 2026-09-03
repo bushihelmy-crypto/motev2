@@ -1,3 +1,5 @@
+# pyright: reportPrivateUsage=false
+
 from collections.abc import Mapping
 from typing import TypeAlias
 
@@ -9,16 +11,25 @@ from mote_kernel.execution.errors import (
     GraphValidationError,
     UnknownNodeError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import (
+    _compile_activation_rules,
+    _FeedbackResolution,
+    _gates_can_coexist,
+    _RawActivationGate,
+    _reject_repeatable_join_sources,
+    compile_graph,
+)
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
+    GraphInputPort,
     GraphInputRef,
     GraphOutputDeclarations,
     NodeOutputPort,
     NodeOutputRef,
+    PublicationSelection,
     PublicationSelectionKind,
     normalize_graph_output_declarations,
     normalize_input_bindings,
@@ -380,7 +391,7 @@ def test_compiler_uses_relative_selection_for_same_source_conditional_routes() -
     assert selection.superstep == 1
 
 
-def test_compiler_rejects_ambiguous_loop_publication_for_join_consumer() -> None:
+def test_compiler_rejects_a_repeatable_join_source_before_publication_selection() -> None:
     source = node("source", inputs={}, outputs={"value": str})
     gate = node("gate", inputs={}, outputs={})
     target = node(
@@ -393,7 +404,7 @@ def test_compiler_rejects_ambiguous_loop_publication_for_join_consumer() -> None
         JoinEdge((GraphNodeId("source"), GraphNodeId("gate")), GraphNodeId("target")),
     )
 
-    with pytest.raises(GraphValidationError, match="no unique activation coordinate"):
+    with pytest.raises(GraphValidationError, match="occurrence identity"):
         compile_graph(definition((source, gate, target), edges=edges, entries=("source",)))
 
 
@@ -417,7 +428,7 @@ def test_compiler_uses_relative_selection_for_loop_graph_output() -> None:
     assert selection.superstep == 0
 
 
-def test_compiler_rejects_ambiguous_loop_graph_output_completion() -> None:
+def test_compiler_rejects_repeatable_terminal_join_sources_before_output_selection() -> None:
     source = node("source", inputs={}, outputs={"value": str})
     gate = node("gate", inputs={}, outputs={})
     edges = (
@@ -426,13 +437,58 @@ def test_compiler_rejects_ambiguous_loop_graph_output_completion() -> None:
         JoinEdge((GraphNodeId("source"), GraphNodeId("gate")), END),
     )
 
-    with pytest.raises(GraphValidationError, match="no unique completion activation coordinate"):
+    with pytest.raises(GraphValidationError, match="occurrence identity"):
         compile_graph(
             definition(
                 (source, gate),
                 edges=edges,
                 entries=("source", "gate"),
                 outputs=normalize_graph_output_declarations({"value": Graph.node_output("source", "value")}),
+            )
+        )
+
+
+def test_compiler_rejects_a_data_publication_without_one_activation_coordinate() -> None:
+    loop = node("loop", inputs={}, outputs={"value": str})
+    coordinator = node("coordinator", inputs={}, outputs={})
+    target = node(
+        "target",
+        inputs={"value": Graph.node_output("loop", "value")},
+        outputs={},
+    )
+
+    with pytest.raises(GraphValidationError, match="no unique activation coordinate"):
+        compile_graph(
+            definition(
+                (loop, coordinator, target),
+                edges=(
+                    ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                    ConditionalEdge(
+                        GraphNodeId("loop"),
+                        GraphRouteId("done"),
+                        GraphNodeId("coordinator"),
+                    ),
+                    DirectEdge(GraphNodeId("coordinator"), GraphNodeId("target")),
+                ),
+                entries=("loop",),
+            )
+        )
+
+
+def test_compiler_rejects_a_graph_output_without_one_completion_coordinate() -> None:
+    loop = node("loop", inputs={}, outputs={"value": str})
+    finish = node("finish", inputs={}, outputs={})
+
+    with pytest.raises(GraphValidationError, match="no unique completion activation coordinate"):
+        compile_graph(
+            definition(
+                (loop, finish),
+                edges=(
+                    ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                    ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), GraphNodeId("finish")),
+                ),
+                entries=("loop",),
+                outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
             )
         )
 
@@ -525,47 +581,135 @@ def test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route() -
         )
 
 
-def test_compiler_accepts_a_join_when_a_direct_path_coexists_with_the_selected_route() -> None:
+def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selected_route() -> None:
     decision = node("decision", inputs={}, outputs={})
     always = node("always", inputs={}, outputs={})
     left = node("left", inputs={}, outputs={})
     right = node("right", inputs={}, outputs={})
 
-    compiled = compile_graph(
-        definition(
-            (decision, always, left, right),
-            edges=(
-                DirectEdge(GraphNodeId("decision"), GraphNodeId("always")),
-                DirectEdge(GraphNodeId("decision"), GraphNodeId("right")),
-                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
-                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
-                JoinEdge((GraphNodeId("always"), GraphNodeId("right")), END),
-            ),
+    with pytest.raises(GraphValidationError, match="occurrence"):
+        compile_graph(
+            definition(
+                (decision, always, left, right),
+                edges=(
+                    DirectEdge(GraphNodeId("decision"), GraphNodeId("always")),
+                    DirectEdge(GraphNodeId("decision"), GraphNodeId("right")),
+                    ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
+                    ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
+                    JoinEdge((GraphNodeId("always"), GraphNodeId("right")), END),
+                ),
+            )
         )
-    )
-
-    assert compiled.transition.conditional_targets[GraphNodeId("decision")][GraphRouteId("right")] == GraphNodeId(
-        "right"
-    )
 
 
-def test_compiler_preserves_cross_superstep_join_possibility_in_a_control_loop() -> None:
+def test_compiler_rejects_cross_superstep_join_without_occurrence_identity() -> None:
     decision = node("decision", inputs={}, outputs={})
     left = node("left", inputs={}, outputs={})
     right = node("right", inputs={}, outputs={})
 
-    compiled = compile_graph(
+    with pytest.raises(GraphValidationError, match="occurrence identity"):
+        compile_graph(
+            definition(
+                (decision, left, right),
+                edges=(
+                    ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
+                    ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
+                    DirectEdge(GraphNodeId("left"), GraphNodeId("decision")),
+                    DirectEdge(GraphNodeId("right"), GraphNodeId("decision")),
+                    JoinEdge((GraphNodeId("left"), GraphNodeId("right")), END),
+                ),
+                entries=("decision",),
+            )
+        )
+
+
+def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> None:
+    source = GraphNodeId("source")
+    left = GraphRouteId("left")
+    right = GraphRouteId("right")
+    requirements = {source: ((source, frozenset({left})),)}
+    conditional_targets = {source: {left: GraphNodeId("left"), right: GraphNodeId("right")}}
+
+    assert not _gates_can_coexist(
+        ((source, right),),
+        ((source, left),),
+        requirements,
+        conditional_targets,
+    )
+    assert _gates_can_coexist((), ((source, left),))
+    assert not _gates_can_coexist(((source, left),), ((source, right),))
+
+
+def test_repeatable_join_source_propagation_reaches_acyclic_dependents() -> None:
+    source = GraphNodeId("source")
+    dependent = GraphNodeId("dependent")
+    other = GraphNodeId("other")
+    target = GraphNodeId("target")
+    successors: dict[GraphNodeId, set[GraphNodeId]] = {
+        source: {source},
+        dependent: set(),
+        other: set(),
+        target: set(),
+    }
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {
+        source: [((source, None),)],
+        dependent: [((source, None),)],
+        other: [],
+        target: [],
+    }
+
+    with pytest.raises(GraphValidationError, match="more than one activation occurrence"):
+        _reject_repeatable_join_sources(
+            (JoinEdge((dependent, other), target),),
+            activation_gates,
+            successors,
+        )
+
+
+def test_feedback_compiler_rejects_a_multi_node_target_before_edge_checks() -> None:
+    valid = compile_graph(
         definition(
-            (decision, left, right),
+            (node("loop", inputs={}, outputs={"value": int}),),
             edges=(
-                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
-                ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
-                DirectEdge(GraphNodeId("left"), GraphNodeId("decision")),
-                DirectEdge(GraphNodeId("right"), GraphNodeId("decision")),
-                JoinEdge((GraphNodeId("left"), GraphNodeId("right")), END),
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
             ),
-            entries=("decision",),
+            entries=("loop",),
+            outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
         )
     )
+    loop = GraphNodeId("loop")
+    extra = GraphNodeId("extra")
+    resolution = _FeedbackResolution(
+        GraphInputPort((), "seed"),
+        NodeOutputPort((), loop, "value"),
+        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
+    )
 
-    assert compiled.transition.joins_by_source[GraphNodeId("left")]
+    nodes: dict[GraphNodeId, GraphNode[PipelineValue]] = {
+        loop: valid.nodes[loop],
+        extra: valid.nodes[loop],
+    }
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {loop: set(), extra: set()}
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {
+        loop: {GraphRouteId("continue"): loop, GraphRouteId("done"): END},
+        extra: {},
+    }
+    joins_by_source: dict[GraphNodeId, list[JoinEdge]] = {loop: [], extra: []}
+    edges: tuple[Edge, ...] = (
+        ConditionalEdge(loop, GraphRouteId("continue"), loop),
+        ConditionalEdge(loop, GraphRouteId("done"), END),
+    )
+
+    with pytest.raises(GraphValidationError, match="one callable target node"):
+        _compile_activation_rules(
+            nodes,
+            (loop, extra),
+            (),
+            {loop: (("value", resolution),), extra: ()},
+            direct_targets,
+            conditional_targets,
+            joins_by_source,
+            edges,
+            valid.transition.graph_outputs,
+        )

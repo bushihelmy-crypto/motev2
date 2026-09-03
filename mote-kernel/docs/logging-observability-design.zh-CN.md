@@ -12,7 +12,7 @@ ordinary node callable
   -> Graph.add_node(...)
 
 Graph.Commit
-  -> EventingGraphCommit 持久化确认后的结算通知（启用 events 时）
+  -> EventingGraphCommit 将结算引用与 State 交给同一持久化事务（启用 events 时）
   -> LoggedGraphCommit   transition callback 的诊断日志
   -> Graph.run(commit=...)
 ```
@@ -21,8 +21,9 @@ Graph.Commit
   并允许模型、工具等更窄的 Port 追加 usage/timing/error 记录。
 - `logging` 同时装饰 node 和 `Graph.Commit`。node 日志用于定位没有进入 settlement/commit 的异常；commit 日志用于
   记录 callback 收到的 transition 坐标以及 callback 的返回、异常或取消。
-- `events` 表达已经确认的节点结算事实。它与 logging、observability 都不是同一条语义边界；若部署需要可靠投递或
-  outbox 原子性，应由具体能力自行保证，Kernel 装饰器只做投影与通知，不偷偷建立第二个提交路径。
+- `events` 表达已经确认的节点结算事实。它与 logging、observability 都不是同一条语义边界；Events 装饰器只做
+  settlement 引用投影，并恰好一次调用具备 State + outbox 原子事务能力的 persistence port。远端可靠投递由事务后的
+  dispatcher 完成，不存在 post-commit sink 或第二条提交路径。
 
 Observability 不提供 `Graph.Commit` 装饰器。若某个具体 commit adapter 希望记录自身的基础设施指标，应在该 adapter
 所属实现中完成；Kernel 的 node observability 不据此假定 callback 背后存在 Store、数据库或持久化行为。
@@ -78,9 +79,9 @@ transition
 
 因此日志装饰器不成为第二个 commit owner，也不声称 transition 已被某种 Store 确认。
 
-`EventingGraphCommit` 先投影 `SettleGraphNode`，再调用内层持久化 commit；只有内层返回 exact candidate 后才等待
-单事件 sink。普通 sink 异常被隔离，避免已经确认的状态 transition 被重复提交；`asyncio.CancelledError` 仍向调用方传播。
-非 settlement transition 不产生事件。
+`EventingGraphCommit` 先为 `SettleGraphNode` 投影稳定引用，再将 transition 与该引用作为一个不可变请求交给内层
+persistence commit。内层在同一事务中提交 candidate `GraphRunState` 和 outbox，装饰器不在提交后调用 Event sink，
+也不自行发送、重试或吞掉持久化异常。非 settlement transition 使用空 Event 引用，但仍经过同一个 persistence port。
 
 ## 5. 数据安全与边界
 

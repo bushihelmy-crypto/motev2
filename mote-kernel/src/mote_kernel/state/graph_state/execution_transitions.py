@@ -15,19 +15,30 @@ from mote_kernel.state.graph_state.command import (
 )
 from mote_kernel.state.graph_state.frontier_model import (
     FailedGraphNode,
+    GraphFrontierActivation,
     GraphFrontierNode,
     GraphFrontierState,
     GraphFrontierStatus,
     GraphNodeInterrupt,
     InterruptedGraphNode,
     PendingGraphNode,
+    RoutedActivationCause,
+    StartActivationCause,
     SucceededGraphNode,
     UseStepRequestInput,
     frontier_node,
     frontier_status,
     pending_node_ids,
 )
-from mote_kernel.state.graph_state.model import GraphExecutionLease, GraphExecutionToken, GraphRunState, GraphRunStatus
+from mote_kernel.state.graph_state.identity import ActivationReference, GraphActivationIdentity
+from mote_kernel.state.graph_state.model import (
+    GraphExecutionLease,
+    GraphExecutionToken,
+    GraphJoinProgress,
+    GraphJoinProgressKey,
+    GraphRunState,
+    GraphRunStatus,
+)
 from mote_kernel.state.graph_state.resource_command import ReleaseResources
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 from mote_kernel.state.graph_state.resource_reducer import (
@@ -35,6 +46,7 @@ from mote_kernel.state.graph_state.resource_reducer import (
     reduce_resources,
     validate_resource_snapshot,
 )
+from mote_kernel.state.graph_state.routing import SelectGraphRoute
 from mote_kernel.state.graph_state.validation import (
     GraphStateTransitionError,
     validate_graph_frontier,
@@ -43,8 +55,12 @@ from mote_kernel.state.graph_state.validation import (
 
 
 def start_graph_run(command: StartGraphRun) -> GraphRunState:
+    activations = _start_activations(command.activations)
     frontier = GraphFrontierState(
-        tuple(GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput())) for node_id in command.node_ids)
+        tuple(
+            GraphFrontierNode(activation.node_id, PendingGraphNode(UseStepRequestInput()), activation.cause)
+            for activation in activations
+        )
     )
     return validated_graph_run_state(
         GraphRunState(
@@ -58,6 +74,198 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             resume_input_codec=command.resume_input_codec,
         )
     )
+
+
+def _start_activations(
+    declared: tuple[GraphFrontierActivation, ...],
+) -> tuple[GraphFrontierActivation, ...]:
+    _validate_activation_batch(declared, "initial")
+    if any(type(activation.cause) is not StartActivationCause for activation in declared):
+        raise GraphStateTransitionError("initial activations must use the START cause")
+    return declared
+
+
+def _validate_activation_batch(
+    declared: tuple[GraphFrontierActivation, ...],
+    label: str,
+) -> None:
+    if (
+        type(declared) is not tuple
+        or not declared
+        or any(type(activation) is not GraphFrontierActivation for activation in declared)
+    ):
+        raise GraphStateTransitionError(f"{label} activations are malformed")
+    node_ids = tuple(activation.node_id for activation in declared)
+    if node_ids != tuple(sorted(set(node_ids))):
+        raise GraphStateTransitionError(f"{label} activations must use canonical node order")
+
+
+def _validate_next_activations(
+    state: GraphRunState,
+    declared: tuple[GraphFrontierActivation, ...],
+) -> frozenset[GraphJoinProgressKey]:
+    _validate_activation_batch(declared, "next frontier")
+    consumed_progress: set[GraphJoinProgressKey] = set()
+    for activation in declared:
+        cause = activation.cause
+        if type(cause) is not RoutedActivationCause:
+            raise GraphStateTransitionError("next frontier activations must carry routed causes")
+        source_ids = tuple(reference.activation.node_id for reference in cause.references)
+        if len(source_ids) != len(set(source_ids)):
+            raise GraphStateTransitionError("next activation cause cannot repeat one source node")
+        current_references: list[ActivationReference] = []
+        historical_references: list[ActivationReference] = []
+        for reference in cause.references:
+            source = reference.activation
+            if source.run_id != state.run_id or source.superstep > state.superstep:
+                raise GraphStateTransitionError("next activation cause references the wrong frontier")
+            if source.superstep < state.superstep:
+                historical_references.append(reference)
+                continue
+            current_references.append(reference)
+            source_node = frontier_node(state.frontier, source.node_id)
+            if source_node is None or not isinstance(source_node.settlement, SucceededGraphNode):
+                raise GraphStateTransitionError("next activation cause source is not a settled success")
+            routing = source_node.settlement.routing
+            expected_route = routing.route if isinstance(routing, SelectGraphRoute) else None
+            if reference.route != expected_route:
+                raise GraphStateTransitionError("next activation cause route does not match source settlement")
+        if not current_references:
+            raise GraphStateTransitionError("next activation cause requires a current settled source")
+        if historical_references:
+            history = tuple(historical_references)
+            source_ids = {reference.activation.node_id for reference in cause.references}
+            matches = tuple(
+                progress
+                for progress in state.join_progress
+                if progress.target == activation.node_id
+                and progress.arrived == history
+                and set(progress.sources) == source_ids
+            )
+            if len(matches) != 1:
+                raise GraphStateTransitionError("historical activation references do not complete one pending join")
+            progress = matches[0]
+            key: GraphJoinProgressKey = (progress.sources, progress.target)
+            consumed_progress.add(key)
+    return frozenset(consumed_progress)
+
+
+def _index_join_progress(
+    progress: tuple[GraphJoinProgress, ...],
+    label: str,
+) -> dict[GraphJoinProgressKey, GraphJoinProgress]:
+    if type(progress) is not tuple:
+        raise GraphStateTransitionError(f"{label} join progress must be a tuple")
+    indexed: dict[GraphJoinProgressKey, GraphJoinProgress] = {}
+    for item in progress:
+        if type(item) is not GraphJoinProgress or type(item.sources) is not tuple or type(item.arrived) is not tuple:
+            raise GraphStateTransitionError(f"{label} join progress contains a malformed record")
+        key = (item.sources, item.target)
+        try:
+            hash(key)
+        except TypeError as error:
+            raise GraphStateTransitionError(f"{label} join progress contains an unhashable key") from error
+        if key in indexed:
+            raise GraphStateTransitionError(f"{label} join progress repeats one join")
+        indexed[key] = item
+    return indexed
+
+
+def _current_successful_references(state: GraphRunState) -> frozenset[ActivationReference]:
+    references: set[ActivationReference] = set()
+    activation_step = state.superstep
+    for node in state.frontier.nodes:
+        settlement = node.settlement
+        if not isinstance(settlement, SucceededGraphNode):
+            continue
+        route = settlement.routing.route if isinstance(settlement.routing, SelectGraphRoute) else None
+        references.add(
+            ActivationReference(
+                GraphActivationIdentity(state.run_id, activation_step, node.node_id),
+                route,
+            )
+        )
+    return frozenset(references)
+
+
+def _validate_join_progress_delta(
+    state: GraphRunState,
+    declared: tuple[GraphJoinProgress, ...],
+    consumed: frozenset[GraphJoinProgressKey],
+    explicitly_consumed: tuple[GraphJoinProgressKey, ...],
+) -> None:
+    """Ensure an advance only appends current successes or consumes a Join once."""
+
+    previous = _index_join_progress(state.join_progress, "state")
+    updated = _index_join_progress(declared, "command")
+    current = _current_successful_references(state)
+    explicit = _validate_join_consumption(state, explicitly_consumed, current)
+    if consumed & explicit:
+        raise GraphStateTransitionError("one pending join cannot be consumed more than once")
+    consumable = consumed | explicit
+
+    for key, progress in updated.items():
+        prior = previous.get(key)
+        try:
+            arrived = frozenset(progress.arrived)
+        except TypeError as error:
+            raise GraphStateTransitionError("command join progress contains unhashable arrivals") from error
+        if prior is None:
+            if not arrived <= current:
+                raise GraphStateTransitionError("new join progress must contain only current settled successes")
+            continue
+        if key in consumable:
+            raise GraphStateTransitionError("consumed join progress cannot be retained")
+        try:
+            prior_arrived = frozenset(prior.arrived)
+        except TypeError as error:
+            raise GraphStateTransitionError("state join progress contains unhashable arrivals") from error
+        if not prior_arrived <= arrived:
+            raise GraphStateTransitionError("join progress cannot remove or replace historical arrivals")
+        if not (arrived - prior_arrived) <= current:
+            raise GraphStateTransitionError("join progress additions must be current settled successes")
+
+    for key in previous:
+        if key not in updated and key not in consumable:
+            raise GraphStateTransitionError("unrelated join progress cannot be discarded")
+
+
+def _validate_join_consumption(
+    state: GraphRunState,
+    declared: tuple[GraphJoinProgressKey, ...],
+    current: frozenset[ActivationReference],
+) -> frozenset[GraphJoinProgressKey]:
+    if type(declared) is not tuple:
+        raise GraphStateTransitionError("consumed join progress must be a tuple")
+    previous = _index_join_progress(state.join_progress, "state")
+    consumed: set[GraphJoinProgressKey] = set()
+    for key in declared:
+        if (
+            type(key) is not tuple
+            or len(key) != 2
+            or type(key[0]) is not tuple
+            or type(key[1]) is not str
+            or not key[0]
+            or any(type(source) is not str for source in key[0])
+            or key[0] != tuple(sorted(set(key[0])))
+        ):
+            raise GraphStateTransitionError("consumed join progress key is malformed")
+        if key in consumed:
+            raise GraphStateTransitionError("consumed join progress keys must be canonical and distinct")
+        progress = previous.get(key)
+        if progress is None:
+            raise GraphStateTransitionError("consumed join progress does not exist in the current state")
+        current_arrivals = tuple(reference for reference in current if reference.activation.node_id in progress.sources)
+        arrivals = (*progress.arrived, *current_arrivals)
+        source_ids = tuple(reference.activation.node_id for reference in arrivals)
+        if len(source_ids) != len(set(source_ids)):
+            raise GraphStateTransitionError("join progress repeats one source activation")
+        if set(source_ids) != set(progress.sources):
+            raise GraphStateTransitionError("consumed join progress is not complete")
+        consumed.add(key)
+    if tuple(sorted(consumed, key=lambda item: (item[0], item[1]))) != declared:
+        raise GraphStateTransitionError("consumed join progress keys must use canonical order")
+    return frozenset(consumed)
 
 
 def _validate_claim_resources(state: GraphRunState, resources: ResourceSnapshot | None) -> None:
@@ -118,15 +326,20 @@ def _resolution_base(state: GraphRunState) -> None:
 
 def advance_graph_frontier(state: GraphRunState, command: AdvanceGraphFrontier) -> GraphRunState:
     _resolution_base(state)
-    if not command.node_ids or command.node_ids != tuple(sorted(set(command.node_ids))):
-        raise GraphStateTransitionError("next frontier nodes must be non-empty and canonical")
+    consumed = _validate_next_activations(state, command.activations)
+    _validate_join_progress_delta(state, command.join_progress, consumed, command.consumed_join_progress)
     return validated_graph_run_state(
         replace(
             state,
             superstep=state.superstep + 1,
             frontier=GraphFrontierState(
                 tuple(
-                    GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput())) for node_id in command.node_ids
+                    GraphFrontierNode(
+                        activation.node_id,
+                        PendingGraphNode(UseStepRequestInput()),
+                        activation.cause,
+                    )
+                    for activation in command.activations
                 )
             ),
             join_progress=command.join_progress,
@@ -136,13 +349,20 @@ def advance_graph_frontier(state: GraphRunState, command: AdvanceGraphFrontier) 
 
 def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier) -> GraphRunState:
     _resolution_base(state)
-    if state.join_progress:
+    consumed = _validate_join_consumption(
+        state,
+        command.consumed_join_progress,
+        _current_successful_references(state),
+    )
+    if len(consumed) != len(state.join_progress):
         raise GraphStateTransitionError("a completed graph cannot discard unresolved join progress")
     return validated_graph_run_state(
         replace(
             state,
             status=GraphRunStatus.COMPLETED,
             frontier=GraphFrontierState(()),
+            join_progress=(),
+            settled_activations=(),
         )
     )
 
@@ -159,8 +379,17 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
     if current is None or not isinstance(current.settlement, PendingGraphNode):
         raise GraphStateTransitionError("node settlement requires a current pending node")
 
+    settled_activations = state.settled_activations
     if isinstance(outcome, SucceededGraphNodeOutcome):
         settlement = SucceededGraphNode(outcome.routing)
+        route = outcome.routing.route if isinstance(outcome.routing, SelectGraphRoute) else None
+        evidence = ActivationReference(
+            GraphActivationIdentity(state.run_id, state.superstep, node_id),
+            route,
+        )
+        if evidence in settled_activations:
+            raise GraphStateTransitionError("node activation has already been committed as settled")
+        settled_activations = tuple(sorted((*settled_activations, evidence), key=ActivationReference.canonical_key))
     elif isinstance(outcome, FailedGraphNodeOutcome):
         settlement = FailedGraphNode(outcome.failure)
     else:
@@ -174,7 +403,11 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
 
     frontier = GraphFrontierState(
         tuple(
-            GraphFrontierNode(node.node_id, settlement if node.node_id == node_id else node.settlement)
+            GraphFrontierNode(
+                node.node_id,
+                settlement if node.node_id == node_id else node.settlement,
+                node.cause,
+            )
             for node in state.frontier.nodes
         )
     )
@@ -189,12 +422,24 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
         if not resources.acquisitions:
             resources = None
 
-    if pending_node_ids(frontier):
+    derived = frontier_status(frontier)
+    if derived is GraphFrontierStatus.EXECUTABLE:
         execution = state.execution
+        status = GraphRunStatus.RUNNING
     else:
         execution = None
         resources = None
-    return validated_graph_run_state(replace(state, frontier=frontier, execution=execution, resources=resources))
+        status = GraphRunStatus.FAILED if derived is GraphFrontierStatus.FAILED else GraphRunStatus.RUNNING
+    return validated_graph_run_state(
+        replace(
+            state,
+            status=status,
+            frontier=frontier,
+            execution=execution,
+            resources=resources,
+            settled_activations=settled_activations,
+        )
+    )
 
 
 __all__ = [

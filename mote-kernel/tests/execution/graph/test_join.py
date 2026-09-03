@@ -1,7 +1,7 @@
 import pytest
 from tests.execution.graph.factories import graph, node
 
-from mote_kernel.execution.errors import InvalidJoinError, UnreachableNodeError
+from mote_kernel.execution.errors import GraphValidationError, InvalidJoinError, UnreachableNodeError
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.edge import DirectEdge, JoinEdge
 from mote_kernel.state.graph_state import GraphNodeId
@@ -52,7 +52,7 @@ def test_direct_edges_and_multiple_joins_coexist_deterministically() -> None:
     )
 
 
-def test_distinct_joins_may_share_a_target() -> None:
+def test_distinct_joins_sharing_a_target_are_rejected_without_occurrence_identity() -> None:
     definition = graph(
         nodes=(node("a"), node("b"), node("c"), node("d")),
         edges=(
@@ -60,12 +60,8 @@ def test_distinct_joins_may_share_a_target() -> None:
             JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("d")),
         ),
     )
-    compiled = compile_graph(definition)
-
-    assert compiled.transition.joins_by_source[GraphNodeId("a")] == (
-        JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d")),
-        JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("d")),
-    )
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
+        compile_graph(definition)
 
 
 def test_join_target_requires_every_source_to_be_structurally_reachable() -> None:

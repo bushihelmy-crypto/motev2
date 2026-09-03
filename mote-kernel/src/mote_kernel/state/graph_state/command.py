@@ -5,14 +5,14 @@ from typing import TypeAlias
 
 from mote_kernel.state.graph_state.frontier_model import (
     GraphFailure,
+    GraphFrontierActivation,
     GraphInterruptPayload,
-    GraphNodeInputBinding,
     GraphNodeInterruptIdentity,
     GraphResumeInputCodec,
-    GraphSkipReason,
     OverrideGraphNodeInput,
 )
 from mote_kernel.state.graph_state.identity import (
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
@@ -24,7 +24,7 @@ from mote_kernel.state.graph_state.model import (
     GraphAbortReason,
     GraphExecutionToken,
     GraphJoinProgress,
-    ParentGraphActivation,
+    GraphJoinProgressKey,
 )
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 from mote_kernel.state.graph_state.routing import GraphRoutingContribution
@@ -55,26 +55,15 @@ GraphNodeOutcome: TypeAlias = SucceededGraphNodeOutcome | FailedGraphNodeOutcome
 @dataclass(frozen=True, slots=True)
 class AdvanceGraphFrontier:
     expected_revision: int
-    node_ids: tuple[GraphNodeId, ...]
+    activations: tuple[GraphFrontierActivation, ...]
     join_progress: tuple[GraphJoinProgress, ...]
+    consumed_join_progress: tuple[GraphJoinProgressKey, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class CompleteGraphFrontier:
     expected_revision: int
-
-
-@dataclass(frozen=True, slots=True)
-class ResumeFailedNode:
-    node_id: GraphNodeId
-    input: GraphNodeInputBinding
-
-
-@dataclass(frozen=True, slots=True)
-class SkipFailedNode:
-    node_id: GraphNodeId
-    reason: GraphSkipReason
-    routing: GraphRoutingContribution
+    consumed_join_progress: tuple[GraphJoinProgressKey, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +73,7 @@ class ResumeInterruptedNode:
     input: OverrideGraphNodeInput
 
 
-GraphNodeResumeAction: TypeAlias = ResumeFailedNode | SkipFailedNode | ResumeInterruptedNode
+GraphNodeResumeAction: TypeAlias = ResumeInterruptedNode
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +81,8 @@ class StartGraphRun:
     run_id: GraphRunId
     definition_id: GraphDefinitionId
     definition_version: GraphDefinitionVersion
-    node_ids: tuple[GraphNodeId, ...]
-    parent: ParentGraphActivation | None = None
+    activations: tuple[GraphFrontierActivation, ...]
+    parent: GraphActivationIdentity | None = None
     resume_input_codec: GraphResumeInputCodec | None = None
 
 
@@ -152,11 +141,9 @@ __all__ = [
     "GraphNodeResumeAction",
     "GraphRunCommand",
     "InterruptedGraphNodeOutcome",
-    "ResumeFailedNode",
     "ResumeGraphNodes",
     "ResumeInterruptedNode",
     "SettleGraphNode",
-    "SkipFailedNode",
     "StartGraphRun",
     "SucceededGraphNodeOutcome",
 ]

@@ -6,14 +6,11 @@ from itertools import groupby, pairwise
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.recovery import (
-    AdmittedActionKind,
     AdmittedResumeFact,
     RecoveryInvocationSeed,
     RecoveryStateBinding,
 )
 from mote_kernel.execution.engine.resume_admission import (
-    ScopedResumeCandidate,
-    admit_resume_candidates,
     prepare_resume,
 )
 from mote_kernel.execution.engine.resume_input import (
@@ -40,12 +37,10 @@ from mote_kernel.execution.identity import (
     StableActivation,
     child_scope_run_for_activation,
     root_scope_run,
+    stable_activation,
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import (
-    OverrideNodeInput,
-    ResumeFailedNodeRequest,
-    ResumeInterruptedNodeRequest,
     ResumeNodeRequest,
     ResumeRequest,
 )
@@ -55,8 +50,6 @@ from mote_kernel.execution.result import (
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
-    AdmittedSubstitution,
-    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
     ChildStateBinding,
     ConfirmedChildBoundary,
@@ -66,16 +59,14 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
-    SkipSubstitutionProvenance,
 )
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
+    GraphActivationIdentity,
     GraphNodeId,
-    GraphRouteId,
     GraphRunState,
     GraphRunStatus,
     OverrideGraphNodeInput,
-    ParentGraphActivation,
     PendingGraphNode,
     SucceededGraphNode,
     frontier_node,
@@ -127,7 +118,6 @@ class PlannedResume(Generic[GraphValueT]):
     scope_run: ScopeRunCoordinate
     successor: GraphRunState
     prepared: PreparedResume[GraphValueT]
-    substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
 
 
 def project_resume_frames(
@@ -138,15 +128,6 @@ def project_resume_frames(
     try:
         for admitted in planned.prepared.inputs:
             installed = installed.add_resume_input(admitted)
-        for substitution in planned.substitutions:
-            installed = installed.add_publication(
-                ConfirmedPublication(
-                    substitution.coordinate,
-                    substitution.frame,
-                    substitution.expected_revision,
-                    substitution.provenance,
-                )
-            )
     except GraphValuePublicationError as error:
         raise FrameInstallationInvariantError("admitted resume frames failed owner-local projection") from error
     return installed
@@ -197,7 +178,7 @@ def plan_fences(
         require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
         activation = binding.parent_activation
         if activation is not None:
-            expected_parent = ParentGraphActivation(
+            expected_parent = GraphActivationIdentity(
                 activation.scope_run.graph_run_id,
                 activation.superstep,
                 activation.node_id,
@@ -246,66 +227,11 @@ def _resolve_scope_run(
         node = frontier_node(state.frontier, segment)
         if nested is None or node is None or not isinstance(node.settlement, PendingGraphNode):
             raise SnapshotMismatchError(f"resume scope segment {segment!r} is not one current nested activation")
-        parent = ParentGraphActivation(state.run_id, state.superstep, segment)
+        parent = GraphActivationIdentity(state.run_id, state.superstep, segment)
         coordinate = child_scope_run_for_activation(coordinate, parent)
         lineage.binding_at(coordinate)
         scoped_graph = nested
     return coordinate
-
-
-def _resume_facts(
-    scope_run: ScopeRunCoordinate,
-    superstep: int,
-    actions: tuple[ResumeNodeRequest[GraphValueT], ...],
-) -> tuple[AdmittedResumeFact, ...]:
-    facts: list[AdmittedResumeFact] = []
-    for action in actions:
-        activation = StableActivation(scope_run, superstep, action.node_id)
-        if isinstance(action, ResumeFailedNodeRequest):
-            kind = (
-                AdmittedActionKind.RESUME_FAILED_WITH
-                if isinstance(action.input, OverrideNodeInput)
-                else AdmittedActionKind.RESUME_FAILED
-            )
-            facts.append(AdmittedResumeFact(activation, kind, None, None, None))
-        elif isinstance(action, ResumeInterruptedNodeRequest):
-            facts.append(
-                AdmittedResumeFact(
-                    activation,
-                    AdmittedActionKind.RESUME_INTERRUPTED,
-                    action.interrupt_id,
-                    None,
-                    None,
-                )
-            )
-        else:
-            facts.append(
-                AdmittedResumeFact(
-                    activation,
-                    AdmittedActionKind.SKIP_FAILED,
-                    None,
-                    action.reason,
-                    GraphRouteId(action.route) if action.route is not None else None,
-                )
-            )
-    return tuple(facts)
-
-
-def _forbid_aborted_child_restart(
-    graph: CompiledGraph[GraphValueT],
-    lineage: _PlannedLineage,
-    scope_run: ScopeRunCoordinate,
-    state: GraphRunState,
-    actions: tuple[ResumeNodeRequest[GraphValueT], ...],
-) -> None:
-    scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
-    for action in actions:
-        if not isinstance(action, ResumeFailedNodeRequest) or action.node_id not in scoped_graph.nested_graphs:
-            continue
-        parent = ParentGraphActivation(state.run_id, state.superstep, action.node_id)
-        child_coordinate = child_scope_run_for_activation(scope_run, parent)
-        lineage.binding_at(child_coordinate)
-        raise SnapshotMismatchError("an aborted nested child cannot be restarted with the same run identity")
 
 
 def plan_resumes(
@@ -315,12 +241,12 @@ def plan_resumes(
     resume: tuple[ResumeNodeRequest[GraphValueT], ...],
 ) -> tuple[
     _PlannedLineage,
-    CandidateFrameAvailability[GraphValueT],
+    ScopedFrameIndex[GraphValueT],
     tuple[PlannedResume[GraphValueT], ...],
     tuple[AdmittedResumeFact, ...],
 ]:
     if not resume:
-        return lineage, CandidateFrameAvailability(frames, ()), (), ()
+        return lineage, frames, (), ()
     if type(resume) is not tuple:
         raise SnapshotMismatchError("resume actions must be supplied as a tuple")
     canonical = tuple(sorted(resume, key=lambda action: (action.scope, action.node_id)))
@@ -335,56 +261,41 @@ def plan_resumes(
         if count == 2:
             duplicate_coordinates.append(coordinate)
     if duplicate_coordinates:
-        raise GraphValuePublicationError(
-            f"resume action nodes {tuple(duplicate_coordinates)!r} supplied duplicate candidate coordinates"
-        )
+        raise SnapshotMismatchError(f"resume action nodes {tuple(duplicate_coordinates)!r} are duplicated")
     planned_lineage = lineage
     candidate_frames = frames
     plans: list[PlannedResume[GraphValueT]] = []
     facts: list[AdmittedResumeFact] = []
-    candidates: list[ScopedResumeCandidate[GraphValueT]] = []
     for scope, grouped_actions in groupby(canonical, key=lambda action: action.scope):
         actions = tuple(grouped_actions)
         scope_run = _resolve_scope_run(graph, planned_lineage, scope)
         binding = planned_lineage.binding_at(scope_run)
-        _forbid_aborted_child_restart(graph, planned_lineage, scope_run, binding.state, actions)
         scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
         prepared = prepare_resume(scoped_graph, ResumeRequest(binding.state, scope_run, candidate_frames, actions))
         candidate = reduce_graph_run(binding.state, prepared.command)
-        action_facts = _resume_facts(scope_run, binding.state.superstep, actions)
+        action_facts = tuple(
+            AdmittedResumeFact(
+                stable_activation(
+                    scope_run,
+                    GraphActivationIdentity(binding.state.run_id, binding.state.superstep, action.node_id),
+                ),
+                action.interrupt_id,
+            )
+            for action in actions
+        )
         for admitted in prepared.inputs:
             candidate_frames = candidate_frames.add_resume_input(admitted)
-        substitutions = tuple(
-            AdmittedSubstitution(
-                prepared_substitution.coordinate,
-                prepared_substitution.frame,
-                prepared_substitution.provenance,
-                candidate.revision,
-            )
-            for prepared_substitution in prepared.substitutions
-        )
-        plans.append(PlannedResume(scope_run, candidate, prepared, substitutions))
-        candidates.append(
-            ScopedResumeCandidate(
-                scoped_graph,
-                scope_run,
-                binding.state,
-                candidate,
-                substitutions,
-                prepared.command,
-            )
-        )
+        plans.append(PlannedResume(scope_run, candidate, prepared))
         facts.extend(action_facts)
         planned_lineage = planned_lineage.replace(
             _PlannedState(scope_run, candidate, binding.parent_activation),
         )
-    availability = admit_resume_candidates(tuple(candidates), candidate_frames)
-    return planned_lineage, availability, tuple(plans), tuple(facts)
+    return planned_lineage, candidate_frames, tuple(plans), tuple(facts)
 
 
 def recovery_seed(
     lineage: _PlannedLineage,
-    frames: ScopedFrameIndex[GraphValueT] | CandidateFrameAvailability[GraphValueT],
+    frames: ScopedFrameIndex[GraphValueT],
     limits: ExecutionLimits,
     facts: tuple[AdmittedResumeFact, ...],
 ) -> RecoveryInvocationSeed[GraphValueT]:
@@ -455,13 +366,10 @@ def _validate_publication_records(
             or coordinate.descriptor != publication.identity
             or coordinate.activation.superstep > binding.state.superstep
             or not 1 <= record.acknowledged_revision <= binding.state.revision
-            or type(record.provenance) not in (ExecutionPublicationProvenance, SkipSubstitutionProvenance)
+            or type(record.provenance) is not ExecutionPublicationProvenance
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
-        if (
-            isinstance(record.provenance, ExecutionPublicationProvenance)
-            and record.provenance.execution_token.generation < 1
-        ):
+        if record.provenance.execution_token.generation < 1:
             raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
         try:
             _admit_node_output_frame(record.frame, publication.declarations)
@@ -565,14 +473,17 @@ def _validate_complete_context(
         for node in state.frontier.nodes:
             if isinstance(node.settlement, SucceededGraphNode):
                 coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                    StableActivation(binding.scope_run, state.superstep, node.node_id),
+                    stable_activation(
+                        binding.scope_run,
+                        GraphActivationIdentity(state.run_id, state.superstep, node.node_id),
+                    ),
                     scoped_graph.transition.publications[node.node_id].identity,
                 )
                 if not frames.has_publication(coordinate):
                     raise SnapshotMismatchError("complete continuation is missing a current success publication")
             if isinstance(node.settlement, PendingGraphNode):
                 if node.node_id in scoped_graph.nested_graphs:
-                    parent = ParentGraphActivation(state.run_id, state.superstep, node.node_id)
+                    parent = GraphActivationIdentity(state.run_id, state.superstep, node.node_id)
                     child_coordinate = child_scope_run_for_activation(binding.scope_run, parent)
                     lineage.binding_at(child_coordinate)
                 elif not pending_node_input_available(

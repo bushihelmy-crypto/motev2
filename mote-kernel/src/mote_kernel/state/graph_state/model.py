@@ -2,10 +2,12 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import NewType
+from typing import NewType, TypeAlias
 
 from mote_kernel.state.graph_state.frontier_model import GraphFrontierState, GraphResumeInputCodec
 from mote_kernel.state.graph_state.identity import (
+    ActivationReference,
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
@@ -20,6 +22,7 @@ GraphAbortReason = NewType("GraphAbortReason", str)
 class GraphRunStatus(Enum):
     RUNNING = auto()
     COMPLETED = auto()
+    FAILED = auto()
     ABORTED = auto()
 
 
@@ -40,17 +43,13 @@ class GraphExecutionLease:
 
 
 @dataclass(frozen=True, slots=True)
-class ParentGraphActivation:
-    run_id: GraphRunId
-    superstep: int
-    node_id: GraphNodeId
-
-
-@dataclass(frozen=True, slots=True)
 class GraphJoinProgress:
     sources: tuple[GraphNodeId, ...]
     target: GraphNodeId
-    arrived: frozenset[GraphNodeId]
+    arrived: tuple[ActivationReference, ...]
+
+
+GraphJoinProgressKey: TypeAlias = tuple[tuple[GraphNodeId, ...], GraphNodeId]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,10 +63,14 @@ class GraphRunState:
     execution_sequence: int = 0
     resume_input_codec: GraphResumeInputCodec | None = None
     join_progress: tuple[GraphJoinProgress, ...] = ()
+    # One canonical success reference per committed activation.  Causes and
+    # Join progress may only point at entries in this ledger; keeping it in the
+    # sole runtime snapshot makes recovery admission deterministic.
+    settled_activations: tuple[ActivationReference, ...] = ()
     resources: ResourceSnapshot | None = None
     execution: GraphExecutionLease | None = None
     abort: GraphAbort | None = None
-    parent: ParentGraphActivation | None = None
+    parent: GraphActivationIdentity | None = None
     revision: int = 0
 
 
@@ -77,7 +80,7 @@ __all__ = [
     "GraphExecutionLease",
     "GraphExecutionToken",
     "GraphJoinProgress",
+    "GraphJoinProgressKey",
     "GraphRunState",
     "GraphRunStatus",
-    "ParentGraphActivation",
 ]

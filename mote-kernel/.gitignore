@@ -22,6 +22,7 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 .pyright/
+.pyrightconfig.*.json
 .ruff_cache/
 .hypothesis/
 

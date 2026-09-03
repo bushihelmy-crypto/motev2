@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.state.graph_state import GraphNodeId, GraphRunId, ParentGraphActivation, child_graph_run_id
+from mote_kernel.state.graph_state import GraphActivationIdentity, GraphNodeId, GraphRunId, child_graph_run_id
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -31,6 +31,17 @@ def root_scope_run(run_id: GraphRunId) -> ScopeRunCoordinate:
     return ScopeRunCoordinate((), run_id)
 
 
+def stable_activation(
+    scope_run: ScopeRunCoordinate,
+    activation: GraphActivationIdentity,
+) -> StableActivation:
+    """Project the state-owned identity into its scoped execution lookup key."""
+
+    if activation.run_id != scope_run.graph_run_id:
+        raise SnapshotMismatchError("activation does not belong to its scope-run coordinate")
+    return StableActivation(scope_run, activation.superstep, activation.node_id)
+
+
 def child_scope_run(
     parent_scope_run: ScopeRunCoordinate,
     parent_superstep: int,
@@ -42,7 +53,7 @@ def child_scope_run(
 
 def child_scope_run_for_activation(
     parent_scope_run: ScopeRunCoordinate,
-    parent: ParentGraphActivation,
+    parent: GraphActivationIdentity,
 ) -> ScopeRunCoordinate:
     if parent.run_id != parent_scope_run.graph_run_id:
         raise SnapshotMismatchError("parent activation does not belong to its scope-run coordinate")
@@ -55,4 +66,5 @@ __all__ = [
     "child_scope_run",
     "child_scope_run_for_activation",
     "root_scope_run",
+    "stable_activation",
 ]

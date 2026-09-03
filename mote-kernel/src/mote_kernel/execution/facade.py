@@ -48,8 +48,8 @@ from mote_kernel.execution.graph.ports import (
     NodeOutputRef,
     canonical_nominal_type,
     canonical_port_name,
+    normalize_facade_input_bindings,
     normalize_graph_output_declarations,
-    normalize_input_bindings,
     normalize_output_declarations,
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
@@ -75,11 +75,8 @@ from mote_kernel.execution.invocation import (
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.request import (
     OverrideNodeInput,
-    ResumeFailedNodeRequest,
     ResumeInterruptedNodeRequest,
     ResumeNodeRequest,
-    SkipFailedNodeRequest,
-    UseMaterializedInput,
 )
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.execution.result import (
@@ -87,6 +84,7 @@ from mote_kernel.execution.result import (
     _AbortedGraphResult,
     _AwaitingResumeGraphResult,
     _CompletedGraphResult,
+    _FailedGraphResult,
     _GraphFailureResult,
     _GraphInterruptResult,
     _GraphSuccessResult,
@@ -195,6 +193,7 @@ class Graph(Generic[GraphValueT]):
     Continuation = _GraphContinuation
     PartialCommitError = _PartialCommitError
     CompletedResult = _CompletedGraphResult
+    FailedResult = _FailedGraphResult
     AbortedResult = _AbortedGraphResult
     AwaitingResumeResult = _AwaitingResumeGraphResult
     Result = GraphResult
@@ -281,7 +280,10 @@ class Graph(Generic[GraphValueT]):
         node_id: str,
         operation: NodeCallable[GraphValueT],
         *,
-        inputs: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef],
+        inputs: Mapping[
+            str,
+            GraphInputRef[GraphValueT] | NodeOutputRef,
+        ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
     ) -> Self: ...
@@ -292,7 +294,10 @@ class Graph(Generic[GraphValueT]):
         node_id: str,
         operation: "Graph[GraphValueT]",
         *,
-        inputs: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef],
+        inputs: Mapping[
+            str,
+            GraphInputRef[GraphValueT] | NodeOutputRef,
+        ],
     ) -> Self: ...
 
     def add_node(
@@ -302,7 +307,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | type[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef,
         ],
         outputs: Mapping[
             str,
@@ -313,7 +318,7 @@ class Graph(Generic[GraphValueT]):
     ) -> Self:
         state = self._require_mutable()
         canonical_id = GraphNodeId(canonical_port_name(node_id, kind="node"))
-        bindings = normalize_input_bindings(inputs)
+        bindings = normalize_facade_input_bindings(inputs)
         if isinstance(operation, Graph):
             if outputs is not None or resources:
                 raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")
@@ -437,31 +442,6 @@ class Graph(Generic[GraphValueT]):
         self._commit_builder(state, replacement)
         return self
 
-    def resume_failed(
-        self,
-        node_id: str,
-        *,
-        scope: tuple[str, ...] = (),
-    ) -> "Graph.ResumeAction[GraphValueT]":
-        return ResumeFailedNodeRequest(
-            _canonical_scope(scope),
-            GraphNodeId(canonical_port_name(node_id, kind="resume node")),
-            UseMaterializedInput(),
-        )
-
-    def resume_failed_with(
-        self,
-        node_id: str,
-        values: "Graph.Values[GraphValueT]",
-        *,
-        scope: tuple[str, ...] = (),
-    ) -> "Graph.ResumeAction[GraphValueT]":
-        return ResumeFailedNodeRequest(
-            _canonical_scope(scope),
-            GraphNodeId(canonical_port_name(node_id, kind="resume node")),
-            OverrideNodeInput(_require_graph_values(values)),
-        )
-
     def resume_interrupted(
         self,
         node_id: str,
@@ -475,25 +455,6 @@ class Graph(Generic[GraphValueT]):
             GraphNodeId(canonical_port_name(node_id, kind="resume node")),
             GraphInterruptId(canonical_port_name(interrupt_id, kind="interrupt")),
             OverrideNodeInput(_require_graph_values(values)),
-        )
-
-    def skip_failed(
-        self,
-        node_id: str,
-        reason: str,
-        *,
-        route: str | None = None,
-        output: "Graph.Values[GraphValueT] | None" = None,
-        scope: tuple[str, ...] = (),
-    ) -> "Graph.ResumeAction[GraphValueT]":
-        canonical_reason = canonical_port_name(reason, kind="skip reason")
-        canonical_route = canonical_port_name(route, kind="skip route") if route is not None else None
-        return SkipFailedNodeRequest(
-            _canonical_scope(scope),
-            GraphNodeId(canonical_port_name(node_id, kind="resume node")),
-            canonical_reason,
-            canonical_route,
-            _require_graph_values(output) if output is not None else None,
         )
 
     def _definition(
@@ -625,17 +586,6 @@ class Graph(Generic[GraphValueT]):
             )
         else:
             if continuation is None:
-                substitution_actions = tuple(
-                    action
-                    for action in resume
-                    if isinstance(action, SkipFailedNodeRequest) and action.output is not None
-                )
-                if substitution_actions and len({action.scope for action in resume}) > 1:
-                    identities = tuple((tuple(action.scope), action.node_id) for action in substitution_actions)
-                    raise GraphValueUnavailableError(
-                        "state-only multi-scope substitution cannot preserve a partially confirmed "
-                        f"publication checkpoint before commit; actions={identities!r}"
-                    )
                 child_states: tuple[ChildStateBinding, ...] = ()
                 frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
                 recovered = True
@@ -653,10 +603,8 @@ class Graph(Generic[GraphValueT]):
                 frames,
                 resume,
             )
-            admit_state_owned_overrides(graph, planned_lineage, candidate_frames.confirmed)
-            if recovered or any(
-                action.output is None for action in resume if isinstance(action, SkipFailedNodeRequest)
-            ):
+            admit_state_owned_overrides(graph, planned_lineage, candidate_frames)
+            if recovered or resume:
                 preflight_recovery(
                     graph,
                     recovery_seed(planned_lineage, candidate_frames, limits, facts),

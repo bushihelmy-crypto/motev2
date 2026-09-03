@@ -23,8 +23,13 @@ complexity-report:
 test:
 	python -m pytest --cov=mote_kernel --cov-report=term-missing
 
+# Pyright's resolver needs an explicit environment; derive it from this `python` without
+# committing a developer-specific path into the project configuration.
 typecheck:
-	pyright
+	@pyright_config="$$(mktemp "$(CURDIR)/.pyrightconfig.XXXXXX.json")"; \
+	trap 'rm -f "$$pyright_config"' EXIT; \
+	python -B -c 'import json, pathlib, sys; prefix = pathlib.Path(sys.prefix); print(json.dumps({"extends": "pyproject.toml", "venvPath": str(prefix.parent), "venv": prefix.name}))' > "$$pyright_config"; \
+	python -B -m pyright -p "$$pyright_config"
 
 security:
 	cd .. && pre-commit run detect-secrets --all-files

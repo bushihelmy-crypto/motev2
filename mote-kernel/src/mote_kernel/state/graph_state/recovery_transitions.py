@@ -3,19 +3,14 @@
 from dataclasses import replace
 
 from mote_kernel.state.graph_state.command import (
-    ResumeFailedNode,
     ResumeGraphNodes,
     ResumeInterruptedNode,
-    SkipFailedNode,
 )
 from mote_kernel.state.graph_state.frontier_model import (
-    FailedGraphNode,
     GraphFrontierNode,
     GraphFrontierState,
     InterruptedGraphNode,
-    OverrideGraphNodeInput,
     PendingGraphNode,
-    SkippedGraphNode,
 )
 from mote_kernel.state.graph_state.identity import graph_interrupt_id
 from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
@@ -30,7 +25,7 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
     if state.status is not GraphRunStatus.RUNNING or state.execution is not None or state.resources is not None:
         raise GraphStateTransitionError("node resume requires one quiescent running graph")
     for action in command.actions:
-        if type(action) not in (ResumeFailedNode, SkipFailedNode, ResumeInterruptedNode):
+        if type(action) is not ResumeInterruptedNode:
             raise GraphStateTransitionError("resume action has an unsupported variant")
     action_ids = tuple(action.node_id for action in command.actions)
     if not action_ids or action_ids != tuple(sorted(set(action_ids))):
@@ -43,13 +38,7 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
             updated.append(node)
             continue
         settlement = node.settlement
-        if isinstance(action, ResumeFailedNode) and isinstance(settlement, FailedGraphNode):
-            if isinstance(action.input, OverrideGraphNodeInput) and state.resume_input_codec is None:
-                raise GraphStateTransitionError("input override requires a resume input codec")
-            next_settlement = PendingGraphNode(action.input)
-        elif isinstance(action, SkipFailedNode) and isinstance(settlement, FailedGraphNode):
-            next_settlement = SkippedGraphNode(settlement.failure, action.reason, action.routing)
-        elif isinstance(action, ResumeInterruptedNode) and isinstance(settlement, InterruptedGraphNode):
+        if isinstance(settlement, InterruptedGraphNode):
             identity = settlement.interrupt.identity
             if action.interrupt_id != graph_interrupt_id(
                 identity.run_id,
@@ -61,7 +50,7 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
             next_settlement = PendingGraphNode(action.input)
         else:
             raise GraphStateTransitionError("resume action does not match its current node settlement")
-        updated.append(GraphFrontierNode(node.node_id, next_settlement))
+        updated.append(GraphFrontierNode(node.node_id, next_settlement, node.cause))
     if actions:
         raise GraphStateTransitionError("resume action references an unknown frontier node")
     frontier = GraphFrontierState(tuple(updated))

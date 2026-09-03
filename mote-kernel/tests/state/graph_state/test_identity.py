@@ -1,11 +1,43 @@
+from typing import cast
+
 import pytest
 
 from mote_kernel.state.graph_state import (
+    ActivationReference,
+    GraphActivationIdentity,
     GraphNodeId,
+    GraphRouteId,
     GraphRunId,
     child_graph_run_id,
     graph_interrupt_id,
 )
+
+
+@pytest.mark.parametrize(
+    ("run_id", "superstep", "node_id"),
+    [
+        (GraphRunId(""), 0, GraphNodeId("node")),
+        (GraphRunId("run"), -1, GraphNodeId("node")),
+        (GraphRunId("run"), cast(int, True), GraphNodeId("node")),
+        (GraphRunId("run"), 0, GraphNodeId(" node")),
+    ],
+)
+def test_graph_activation_identity_rejects_noncanonical_coordinates(
+    run_id: GraphRunId,
+    superstep: int,
+    node_id: GraphNodeId,
+) -> None:
+    with pytest.raises(ValueError):
+        GraphActivationIdentity(run_id, superstep, node_id)
+
+
+def test_activation_reference_rejects_invalid_identity_and_route() -> None:
+    activation = GraphActivationIdentity(GraphRunId("run"), 0, GraphNodeId("node"))
+
+    with pytest.raises(ValueError, match="GraphActivationIdentity"):
+        ActivationReference(cast(GraphActivationIdentity, object()))
+    with pytest.raises(ValueError, match="route"):
+        ActivationReference(activation, GraphRouteId(" route"))
 
 
 @pytest.mark.parametrize(

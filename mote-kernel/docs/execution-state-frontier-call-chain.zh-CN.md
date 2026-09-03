@@ -111,8 +111,9 @@ Frontier status 是从节点 settlement 派生的，不是第二份存储字段�
 
 ```text
 存在 Pending                              -> EXECUTABLE
-无 Pending，存在 Failed / Interrupted     -> AWAITING_RESUME
-全部为 Succeeded / Skipped                -> SETTLED
+无 Pending，有 Failed                     -> FAILED
+无 Pending，无 Failed，有 Interrupted     -> AWAITING_RESUME
+全部为 Succeeded                          -> SETTLED
 ```
 
 ## 4. 可执行 Frontier 的完整链路
@@ -241,21 +242,26 @@ Node State。
 Routing 由 Execution 根据 compiled topology 计算；Reducer 只应用并验证 command 的
 state-owned 结构。Settlement 与 routing 拆成两次提交，保证崩溃后可以从 `SETTLED` 屏障恢复。
 
+若 frontier 中出现 `FailedGraphNode`，同一 claim 先排空已经启动的 completion；最后一个 Pending settlement
+确认后，Reducer 原子写入 `GraphRunStatus.FAILED`、清除 lease/resources，并保留失败 frontier 作为诊断事实。
+FAILED 不进入 routing，也没有恢复成 Pending 的入口。
+
 ## 7. Resume 与异常分支
 
 ```text
-AWAITING_RESUME
+AWAITING_RESUME（只包含 interrupt）
   |
-  +-- Graph.resume_failed / resume_interrupted / skip_failed
-  |     `-- plan_resumes(...) -> PlannedResume(successor)
-  |           `-- admit_continued_root(...)
-  |                 `-- _GraphRun.apply_admission_resume(...)
-  |                       `-- commit_transition(admitted_successor=successor)
-  |                             `-- 唯一一次 reduce_graph_run
-  |                                   +-- 恢复节点变回 Pending
-  |                                   `-- skip 节点变为 Skipped
-  |
-  `-- 回到 _GraphRun.drive_quantum / prepare_superstep
+  `-- Graph.resume_interrupted(exact interrupt_id, values)
+        `-- plan_resumes(...) -> PlannedResume(successor)
+              `-- admit_continued_root(...)
+                    `-- _GraphRun.apply_admission_resume(...)
+                          `-- commit_transition(admitted_successor=successor)
+                                `-- 唯一一次 reduce_graph_run
+                                      `-- 对应 Interrupted 节点变回 Pending
+                                            `-- 回到 drive_quantum / prepare_superstep
+
+FAILED
+  `-- terminal result；state-led 重载直接返回同一失败诊断，零 claim、零 callable
 ```
 
 ```text

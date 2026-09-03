@@ -100,6 +100,7 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
         await invalid_graph.run(Graph.values(value="input"))
 
     graph = Graph[str]("typing.errors")
+    graph.set_resume_codec("text", 1, _encode_text, _decode_text)
     graph.add_node("node", echo, inputs={"value": source}, outputs={"value": str})
     graph.set_outputs({})
     completed = await graph.run(Graph.values(value="input"))
@@ -108,7 +109,13 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
         await graph.run(
             state=completed.state,
             continuation=completed.continuation,
-            resume=(graph.resume_failed("node"),),
+            resume=(
+                graph.resume_interrupted(
+                    "node",
+                    "missing-interrupt",
+                    Graph.values(value="replacement"),
+                ),
+            ),
         )
     with pytest.raises(Graph.ExecutionLimitError):
         await graph.run(Graph.values(value="input"), max_parallel_tasks=0)

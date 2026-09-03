@@ -163,10 +163,6 @@ CASES = (
         ("ResumeAction", "UniverseA", "UniverseB", "reportArgumentType"),
     ),
     NegativeTypingCase(
-        "cross_universe_skip_output.py",
-        ("ResumeAction", "UniverseA", "UniverseB", "reportAssignmentType"),
-    ),
-    NegativeTypingCase(
         "invariant_success_result.py",
         (
             '"_GraphSuccessResult[UniverseA]"',
@@ -212,11 +208,10 @@ def test_invalid_public_generic_programs_remain_rejected(case: NegativeTypingCas
 
 
 def test_factory_inference_is_exact_and_contains_no_unknown() -> None:
-    for filename in ("factory_inference.py", "skip_output_factory_inference.py"):
-        completed = _pyright(filename)
+    completed = _pyright("factory_inference.py")
 
-        assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert "Unknown" not in completed.stdout
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout
 
 
 def test_logging_observability_positive_fixture_is_exact_and_contains_no_unknown() -> None:

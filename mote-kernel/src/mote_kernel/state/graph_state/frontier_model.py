@@ -1,23 +1,71 @@
-"""Authoritative settlement model for one graph frontier."""
+"""Authoritative activation and settlement model for one graph frontier."""
 
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import NewType, TypeAlias
 
-from mote_kernel.state.graph_state.identity import GraphNodeId, GraphRunId
+from mote_kernel.state.graph_state.identity import (
+    ActivationReference,
+    GraphNodeId,
+    GraphRunId,
+    is_canonical_identity,
+)
 from mote_kernel.state.graph_state.routing import GraphRoutingContribution
 
 GraphFailure = NewType("GraphFailure", str)
 GraphInterruptPayload = NewType("GraphInterruptPayload", bytes)
 GraphResumeInputPayload = NewType("GraphResumeInputPayload", bytes)
 GraphResumeInputCodecId = NewType("GraphResumeInputCodecId", str)
-GraphSkipReason = NewType("GraphSkipReason", str)
+
+
+@dataclass(frozen=True, slots=True)
+class StartActivationCause:
+    """The cause of an activation admitted directly from graph START."""
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedActivationCause:
+    """The settled routing facts that admitted a new activation."""
+
+    references: tuple[ActivationReference, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.references) is not tuple or not self.references:
+            raise ValueError("routed activation cause requires at least one reference")
+        if any(type(reference) is not ActivationReference for reference in self.references):
+            raise ValueError("routed activation cause references must be typed values")
+        canonical = tuple(
+            sorted(
+                set(self.references),
+                key=ActivationReference.canonical_key,
+            )
+        )
+        if self.references != canonical:
+            raise ValueError("routed activation cause references must be canonical and distinct")
+
+
+GraphActivationCause: TypeAlias = StartActivationCause | RoutedActivationCause
+
+
+@dataclass(frozen=True, slots=True)
+class GraphFrontierActivation:
+    """A frontier node identity together with its durable activation cause."""
+
+    node_id: GraphNodeId
+    cause: GraphActivationCause
+
+    def __post_init__(self) -> None:
+        if not is_canonical_identity(self.node_id):
+            raise ValueError("frontier activation node_id must be canonical")
+        if type(self.cause) not in (StartActivationCause, RoutedActivationCause):
+            raise ValueError("frontier activation cause has an unsupported variant")
 
 
 class GraphFrontierStatus(Enum):
-    """Derived execution disposition of a complete frontier."""
+    """Derived execution disposition of one durable frontier."""
 
     EXECUTABLE = auto()
+    FAILED = auto()
     AWAITING_RESUME = auto()
     SETTLED = auto()
 
@@ -75,22 +123,20 @@ class InterruptedGraphNode:
     interrupt: GraphNodeInterrupt
 
 
-@dataclass(frozen=True, slots=True)
-class SkippedGraphNode:
-    failure: GraphFailure
-    reason: GraphSkipReason
-    routing: GraphRoutingContribution
-
-
-GraphNodeSettlement: TypeAlias = (
-    PendingGraphNode | SucceededGraphNode | FailedGraphNode | InterruptedGraphNode | SkippedGraphNode
-)
+GraphNodeSettlement: TypeAlias = PendingGraphNode | SucceededGraphNode | FailedGraphNode | InterruptedGraphNode
 
 
 @dataclass(frozen=True, slots=True)
 class GraphFrontierNode:
     node_id: GraphNodeId
     settlement: GraphNodeSettlement
+    cause: GraphActivationCause
+
+    @property
+    def activation(self) -> GraphFrontierActivation:
+        """Return the state-owned activation record for this frontier node."""
+
+        return GraphFrontierActivation(self.node_id, self.cause)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,14 +145,16 @@ class GraphFrontierState:
 
 
 def frontier_status(frontier: GraphFrontierState) -> GraphFrontierStatus:
-    """Derive executable, awaiting-resume, or settled state in fixed priority order."""
+    """Derive frontier disposition in the kernel's fixed priority order."""
 
     settlements = tuple(node.settlement for node in frontier.nodes)
     if any(isinstance(settlement, PendingGraphNode) for settlement in settlements):
         return GraphFrontierStatus.EXECUTABLE
-    if any(isinstance(settlement, FailedGraphNode | InterruptedGraphNode) for settlement in settlements):
+    if any(isinstance(settlement, FailedGraphNode) for settlement in settlements):
+        return GraphFrontierStatus.FAILED
+    if any(isinstance(settlement, InterruptedGraphNode) for settlement in settlements):
         return GraphFrontierStatus.AWAITING_RESUME
-    if settlements and all(isinstance(settlement, SucceededGraphNode | SkippedGraphNode) for settlement in settlements):
+    if settlements and all(isinstance(settlement, SucceededGraphNode) for settlement in settlements):
         return GraphFrontierStatus.SETTLED
     raise ValueError("a graph frontier has no valid derived status")
 
@@ -123,10 +171,6 @@ def pending_node_ids(frontier: GraphFrontierState) -> tuple[GraphNodeId, ...]:
     return _node_ids(frontier, PendingGraphNode)
 
 
-def failed_node_ids(frontier: GraphFrontierState) -> tuple[GraphNodeId, ...]:
-    return _node_ids(frontier, FailedGraphNode)
-
-
 def interrupted_node_ids(frontier: GraphFrontierState) -> tuple[GraphNodeId, ...]:
     return _node_ids(frontier, InterruptedGraphNode)
 
@@ -137,13 +181,15 @@ def routing_contributions(
     return tuple(
         (node.node_id, node.settlement.routing)
         for node in frontier.nodes
-        if isinstance(node.settlement, SucceededGraphNode | SkippedGraphNode)
+        if isinstance(node.settlement, SucceededGraphNode)
     )
 
 
 __all__ = [
     "FailedGraphNode",
+    "GraphActivationCause",
     "GraphFailure",
+    "GraphFrontierActivation",
     "GraphFrontierNode",
     "GraphFrontierState",
     "GraphFrontierStatus",
@@ -155,14 +201,13 @@ __all__ = [
     "GraphResumeInputCodec",
     "GraphResumeInputCodecId",
     "GraphResumeInputPayload",
-    "GraphSkipReason",
     "InterruptedGraphNode",
     "OverrideGraphNodeInput",
     "PendingGraphNode",
-    "SkippedGraphNode",
+    "RoutedActivationCause",
+    "StartActivationCause",
     "SucceededGraphNode",
     "UseStepRequestInput",
-    "failed_node_ids",
     "frontier_node",
     "frontier_status",
     "interrupted_node_ids",

@@ -1,10 +1,13 @@
 from dataclasses import replace
 
+import pytest
 from tests.execution.graph.factories import graph, node
 
 from mote_kernel.execution import Graph
+from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
+from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
@@ -30,24 +33,20 @@ def test_compilation_never_invokes_nodes() -> None:
 
 def test_compile_indexes_conditional_routes_and_joins() -> None:
     definition = graph(
-        nodes=(node("a"), node("b"), node("c"), node("d")),
+        nodes=(node("a"), node("b"), node("c"), node("d"), node("e"), node("f"), node("g")),
         edges=(
-            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
-            DirectEdge(GraphNodeId("a"), GraphNodeId("c")),
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
-            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d")),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("e")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("d")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("f")),
+            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("g")),
         ),
     )
     compiled = compile_graph(definition)
 
-    assert compiled.transition.direct_targets[GraphNodeId("a")] == (
-        GraphNodeId("b"),
-        GraphNodeId("c"),
-    )
-    assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("b")
-    assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("c")
-    expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d"))
+    assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("e"),)
+    assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("d")
+    assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("f")
+    expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("g"))
     assert compiled.transition.joins_by_source[GraphNodeId("b")] == (expected_join,)
     assert compiled.transition.joins_by_source[GraphNodeId("c")] == (expected_join,)
 
@@ -65,7 +64,7 @@ def test_join_to_end_preserves_its_runtime_barrier() -> None:
     assert compiled.transition.joins_by_source[GraphNodeId("b")] == (expected_join,)
 
 
-def test_cycles_and_self_loops_compile() -> None:
+def test_control_cycles_without_a_successful_exit_are_rejected() -> None:
     cycle = graph(
         nodes=(node("a"), node("b")),
         edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")), DirectEdge(GraphNodeId("b"), GraphNodeId("a"))),
@@ -77,8 +76,42 @@ def test_cycles_and_self_loops_compile() -> None:
         entries=(GraphNodeId("a"),),
     )
 
-    assert compile_graph(cycle).transition.direct_targets[GraphNodeId("b")] == (GraphNodeId("a"),)
-    assert compile_graph(self_loop).transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("a"),)
+    with pytest.raises(GraphValidationError, match="no statically reachable successful exit"):
+        compile_graph(cycle)
+    with pytest.raises(GraphValidationError, match="no statically reachable successful exit"):
+        compile_graph(self_loop)
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        graph(
+            nodes=(node("a"), node("b"), node("joined")),
+            edges=(
+                DirectEdge(GraphNodeId("a"), GraphNodeId("a")),
+                DirectEdge(GraphNodeId("a"), END),
+                JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("joined")),
+            ),
+            entries=(GraphNodeId("a"),),
+        ),
+        graph(
+            nodes=(node("loop"), node("repeated"), node("fixed"), node("joined")),
+            edges=(
+                DirectEdge(GraphNodeId("loop"), GraphNodeId("loop")),
+                DirectEdge(GraphNodeId("loop"), GraphNodeId("repeated")),
+                DirectEdge(GraphNodeId("loop"), END),
+                JoinEdge(
+                    (GraphNodeId("repeated"), GraphNodeId("fixed")),
+                    GraphNodeId("joined"),
+                ),
+            ),
+            entries=(GraphNodeId("loop"),),
+        ),
+    ],
+)
+def test_join_with_a_repeatable_source_requires_occurrence_identity(definition: GraphDefinition[str]) -> None:
+    with pytest.raises(GraphValidationError, match="occurrence identity"):
+        compile_graph(definition)
 
 
 def test_multiple_entries_and_direct_fan_out_are_sorted() -> None:
@@ -94,23 +127,21 @@ def test_multiple_entries_and_direct_fan_out_are_sorted() -> None:
 
 def test_declaration_order_does_not_change_compiled_indexes() -> None:
     first = graph(
-        nodes=(node("a"), node("b"), node("c"), node("d")),
+        nodes=(node("a"), node("b"), node("c"), node("d"), node("e"), node("f"), node("g")),
         edges=(
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
-            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
-            JoinEdge((GraphNodeId("c"), GraphNodeId("b")), GraphNodeId("d")),
-            DirectEdge(GraphNodeId("a"), GraphNodeId("c")),
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("f")),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("e")),
+            JoinEdge((GraphNodeId("c"), GraphNodeId("b")), GraphNodeId("g")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("d")),
         ),
     )
     second = graph(
-        nodes=(node("d"), node("c"), node("b"), node("a")),
+        nodes=(node("g"), node("f"), node("e"), node("d"), node("c"), node("b"), node("a")),
         edges=(
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("b")),
-            DirectEdge(GraphNodeId("a"), GraphNodeId("c")),
-            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("d")),
-            DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
-            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("c")),
+            JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("g")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("left"), GraphNodeId("d")),
+            DirectEdge(GraphNodeId("a"), GraphNodeId("e")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("right"), GraphNodeId("f")),
         ),
     )
 
@@ -151,13 +182,8 @@ def test_multiple_routes_may_share_a_target_and_identity_across_sources() -> Non
             ConditionalEdge(GraphNodeId("b"), GraphRouteId("first"), GraphNodeId("c")),
         ),
     )
-    compiled = compile_graph(definition)
-
-    assert tuple(compiled.transition.conditional_targets[GraphNodeId("a")]) == (
-        GraphRouteId("first"),
-        GraphRouteId("second"),
-    )
-    assert compiled.transition.conditional_targets[GraphNodeId("b")][GraphRouteId("first")] == GraphNodeId("c")
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
+        compile_graph(definition)
 
 
 def test_compiling_the_same_definition_is_idempotent() -> None:

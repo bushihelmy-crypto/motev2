@@ -238,7 +238,7 @@ def test_each_failure_completion_is_preserved_in_its_own_revision() -> None:
     assert current.revision == 2
 
 
-def test_unknown_canonical_task_cannot_substitute_a_pending_task() -> None:
+def test_unknown_canonical_task_cannot_settle_a_pending_task() -> None:
     graph, state, _tasks = planned()
     node_id = GraphNodeId("unknown")
     task = GraphTask(

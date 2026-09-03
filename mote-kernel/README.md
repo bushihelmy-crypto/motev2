@@ -43,6 +43,7 @@ Public execution failures are caught through the same namespace: `Graph.Error` i
 - [Runnable graph examples](example/graph/README.md) cover the public `Graph` facade end to end: topology, loops, nested scopes, concurrent runs, every resume action, checkpoints, limits, cancellation, partial commit handoff, and versioned deployment.
 - [Architecture](docs/architecture.md) owns the current facade, execution/state ownership, and persistence boundaries.
 - [Execution/state frontier call chain](docs/execution-state-frontier-call-chain.zh-CN.md) explains the current command, reducer, commit, and frontier flow.
+- [Cross-module runtime call coupling review](docs/complexity-cross-module-runtime-call-review.zh-CN.md) explains the additional high-recall metric, review workflow, and limitations.
 
 ## Design principles
 
@@ -68,7 +69,9 @@ pytest --cov=mote_kernel
 Run `pre-commit install` and `pre-commit run --all-files` from the monorepo root.
 
 The repository-wide AST gate combines independent high-recall detectors for exact, statement-level, and near-miss
-clones; symbol and field usage; function complexity and effects; call chains; import cycles; and asynchronous ownership.
+clones; symbol and field usage; function complexity and effects; call chains; resolved runtime calls crossing module
+boundaries; import cycles; and asynchronous ownership. Cross-module runtime coupling is a high-recall review signal,
+not an automatic claim that the dependency is wrong.
 `make complexity` enforces zero proven debt without exception inventories. `make complexity-ratchet` prevents every
 high-recall metric from growing and requires its ceiling to be lowered after an improvement. `make complexity-report`
 prints the candidates behind the metrics. Both gates run from `make check`.
@@ -77,7 +80,7 @@ Run all repository checks with:
 
 ```bash
 pre-commit run --all-files
-pyright
+make typecheck
 pytest --cov=mote_kernel
 python -m build
 ```

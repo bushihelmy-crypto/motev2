@@ -8,7 +8,7 @@ from enum import IntEnum, auto
 from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import ExecutionError, GraphValidationError
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
@@ -52,7 +52,28 @@ class NodeOutputRef:
     output_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class FeedbackInputBinding(Generic[GraphValueT]):
+    """An internal input declaration that crosses activation boundaries.
+
+    ``initial`` is used for the START activation and ``repeat`` is used only
+    when a compiled routed cause explicitly selects the feedback rule.  The
+    compiler, rather than this value object, decides whether the two sources
+    are legal for a particular target node.
+    """
+
+    initial: "GraphInputRef[GraphValueT] | NodeOutputRef"
+    repeat: NodeOutputRef
+
+    def __post_init__(self) -> None:
+        if type(self.initial) not in (GraphInputRef, NodeOutputRef):
+            raise GraphValidationError("feedback initial must be a graph input or node output reference")
+        if type(self.repeat) is not NodeOutputRef:
+            raise GraphValidationError("feedback repeat must be a node output reference")
+
+
 ValueSourceRef: TypeAlias = GraphInputRef[GraphValueT] | NodeOutputRef
+InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | FeedbackInputBinding[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -87,7 +108,7 @@ ResolvedValueSource: TypeAlias = GraphInputPort | NodeOutputPort
 @dataclass(frozen=True, slots=True)
 class InputBinding(Generic[GraphValueT]):
     local_name: str
-    source: ValueSourceRef[GraphValueT]
+    source: InputBindingSource[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +157,22 @@ class PublicationSelection:
         return selected
 
 
+@dataclass(frozen=True, slots=True)
+class CompiledActivationRule(Generic[GraphValueT]):
+    """The sole compiled value and route rule for one feedback activation."""
+
+    target: GraphNodeId
+    input_name: str
+    initial: GraphInputPort
+    repeat: NodeOutputPort
+    repeat_selection: PublicationSelection
+    feedback_route: GraphRouteId
+    terminal_route: GraphRouteId
+
+
+ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledActivationRule[GraphValueT]
+
+
 def require_publication_selection(
     selection: PublicationSelection | None,
     error: ExecutionError,
@@ -150,7 +187,7 @@ def require_publication_selection(
 @dataclass(frozen=True, slots=True)
 class ResolvedInputBinding(Generic[GraphValueT]):
     destination: NodeInputPort
-    source: ResolvedValueSource
+    source: ResolvedInputSource[GraphValueT]
     descriptor: NominalTypeDescriptor[GraphValueT]
     publication: PublicationSelection | None
 
@@ -201,17 +238,28 @@ class MaterializationPlan(Generic[GraphValueT]):
 
 
 def normalize_input_bindings(
-    values: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef | type[GraphValueT]] | None,
+    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]] | None,
 ) -> InputBindings[GraphValueT]:
     if not isinstance(values, Mapping):
         raise GraphValidationError("inputs must be a mapping")
     entries: list[InputBinding[GraphValueT]] = []
     for name, source in sorted(values.items()):
         canonical = canonical_port_name(name, kind="input")
-        if not isinstance(source, GraphInputRef | NodeOutputRef):
-            raise GraphValidationError(f"input {canonical!r} must bind one graph input or node output")
+        if not isinstance(source, GraphInputRef | NodeOutputRef | FeedbackInputBinding):
+            raise GraphValidationError(f"input {canonical!r} must bind one graph input, node output, or feedback input")
         entries.append(InputBinding(canonical, source))
     return InputBindings(tuple(entries))
+
+
+def normalize_facade_input_bindings(
+    values: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef] | None,
+) -> InputBindings[GraphValueT]:
+    """Admit only capabilities already promised by the public Graph facade."""
+
+    bindings = normalize_input_bindings(values)
+    if any(isinstance(binding.source, FeedbackInputBinding) for binding in bindings.entries):
+        raise GraphValidationError("feedback input declarations are not available through Graph.add_node()")
+    return bindings
 
 
 def normalize_output_declarations(

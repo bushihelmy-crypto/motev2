@@ -61,7 +61,7 @@ jobs:
         working-directory: .
       - run: python -m ruff check src tests
       - run: python -m ruff format --check src tests
-      - run: pyright
+      - run: make typecheck
       - run: python -m pytest --cov=mote_kernel --cov-report=term-missing --cov-report=xml
       - run: python -m build
       - run: python -m twine check dist/*

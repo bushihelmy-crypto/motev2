@@ -13,8 +13,19 @@ from typing import cast
 from mote_kernel.execution import Graph
 
 
-async def unavailable(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-    return Graph.failure("provider result is missing")
+def encode_text(values: Graph.Values[str]) -> bytes:
+    return values["value"].encode()
+
+
+def decode_text(payload: bytes) -> Graph.Values[str]:
+    return Graph.values(value=payload.decode())
+
+
+async def await_result(values: Graph.Values[str]) -> Graph.Outcome[str]:
+    value = values["value"]
+    if not value:
+        return Graph.interrupt(b"provider result")
+    return Graph.success(Graph.values(value=value))
 
 
 def _empty_transitions() -> list[Graph.Transition[str]]:
@@ -23,7 +34,13 @@ def _empty_transitions() -> list[Graph.Transition[str]]:
 
 def build_child(definition_id: str) -> Graph[str]:
     child = Graph[str](definition_id)
-    child.add_node("leaf", unavailable, inputs={}, outputs={"value": str})
+    child.set_resume_codec("text", 1, encode_text, decode_text)
+    child.add_node(
+        "leaf",
+        await_result,
+        inputs={"value": Graph.graph_input("value", str)},
+        outputs={"value": str},
+    )
     child.set_outputs({"value": Graph.node_output("leaf", "value")})
     return child
 
@@ -47,32 +64,51 @@ async def accept_commit(transition: Graph.Transition[str], /) -> Graph.State:
 
 
 def build_graph() -> Graph[str]:
-    """Build two independent child scopes whose failed leaves can be replaced."""
+    """Build two independent child scopes awaiting external results."""
 
     graph = Graph[str]("example.partial-commit-recovery")
-    graph.add_node("left", build_child("example.partial-commit-recovery.left"), inputs={})
-    graph.add_node("right", build_child("example.partial-commit-recovery.right"), inputs={})
+    graph.add_node(
+        "left",
+        build_child("example.partial-commit-recovery.left"),
+        inputs={"value": Graph.graph_input("left", str)},
+    )
+    graph.add_node(
+        "right",
+        build_child("example.partial-commit-recovery.right"),
+        inputs={"value": Graph.graph_input("right", str)},
+    )
     graph.set_outputs({})
     return graph
 
 
 async def main() -> None:
     graph = build_graph()
-    paused = await graph.run(Graph.values(), run_id="partial-commit")
+    paused = await graph.run(Graph.values(left="", right=""), run_id="partial-commit")
     if not isinstance(paused, Graph.AwaitingResumeResult):
-        print("没有可恢复的失败节点。")
+        print("没有等待外部结果的节点。")
         return
 
     left = Graph.values(value="left-result")
     right = Graph.values(value="right-result")
     faulty = FailOnScopeCommit(("right",))
+    interrupt_by_scope = {interrupt.scope: interrupt for interrupt in paused.interrupts}
     try:
         await graph.run(
             state=paused.state,
             continuation=paused.continuation,
             resume=(
-                graph.skip_failed("leaf", "left replacement", output=left, scope=("left",)),
-                graph.skip_failed("leaf", "right replacement", output=right, scope=("right",)),
+                graph.resume_interrupted(
+                    "leaf",
+                    interrupt_by_scope[("left",)].interrupt_id,
+                    left,
+                    scope=("left",),
+                ),
+                graph.resume_interrupted(
+                    "leaf",
+                    interrupt_by_scope[("right",)].interrupt_id,
+                    right,
+                    scope=("right",),
+                ),
             ),
             commit=faulty,
         )
@@ -84,7 +120,14 @@ async def main() -> None:
         recovered = await graph.run(
             state=partial.state,
             continuation=partial.continuation,
-            resume=(graph.skip_failed("leaf", "retry right", output=right, scope=("right",)),),
+            resume=(
+                graph.resume_interrupted(
+                    "leaf",
+                    interrupt_by_scope[("right",)].interrupt_id,
+                    right,
+                    scope=("right",),
+                ),
+            ),
             commit=accept_commit,
         )
     else:

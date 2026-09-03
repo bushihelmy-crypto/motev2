@@ -7,6 +7,7 @@ from tests.architecture.quality_analysis import (
     module_dependency_metrics,
     orphaned_task_handles,
     production_unreferenced_definitions,
+    runtime_module_call_metrics,
     symbol_usages,
     unconsumed_internal_async_calls,
     unowned_internal_coroutine_handles,
@@ -312,6 +313,29 @@ def root(value: int) -> int:
     assert metrics.recursive_components == 1
     assert metrics.max_chain_depth == 2
     assert metrics.max_chain_cognitive >= 1
+
+
+def test_runtime_module_call_metrics_measure_resolved_callable_coupling(tmp_path: Path) -> None:
+    index = _build_index(
+        tmp_path,
+        {
+            "left.py": ("class Marker:\n    pass\n\ndef leaf() -> None:\n    return None\n"),
+            "right.py": (
+                "from package.left import Marker, leaf\n\ndef run() -> None:\n    leaf()\n    leaf()\n    Marker()\n"
+            ),
+            "third.py": ("from package.left import leaf\n\ndef other() -> None:\n    leaf()\n"),
+        },
+    )
+
+    metrics = runtime_module_call_metrics(index)
+
+    assert metrics.edge_count == 3
+    assert metrics.module_pair_count == 2
+    assert metrics.max_fan_out == 1
+    assert [(pair.source_module, pair.target_module, pair.symbol_edges, pair.call_sites) for pair in metrics.pairs] == [
+        ("package.right", "package.left", 2, 3),
+        ("package.third", "package.left", 1, 1),
+    ]
 
 
 def test_module_dependency_graph_resolves_relative_imports_and_cycles(tmp_path: Path) -> None:

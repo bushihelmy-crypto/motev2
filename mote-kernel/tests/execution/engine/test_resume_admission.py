@@ -1,486 +1,440 @@
 from dataclasses import replace
+from typing import cast
 
 import pytest
-from tests.execution.engine.factories import direct, join, running_state, topology
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.engine.admission import admit_graph_input
-from mote_kernel.execution.engine.resume_admission import ScopedResumeCandidate, admit_resume_candidates
-from mote_kernel.execution.errors import GraphValuePublicationError, GraphValueUnavailableError, SnapshotMismatchError
+from mote_kernel.execution.engine.resume_admission import prepare_resume
+from mote_kernel.execution.errors import GraphValueAdmissionError, SnapshotMismatchError
 from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.edge import ConditionalEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    GraphInputRef,
-    NodeOutputRef,
+    FeedbackInputBinding,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.graph.values import _make_node_output_frame
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
-from mote_kernel.execution.run_context import (
-    AdmittedGraphInput,
-    AdmittedSubstitution,
-    ConfirmedPublication,
-    ExecutionPublicationProvenance,
-    GraphInputAvailabilityCoordinate,
-    PublicationAvailabilityCoordinate,
-    ScopedFrameIndex,
-    SkipSubstitutionProvenance,
+from mote_kernel.execution.graph.values import _frame_value
+from mote_kernel.execution.graph_run import project_start_graph_command
+from mote_kernel.execution.identity import root_scope_run
+from mote_kernel.execution.request import (
+    OverrideNodeInput,
+    ResumeInterruptedNodeRequest,
+    ResumeNodeRequest,
+    ResumeRequest,
 )
+from mote_kernel.execution.run_context import ResumeInputAvailabilityCoordinate, ScopedFrameIndex
 from mote_kernel.state.graph_state import (
-    ContinueGraphRouting,
-    FailedGraphNode,
+    AbortGraphRun,
+    ClaimGraphExecution,
+    GraphAbortReason,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphExecutionToken,
-    GraphFailure,
-    GraphFrontierNode,
-    GraphFrontierState,
-    GraphJoinProgress,
+    GraphInterruptId,
+    GraphInterruptPayload,
     GraphNodeId,
+    GraphNodeInterruptIdentity,
+    GraphResumeInputCodecId,
+    GraphResumeInputPayload,
+    GraphRouteId,
     GraphRunId,
     GraphRunState,
-    GraphSkipReason,
+    GraphRunStatus,
+    InterruptedGraphNode,
+    InterruptedGraphNodeOutcome,
+    OverrideGraphNodeInput,
+    PendingGraphNode,
     ResumeGraphNodes,
-    SkipFailedNode,
-    SkippedGraphNode,
+    ResumeInterruptedNode,
+    SettleGraphNode,
+    frontier_node,
+    graph_interrupt_id,
     reduce_graph_run,
 )
 
 
-async def _echo(values: Graph.Values[str]) -> Graph.Values[str]:
-    return values
+async def _node(_values: Graph.Values[str]) -> Graph.Values[str]:
+    return Graph.values()
 
 
-def _controlled_graph(*, target_uses_graph_input: bool) -> CompiledGraph[str]:
-    source = CallableNodeDefinition(
-        GraphNodeId("source"),
-        _echo,
-        normalize_input_bindings({}),
-        normalize_output_declarations({"value": str}),
-    )
-    inputs: dict[str, GraphInputRef[str] | NodeOutputRef] = {"source": Graph.node_output("source", "value")}
-    if target_uses_graph_input:
-        inputs["required"] = Graph.graph_input("required", str)
-    target = CallableNodeDefinition(
-        GraphNodeId("target"),
-        _echo,
-        normalize_input_bindings(inputs),
-        normalize_output_declarations({}),
-    )
+class _Codec:
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        return value["value"].encode()
+
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        return Graph.values(value=payload.decode())
+
+
+class _TrackingCodec(_Codec):
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.tamper: str | None = None
+
+    def encode(self, value: Graph.Values[str]) -> bytes:
+        self.events.append("encode")
+        return super().encode(value)
+
+    def decode(self, payload: bytes) -> Graph.Values[str]:
+        self.events.append("decode")
+        if self.tamper == "name":
+            return Graph.values(other="answer")
+        if self.tamper == "type":
+            return cast(Graph.Values[str], Graph.values(value=True))
+        return super().decode(payload)
+
+
+def interruptible_graph(
+    *node_ids: str,
+    codec: bool = True,
+    codec_implementation: _Codec | None = None,
+) -> CompiledGraph[str]:
+    binding: ResumeInputBinding[str] | None = None
+    if codec:
+        implementation = _Codec() if codec_implementation is None else codec_implementation
+        binding = ResumeInputBinding(
+            GraphResumeInputCodecId("resume.input.v1"),
+            1,
+            implementation,
+            implementation,
+        )
     return compile_graph(
         GraphDefinition(
-            definition_id=GraphDefinitionId("test.graph"),
-            version=GraphDefinitionVersion(1),
-            nodes=(source, target),
-            edges=(direct("source", "target"),),
-            entries=(),
-            outputs=normalize_graph_output_declarations({}),
-        )
-    )
-
-
-def _substitution(
-    graph: CompiledGraph[str],
-    state: GraphRunState,
-    node_id: str = "source",
-) -> AdmittedSubstitution[str]:
-    publication = graph.transition.publications[GraphNodeId(node_id)]
-    return AdmittedSubstitution(
-        PublicationAvailabilityCoordinate(
-            StableActivation(root_scope_run(state.run_id), state.superstep, GraphNodeId(node_id)),
-            publication.identity,
-        ),
-        _make_node_output_frame(
-            Graph.values(value="replacement"),
-            publication.declarations,
-        ),
-        SkipSubstitutionProvenance(),
-        state.revision + 1,
-    )
-
-
-def _confirmed_publication(
-    substitution: AdmittedSubstitution[str],
-    state: GraphRunState,
-) -> ConfirmedPublication[str]:
-    return ConfirmedPublication(
-        substitution.coordinate,
-        substitution.frame,
-        state.revision,
-        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("confirmed"))),
-    )
-
-
-def _skipped_successor(state: GraphRunState, node_id: str = "source") -> GraphRunState:
-    return replace(
-        state,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId(node_id),
-                    SkippedGraphNode(
-                        GraphFailure("failed"),
-                        GraphSkipReason("replacement"),
-                        ContinueGraphRouting(),
-                    ),
-                ),
-            )
-        ),
-    )
-
-
-def _skip_action(node_id: str = "source") -> SkipFailedNode:
-    return SkipFailedNode(GraphNodeId(node_id), GraphSkipReason("replacement"), ContinueGraphRouting())
-
-
-def _failed_state(state: GraphRunState, node_id: str = "source") -> GraphRunState:
-    return replace(
-        state,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(GraphNodeId(node_id), FailedGraphNode(GraphFailure("failed"))),)
-        ),
-    )
-
-
-def _candidate(
-    graph: CompiledGraph[str],
-    state: GraphRunState,
-    substitutions: tuple[AdmittedSubstitution[str], ...],
-    actions: tuple[SkipFailedNode, ...] = (),
-    *,
-    scope_run: ScopeRunCoordinate | None = None,
-) -> ScopedResumeCandidate[str]:
-    command = ResumeGraphNodes(state.revision, actions)
-    return ScopedResumeCandidate(
-        graph,
-        root_scope_run(state.run_id) if scope_run is None else scope_run,
-        state,
-        reduce_graph_run(state, command),
-        substitutions,
-        command,
-    )
-
-
-def test_resume_admission_rejects_duplicate_and_confirmed_substitution_coordinates() -> None:
-    graph = topology("source")
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    candidate = _candidate(graph, state, (substitution, substitution), (_skip_action(),))
-
-    with pytest.raises(GraphValuePublicationError, match=r"source.*duplicate"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-    publication = _confirmed_publication(substitution, state)
-    candidate = replace(candidate, substitutions=(substitution,))
-    with pytest.raises(GraphValuePublicationError, match="confirmed publication"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
-
-
-def test_resume_admission_evidence_precedes_duplicate_publication() -> None:
-    graph = topology("source")
-    state = _failed_state(running_state(frontier=("source",)))
-    invalid = replace(_substitution(graph, state), expected_revision=state.revision)
-    candidate = _candidate(graph, state, (invalid, invalid), (_skip_action(),))
-
-    with pytest.raises(SnapshotMismatchError, match="evidence does not match"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_duplicate_publication_precedes_confirmed_collision() -> None:
-    graph = topology("source")
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    candidate = _candidate(graph, state, (substitution, substitution), (_skip_action(),))
-    publication = _confirmed_publication(substitution, state)
-
-    with pytest.raises(GraphValuePublicationError, match=r"source.*duplicate"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
-
-
-def test_resume_admission_confirmed_collision_precedes_unavailable_input() -> None:
-    graph = _controlled_graph(target_uses_graph_input=True)
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    candidate = _candidate(graph, state, (substitution,), (_skip_action(),))
-    publication = _confirmed_publication(substitution, state)
-
-    with pytest.raises(GraphValuePublicationError, match="confirmed publication"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex(publications=(publication,)))
-
-
-def test_resume_admission_rejects_substitution_coordinate_claimed_by_another_scope() -> None:
-    graph = topology("source")
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    first = _candidate(graph, state, (substitution,), (_skip_action(),))
-    second = replace(first, scope_run=replace(first.scope_run, scope=(GraphNodeId("child"),)))
-
-    with pytest.raises(SnapshotMismatchError, match="evidence does not match"):
-        admit_resume_candidates((first, second), ScopedFrameIndex())
-
-
-def test_resume_admission_rejects_candidate_states_from_another_scoped_run() -> None:
-    graph = topology("source")
-    state = running_state(frontier=("source",))
-    scope_run = root_scope_run(GraphRunId("other-run"))
-    command = ResumeGraphNodes(state.revision, (_skip_action(),))
-    candidate = ScopedResumeCandidate(graph, scope_run, state, state, (), command)
-
-    with pytest.raises(SnapshotMismatchError, match="states do not match"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_rejects_a_successor_not_produced_by_its_exact_command() -> None:
-    graph = topology("source")
-    state = running_state(frontier=("source",))
-    state = replace(
-        state,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(GraphNodeId("source"), FailedGraphNode(GraphFailure("failed"))),)
-        ),
-    )
-    command = ResumeGraphNodes(state.revision, (_skip_action(),))
-    candidate = ScopedResumeCandidate(
-        graph,
-        root_scope_run(state.run_id),
-        state,
-        replace(
-            _skipped_successor(state),
-            join_progress=(
-                GraphJoinProgress((GraphNodeId("source"),), GraphNodeId("source"), frozenset({GraphNodeId("source")})),
-            ),
-        ),
-        (_substitution(graph, state),),
-        command,
-    )
-
-    with pytest.raises(SnapshotMismatchError, match="exact command reduction"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_rejects_substitution_for_a_previously_skipped_node() -> None:
-    graph = topology("previous", "source", entries=("previous", "source"))
-    state = replace(
-        running_state(frontier=("previous", "source")),
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("previous"),
-                    SkippedGraphNode(
-                        GraphFailure("earlier failure"),
-                        GraphSkipReason("earlier skip"),
-                        ContinueGraphRouting(),
-                    ),
-                ),
-                GraphFrontierNode(GraphNodeId("source"), FailedGraphNode(GraphFailure("failed"))),
-            )
-        ),
-    )
-    candidate = _candidate(
-        graph,
-        state,
-        (_substitution(graph, state, "previous"),),
-        (_skip_action(),),
-    )
-
-    with pytest.raises(SnapshotMismatchError, match="evidence does not match"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-@pytest.mark.parametrize("tamper", ["node", "descriptor", "provenance", "settlement", "action"])
-def test_resume_admission_rejects_incomplete_substitution_evidence_before_commit(tamper: str) -> None:
-    graph = topology("other", "source", entries=("other", "source"))
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    actions = (_skip_action(),)
-    if tamper == "node":
-        substitution = replace(
-            substitution,
-            coordinate=replace(
-                substitution.coordinate,
-                activation=StableActivation(
-                    substitution.coordinate.activation.scope_run,
-                    substitution.coordinate.activation.superstep,
-                    GraphNodeId("missing"),
-                ),
-            ),
-        )
-    elif tamper == "descriptor":
-        substitution = replace(
-            substitution,
-            coordinate=replace(
-                substitution.coordinate,
-                descriptor=graph.transition.publications[GraphNodeId("other")].identity,
-            ),
-        )
-    elif tamper == "provenance":
-        substitution = replace(
-            substitution,
-            provenance=ExecutionPublicationProvenance(
-                GraphExecutionToken(1, GraphExecutionAttemptId("forged-execution"))
-            ),
-        )  # type: ignore[arg-type]
-    elif tamper == "settlement":
-        substitution = replace(substitution, expected_revision=substitution.expected_revision + 1)
-    else:
-        substitution = replace(
-            substitution,
-            coordinate=replace(
-                substitution.coordinate,
-                activation=replace(substitution.coordinate.activation, node_id=GraphNodeId("other")),
-            ),
-        )
-    candidate = _candidate(graph, state, (substitution,), actions)
-
-    with pytest.raises(SnapshotMismatchError, match=r"unknown publication node|evidence does not match"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_keeps_distinct_scope_coordinates_isolated() -> None:
-    graph = topology("source")
-    root_state = _failed_state(running_state(frontier=("source",), run_id="root"))
-    root_candidate = _candidate(graph, root_state, (_substitution(graph, root_state),), (_skip_action(),))
-    child_scope = replace(root_candidate.scope_run, scope=(GraphNodeId("child"),), graph_run_id=GraphRunId("child-run"))
-    child_state = replace(root_state, run_id=child_scope.graph_run_id)
-    child_substitution = replace(
-        _substitution(graph, child_state),
-        coordinate=replace(
-            _substitution(graph, child_state).coordinate,
-            activation=StableActivation(child_scope, child_state.superstep, GraphNodeId("source")),
-        ),
-    )
-    child_candidate = _candidate(graph, child_state, (child_substitution,), (_skip_action(),), scope_run=child_scope)
-
-    availability = admit_resume_candidates((root_candidate, child_candidate), ScopedFrameIndex())
-
-    assert availability.has_publication(root_candidate.substitutions[0].coordinate)
-    assert availability.has_publication(child_substitution.coordinate)
-
-
-def test_resume_admission_keeps_repeated_superstep_coordinates_isolated() -> None:
-    graph = topology("source")
-    first_state = _failed_state(running_state(frontier=("source",), superstep=0, revision=1))
-    second_state = _failed_state(running_state(frontier=("source",), superstep=1, revision=2))
-    first = _substitution(graph, first_state)
-    second = _substitution(graph, second_state)
-    availability = admit_resume_candidates(
-        (
-            _candidate(graph, first_state, (first,), (_skip_action(),)),
-            _candidate(graph, second_state, (second,), (_skip_action(),)),
-        ),
-        ScopedFrameIndex(),
-    )
-
-    assert first.coordinate != second.coordinate
-    assert availability.has_publication(first.coordinate)
-    assert availability.has_publication(second.coordinate)
-
-
-def test_recovery_availability_rejects_a_confirmed_candidate_publication_collision() -> None:
-    from mote_kernel.execution.engine.recovery import RecoveryAvailabilityCoordinates
-    from mote_kernel.execution.run_context import CandidateFrameAvailability
-
-    graph = topology("source")
-    state = running_state(frontier=("source",))
-    substitution = _substitution(graph, state)
-    publication = ConfirmedPublication(
-        substitution.coordinate,
-        substitution.frame,
-        state.revision,
-        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("confirmed"))),
-    )
-
-    with pytest.raises(SnapshotMismatchError, match="must be unique"):
-        RecoveryAvailabilityCoordinates[str].from_frames(
-            CandidateFrameAvailability(ScopedFrameIndex(publications=(publication,)), (substitution,))
-        )
-
-
-def test_non_skip_resume_admission_rejects_unavailable_control_target() -> None:
-    graph = topology("source", "target", edges=(direct("source", "target"),))
-    state = _failed_state(running_state(frontier=("source",)))
-    action = _skip_action()
-    command = ResumeGraphNodes(state.revision, (action,))
-    successor = reduce_graph_run(state, command)
-    candidate = ScopedResumeCandidate(
-        graph,
-        root_scope_run(state.run_id),
-        state,
-        successor,
-        (),
-        command,
-    )
-
-    with pytest.raises(GraphValueUnavailableError, match="required nodes"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_rejects_a_control_target_with_an_unavailable_input() -> None:
-    graph = _controlled_graph(target_uses_graph_input=True)
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    candidate = _candidate(graph, state, (substitution,), (_skip_action(),))
-
-    with pytest.raises(GraphValueUnavailableError, match=r"required nodes.*target"):
-        admit_resume_candidates((candidate,), ScopedFrameIndex())
-
-
-def test_resume_admission_accepts_a_control_target_with_complete_inputs() -> None:
-    graph = _controlled_graph(target_uses_graph_input=True)
-    state = _failed_state(running_state(frontier=("source",)))
-    substitution = _substitution(graph, state)
-    scope_run = root_scope_run(state.run_id)
-    graph_input = AdmittedGraphInput(
-        GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
-        admit_graph_input(graph, Graph.values(required="available")),
-    )
-
-    admitted = admit_resume_candidates(
-        (_candidate(graph, state, (substitution,), (_skip_action(),)),),
-        ScopedFrameIndex(graph_inputs=(graph_input,)),
-    )
-
-    assert admitted.has_publication(substitution.coordinate)
-
-
-def test_resume_admission_join_targets_are_required_only_after_completion() -> None:
-    graph = topology(
-        "a",
-        "b",
-        "target",
-        edges=(join(("a", "b"), "target"),),
-        entries=("a", "b"),
-    )
-    state = _failed_state(running_state(frontier=("a",), run_id="join"), "a")
-    action_a = _skip_action("a")
-    command_a = ResumeGraphNodes(state.revision, (action_a,))
-    settled_a = reduce_graph_run(state, command_a)
-    scope_run = root_scope_run(state.run_id)
-
-    admit_resume_candidates(
-        (ScopedResumeCandidate(graph, scope_run, state, settled_a, (), command_a),),
-        ScopedFrameIndex(),
-    )
-
-    both = replace(
-        state,
-        frontier=GraphFrontierState(
+            GraphDefinitionId("resume.admission"),
+            GraphDefinitionVersion(1),
             tuple(
-                GraphFrontierNode(GraphNodeId(node_id), FailedGraphNode(GraphFailure("failed")))
-                for node_id in ("a", "b")
-            )
+                CallableNodeDefinition(
+                    GraphNodeId(node_id),
+                    _node,
+                    normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+                    normalize_output_declarations({}),
+                )
+                for node_id in node_ids
+            ),
+            (),
+            (),
+            normalize_graph_output_declarations({}),
+            resume_input=binding,
+        )
+    )
+
+
+def feedback_interruptible_graph() -> CompiledGraph[str]:
+    seed = Graph.graph_input("seed", str)
+    node = CallableNodeDefinition(
+        GraphNodeId("loop"),
+        _node,
+        normalize_input_bindings(
+            {
+                "value": FeedbackInputBinding(
+                    seed,
+                    Graph.node_output("loop", "value"),
+                )
+            }
+        ),
+        normalize_output_declarations({"value": str}),
+    )
+    codec = _Codec()
+    return compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("resume.feedback"),
+            GraphDefinitionVersion(1),
+            (node,),
+            (
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
+            ),
+            (GraphNodeId("loop"),),
+            normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
+            resume_input=ResumeInputBinding(
+                GraphResumeInputCodecId("resume.input.v1"),
+                1,
+                codec,
+                codec,
+            ),
+        )
+    )
+
+
+def interrupted_state(graph: CompiledGraph[str]) -> GraphRunState:
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
+    claimed = reduce_graph_run(
+        state,
+        ClaimGraphExecution(state.revision, GraphExecutionAttemptId("claim"), None),
+    )
+    assert claimed.execution is not None
+    current = claimed
+    generation = claimed.execution.token.generation
+    for node_id in tuple(graph.nodes):
+        assert current.execution is not None
+        current = reduce_graph_run(
+            current,
+            SettleGraphNode(
+                current.revision,
+                current.execution.token,
+                InterruptedGraphNodeOutcome(
+                    node_id,
+                    GraphNodeInterruptIdentity(current.run_id, current.superstep, node_id, generation),
+                    GraphInterruptPayload(f"question-{node_id}".encode()),
+                ),
+            ),
+        )
+    return current
+
+
+def exact_interrupt_id(state: GraphRunState, node_id: GraphNodeId) -> GraphInterruptId:
+    node = frontier_node(state.frontier, node_id)
+    assert node is not None and isinstance(node.settlement, InterruptedGraphNode)
+    identity = node.settlement.interrupt.identity
+    return graph_interrupt_id(
+        identity.run_id,
+        identity.superstep,
+        identity.node_id,
+        identity.execution_generation,
+    )
+
+
+def request_action(
+    state: GraphRunState,
+    node_id: GraphNodeId,
+    value: str,
+) -> ResumeInterruptedNodeRequest[str]:
+    return ResumeInterruptedNodeRequest(
+        (),
+        node_id,
+        exact_interrupt_id(state, node_id),
+        OverrideNodeInput(Graph.values(value=value)),
+    )
+
+
+def test_prepare_resume_admits_one_exact_interrupt_input_and_command() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    scope_run = root_scope_run(state.run_id)
+
+    prepared = prepare_resume(
+        graph,
+        ResumeRequest(state, scope_run, ScopedFrameIndex(), (request_action(state, GraphNodeId("node"), "answer"),)),
+    )
+
+    assert prepared.command == ResumeGraphNodes(
+        state.revision,
+        (
+            ResumeInterruptedNode(
+                GraphNodeId("node"),
+                exact_interrupt_id(state, GraphNodeId("node")),
+                OverrideGraphNodeInput(GraphResumeInputPayload(b"answer")),
+            ),
         ),
     )
-    actions = (_skip_action("a"), _skip_action("b"))
-    command = ResumeGraphNodes(both.revision, actions)
-    completed = reduce_graph_run(both, command)
-    with pytest.raises(GraphValueUnavailableError, match=r"required nodes.*target"):
-        admit_resume_candidates(
-            (ScopedResumeCandidate(graph, scope_run, both, completed, (), command),),
-            ScopedFrameIndex(),
+    assert len(prepared.inputs) == 1
+    admitted = prepared.inputs[0]
+    assert admitted.coordinate == ResumeInputAvailabilityCoordinate(
+        prepared.inputs[0].coordinate.activation,
+        graph.transition.materializations[GraphNodeId("node")].descriptor.identity,
+    )
+    assert _frame_value(admitted.frame, "value") == "answer"
+
+    successor = reduce_graph_run(state, prepared.command)
+    assert successor.frontier.nodes[0].settlement == PendingGraphNode(
+        OverrideGraphNodeInput(GraphResumeInputPayload(b"answer"))
+    )
+
+
+def test_prepare_resume_admits_multiple_interrupts_in_canonical_order() -> None:
+    graph = interruptible_graph("a", "b")
+    state = interrupted_state(graph)
+    actions = (
+        request_action(state, GraphNodeId("a"), "first"),
+        request_action(state, GraphNodeId("b"), "second"),
+    )
+
+    prepared = prepare_resume(
+        graph,
+        ResumeRequest(state, root_scope_run(state.run_id), ScopedFrameIndex(), actions),
+    )
+
+    assert tuple(action.node_id for action in prepared.command.actions) == (GraphNodeId("a"), GraphNodeId("b"))
+    assert tuple(_frame_value(admitted.frame, "value") for admitted in prepared.inputs) == ("first", "second")
+
+
+@pytest.mark.parametrize("case", ["empty", "reverse", "duplicate", "wrong-scope"])
+def test_prepare_resume_rejects_noncanonical_action_groups(case: str) -> None:
+    graph = interruptible_graph("a", "b")
+    state = interrupted_state(graph)
+    first = request_action(state, GraphNodeId("a"), "first")
+    second = request_action(state, GraphNodeId("b"), "second")
+    actions: tuple[ResumeNodeRequest[str], ...]
+    if case == "empty":
+        actions = ()
+    elif case == "reverse":
+        actions = (second, first)
+    elif case == "duplicate":
+        actions = (first, first)
+    else:
+        actions = (replace(first, scope=(GraphNodeId("child"),)),)
+
+    with pytest.raises(SnapshotMismatchError, match="non-empty, distinct, canonical, and scoped"):
+        prepare_resume(
+            graph,
+            ResumeRequest(state, root_scope_run(state.run_id), ScopedFrameIndex(), actions),
         )
+
+
+def test_prepare_resume_rejects_wrong_interrupt_identity_without_state_mutation() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    action = replace(
+        request_action(state, GraphNodeId("node"), "answer"),
+        interrupt_id=GraphInterruptId("wrong"),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="does not match"):
+        prepare_resume(
+            graph,
+            ResumeRequest(state, root_scope_run(state.run_id), ScopedFrameIndex(), (action,)),
+        )
+    assert state.status is GraphRunStatus.RUNNING
+    assert isinstance(state.frontier.nodes[0].settlement, InterruptedGraphNode)
+
+
+def test_prepare_resume_requires_a_current_interrupted_node() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    pending = replace(
+        state,
+        frontier=replace(
+            state.frontier,
+            nodes=(
+                replace(
+                    state.frontier.nodes[0],
+                    settlement=PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"answer"))),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="interrupted node"):
+        prepare_resume(
+            graph,
+            ResumeRequest(
+                pending,
+                root_scope_run(pending.run_id),
+                ScopedFrameIndex(),
+                (request_action(state, GraphNodeId("node"), "answer"),),
+            ),
+        )
+
+
+def test_prepare_resume_rejects_an_override_for_a_feedback_activation() -> None:
+    graph = feedback_interruptible_graph()
+    state = interrupted_state(graph)
+    action = request_action(state, GraphNodeId("loop"), "answer")
+
+    with pytest.raises(SnapshotMismatchError, match="feedback activation cannot use an input override"):
+        prepare_resume(
+            graph,
+            ResumeRequest(
+                state,
+                root_scope_run(state.run_id),
+                ScopedFrameIndex(),
+                (action,),
+            ),
+        )
+
+
+def test_prepare_resume_requires_matching_compiled_codec_and_running_state() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    action = request_action(state, GraphNodeId("node"), "answer")
+
+    aborted = reduce_graph_run(
+        state,
+        AbortGraphRun(state.revision, GraphAbortReason("operator aborted")),
+    )
+    with pytest.raises(SnapshotMismatchError, match="quiescent running"):
+        prepare_resume(
+            graph,
+            ResumeRequest(
+                aborted,
+                root_scope_run(state.run_id),
+                ScopedFrameIndex(),
+                (action,),
+            ),
+        )
+
+    graph_without_codec = interruptible_graph("node", codec=False)
+    with pytest.raises(SnapshotMismatchError, match="codec"):
+        prepare_resume(
+            graph_without_codec,
+            ResumeRequest(state, root_scope_run(state.run_id), ScopedFrameIndex(), (action,)),
+        )
+
+
+def test_prepare_resume_rejects_an_unsupported_request_variant() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    forged = cast(ResumeNodeRequest[str], object())
+
+    with pytest.raises(SnapshotMismatchError, match="unsupported action"):
+        prepare_resume(
+            graph,
+            ResumeRequest(state, root_scope_run(state.run_id), ScopedFrameIndex(), (forged,)),
+        )
+
+
+def test_resume_identity_and_shape_validation_precede_codec_execution() -> None:
+    codec = _TrackingCodec()
+    graph = interruptible_graph("node", codec_implementation=codec)
+    state = interrupted_state(graph)
+    frames: ScopedFrameIndex[str] = ScopedFrameIndex()
+    scope_run = root_scope_run(state.run_id)
+    exact = request_action(state, GraphNodeId("node"), "answer")
+
+    stale = replace(exact, interrupt_id=GraphInterruptId("stale"))
+    with pytest.raises(SnapshotMismatchError, match="does not match"):
+        prepare_resume(graph, ResumeRequest(state, scope_run, frames, (stale,)))
+    assert codec.events == []
+
+    missing = replace(exact, node_id=GraphNodeId("missing"))
+    with pytest.raises(SnapshotMismatchError, match="unknown frontier node"):
+        prepare_resume(graph, ResumeRequest(state, scope_run, frames, (missing,)))
+    assert codec.events == []
+
+    prepared = prepare_resume(graph, ResumeRequest(state, scope_run, frames, (exact,)))
+    assert codec.events == ["encode", "decode"]
+    assert _frame_value(prepared.inputs[0].frame, "value") == "answer"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("name", "node input names do not match the compiled descriptor"),
+        ("type", "does not have its exact declared type"),
+    ],
+)
+def test_resume_codec_output_is_readmitted_before_state_mutation(tamper: str, message: str) -> None:
+    codec = _TrackingCodec()
+    codec.tamper = tamper
+    graph = interruptible_graph("node", codec_implementation=codec)
+    state = interrupted_state(graph)
+    frames: ScopedFrameIndex[str] = ScopedFrameIndex()
+    request = ResumeRequest(
+        state,
+        root_scope_run(state.run_id),
+        frames,
+        (request_action(state, GraphNodeId("node"), "answer"),),
+    )
+
+    with pytest.raises(GraphValueAdmissionError, match=message):
+        prepare_resume(graph, request)
+
+    assert codec.events == ["encode", "decode"]
+    assert request.state is state
+    assert request.frames is frames
+    assert isinstance(state.frontier.nodes[0].settlement, InterruptedGraphNode)
