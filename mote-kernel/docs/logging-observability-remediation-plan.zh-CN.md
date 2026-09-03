@@ -25,8 +25,11 @@
 3. `LoggedGraphCommit` 必须包裹一个调用方提供的 `Graph.Commit`，不接受 `None`，也不提供替代 helper；
 4. Logging 可以只读比较 inner 返回值以记录 `accepted`/`mismatch`，但不能据此确认 candidate、短路 inner、
    改写返回值或安装 State；
-5. sink/port 是同步诊断旁路。它们自己误抛的普通异常或 `asyncio.CancelledError` 只丢弃当前诊断，不改变业务结果、
-   异常、取消或 mismatch，也不停止 inner；业务 inner 或 Graph execution 收到的取消则在尽力记录诊断后原样传播同一个对象；
+5. sink/port 是基于共享 `Invocation` 的异步诊断旁路。Port 接受普通 Invocation，并在边界固定使用 best-effort；每次调用默认有
+   `BEST_EFFORT_TIMEOUT_SECONDS`（当前 1 秒）的有限协作式 deadline，可用 keyword-only `timeout_seconds` 覆盖为有限正数；
+   期限到达、Invocation 自己误抛普通异常或 `asyncio.CancelledError` 都只丢弃当前诊断，不改变业务结果、异常、取消或 mismatch，也不停止 inner；
+   deadline 自身占用一个 cancellation count；与调用方取消并发时，额外的 count 仍按调用方取消传播；适配器主动 `uncancel()` 暂不处理；
+   业务 inner 或 Graph execution 收到的取消则在尽力记录诊断后原样传播同一个对象；inner outcome 已确定后，后置诊断收到的调用方取消不能覆盖该 primary；
 6. `Graph.run(commit=None)` 的进程内确认只由 execution 的 `scoped_commit()` 处理；Logging 不参与；
 7. decorator 不校验 Port、factory 或 inner 是否正确装配；这些 required capability 由 strict typing 和未来
    Role/Flow assembly owner 保证，不属于本轮；
@@ -40,6 +43,11 @@
 
 - “inner 恰好一次”只表示一次 wrapper invocation 内不主动重试，不承诺跨 Graph recovery 或新的 `Graph.run()` invocation
   的全局 exactly-once；
+- `mote_kernel.invocation` 是 Kernel 侧薄适配接缝，不是 transport/runtime owner。composition 通过配置从
+  `mote-infra/invocation` 注入 Invocation；local、Unix socket、HTTP、gRPC 等实现由 infra/config 选择，Kernel 不实现 resolver
+  或具体通信机制；
+- Invocation 提供 strict 与 best-effort 两条错误策略：Hook/核心业务调用使用 strict，Logging/Observability Port 固定使用
+  best-effort。Port 不要求调用方再手动包一层策略适配器；
 - 零参数 fields/span factory 是调用方提供的 callable。调用方可以用闭包或调用方自己的 context 机制取得坐标，Kernel 不注入
   隐藏 ContextVar、全局上下文或新的 execution API；
 - 对 `ObservedNode` 的安装，`port + span_factory` 是一个完整 bundle：两者都缺时不安装节点观测；只缺一个时由 assembly
@@ -191,11 +199,12 @@ assembly owner，而不是观测 node 或日志 decorator 的职责。
 
 本轮依靠 strict Pyright 保证：
 
-- `LogSinkPort.write()` 与 `ObservabilityPort.record()` 是同步、返回 `None` 的窄协议；
+- `LogSinkPort` 与 `ObservabilityPort` 持有 typed `Invocation`，其 async `write()`/`record()` 只转发一次并返回 `None`；
+- Port 的 transport 和 runtime 选择不出现在 Kernel 类型或实现中；
 - `NodeSpanFactory` 返回 `Span`；
 - node inner 保持原输入/输出 callable 契约；
 - commit inner 是相同 `GraphValueT` 的 `Graph.Commit`；
-- `None`、async sink/port 和错误 callable 签名不能通过正常类型检查。
+- `None`、非 Invocation capability 和错误 callable 签名不能通过正常类型检查。
 
 对于调用方用 `cast`、禁用类型检查或故意传入结构错误对象的情况，不增加运行时反射和兼容分支兜底；行为不属于受支持
 公共契约。
@@ -244,8 +253,9 @@ assembly owner，而不是观测 node 或日志 decorator 的职责。
 ## 4. 运行期失败与取消矩阵
 
 这里的业务取消专指 node/commit inner 或 Graph execution 收到的 `asyncio.CancelledError`。wrapper 先尽力记录取消诊断，
-再原样传播同一个取消对象。相反，sink/port 是同步旁路；如果适配器自己误抛普通异常或 `CancelledError`，那只是当前诊断
-失败，必须隔离并继续业务调用或保留已经产生的业务结果。只有已知的诊断适配器/投影调用边界才显式隔离其自有
+再原样传播同一个取消对象。相反，sink/port 是异步 best-effort 旁路；每次调用有有限协作式 deadline（默认 1 秒，可由 Port 的
+`timeout_seconds` 覆盖），如果适配器自己误抛普通异常、`CancelledError` 或 deadline 到达，那只是当前诊断失败，必须隔离并继续业务调用或
+保留已经产生的业务结果。只有已知的诊断适配器/投影调用边界才显式隔离其自有
 `CancelledError`；业务 inner/execution 的取消仍按上句保留 identity。绝不能用 `except BaseException` 把 `KeyboardInterrupt`、
 `SystemExit` 等系统级中断一并吞掉。
 
@@ -254,8 +264,8 @@ assembly owner，而不是观测 node 或日志 decorator 的职责。
 | node/commit inner 或 Graph execution | 原样传播 | 记录诊断后原样传播同一对象 | 否 | 不改写 primary |
 | fields factory | 回退已验证静态字段 | 仅普通/非法失败纳入回退；自身 `CancelledError` 不在该回退范围，按 factory 异常自然结束；不使用 `BaseException` 泛捕获 | 普通/非法失败继续 | 配置后每次 invocation 恰好调用一次 |
 | span factory | 实现或值契约违例自然传播 | 自身 setup 失败自然传播 | 否 | 每次 invocation 恰好调用一次 |
-| logging sink | 丢弃当前 record | 丢弃当前 record | 继续 inner；已执行 inner 不重试 | 不改变业务结果、异常、取消或 mismatch |
-| observation port | 丢弃当前 observation | 丢弃当前 observation | 继续 inner；已执行 inner 不重试 | 不改变业务结果、异常、取消或 mismatch |
+| logging sink | 丢弃当前 record | 丢弃当前 record | 继续 inner；已执行 inner 不重试 | 普通异常、取消或 deadline 都不改变业务结果、异常、取消或 mismatch |
+| observation port | 丢弃当前 observation | 丢弃当前 observation | 继续 inner；已执行 inner 不重试 | 普通异常、取消或 deadline 都不改变业务结果、异常、取消或 mismatch |
 | logging projection 或 `LogRecord` 构造 | 当前诊断降级或丢弃 | 只丢弃当前诊断 | 继续 inner；不主动重试 | 不改变 primary |
 | observation record 构造 | `ObservationContractError` 自然传播 | 不由值构造器制造业务取消 | 否 | 不把非法观测值降级成合法值 |
 | persistence/Eventing async inner | 不属于本批；按 owner 契约传播 | 由 owner 原样传播 | 否 | 由 execution/events 测试锁定 |
@@ -390,7 +400,7 @@ acknowledgement uncertainty；后续是否恢复、重放或 reconcile 由 execu
 | 类型 | node 单层、Observed+Logged 链 | 保留精确输入/输出类型，无 `Unknown` |
 | 类型 | commit 单层与 Graph.run | 保留 `GraphValueT`，无 `Unknown` |
 | 类型 | Port/factory/inner 为 `None` 或错误 callable | strict 类型拒绝；decorator 不做 assembly validation |
-| 类型 | async `write`/`record` 违反同步协议 | strict 类型拒绝，不增加运行时反射 |
+| 类型 | Port 持有错误 request/result 的 Invocation | strict 类型拒绝；不把 transport 类型泄漏到 Kernel |
 | node 顺序 | Logged(Observed(base)) 成功 | started/finished 顺序精确 |
 | node primary | 正常返回、普通异常、inner 取消 | 单次 wrapper invocation 内调用一次；普通诊断失败不改变对象 identity |
 | fields factory | 普通异常、非法返回 | 回退静态 fields，inner 继续 |
@@ -412,7 +422,7 @@ acknowledgement uncertainty；后续是否恢复、重放或 reconcile 由 execu
 | 并发 | 同一 decorator 配置复用多个 run | 无共享 run/field/span/transition 状态 |
 | 公共面 | 两个根包 import 与 `__all__` | 仍只文档化导出三个 decorator |
 
-Events 的 event projection-before-persistence、async sink cancellation 和持久化次数继续由 Events 测试负责，不复制到
+Events 的 event projection-before-persistence、Invocation transport 和持久化次数继续由各自 owner 测试负责，不复制到
 本轮 Logging 测试。
 
 ## 9. 隔离复杂度预算
@@ -494,7 +504,7 @@ health 指标保持全为零。
 fields fallback 规则独立于 wrapper 生命周期，避免在一段大异常块里混合两种失败来源。三个私有 wrapper 的 `+3`
 dataclass/type/field 结构是保持配置与 inner 精确类型所必需的实现，不复制配置字段，也不保存运行状态；如果范围内发现
 其他真实债务，也应一并清理，不能为了贴合这条参考线保留债务。Logging 的
-node/commit 写入现在共用一个 logging 包内的窄 `_emit` 函数；它不进入根包公共面，也没有为消除局部重复引入宽泛的
+node/commit 写入现在共用一个 logging 包内的窄 `emit` 函数；它不进入根包公共面，也没有为消除局部重复引入宽泛的
 `common/utils` 层。`record` 与 `span` 的值校验仍由各自 owner 保持独立，不能为了消除高召回 clone 提示而制造跨包耦合。
 
 报告中的 clone、hotspot 和低使用率条目是高召回审计提示，不是自动失败结论。人工复核确认新增结构职责单一、复杂度低、

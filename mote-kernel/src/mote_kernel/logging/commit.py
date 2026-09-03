@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from time import perf_counter_ns
 from typing import Generic, TypeVar
 
 from mote_kernel.execution import Graph
-from mote_kernel.logging._emit import write_best_effort
+from mote_kernel.logging.emit import write_diagnostic
 from mote_kernel.logging.level import LogLevel
 from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogField, require_log_label
@@ -84,45 +85,48 @@ class _LoggedCommit(Generic[GraphValueT]):
     ) -> Graph.State:
         candidate = _candidate_state(transition)
         fields = _transition_fields(transition, candidate)
-        write_best_effort(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
+        await write_diagnostic(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
         started = perf_counter_ns()
         try:
             returned = await self.inner(transition)
         except asyncio.CancelledError as error:
-            write_best_effort(
-                self.config.sink,
-                LogLevel.WARNING,
-                f"{self.config.event}.cancelled",
-                (
-                    *fields,
-                    LogField("duration_ns", perf_counter_ns() - started),
-                ),
-                error=error,
-            )
+            with suppress(asyncio.CancelledError):
+                await write_diagnostic(
+                    self.config.sink,
+                    LogLevel.WARNING,
+                    f"{self.config.event}.cancelled",
+                    (
+                        *fields,
+                        LogField("duration_ns", perf_counter_ns() - started),
+                    ),
+                    error=error,
+                )
             raise
         except Exception as error:
-            write_best_effort(
-                self.config.sink,
-                LogLevel.ERROR,
-                f"{self.config.event}.failed",
-                (
-                    *fields,
-                    LogField("duration_ns", perf_counter_ns() - started),
-                ),
-                error=error,
-            )
+            with suppress(asyncio.CancelledError):
+                await write_diagnostic(
+                    self.config.sink,
+                    LogLevel.ERROR,
+                    f"{self.config.event}.failed",
+                    (
+                        *fields,
+                        LogField("duration_ns", perf_counter_ns() - started),
+                    ),
+                    error=error,
+                )
             raise
         exact = candidate is not None and type(returned) is Graph.State and returned == candidate
-        write_best_effort(
-            self.config.sink,
-            LogLevel.INFO if exact else LogLevel.ERROR,
-            f"{self.config.event}.accepted" if exact else f"{self.config.event}.mismatch",
-            (
-                *fields,
-                LogField("outcome", "accepted" if exact else "mismatch"),
-                LogField("duration_ns", perf_counter_ns() - started),
-            ),
-        )
+        with suppress(asyncio.CancelledError):
+            await write_diagnostic(
+                self.config.sink,
+                LogLevel.INFO if exact else LogLevel.ERROR,
+                f"{self.config.event}.accepted" if exact else f"{self.config.event}.mismatch",
+                (
+                    *fields,
+                    LogField("outcome", "accepted" if exact else "mismatch"),
+                    LogField("duration_ns", perf_counter_ns() - started),
+                ),
+            )
         return returned
 
 

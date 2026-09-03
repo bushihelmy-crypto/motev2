@@ -13,6 +13,7 @@ import mote_kernel.events.commit as commit_module
 from mote_kernel.events import EventingGraphCommit
 from mote_kernel.events.commit import AtomicCommitRequest, AtomicPersistenceCommit
 from mote_kernel.events.identity import NODE_SETTLEMENT_EVENT_SCHEMA_VERSION, node_settlement_event_id
+from mote_kernel.events.port import EventPort
 from mote_kernel.events.record import NodeSettlementEventReference
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import NodeCallable
@@ -32,6 +33,16 @@ class RecordingPersistence:
     async def __call__(self, request: AtomicCommitRequest[str], /) -> Graph.State:
         self.requests.append(request)
         return request.transition.candidate_state
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingEventInvocation:
+    """Capture post-commit notification references without owning state."""
+
+    references: list[NodeSettlementEventReference]
+
+    async def invoke(self, reference: NodeSettlementEventReference, /) -> None:
+        self.references.append(reference)
 
 
 def _encode_resume(values: Graph.Values[str]) -> bytes:
@@ -76,8 +87,10 @@ async def _interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
 
 def _decorated_commit(
     persistence: AtomicPersistenceCommit[str],
+    *,
+    event_port: EventPort | None = None,
 ) -> Graph.Commit[str]:
-    return EventingGraphCommit(persistence)
+    return EventingGraphCommit(persistence, event_port)
 
 
 async def _run(
@@ -242,6 +255,134 @@ async def test_projection_failure_prevents_any_persistence_call(monkeypatch: pyt
     commit = EventingGraphCommit[str](persistence)
     with pytest.raises(ValueError, match="invalid event coordinate"):
         await commit(cast(Graph.Transition[str], object()))
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_confirmed_settlement_is_notified_after_the_atomic_commit() -> None:
+    transition = await _captured_settlement_transition()
+    trace: list[str] = []
+    references: list[NodeSettlementEventReference] = []
+
+    async def persistence(request: AtomicCommitRequest[str], /) -> Graph.State:
+        trace.append("persistence")
+        return request.transition.candidate_state
+
+    @dataclass(frozen=True, slots=True)
+    class TracedInvocation:
+        async def invoke(self, reference: NodeSettlementEventReference, /) -> None:
+            trace.append("event")
+            references.append(reference)
+
+    commit = EventingGraphCommit[str](persistence, EventPort(TracedInvocation()))
+
+    assert await commit(transition) == transition.candidate_state
+    assert trace == ["persistence", "event"]
+    projected = commit_module.project_event(transition)
+    assert projected is not None
+    assert references == [projected]
+
+
+@pytest.mark.asyncio
+async def test_event_notification_failure_does_not_change_confirmed_commit() -> None:
+    transition = await _captured_settlement_transition()
+    error = RuntimeError("event runtime unavailable")
+
+    @dataclass(frozen=True, slots=True)
+    class FailingInvocation:
+        async def invoke(self, _reference: NodeSettlementEventReference, /) -> None:
+            raise error
+
+    async def persistence(request: AtomicCommitRequest[str], /) -> Graph.State:
+        return request.transition.candidate_state
+
+    commit = EventingGraphCommit[str](persistence, EventPort(FailingInvocation()))
+
+    assert await commit(transition) == transition.candidate_state
+
+
+@pytest.mark.asyncio
+async def test_event_notification_is_skipped_when_persistence_fails() -> None:
+    transition = await _captured_settlement_transition()
+    called = False
+
+    @dataclass(frozen=True, slots=True)
+    class RecordingInvocation:
+        async def invoke(self, _reference: NodeSettlementEventReference, /) -> None:
+            nonlocal called
+            called = True
+
+    error = RuntimeError("transaction rejected")
+
+    async def persistence(_request: AtomicCommitRequest[str], /) -> Graph.State:
+        raise error
+
+    commit = EventingGraphCommit[str](persistence, EventPort(RecordingInvocation()))
+    with pytest.raises(RuntimeError) as raised:
+        await commit(transition)
+    assert raised.value is error
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_event_notification_is_skipped_for_a_non_settlement_transition() -> None:
+    persistence = RecordingPersistence()
+    await _run(_identity, persistence, definition_id="events.non-settlement-notification")
+    transition = next(request.transition for request in persistence.requests if request.event_reference is None)
+
+    called = False
+
+    @dataclass(frozen=True, slots=True)
+    class RecordingInvocation:
+        async def invoke(self, _reference: NodeSettlementEventReference, /) -> None:
+            nonlocal called
+            called = True
+
+    async def persistence_commit(request: AtomicCommitRequest[str], /) -> Graph.State:
+        return request.transition.candidate_state
+
+    commit = EventingGraphCommit[str](persistence_commit, EventPort(RecordingInvocation()))
+    assert await commit(transition) == transition.candidate_state
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_event_notification_is_skipped_for_a_mismatched_persistence_result() -> None:
+    transition = await _captured_settlement_transition()
+    called = False
+
+    @dataclass(frozen=True, slots=True)
+    class RecordingInvocation:
+        async def invoke(self, _reference: NodeSettlementEventReference, /) -> None:
+            nonlocal called
+            called = True
+
+    async def persistence(request: AtomicCommitRequest[str], /) -> Graph.State:
+        return replace(request.transition.candidate_state, revision=request.transition.candidate_state.revision + 1)
+
+    commit = EventingGraphCommit[str](persistence, EventPort(RecordingInvocation()))
+    assert await commit(transition) != transition.candidate_state
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_event_notification_requires_an_exact_graph_state_type() -> None:
+    transition = await _captured_settlement_transition()
+    called = False
+
+    @dataclass(frozen=True, slots=True)
+    class RecordingInvocation:
+        async def invoke(self, _reference: NodeSettlementEventReference, /) -> None:
+            nonlocal called
+            called = True
+
+    forged = cast(Graph.State, object())
+
+    async def persistence(_request: AtomicCommitRequest[str], /) -> Graph.State:
+        return forged
+
+    commit = EventingGraphCommit[str](persistence, EventPort(RecordingInvocation()))
+    assert await commit(transition) is forged
     assert not called
 
 

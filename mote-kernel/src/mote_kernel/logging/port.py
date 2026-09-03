@@ -1,18 +1,28 @@
-"""The narrow output capability for structured diagnostic records."""
+"""The Kernel-side invocation adapter for structured diagnostic records."""
 
-from typing import Protocol
+from dataclasses import dataclass, field
 
+from mote_kernel.invocation import BEST_EFFORT_TIMEOUT_SECONDS, Invocation, invoke_best_effort
 from mote_kernel.logging.record import LogRecord
 
 
-class LogSinkPort(Protocol):
-    """Accept one Kernel log record without choosing a destination backend.
+@dataclass(frozen=True, slots=True)
+class LogSinkPort:
+    """Adapt one best-effort invocation to the Kernel logging vocabulary.
 
-    A concrete sink may enqueue, format, filter, persist, or forward the
-    record.  None of those policies are part of the Kernel contract.
+    Resolution of the invocation (local, RPC, or another configured
+    implementation) belongs outside the Kernel; this adapter fixes the
+    diagnostic error policy and preserves the typed ``LogRecord`` request at
+    the domain boundary.
     """
 
-    def write(self, record: LogRecord, /) -> None: ...
+    invocation: Invocation[LogRecord, None]
+    timeout_seconds: float = field(default=BEST_EFFORT_TIMEOUT_SECONDS, kw_only=True)
+
+    async def write(self, record: LogRecord, /) -> None:
+        """Forward one record exactly once on the best-effort invocation path."""
+
+        await invoke_best_effort(self.invocation, record, timeout_seconds=self.timeout_seconds)
 
 
 __all__ = ["LogSinkPort"]

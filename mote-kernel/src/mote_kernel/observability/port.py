@@ -1,21 +1,27 @@
-"""The backend-neutral observation output capability."""
+"""The Kernel-side invocation adapter for normalized observations."""
 
-from typing import Protocol
+from dataclasses import dataclass, field
 
+from mote_kernel.invocation import BEST_EFFORT_TIMEOUT_SECONDS, Invocation, invoke_best_effort
 from mote_kernel.observability.record import Observation
 
 
-class ObservabilityPort(Protocol):
-    """Accept normalized observations for a runtime-selected adapter.
+@dataclass(frozen=True, slots=True)
+class ObservabilityPort:
+    """Adapt one best-effort invocation to the Kernel observation vocabulary.
 
-    The implementation may map records to OpenTelemetry, Langfuse, a local
-    buffer, or another system.  None of those choices are visible to Kernel
-    code.  Implementations must return promptly; asynchronous export and
-    buffering remain adapter concerns so observation adds no execution await
-    point.
+    Transport and implementation selection are performed by the invocation
+    infrastructure; this adapter fixes the diagnostic error policy and owns
+    only the typed observation request.
     """
 
-    def record(self, observation: Observation, /) -> None: ...
+    invocation: Invocation[Observation, None]
+    timeout_seconds: float = field(default=BEST_EFFORT_TIMEOUT_SECONDS, kw_only=True)
+
+    async def record(self, observation: Observation, /) -> None:
+        """Forward one observation exactly once on the best-effort path."""
+
+        await invoke_best_effort(self.invocation, observation, timeout_seconds=self.timeout_seconds)
 
 
 __all__ = ["ObservabilityPort"]

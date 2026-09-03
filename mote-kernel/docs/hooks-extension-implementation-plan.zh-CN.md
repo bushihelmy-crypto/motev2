@@ -100,6 +100,7 @@ tests/architecture/test_package_structure.py
 | `identity.py` | definition ID 用点号拼接，存在真实碰撞 | 改为长度前缀/结构化编码；不重复编码 Graph version |
 | `contract.py` | `HookResult` 同时表示 stage delta 和 final outcome；Python 泛型运行时会擦除 | 增加/明确 `HookStageResult` 与 final `HookResult` 边界；由一份 `HookPayloadAdmission` 做具体 nominal admission；不增加 `state` |
 | `contract.py` | command 只有泛型 tuple，没有通用语义 | 保留 typed、有序 delta；删除 generic policy/identity index |
+| `port.py` | `HookPort` 与 HookNode 拓扑混在同一个模块 | 将 `HookPort` 单独放入 `hooks/port.py`；保持一次 strict invocation 适配，不纳入包级公共 API |
 | `node.py` | 固定 Graph 在首次 compile 前可被外部改写 | 本轮接受该边界；沿用 Graph 首次成功编译后的冻结，不主动构造期封图 |
 | `node.py` | 只检查 capability 是否为 `None` | 构造期检查必需成员存在且可调用 |
 | `node.py` | 只拼接结果但语义不够显式 | 提取清楚的 value 链和固定顺序 command append 步骤 |
@@ -134,7 +135,7 @@ HookStageResult
 必要的 Pi 风格语义都由 invocation runtime 在返回前完成；Hook 不解释这些内部细节。
 
 `HookStageResult` 与 `HookResult` 都是 `frozen dataclass(slots=True)`，`commands` 必须是
-exact `tuple`。`_HookPort` 在 invocation 返回处做 exact nominal 校验；结果中不携带
+exact `tuple`。`HookPort` 在 invocation 返回处做 exact nominal 校验；结果中不携带
 priority、run、superstep、activation、retry、command policy、identity 或 state 字段。
 runtime 只能返回 `HookStageResult`，最终 `HookResult` 只能由 P3 节点构造。
 
@@ -205,7 +206,7 @@ discriminator 或未经定义的 `set` 推断 command 语义。
 每个 priority 的调用边界：
 
 ```text
-_HookPort.execute(priority_plan, request)
+HookPort.execute(priority_plan, request)
 → invocation.invoke(HookInvocationRequest(priority_plan.config, request))
 → exact 校验 HookStageResult
 → 返回给 HookNode 做固定顺序追加
@@ -294,11 +295,15 @@ src/mote_kernel/hooks/plan.py
 文件：
 
 ```text
+src/mote_kernel/hooks/port.py
 src/mote_kernel/hooks/node.py
 ```
 
 任务：
 
+- 将 `HookPort` 放在 `hooks/port.py`，只负责组装 `HookInvocationRequest`、调用 shared
+  `Invocation` 的 strict 路径并校验 `HookStageResult`；它仍是 HookNode 的私有实现，不是
+  外部 SPI；
 - 使用现有 `mote_kernel.execution.Graph` 组合固定四节点子图；
 - `_HookProgress` 保存当前 request、固定 Plan 和有序 command tuple；
 - P1/P2/P3 只替换 current value，不在 HookNode 内手工改写 state；

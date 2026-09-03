@@ -138,15 +138,16 @@ Kernel Hooks 只固定以下事实：
 
 ## 4. 内部 Hook Port 与统一调用边界
 
-Hook Port 是 HookNode 内部的薄调用层，不是扩展需要实现或可以替换的 SPI，也不
-单独建立 `port.py`。统一的 `Invocation` 协议位于 `mote_kernel.invocation`；HookNode
-装配时接收一个符合该协议的 capability，然后在内部构造同一个 Port 供 P1、P2、P3
-使用；缺少 invocation capability 时立即装配失败。
+Hook Port 是 HookNode 内部的薄调用层，不是扩展需要实现或可以替换的 SPI。它作为
+模块内的 `HookPort` 单独放在 `hooks/port.py`，只隔离 invocation 适配职责；统一的
+`Invocation` 协议位于 `mote_kernel.invocation`。HookNode 装配时接收一个符合该协议的
+capability，然后构造同一个 Port 供 P1、P2、P3 使用；缺少 invocation capability 时
+立即装配失败。
 
 每个优先级节点只执行以下路径：
 
 ~~~text
-_HookPort.execute(priority_plan, request)
+HookPort.execute(priority_plan, request)
 → invocation.invoke(HookInvocationRequest(priority_plan.config, request))
 → 校验返回值是 HookStageResult
 → 返回
@@ -160,9 +161,10 @@ config、priority config 及每个 command 元素，并要求 stage/final comman
 `tuple`。`object`、`Any`、Union 等擦除或非 nominal descriptor 在装配期拒绝；嵌套业务
 schema 仍由具体 invocation owner 负责，不在 Hooks 内引入深层反射或第二套 validator。
 
-每个优先级节点只发出一次统一调用。调用最终落到本地、HTTP、gRPC 或其他传输，
-由 invocation capability 的具体实现解析，Hook Port 不知道也不判断。当前只提供
-可导入的窄 `Invocation` 协议，不建设 Resolver、注册表或传输占位实现。
+每个优先级节点只发出一次统一调用。调用最终落到本地、Unix socket、HTTP、gRPC 或其他传输，
+由 invocation capability 的具体实现和配置解析，Hook Port 不知道也不判断。当前只提供
+可导入的窄 `Invocation` 协议，不建设 Resolver、注册表或传输占位实现。Hook 使用 Invocation 的 strict 路径：调用失败
+必须原样报错；Logging/Observability 是另一类诊断 Port，固定使用 best-effort 路径。
 
 统一 invocation 引擎未来可以由 Rust 实现，但 Rust 不直接依赖或实现 Python 的
 `HookRequest`、`HookStageResult` 或 `HookResult`。装配关系是：创建 HookNode 的 composition root 注入
@@ -245,14 +247,16 @@ hooks/
   identity.py   # slot 和 priority
   contract.py   # 请求、阶段/最终结果及配置读取/Plan 装载协议
   plan.py       # config snapshot、HookPlan 和 HookPriorityPlan
-  node.py       # HookNode、Plan 节点、内部薄 Port 和 P1/P2/P3 节点组合
+  port.py       # HookPort：Hook-specific request 的 Invocation 适配（包级不导出）
+  node.py       # HookNode、Plan 节点和 P1/P2/P3 节点组合
 ~~~
 
-不建立单独的 `port.py`：当前 Port 只有一次转发和一次结果校验，只服务于 HookNode，
-放在 `node.py` 能准确表达其内部所有权。`mote_kernel.invocation` 维护跨 Kernel
-domain 共用的最小 `Invocation` 协议；`hooks.contract` 维护 Hook-specific request、
-阶段/最终结果以及配置/Plan 契约。`mote_kernel.hooks` 包级公共入口仍只有 HookNode，
-不提供外部 HookPort SPI。
+虽然建立了单独的 `port.py`，其中只保留供 HookNode 组合使用的 `HookPort`，不把它变成
+包级公共 SPI，也不在 `hooks/__init__.py` 导出。`HookPort` 只有一次 typed request
+组装、一次 strict invocation 和一次结果校验，所有权仍属于 HookNode 这条固定子图；
+拆出模块只是让 Port 的调用边界和节点拓扑各自清楚。`mote_kernel.invocation` 维护跨
+Kernel domain 共用的最小 `Invocation` 协议；`hooks.contract` 维护 Hook-specific request、
+阶段/最终结果以及配置/Plan 契约。`mote_kernel.hooks` 包级公共入口仍只有 HookNode。
 
 旧的 manager.py、HookManager、HookBindingSnapshot、HookBindingGeneration、
 HookManagerNode，以及携带 activation/执行坐标的旧 invocation 值模型均已放弃，

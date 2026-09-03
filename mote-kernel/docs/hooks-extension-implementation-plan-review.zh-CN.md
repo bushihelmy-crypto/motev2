@@ -119,7 +119,8 @@ class Invocation(Protocol[RequestT_contra, ResultT_co]):
 - Think、Act、Context 等 Port 各自拥有 request/result，但复用同一个 Invocation 形状；
 - local/RPC 是 Invocation 的实现选择，不改变 Port 的业务类型；
 - Invocation 不负责 retry、failover、command 语义、状态提交或 Graph 推进；
-- 日志和 Observability 当前是同步旁路能力，不要为了“统一”强行变成异步 Invocation；
+- 日志和 Observability 当前通过 `mote_kernel.invocation` 接到 async Invocation，Port 固定走 best-effort；不要把
+  transport、resolver 或 runtime 实现搬进 Kernel；
 - Python adapter 必须把一次调用明确委托给 Rust binding，不能在 Kernel 再实现一套 retry、
   transport、resolver 或 command 语义。
 
@@ -132,7 +133,8 @@ class Invocation(Protocol[RequestT_contra, ResultT_co]):
 
 当前代码已经删除了 `hooks.contract.HookInvocation`，并用一个两参数泛型协议承载 Python
 适配形状；该协议定义在 [`src/mote_kernel/invocation.py:1-15`](../src/mote_kernel/invocation.py:1)，
-由 `HookNode` 导入（[`node.py:19`](../src/mote_kernel/hooks/node.py:19)）。在 Rust
+由 Hooks 的内部适配模块导入（[`port.py`](../src/mote_kernel/hooks/port.py)），并由
+`HookNode` 组合使用。在 Rust
 基础设施方案下，这个位置是合理的 Python 接缝，不应把它误判为重复 owner。
 
 当前 Hook-specific envelope 是：
@@ -146,7 +148,7 @@ invoke(HookInvocationRequest) -> HookStageResult
 - 保留 Hook 自己的 `HookInvocationRequest`，由 Python adapter 实现唯一
   `Invocation[RequestT, ResultT]`；
 - 公共方法只收一个 typed request，Hook 的 config 放进 Hook 自己的 request envelope；
-- `_HookPort` 只负责组装 request、调用公共 Invocation、校验 Hook stage result；
+- `HookPort` 只负责组装 request、调用公共 Invocation、校验 Hook stage result；
 - Rust binding 负责编码/解码和实际调用，不能把 Hook 类型反向放进 Rust，也不能把 transport
   DTO 暴露给 Hook；
 - failover 若需要“单次调用”保证，只包裹 Invocation，不把 retry 语义塞进 Invocation。
@@ -323,7 +325,7 @@ Hooks 覆盖率 100%。专项测试已证明 value/state/config/command 的 nomi
 
 1. 保持唯一的 Python `Invocation` 适配协议；真实 Rust binding 由 infra consumer 接入，
    Hooks 不复制 invocation 机制；
-2. 已在 `HookPayloadAdmission` 和 `_HookPort` 边界补齐 value/state/config/result
+2. 已在 `HookPayloadAdmission` 和 `HookPort` 边界补齐 value/state/config/result
    payload admission；
 3. 已明确 priority 由各自 `HookPriorityPlan.config` 表达，不向公共 Invocation 重复塞
    `HookPriority`；

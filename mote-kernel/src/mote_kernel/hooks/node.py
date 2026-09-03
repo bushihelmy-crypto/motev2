@@ -16,7 +16,8 @@ from mote_kernel.hooks.contract import (
     HookStageResult,
 )
 from mote_kernel.hooks.identity import HookPriority, HookSlotId, hook_definition_id
-from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
+from mote_kernel.hooks.plan import HookPlan
+from mote_kernel.hooks.port import HookPort
 from mote_kernel.invocation import Invocation
 
 ConfigT = TypeVar("ConfigT")
@@ -24,27 +25,6 @@ PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
 CommandT = TypeVar("CommandT")
-
-
-@dataclass(frozen=True, slots=True)
-class _HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
-    """Adapt one priority plan to one transport-independent invocation."""
-
-    admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
-    invocation: Invocation[
-        HookInvocationRequest[PriorityConfigT, ValueT, StateT],
-        HookStageResult[ValueT, CommandT],
-    ]
-
-    async def execute(
-        self,
-        plan: HookPriorityPlan[PriorityConfigT],
-        request: HookRequest[ValueT, StateT],
-        /,
-    ) -> HookStageResult[ValueT, CommandT]:
-        invocation_request = self.admission.admit_invocation_request(HookInvocationRequest(plan.config, request))
-        result = await self.invocation.invoke(invocation_request)
-        return self.admission.admit_stage_result(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +67,7 @@ class _PlanNode(
 @dataclass(frozen=True, slots=True)
 class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
     priority: Literal[HookPriority.P1, HookPriority.P2, HookPriority.P3]
-    port: _HookPort[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
+    port: HookPort[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
 
     async def __call__(
         self,
@@ -158,7 +138,7 @@ class HookNode(
         progress_type = cast(type[HookGraphValue], _HookProgress)
         result_type = cast(type[HookGraphValue], HookResult)
         request_input = Graph.graph_input("request", request_type)
-        port = _HookPort(payload_admission, invocation)
+        port = HookPort(payload_admission, invocation)
         plan = _PlanNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
             config_source,
             plan_loader,

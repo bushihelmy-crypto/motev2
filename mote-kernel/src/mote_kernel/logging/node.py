@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from time import perf_counter_ns
 from typing import Generic, Protocol, TypeAlias, TypeVar
 
-from mote_kernel.logging._emit import write_best_effort
+from mote_kernel.logging.emit import write_diagnostic
 from mote_kernel.logging.level import LogLevel
 from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogContractError, LogField, LogRecord, require_log_label
@@ -89,55 +90,58 @@ class _LoggedNode(Generic[InputT, OutputT]):
 
     async def __call__(self, value: InputT, /) -> OutputT:
         fields = _invocation_fields(self.config)
-        write_best_effort(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
+        await write_diagnostic(self.config.sink, LogLevel.DEBUG, f"{self.config.event}.started", fields)
         started = perf_counter_ns()
         try:
             result = await self.inner(value)
         except asyncio.CancelledError as error:
-            write_best_effort(
-                self.config.sink,
-                LogLevel.WARNING,
-                f"{self.config.event}.cancelled",
-                _merge_fields(
-                    fields,
-                    (),
-                    (
-                        LogField("outcome", "cancelled"),
-                        LogField("duration_ns", perf_counter_ns() - started),
+            with suppress(asyncio.CancelledError):
+                await write_diagnostic(
+                    self.config.sink,
+                    LogLevel.WARNING,
+                    f"{self.config.event}.cancelled",
+                    _merge_fields(
+                        fields,
+                        (),
+                        (
+                            LogField("outcome", "cancelled"),
+                            LogField("duration_ns", perf_counter_ns() - started),
+                        ),
                     ),
-                ),
-                error=error,
-            )
+                    error=error,
+                )
             raise
         except Exception as error:
-            write_best_effort(
+            with suppress(asyncio.CancelledError):
+                await write_diagnostic(
+                    self.config.sink,
+                    LogLevel.ERROR,
+                    f"{self.config.event}.failed",
+                    _merge_fields(
+                        fields,
+                        (),
+                        (
+                            LogField("outcome", "error"),
+                            LogField("duration_ns", perf_counter_ns() - started),
+                        ),
+                    ),
+                    error=error,
+                )
+            raise
+        with suppress(asyncio.CancelledError):
+            await write_diagnostic(
                 self.config.sink,
-                LogLevel.ERROR,
-                f"{self.config.event}.failed",
+                LogLevel.INFO,
+                f"{self.config.event}.finished",
                 _merge_fields(
                     fields,
                     (),
                     (
-                        LogField("outcome", "error"),
+                        LogField("outcome", "ok"),
                         LogField("duration_ns", perf_counter_ns() - started),
                     ),
                 ),
-                error=error,
             )
-            raise
-        write_best_effort(
-            self.config.sink,
-            LogLevel.INFO,
-            f"{self.config.event}.finished",
-            _merge_fields(
-                fields,
-                (),
-                (
-                    LogField("outcome", "ok"),
-                    LogField("duration_ns", perf_counter_ns() - started),
-                ),
-            ),
-        )
         return result
 
 

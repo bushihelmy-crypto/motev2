@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
+from mote_kernel.events.port import EventPort
 from mote_kernel.events.projection import project_event
 from mote_kernel.events.record import NodeSettlementEventReference
 from mote_kernel.execution import Graph
@@ -32,11 +33,13 @@ class EventingGraphCommit(Generic[GraphValueT]):
     """Wrap one atomic persistence port as an ordinary ``Graph.Commit``.
 
     The persistence owner commits the transition and optional outbox reference
-    together. Remote delivery happens after this boundary and is never invoked
-    by this decorator.
+    together.  An optional ``EventPort`` receives the already-confirmed
+    settlement reference after that transaction; it is a best-effort
+    notification and never becomes a second commit or state owner.
     """
 
     persistence: AtomicPersistenceCommit[GraphValueT]
+    event_port: EventPort | None = None
 
     async def __call__(
         self,
@@ -47,7 +50,15 @@ class EventingGraphCommit(Generic[GraphValueT]):
             transition=transition,
             event_reference=project_event(transition),
         )
-        return await self.persistence(request)
+        confirmed = await self.persistence(request)
+        if (
+            self.event_port is not None
+            and request.event_reference is not None
+            and type(confirmed) is Graph.State
+            and confirmed == transition.candidate_state
+        ):
+            await self.event_port.emit(request.event_reference)
+        return confirmed
 
 
 __all__ = ["EventingGraphCommit"]

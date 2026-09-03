@@ -21,7 +21,7 @@ CASES = (
     ),
     NegativeTypingCase(
         "logging_node_async_sink.py",
-        ("AsyncSink", "CoroutineType", 'parameter "sink"', "reportArgumentType"),
+        ("AsyncSink", 'parameter "sink"', "reportArgumentType"),
     ),
     NegativeTypingCase(
         "logging_node_non_awaitable.py",
@@ -41,7 +41,7 @@ CASES = (
     ),
     NegativeTypingCase(
         "observed_node_async_port.py",
-        ("AsyncPort", "CoroutineType", 'parameter "port"', "reportArgumentType"),
+        ("AsyncPort", 'parameter "port"', "reportArgumentType"),
     ),
     NegativeTypingCase(
         "observed_node_non_awaitable.py",
@@ -50,6 +50,10 @@ CASES = (
     NegativeTypingCase(
         "observed_node_none_inner.py",
         ('Argument of type "None"', 'parameter "inner"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "events_port_wrong_invocation.py",
+        ("_WrongInvocation", 'parameter "invocation"', "reportArgumentType"),
     ),
     NegativeTypingCase(
         "commit_none_sink.py",
@@ -217,6 +221,19 @@ def test_factory_inference_is_exact_and_contains_no_unknown() -> None:
 def test_logging_observability_positive_fixture_is_exact_and_contains_no_unknown() -> None:
     completed = subprocess.run(
         ("pyright", "tests/typing_positive/logging_observability.py"),
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout
+
+
+def test_events_port_positive_fixture_is_exact_and_contains_no_unknown() -> None:
+    completed = subprocess.run(
+        ("pyright", "tests/typing_positive/events_port.py"),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,

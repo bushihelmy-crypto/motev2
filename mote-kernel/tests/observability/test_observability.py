@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import FrozenInstanceError, dataclass, field, is_dataclass
+from dataclasses import FrozenInstanceError, dataclass, is_dataclass
 from typing import cast
 
 import pytest
 
 import mote_kernel.observability as observability_package
 from mote_kernel.execution import Graph
+from mote_kernel.invocation import BEST_EFFORT_TIMEOUT_SECONDS
 from mote_kernel.logging import LoggedNode
+from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogRecord
 from mote_kernel.observability import ObservedNode
 from mote_kernel.observability.node import NodeSpanFactory
+from mote_kernel.observability.port import ObservabilityPort
 from mote_kernel.observability.record import (
     ErrorRecord,
     Observation,
@@ -38,20 +41,53 @@ from mote_kernel.observability.span import (
 )
 
 
-@dataclass
-class RecordingPort:
-    observations: list[Observation] = field(default_factory=lambda: list[Observation]())
+@dataclass(frozen=True, slots=True)
+class _RecordingInvocation:
+    observations: list[Observation]
 
-    def record(self, observation: Observation, /) -> None:
+    async def invoke(self, observation: Observation, /) -> None:
         self.observations.append(observation)
 
 
-@dataclass(frozen=True)
-class RaisingPort:
+@dataclass(frozen=True, slots=True, init=False)
+class RecordingPort(ObservabilityPort):
+    observations: list[Observation]
+
+    def __init__(self) -> None:
+        observations: list[Observation] = []
+        object.__setattr__(self, "observations", observations)
+        object.__setattr__(self, "invocation", _RecordingInvocation(observations))
+        object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
+
+
+@dataclass(frozen=True, slots=True)
+class _RaisingInvocation:
     error: BaseException
 
-    def record(self, _observation: Observation, /) -> None:
+    async def invoke(self, _observation: Observation, /) -> None:
         raise self.error
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockingInvocation:
+    observation_type: type[Observation]
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    async def invoke(self, observation: Observation, /) -> None:
+        if type(observation) is self.observation_type:
+            self.entered.set()
+            await self.release.wait()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RaisingPort(ObservabilityPort):
+    error: BaseException
+
+    def __init__(self, error: BaseException) -> None:
+        object.__setattr__(self, "error", error)
+        object.__setattr__(self, "invocation", _RaisingInvocation(error))
+        object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
 
 
 def _context(span_id: str = "span-1", *, parent: str | None = None) -> SpanContext:
@@ -326,6 +362,47 @@ async def test_observation_port_failures_do_not_replace_inner_primary_errors() -
 
 
 @pytest.mark.asyncio
+async def test_post_outcome_observation_cancellation_preserves_node_primary_error() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    port = ObservabilityPort(
+        _BlockingInvocation(SpanFinished, entered, release),
+        timeout_seconds=1.0,
+    )
+    problem = RuntimeError("primary")
+
+    async def fail(_value: str) -> str:
+        raise problem
+
+    task = asyncio.ensure_future(ObservedNode(port, _span)(fail)("value"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    task.cancel()
+
+    with pytest.raises(RuntimeError) as raised:
+        await task
+    assert raised.value is problem
+
+
+@pytest.mark.asyncio
+async def test_post_outcome_observation_cancellation_preserves_node_result() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    port = ObservabilityPort(
+        _BlockingInvocation(SpanFinished, entered, release),
+        timeout_seconds=1.0,
+    )
+
+    async def echo(value: str) -> str:
+        return value
+
+    task = asyncio.ensure_future(ObservedNode(port, _span)(echo)("value"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    task.cancel()
+
+    assert await task == "value"
+
+
+@pytest.mark.asyncio
 async def test_observed_node_rejects_a_malformed_span_factory_before_calling_node() -> None:
     called = False
 
@@ -441,13 +518,27 @@ async def test_observed_node_composes_with_the_public_graph_facade() -> None:
 async def test_logged_observed_decorator_order_is_logged_outside_observed() -> None:
     timeline: list[str] = []
 
-    class OrderedPort:
-        def record(self, observation: Observation, /) -> None:
+    @dataclass(frozen=True, slots=True)
+    class OrderedObservationInvocation:
+        async def invoke(self, observation: Observation, /) -> None:
             timeline.append(type(observation).__name__)
 
-    class OrderedSink:
-        def write(self, record: LogRecord, /) -> None:
+    @dataclass(frozen=True, slots=True, init=False)
+    class OrderedPort(ObservabilityPort):
+        def __init__(self) -> None:
+            object.__setattr__(self, "invocation", OrderedObservationInvocation())
+            object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
+
+    @dataclass(frozen=True, slots=True)
+    class OrderedLogInvocation:
+        async def invoke(self, record: LogRecord, /) -> None:
             timeline.append(record.event)
+
+    @dataclass(frozen=True, slots=True, init=False)
+    class OrderedSink(LogSinkPort):
+        def __init__(self) -> None:
+            object.__setattr__(self, "invocation", OrderedLogInvocation())
+            object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
 
     @LoggedNode(OrderedSink())
     @ObservedNode(OrderedPort(), _span)
@@ -459,8 +550,9 @@ async def test_logged_observed_decorator_order_is_logged_outside_observed() -> N
     assert timeline == ["node.started", "SpanStarted", "inner", "SpanFinished", "node.finished"]
 
 
-def test_span_factory_and_observation_port_are_structural() -> None:
+@pytest.mark.asyncio
+async def test_span_factory_and_observation_port_are_structural() -> None:
     factory: NodeSpanFactory = _span
     port = RecordingPort()
-    port.record(SpanStarted(factory()))
+    await port.record(SpanStarted(factory()))
     assert len(port.observations) == 1

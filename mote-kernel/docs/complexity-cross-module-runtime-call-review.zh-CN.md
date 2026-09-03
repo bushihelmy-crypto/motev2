@@ -715,7 +715,7 @@ root/child coordinate 与 State identity 各自拥有不同事实：前者描述
 | # | 目标模块 | edges/sites | 判定 | 审查结论 |
 |---:|---|---:|:---:|---|
 | 1 | `execution.facade` | 4/8 | K | `Graph.graph_input`、`Graph.node_output`、`Graph.values` 是 domain graph 进入唯一 public facade 的窄构造口；HookNode 不绕过 facade 或另建 execution path。 |
-| 2 | `hooks.contract` | 7/11 | K | config snapshot、plan loader、request/result 和 contract error 由 hooks contract owner 定义；`_HookPort` 只做一次 typed invocation adapter。 |
+| 2 | `hooks.port` | 7/11 | K | `HookPort` 只做一次 typed invocation adapter；config snapshot、plan loader、request/result 和 contract error 仍由 hooks contract owner 定义。 |
 
 P1→P2→P3 的线性 topology 是 HookNode 的业务顺序，不是跨模块冗余调用；将其改成通用 hook runner 会引入第二执行语义。累计已审 **210 个 module pair：K=210，A=0，B=0**。
 
