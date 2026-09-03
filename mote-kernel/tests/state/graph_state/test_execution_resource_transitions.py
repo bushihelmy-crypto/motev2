@@ -11,14 +11,17 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphFailure,
+    GraphFrontierActivation,
     GraphNodeId,
     GraphRunId,
     GraphRunState,
+    GraphRunStatus,
     GraphStateTransitionError,
     ResourceId,
     ResourceLock,
     ResourceSnapshot,
     SettleGraphNode,
+    StartActivationCause,
     StartGraphRun,
     SucceededGraphNodeOutcome,
     reduce_graph_run,
@@ -40,7 +43,7 @@ def running(*nodes: GraphNodeId) -> GraphRunState:
             GraphRunId("run"),
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            tuple(nodes),
+            tuple(GraphFrontierActivation(node, StartActivationCause()) for node in nodes),
         ),
     )
 
@@ -106,6 +109,10 @@ def test_failure_uses_the_same_release_and_waiter_progression() -> None:
     assert failed.resources is not None
     assert failed.resources.acquisitions[0].node_id == B
     assert failed.resources.acquisitions[0].admitted
+
+    terminal = settle_success(failed, B)
+    assert terminal.status is GraphRunStatus.FAILED
+    assert terminal.execution is terminal.resources is None
 
 
 def test_release_advances_a_waiters_multi_resource_prefix() -> None:

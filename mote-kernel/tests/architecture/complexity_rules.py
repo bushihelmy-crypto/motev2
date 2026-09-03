@@ -29,6 +29,7 @@ from tests.architecture.quality_analysis import (
     ClassCohesion,
     ComplexityHotspot,
     CoroutineHandleViolation,
+    RuntimeModuleCallPair,
     TaskHandleViolation,
     ambiguous_internal_dispatches,
     call_graph_metrics,
@@ -41,6 +42,7 @@ from tests.architecture.quality_analysis import (
     module_dependency_metrics,
     orphaned_task_handles,
     production_unreferenced_definitions,
+    runtime_module_call_metrics,
     single_use_private_dataclasses,
     stateful_async_hotspots,
     test_only_private_definitions,
@@ -86,6 +88,9 @@ RATCHET_METRIC_NAMES = frozenset(
         "max_call_fan_out",
         "max_call_chain_depth",
         "max_call_chain_cognitive",
+        "cross_module_call_edges",
+        "cross_module_call_pairs",
+        "max_runtime_module_fan_out",
         "internal_import_edges",
         "import_cycle_components",
         "max_module_fan_out",
@@ -153,6 +158,9 @@ class ComplexitySnapshot:
     max_call_fan_out: int
     max_call_chain_depth: int
     max_call_chain_cognitive: int
+    cross_module_call_edges: int
+    cross_module_call_pairs: int
+    max_runtime_module_fan_out: int
     internal_import_edges: int
     import_cycle_components: int
     max_module_fan_out: int
@@ -197,6 +205,7 @@ class ComplexitySnapshot:
     unconsumed_async_calls: tuple[AsyncCallViolation, ...]
     unowned_coroutines: tuple[CoroutineHandleViolation, ...]
     orphaned_tasks: tuple[TaskHandleViolation, ...]
+    runtime_module_calls: tuple[RuntimeModuleCallPair, ...]
 
     def metric_items(self) -> tuple[tuple[str, int], ...]:
         return (
@@ -229,6 +238,9 @@ class ComplexitySnapshot:
             ("max_call_fan_out", self.max_call_fan_out),
             ("max_call_chain_depth", self.max_call_chain_depth),
             ("max_call_chain_cognitive", self.max_call_chain_cognitive),
+            ("cross_module_call_edges", self.cross_module_call_edges),
+            ("cross_module_call_pairs", self.cross_module_call_pairs),
+            ("max_runtime_module_fan_out", self.max_runtime_module_fan_out),
             ("internal_import_edges", self.internal_import_edges),
             ("import_cycle_components", self.import_cycle_components),
             ("max_module_fan_out", self.max_module_fan_out),
@@ -376,6 +388,7 @@ def complexity_snapshot(package_root: Path, test_root: Path) -> ComplexitySnapsh
     unowned_coroutines = unowned_internal_coroutine_handles(semantic)
     orphaned_tasks = orphaned_task_handles(semantic)
     graph_metrics = call_graph_metrics(semantic)
+    runtime_call_metrics = runtime_module_call_metrics(semantic)
     dependency_metrics = module_dependency_metrics(semantic)
     import_cycles = cyclic_module_dependencies(semantic)
 
@@ -433,6 +446,9 @@ def complexity_snapshot(package_root: Path, test_root: Path) -> ComplexitySnapsh
         max_call_fan_out=graph_metrics.max_fan_out,
         max_call_chain_depth=graph_metrics.max_chain_depth,
         max_call_chain_cognitive=graph_metrics.max_chain_cognitive,
+        cross_module_call_edges=runtime_call_metrics.edge_count,
+        cross_module_call_pairs=runtime_call_metrics.module_pair_count,
+        max_runtime_module_fan_out=runtime_call_metrics.max_fan_out,
         internal_import_edges=dependency_metrics.edge_count,
         import_cycle_components=dependency_metrics.cyclic_components,
         max_module_fan_out=dependency_metrics.max_fan_out,
@@ -477,6 +493,7 @@ def complexity_snapshot(package_root: Path, test_root: Path) -> ComplexitySnapsh
         unconsumed_async_calls=unconsumed_async_calls,
         unowned_coroutines=unowned_coroutines,
         orphaned_tasks=orphaned_tasks,
+        runtime_module_calls=runtime_call_metrics.pairs,
     )
 
 
@@ -631,6 +648,10 @@ def render_complexity_report(
                 "  " + " <-> ".join(symbol.render() for symbol in sorted(component))
                 for component in snapshot.recursive_components
             ),
+        ),
+        (
+            "Resolved runtime calls crossing module boundaries:",
+            (f"  {pair.render()}" for pair in snapshot.runtime_module_calls),
         ),
         (
             "Cyclic internal module dependencies:",

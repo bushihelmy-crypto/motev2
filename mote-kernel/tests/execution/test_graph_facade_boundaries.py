@@ -46,6 +46,33 @@ async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
     return Graph.failure("failed")
 
 
+def encode_empty(_values: Graph.Values[str]) -> bytes:
+    return b""
+
+
+def decode_empty(_payload: bytes) -> Graph.Values[str]:
+    return Graph.values()
+
+
+def interrupted_resume(
+    graph: Graph[str],
+    paused: Graph.AwaitingResumeResult[str],
+    node_id: str,
+    *,
+    scope: tuple[str, ...] = (),
+) -> Graph.ResumeAction[str]:
+    matches = tuple(
+        interrupt for interrupt in paused.interrupts if interrupt.scope == scope and interrupt.node_id == node_id
+    )
+    assert len(matches) == 1
+    return graph.resume_interrupted(
+        node_id,
+        matches[0].interrupt_id,
+        Graph.values(),
+        scope=scope,
+    )
+
+
 def test_builder_local_failures_leave_a_clean_retry_surface() -> None:
     graph = Graph[str]("facade.builder-local-failures")
     add_node = cast(RuntimeAddNode, graph.add_node)
@@ -146,34 +173,52 @@ async def test_shared_child_definition_freezes_once_and_recursive_composition_is
 
 @pytest.mark.asyncio
 async def test_resume_dispatch_rejects_non_tuple_noncanonical_and_unknown_scope() -> None:
+    async def interrupt(_values: Graph.Values[str]) -> Graph.InterruptOutcome:
+        return Graph.interrupt(b"question")
+
     graph = Graph[str]("facade.resume-dispatch")
-    graph.add_node("a", fail, inputs={}, outputs={})
-    graph.add_node("b", fail, inputs={}, outputs={})
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
+    graph.add_node("a", interrupt, inputs={}, outputs={})
+    graph.add_node("b", interrupt, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     run = cast(RuntimeRun, graph.run)
+    resume_a = interrupted_resume(graph, paused, "a")
+    resume_b = interrupted_resume(graph, paused, "b")
 
     with pytest.raises(Graph.SnapshotMismatchError, match="supplied as a tuple"):
         await run(
             state=paused.state,
             continuation=paused.continuation,
-            resume=cast(tuple[Graph.ResumeAction[str], ...], [graph.resume_failed("a")]),
+            resume=cast(tuple[Graph.ResumeAction[str], ...], [resume_a]),
         )
     with pytest.raises(Graph.SnapshotMismatchError, match="canonical scope/node order"):
         await run(
             state=paused.state,
             continuation=paused.continuation,
-            resume=(graph.resume_failed("b"), graph.resume_failed("a")),
+            resume=(resume_b, resume_a),
         )
     with pytest.raises(Graph.SnapshotMismatchError, match="not one current nested activation"):
         await run(
             state=paused.state,
             continuation=paused.continuation,
-            resume=(graph.resume_failed("leaf", scope=("unknown",)),),
+            resume=(
+                graph.resume_interrupted(
+                    "leaf",
+                    paused.interrupts[0].interrupt_id,
+                    Graph.values(),
+                    scope=("unknown",),
+                ),
+            ),
         )
     with pytest.raises(Graph.SnapshotMismatchError, match="resume scope must be a tuple"):
-        graph.resume_failed("a", scope=cast(tuple[str, ...], ["nested"]))
+        graph.resume_interrupted(
+            "a",
+            paused.interrupts[0].interrupt_id,
+            Graph.values(),
+            scope=cast(tuple[str, ...], ["nested"]),
+        )
 
 
 @pytest.mark.asyncio
@@ -200,7 +245,14 @@ async def test_resume_scope_requires_the_current_child_snapshot() -> None:
     with pytest.raises(Graph.SnapshotMismatchError, match="does not contain one state"):
         await parent.run(
             state=captured,
-            resume=(parent.resume_failed("leaf", scope=("child",)),),
+            resume=(
+                parent.resume_interrupted(
+                    "leaf",
+                    "missing-interrupt",
+                    Graph.values(),
+                    scope=("child",),
+                ),
+            ),
         )
 
 

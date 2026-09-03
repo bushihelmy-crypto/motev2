@@ -58,38 +58,15 @@ class ExecutionPublicationProvenance:
     execution_token: GraphExecutionToken
 
 
-@dataclass(frozen=True, slots=True)
-class SkipSubstitutionProvenance:
-    pass
-
-
-PublicationProvenance: TypeAlias = ExecutionPublicationProvenance | SkipSubstitutionProvenance
-
-
 @dataclass(frozen=True, slots=True, eq=False)
 class ConfirmedPublication(Generic[GraphValueT]):
     coordinate: PublicationAvailabilityCoordinate[GraphValueT]
     frame: NodeOutputFrame[GraphValueT] = field(compare=False, repr=False, hash=False)
     acknowledged_revision: int
-    provenance: PublicationProvenance
+    provenance: ExecutionPublicationProvenance
 
     def __hash__(self) -> Never:
         raise TypeError("scoped frame records are unhashable")
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSubstitution(Generic[GraphValueT]):
-    coordinate: PublicationAvailabilityCoordinate[GraphValueT]
-    frame: NodeOutputFrame[GraphValueT]
-    provenance: SkipSubstitutionProvenance
-
-
-@dataclass(frozen=True, slots=True)
-class AdmittedSubstitution(Generic[GraphValueT]):
-    coordinate: PublicationAvailabilityCoordinate[GraphValueT]
-    frame: NodeOutputFrame[GraphValueT]
-    provenance: SkipSubstitutionProvenance
-    expected_revision: int
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -144,26 +121,6 @@ class ScopedFrameAvailability(Protocol[GraphValueT]):
         self,
         coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT],
     ) -> bool: ...
-
-
-@dataclass(frozen=True, slots=True)
-class CandidateFrameAvailability(Generic[GraphValueT]):
-    confirmed: "ScopedFrameIndex[GraphValueT]"
-    substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
-
-    def has_graph_input(self, coordinate: GraphInputAvailabilityCoordinate[GraphValueT]) -> bool:
-        return self.confirmed.has_graph_input(coordinate)
-
-    def has_publication(self, coordinate: PublicationAvailabilityCoordinate[GraphValueT]) -> bool:
-        return self.confirmed.has_publication(coordinate) or any(
-            substitution.coordinate == coordinate for substitution in self.substitutions
-        )
-
-    def has_resume_input(self, coordinate: ResumeInputAvailabilityCoordinate[GraphValueT]) -> bool:
-        return self.confirmed.has_resume_input(coordinate)
-
-    def has_child_boundary(self, coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT]) -> bool:
-        return self.confirmed.has_child_boundary(coordinate)
 
 
 @dataclass(frozen=True, slots=True, eq=False)

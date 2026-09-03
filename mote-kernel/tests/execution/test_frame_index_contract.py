@@ -9,17 +9,21 @@ from mote_kernel.execution.graph.values import (
 from mote_kernel.execution.identity import StableActivation, root_scope_run
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
-    AdmittedSubstitution,
-    CandidateFrameAvailability,
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedChildBoundary,
+    ConfirmedPublication,
+    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
-    SkipSubstitutionProvenance,
 )
-from mote_kernel.state.graph_state import GraphNodeId, GraphRunId
+from mote_kernel.state.graph_state import (
+    GraphExecutionAttemptId,
+    GraphExecutionToken,
+    GraphNodeId,
+    GraphRunId,
+)
 
 
 def test_child_boundary_lookup_distinguishes_repeated_scoped_runs() -> None:
@@ -46,7 +50,7 @@ def test_child_boundary_lookup_distinguishes_repeated_scoped_runs() -> None:
     assert index.lookup(second_coordinate) is second
 
 
-def test_candidate_availability_delegates_non_publication_segments_and_overlays_publications() -> None:
+def test_scoped_frame_index_is_the_single_availability_source_for_all_segments() -> None:
     scope_run = root_scope_run(GraphRunId("candidate-run"))
     descriptor = FrameDescriptorIdentity("candidate.graph", 1, FrameKind.GRAPH_INPUT, 0)
     graph_input_coordinate: GraphInputAvailabilityCoordinate[str] = GraphInputAvailabilityCoordinate(
@@ -54,28 +58,28 @@ def test_candidate_availability_delegates_non_publication_segments_and_overlays_
     )
     declarations = normalize_output_declarations({"value": str})
     frame = _make_graph_input_frame(Graph.values(value="input"), declarations)
-    confirmed = ScopedFrameIndex[str]().add_graph_input(AdmittedGraphInput(graph_input_coordinate, frame))
+    index = ScopedFrameIndex[str]().add_graph_input(AdmittedGraphInput(graph_input_coordinate, frame))
     publication_coordinate: PublicationAvailabilityCoordinate[str] = PublicationAvailabilityCoordinate(
         StableActivation(scope_run, 0, GraphNodeId("source")),
         FrameDescriptorIdentity("candidate.graph", 1, FrameKind.NODE_OUTPUT, 0),
     )
-    substitution = AdmittedSubstitution(
+    publication = ConfirmedPublication(
         publication_coordinate,
-        _make_node_output_frame(Graph.values(value="replacement"), declarations),
-        SkipSubstitutionProvenance(),
+        _make_node_output_frame(Graph.values(value="published"), declarations),
         2,
+        ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("claim"))),
     )
-    availability = CandidateFrameAvailability(confirmed, (substitution,))
+    index = index.add_publication(publication)
 
-    assert availability.has_graph_input(graph_input_coordinate)
-    assert availability.has_publication(publication_coordinate)
-    assert not availability.has_resume_input(
+    assert index.has_graph_input(graph_input_coordinate)
+    assert index.has_publication(publication_coordinate)
+    assert not index.has_resume_input(
         ResumeInputAvailabilityCoordinate(
             publication_coordinate.activation,
             FrameDescriptorIdentity("candidate.graph", 1, FrameKind.NODE_INPUT, 0),
         )
     )
-    assert not availability.has_child_boundary(
+    assert not index.has_child_boundary(
         ChildBoundaryAvailabilityCoordinate(
             scope_run,
             FrameDescriptorIdentity("candidate.graph", 1, FrameKind.GRAPH_OUTPUT, 0),

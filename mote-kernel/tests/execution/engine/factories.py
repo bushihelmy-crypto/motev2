@@ -16,13 +16,18 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import NodeOutputFrame, _frame_value, _make_node_output_frame
 from mote_kernel.execution.result import TaskSuccess
 from mote_kernel.state.graph_state import (
+    ActivationReference,
+    FailedGraphNode,
     GraphAbort,
     GraphAbortReason,
+    GraphActivationCause,
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphExecutionLease,
     GraphExecutionToken,
+    GraphFailure,
     GraphFrontierNode,
     GraphFrontierState,
     GraphJoinProgress,
@@ -32,6 +37,8 @@ from mote_kernel.state.graph_state import (
     GraphRunState,
     GraphRunStatus,
     PendingGraphNode,
+    RoutedActivationCause,
+    StartActivationCause,
     UseStepRequestInput,
 )
 
@@ -85,8 +92,12 @@ def _compile(
     )
 
 
-def compiled_graph(*node_ids: str, entries: tuple[str, ...] = ("a",)) -> CompiledGraph[str]:
-    return _compile(node_ids, (), entries)
+def compiled_graph(
+    *node_ids: str,
+    entries: tuple[str, ...] = ("a",),
+    edges: tuple[Edge, ...] = (),
+) -> CompiledGraph[str]:
+    return _compile(node_ids, edges, entries)
 
 
 def topology(
@@ -119,19 +130,45 @@ def running_state(
     version: int = 1,
     join_progress: tuple[GraphJoinProgress, ...] = (),
 ) -> GraphRunState:
+    canonical_run_id = GraphRunId(run_id)
+
+    settled_activations = tuple(
+        sorted(
+            {reference for progress in join_progress for reference in progress.arrived}
+            | {
+                ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, GraphNodeId(node_id)))
+                for node_id in frontier
+                if superstep > 0
+            },
+            key=ActivationReference.canonical_key,
+        )
+    )
+
+    def cause(node_id: GraphNodeId) -> GraphActivationCause:
+        if superstep == 0:
+            return StartActivationCause()
+        return RoutedActivationCause(
+            (ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, node_id)),)
+        )
+
     return GraphRunState(
-        run_id=GraphRunId(run_id),
+        run_id=canonical_run_id,
         definition_id=GraphDefinitionId(definition_id),
         definition_version=GraphDefinitionVersion(version),
         status=GraphRunStatus.RUNNING,
         superstep=superstep,
         frontier=GraphFrontierState(
             tuple(
-                GraphFrontierNode(GraphNodeId(node_id), PendingGraphNode(UseStepRequestInput()))
+                GraphFrontierNode(
+                    GraphNodeId(node_id),
+                    PendingGraphNode(UseStepRequestInput()),
+                    cause(GraphNodeId(node_id)),
+                )
                 for node_id in sorted(frontier)
             )
         ),
         join_progress=join_progress,
+        settled_activations=settled_activations,
         revision=revision,
     )
 
@@ -149,6 +186,14 @@ def terminal_state(status: GraphRunStatus) -> GraphRunState:
     state = running_state()
     if status is GraphRunStatus.COMPLETED:
         return replace(state, status=status, frontier=GraphFrontierState(()))
+    if status is GraphRunStatus.FAILED:
+        return replace(
+            state,
+            status=status,
+            frontier=GraphFrontierState(
+                (GraphFrontierNode(GraphNodeId("a"), FailedGraphNode(GraphFailure("failed")), StartActivationCause()),)
+            ),
+        )
     if status is GraphRunStatus.ABORTED:
         return replace(state, status=status, abort=GraphAbort(GraphAbortReason("aborted")))
     return state

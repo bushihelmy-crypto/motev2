@@ -41,7 +41,8 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 
 - [可运行图示例](example/graph/README.md)通过公开 `Graph` 门面完整演示拓扑、循环、嵌套作用域、并行 run、全部恢复 action、检查点、预算、取消、部分提交交接与版本化部署；
 - [架构说明](docs/architecture.zh-CN.md)记录当前公共门面、execution/state owner 与持久化边界；
-- [Execution / State / Frontier 核心调用链](docs/execution-state-frontier-call-chain.zh-CN.md)说明当前 command、reducer、commit 与 frontier 流程。
+- [Execution / State / Frontier 核心调用链](docs/execution-state-frontier-call-chain.zh-CN.md)说明当前 command、reducer、commit 与 frontier 流程；
+- [跨模块运行时调用耦合审查](docs/complexity-cross-module-runtime-call-review.zh-CN.md)说明额外高召回指标的统计口径、人工审核方法与边界。
 
 ## 开发
 
@@ -54,7 +55,8 @@ make check
 `pre-commit install` 和 `pre-commit run --all-files` 应在 monorepo 根目录执行。
 
 仓库级 AST 门禁以多个独立探测器召回整函数、语句子树和近似重复，并分析符号/字段使用率、函数内部复杂度与
-副作用、调用链、模块依赖环和异步所有权。`make complexity` 对确定性违规执行无例外清单的零债务门禁；
+副作用、调用链、已解析的跨模块运行时调用、模块依赖环和异步所有权。跨模块运行时耦合是高召回的人工审核线索，
+不自动判定依赖错误。`make complexity` 对确定性违规执行无例外清单的零债务门禁；
 `make complexity-ratchet` 阻止每一项高召回指标增长，并要求在指标改善后立即下调上限。`make complexity-report`
 输出指标对应的全部候选。两道门禁都会由 `make check` 执行。
 

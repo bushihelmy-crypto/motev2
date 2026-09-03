@@ -23,13 +23,6 @@ from example.graph.polling_loop import PollDecision, PollRequest
 from example.graph.polling_loop import build_graph as build_polling_graph
 from example.graph.resource_customer_report import CustomerSnapshot
 from example.graph.resource_customer_report import build_graph as build_customer_report_graph
-from example.graph.retryable_payment import Order, OrderStatus
-from example.graph.retryable_payment import build_graph as build_payment_graph
-from example.graph.same_input_retry import ProviderHealth
-from example.graph.same_input_retry import build_graph as build_same_input_retry_graph
-from example.graph.skip_failed_delivery import Delivery, DeliveryStatus
-from example.graph.skip_failed_delivery import build_graph as build_delivery_graph
-from example.graph.skip_failed_route import build_graph as build_skip_route_graph
 from example.graph.versioned_deployment import build_graph as build_versioned_graph
 
 from mote_kernel.execution import Graph
@@ -180,22 +173,6 @@ async def test_nested_batch_review_resumes_multiple_scopes_in_one_call() -> None
 
 
 @pytest.mark.asyncio
-async def test_skip_failed_route_continues_without_an_output_substitution() -> None:
-    graph = build_skip_route_graph()
-    paused = await graph.run(Graph.values(text="blocked: policy"), run_id="example-skip-route")
-
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    completed = await graph.run(
-        state=paused.state,
-        continuation=paused.continuation,
-        resume=(graph.skip_failed("moderate", "operator selected manual", route="manual"),),
-    )
-
-    assert isinstance(completed, Graph.CompletedResult)
-    assert completed.outputs["result"] == "已处理：blocked: policy"
-
-
-@pytest.mark.asyncio
 async def test_fanout_terminal_projects_input_and_node_output_after_join_to_end() -> None:
     result = await build_fanout_terminal_graph().run(
         Graph.values(request="invoice-42"),
@@ -206,56 +183,6 @@ async def test_fanout_terminal_projects_input_and_node_output_after_join_to_end(
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["original_request"] == "invoice-42"
     assert result.outputs["prepared_token"] == "token:invoice-42"
-
-
-@pytest.mark.asyncio
-async def test_retryable_payment_replaces_failed_input_on_a_fresh_graph() -> None:
-    paused = await build_payment_graph().run(
-        Graph.values(order=Order("order-1", "declined", OrderStatus.NEW)),
-        run_id="example-payment",
-    )
-
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    assert paused.failures[0].node_id == "authorize"
-
-    recovered_graph = build_payment_graph()
-    completed = await recovered_graph.run(
-        state=paused.state,
-        resume=(
-            recovered_graph.resume_failed_with(
-                "authorize",
-                Graph.values(order=Order("order-1", "replacement", OrderStatus.NEW)),
-            ),
-        ),
-    )
-
-    assert isinstance(completed, Graph.CompletedResult)
-    assert completed.outputs["order"].status is OrderStatus.SHIPPED
-
-
-@pytest.mark.asyncio
-async def test_skip_failed_delivery_publishes_operator_output_with_continuation() -> None:
-    graph = build_delivery_graph()
-    original = Delivery("order-2", "偏远山区", DeliveryStatus.READY, "")
-    paused = await graph.run(Graph.values(delivery=original), run_id="example-delivery")
-
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    fallback = Delivery("order-2", "偏远山区", DeliveryStatus.MANUAL, "operator-dispatch")
-    completed = await graph.run(
-        state=paused.state,
-        continuation=paused.continuation,
-        resume=(
-            graph.skip_failed(
-                "reserve",
-                "manual courier selected",
-                output=Graph.values(delivery=fallback),
-            ),
-        ),
-    )
-
-    assert isinstance(completed, Graph.CompletedResult)
-    assert completed.outputs["delivery"].tracking_code == "operator-dispatch"
-    assert completed.outputs["delivery"].status is DeliveryStatus.SENT
 
 
 @pytest.mark.asyncio
@@ -315,28 +242,11 @@ async def test_bounded_execution_fails_closed_before_a_sufficient_budget() -> No
 
 
 @pytest.mark.asyncio
-async def test_same_input_retry_reuses_materialized_input_after_external_recovery() -> None:
-    health = ProviderHealth(False)
-    graph = build_same_input_retry_graph(health)
-    paused = await graph.run(Graph.values(token="token-ok"), run_id="example-same-input")
-
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    health.available = True
-    completed = await graph.run(
-        state=paused.state,
-        continuation=paused.continuation,
-        resume=(graph.resume_failed("authorize"),),
-    )
-
-    assert isinstance(completed, Graph.CompletedResult)
-    assert completed.outputs["result"] == "shipped:authorized:token-ok"
-
-
-@pytest.mark.asyncio
 async def test_partial_commit_example_retries_only_the_unconfirmed_scope() -> None:
     graph = build_partial_commit_graph()
-    paused = await graph.run(Graph.values(), run_id="example-partial-commit")
+    paused = await graph.run(Graph.values(left="", right=""), run_id="example-partial-commit")
     assert isinstance(paused, Graph.AwaitingResumeResult)
+    interrupt_by_scope = {interrupt.scope: interrupt for interrupt in paused.interrupts}
 
     faulty = FailOnScopeCommit(("right",))
     try:
@@ -344,8 +254,18 @@ async def test_partial_commit_example_retries_only_the_unconfirmed_scope() -> No
             state=paused.state,
             continuation=paused.continuation,
             resume=(
-                graph.skip_failed("leaf", "left", output=Graph.values(value="L"), scope=("left",)),
-                graph.skip_failed("leaf", "right", output=Graph.values(value="R"), scope=("right",)),
+                graph.resume_interrupted(
+                    "leaf",
+                    interrupt_by_scope[("left",)].interrupt_id,
+                    Graph.values(value="L"),
+                    scope=("left",),
+                ),
+                graph.resume_interrupted(
+                    "leaf",
+                    interrupt_by_scope[("right",)].interrupt_id,
+                    Graph.values(value="R"),
+                    scope=("right",),
+                ),
             ),
             commit=faulty,
         )
@@ -358,7 +278,14 @@ async def test_partial_commit_example_retries_only_the_unconfirmed_scope() -> No
     completed = await graph.run(
         state=partial.state,
         continuation=partial.continuation,
-        resume=(graph.skip_failed("leaf", "retry right", output=Graph.values(value="R"), scope=("right",)),),
+        resume=(
+            graph.resume_interrupted(
+                "leaf",
+                interrupt_by_scope[("right",)].interrupt_id,
+                Graph.values(value="R"),
+                scope=("right",),
+            ),
+        ),
     )
     assert isinstance(completed, Graph.CompletedResult)
     assert partial.failed_scope == ("right",)

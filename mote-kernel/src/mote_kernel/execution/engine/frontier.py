@@ -14,13 +14,13 @@ from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.result import (
     ActiveChild,
     CompletedChild,
+    FailedChild,
     MissingChild,
     TaskFailure,
     TaskResult,
     TaskSuccess,
-    WaitingForChildren,
 )
-from mote_kernel.state.graph_state import ParentGraphActivation
+from mote_kernel.state.graph_state import GraphActivationIdentity
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -31,14 +31,16 @@ class FrontierPreparation(Generic[GraphValueT]):
     tasks: tuple[GraphTask, ...]
     executables: tuple[ExecutableTask[GraphValueT], ...]
     nested_results: tuple[TaskResult[GraphValueT], ...]
+    missing_children: tuple[MissingChild, ...]
+    active_children: tuple[ActiveChild, ...]
 
 
 def prepare_frontier(
     graph: CompiledGraph[GraphValueT], request: StepRequest[GraphValueT]
-) -> FrontierPreparation[GraphValueT] | WaitingForChildren[GraphValueT]:
+) -> FrontierPreparation[GraphValueT]:
     tasks = plan_tasks(graph, request.state, request.limits)
     nested_tasks = tuple(task for task in tasks if task.node_id in graph.nested_graphs)
-    expected = tuple(ParentGraphActivation(task.run_id, task.superstep, task.node_id) for task in nested_tasks)
+    expected = tuple(GraphActivationIdentity(task.run_id, task.superstep, task.node_id) for task in nested_tasks)
     received = tuple(projection.parent for projection in request.child_projections)
     if received != expected:
         raise ResultCollectionError("child projections must exactly and canonically cover pending nested activations")
@@ -55,11 +57,10 @@ def prepare_frontier(
         elif isinstance(projection, CompletedChild):
             declarations = graph.transition.publications[task.node_id].declarations
             nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
+        elif isinstance(projection, FailedChild):
+            nested_results.append(TaskFailure(task, projection.failure))
         else:
             nested_results.append(TaskFailure(task, projection.reason))
-    if missing or active:
-        return WaitingForChildren(tuple(missing), tuple(active))
-
     executables = tuple(
         ExecutableTask(
             task,
@@ -73,6 +74,8 @@ def prepare_frontier(
         tasks,
         executables,
         tuple(nested_results),
+        tuple(missing),
+        tuple(active),
     )
 
 

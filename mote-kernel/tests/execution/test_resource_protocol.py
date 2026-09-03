@@ -380,7 +380,7 @@ async def test_typed_resource_failure_releases_and_admits_its_waiter() -> None:
     )
     result = await graph.run(Graph.values(value="input"))
 
-    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert isinstance(result, Graph.FailedResult)
     assert tuple(view.node_id for view in result.failures) == ("a",)
     assert calls == ["a", "b"]
 
@@ -448,7 +448,8 @@ async def test_missing_child_precedes_resource_admission() -> None:
     assert child_start < root_claim
 
 
-async def test_active_child_blocks_resource_admission() -> None:
+@pytest.mark.parametrize("max_parallel_tasks", [1, 64])
+async def test_active_child_does_not_block_resource_admission(max_parallel_tasks: int) -> None:
     child_entered = asyncio.Event()
     child_cleaned = asyncio.Event()
     resource_calls = 0
@@ -482,15 +483,21 @@ async def test_active_child_blocks_resource_admission() -> None:
     )
     graph.set_outputs({})
     commits = CommitLog()
-    running = asyncio.create_task(graph.run(Graph.values(value="input"), commit=commits))
+    running = asyncio.create_task(
+        graph.run(
+            Graph.values(value="input"),
+            commit=commits,
+            max_parallel_tasks=max_parallel_tasks,
+        )
+    )
     await child_entered.wait()
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
 
     assert child_cleaned.is_set()
-    assert resource_calls == 0
-    assert not any(
+    assert resource_calls == 1
+    assert any(
         transition.scope == () and isinstance(transition.command, ClaimGraphExecution)
         for transition in commits.transitions
     )
@@ -499,7 +506,7 @@ async def test_active_child_blocks_resource_admission() -> None:
     ) == (("nested",), ())
 
 
-async def test_resource_and_completed_nested_node_share_one_settlement_session() -> None:
+async def test_resource_sibling_settles_without_waiting_for_nested_completion() -> None:
     graph = nested_resource_graph()
     commits = CommitLog()
     result = await graph.run(Graph.values(value="input"), commit=commits)
@@ -507,8 +514,8 @@ async def test_resource_and_completed_nested_node_share_one_settlement_session()
     assert isinstance(result, Graph.CompletedResult)
     settlements = root_settlements(commits)
     assert tuple(transition.result.node_id for transition in settlements if transition.result is not None) == (
-        "nested",
         "resource",
+        "nested",
     )
     assert all(isinstance(transition.result, Graph.SuccessResult) for transition in settlements)
 
@@ -556,7 +563,7 @@ async def test_committed_resource_snapshot_rejects_each_authority_mismatch(case:
                 ),
             ),
         )
-        with pytest.raises(GraphStateTransitionError):
+        with pytest.raises(InvalidExecutionSnapshotError):
             require_snapshot_matches_graph(original, stale)
         return
 
@@ -656,23 +663,23 @@ async def test_resource_waiters_preserve_mixed_failure_and_interrupt_outcomes() 
     )
     result = await graph.run(Graph.values(value="input"))
 
-    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert isinstance(result, Graph.FailedResult)
     assert tuple(view.node_id for view in result.failures) == ("a",)
     assert tuple(view.node_id for view in result.interrupts) == ("b",)
     assert calls == ["a", "b", "c"]
 
 
-async def test_failure_overrides_survive_resource_admission_per_node() -> None:
+async def test_interrupt_inputs_survive_resource_admission_per_node() -> None:
     received: dict[str, list[str]] = {"a": [], "b": []}
 
     def operation(node_id: str) -> NodeCallable[str]:
-        async def fail_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+        async def interrupt_once(values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
             received[node_id].append(values["value"])
             if len(received[node_id]) == 1:
-                return Graph.failure(f"failed-{node_id}")
+                return Graph.interrupt(f"question-{node_id}".encode())
             return values
 
-        return fail_once
+        return interrupt_once
 
     graph = resource_graph(
         (
@@ -683,12 +690,21 @@ async def test_failure_overrides_survive_resource_admission_per_node() -> None:
     )
     first = await graph.run(Graph.values(value="initial"))
     assert isinstance(first, Graph.AwaitingResumeResult)
+    by_node = {interrupt.node_id: interrupt for interrupt in first.interrupts}
     completed = await graph.run(
         state=first.state,
         continuation=first.continuation,
         resume=(
-            graph.resume_failed_with("a", Graph.values(value="override-a")),
-            graph.resume_failed_with("b", Graph.values(value="override-b")),
+            graph.resume_interrupted(
+                "a",
+                by_node["a"].interrupt_id,
+                Graph.values(value="override-a"),
+            ),
+            graph.resume_interrupted(
+                "b",
+                by_node["b"].interrupt_id,
+                Graph.values(value="override-b"),
+            ),
         ),
     )
 

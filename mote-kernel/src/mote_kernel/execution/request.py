@@ -23,20 +23,8 @@ class StepRequest(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class UseMaterializedInput:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
 class OverrideNodeInput(Generic[GraphValueT]):
     values: _GraphValues[GraphValueT]
-
-
-@dataclass(frozen=True, slots=True)
-class ResumeFailedNodeRequest(Generic[GraphValueT]):
-    scope: tuple[GraphNodeId, ...]
-    node_id: GraphNodeId
-    input: UseMaterializedInput | OverrideNodeInput[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,20 +35,7 @@ class ResumeInterruptedNodeRequest(Generic[GraphValueT]):
     input: OverrideNodeInput[GraphValueT]
 
 
-@dataclass(frozen=True, slots=True)
-class SkipFailedNodeRequest(Generic[GraphValueT]):
-    scope: tuple[GraphNodeId, ...]
-    node_id: GraphNodeId
-    reason: str
-    route: str | None
-    output: _GraphValues[GraphValueT] | None = None
-
-
-ResumeNodeRequest: TypeAlias = (
-    ResumeFailedNodeRequest[GraphValueT]
-    | ResumeInterruptedNodeRequest[GraphValueT]
-    | SkipFailedNodeRequest[GraphValueT]
-)
+ResumeNodeRequest: TypeAlias = ResumeInterruptedNodeRequest[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)

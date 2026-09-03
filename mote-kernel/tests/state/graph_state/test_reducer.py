@@ -14,20 +14,17 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphFailure,
+    GraphFrontierActivation,
     GraphNodeId,
     GraphRunCommand,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
-    GraphSkipReason,
     GraphStateTransitionError,
-    ResumeFailedNode,
-    ResumeGraphNodes,
     SettleGraphNode,
-    SkipFailedNode,
+    StartActivationCause,
     StartGraphRun,
     SucceededGraphNodeOutcome,
-    UseStepRequestInput,
     reduce_graph_run,
 )
 
@@ -37,7 +34,12 @@ A = GraphNodeId("a")
 def start() -> GraphRunState:
     return reduce_graph_run(
         None,
-        StartGraphRun(GraphRunId("run"), GraphDefinitionId("graph"), GraphDefinitionVersion(1), (A,)),
+        StartGraphRun(
+            GraphRunId("run"),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (GraphFrontierActivation(A, StartActivationCause()),),
+        ),
     )
 
 
@@ -50,7 +52,7 @@ def test_start_is_the_only_command_allowed_without_existing_state() -> None:
                 GraphRunId("other"),
                 GraphDefinitionId("graph"),
                 GraphDefinitionVersion(1),
-                (A,),
+                (GraphFrontierActivation(A, StartActivationCause()),),
             ),
         )
     with pytest.raises(GraphStateTransitionError, match="started"):
@@ -85,7 +87,7 @@ def test_single_node_settlement_dispatches_success_and_failure() -> None:
         claimed,
         SettleGraphNode(1, claimed.execution.token, FailedGraphNodeOutcome(A, GraphFailure("failed"))),
     )
-    assert failed.status is GraphRunStatus.RUNNING
+    assert failed.status is GraphRunStatus.FAILED
     assert failed.revision == 2
 
 
@@ -105,36 +107,15 @@ def test_abort_rejects_an_active_execution_without_changing_it() -> None:
     assert claimed.execution is not None
 
 
-def test_resume_changes_only_selected_failure_and_is_not_a_resolution() -> None:
+def test_terminal_failure_cannot_be_overwritten_by_abort() -> None:
     claimed = reduce_graph_run(start(), ClaimGraphExecution(0, GraphExecutionAttemptId("a"), None))
     assert claimed.execution is not None
     failed = reduce_graph_run(
         claimed,
         SettleGraphNode(1, claimed.execution.token, FailedGraphNodeOutcome(A, GraphFailure("failed"))),
     )
-    resumed = reduce_graph_run(
-        failed,
-        ResumeGraphNodes(failed.revision, (ResumeFailedNode(A, UseStepRequestInput()),)),
-    )
-    assert resumed.frontier.nodes[0].settlement.__class__.__name__ == "PendingGraphNode"
-
-
-def test_skip_then_resolution_requires_two_revisions() -> None:
-    claimed = reduce_graph_run(start(), ClaimGraphExecution(0, GraphExecutionAttemptId("a"), None))
-    assert claimed.execution is not None
-    failed = reduce_graph_run(
-        claimed,
-        SettleGraphNode(1, claimed.execution.token, FailedGraphNodeOutcome(A, GraphFailure("failed"))),
-    )
-    skipped = reduce_graph_run(
-        failed,
-        ResumeGraphNodes(
-            failed.revision,
-            (SkipFailedNode(A, GraphSkipReason("operator"), ContinueGraphRouting()),),
-        ),
-    )
-    assert skipped.revision == failed.revision + 1
-    assert skipped.status is GraphRunStatus.RUNNING
+    with pytest.raises(GraphStateTransitionError, match="running graph"):
+        reduce_graph_run(failed, AbortGraphRun(failed.revision, GraphAbortReason("late cancellation")))
 
 
 def test_unknown_runtime_command_fails_closed() -> None:

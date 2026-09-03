@@ -1,9 +1,14 @@
+# pyright: reportPrivateUsage=false
+
 from dataclasses import FrozenInstanceError, replace
 from typing import cast
 
 import pytest
 
+import mote_kernel.state.graph_state.execution_transitions as transitions
+from mote_kernel.execution.graph.constants import END
 from mote_kernel.state.graph_state import (
+    ActivationReference,
     AdvanceGraphFrontier,
     ClaimGraphExecution,
     CompleteGraphFrontier,
@@ -11,12 +16,14 @@ from mote_kernel.state.graph_state import (
     FailedGraphNode,
     FailedGraphNodeOutcome,
     FenceGraphExecution,
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphFailure,
+    GraphFrontierActivation,
     GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
@@ -27,6 +34,7 @@ from mote_kernel.state.graph_state import (
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
+    GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -34,13 +42,15 @@ from mote_kernel.state.graph_state import (
     InterruptedGraphNode,
     InterruptedGraphNodeOutcome,
     OverrideGraphNodeInput,
-    ParentGraphActivation,
     PendingGraphNode,
     ResourceAcquisition,
     ResourceId,
     ResourceLock,
     ResourceSnapshot,
+    RoutedActivationCause,
+    SelectGraphRoute,
     SettleGraphNode,
+    StartActivationCause,
     StartGraphRun,
     SucceededGraphNode,
     SucceededGraphNodeOutcome,
@@ -64,7 +74,7 @@ def running(*nodes: GraphNodeId, codec: bool = True) -> GraphRunState:
             GraphRunId("run"),
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            tuple(nodes),
+            tuple(GraphFrontierActivation(node, StartActivationCause()) for node in nodes),
             resume_input_codec=CODEC if codec else None,
         ),
     )
@@ -93,8 +103,8 @@ def test_start_is_canonical_and_immutable() -> None:
     assert state.revision == state.execution_sequence == 0
     assert state.frontier == GraphFrontierState(
         (
-            GraphFrontierNode(A, PendingGraphNode(UseStepRequestInput())),
-            GraphFrontierNode(B, PendingGraphNode(UseStepRequestInput())),
+            GraphFrontierNode(A, PendingGraphNode(UseStepRequestInput()), StartActivationCause()),
+            GraphFrontierNode(B, PendingGraphNode(UseStepRequestInput()), StartActivationCause()),
         )
     )
     with pytest.raises(FrozenInstanceError):
@@ -111,28 +121,299 @@ def test_start_initializes_every_durable_field_and_default_binding() -> None:
     assert state.resources is state.execution is state.abort is state.parent is None
 
 
+def test_start_installs_the_explicit_state_owned_activation_cause() -> None:
+    command = StartGraphRun(
+        GraphRunId("run"),
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        (GraphFrontierActivation(A, StartActivationCause()),),
+    )
+
+    state = reduce_graph_run(None, command)
+
+    assert state.frontier.nodes[0].activation == command.activations[0]
+
+
+def test_start_rejects_a_routed_activation_cause() -> None:
+    command = StartGraphRun(
+        GraphRunId("run"),
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        (_routed_activation(),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="initial activations must use the START cause"):
+        reduce_graph_run(None, command)
+
+
+def _routed_activation(
+    node_id: GraphNodeId = A,
+    *,
+    superstep: int = 0,
+    route: str = "continue",
+    source_node_id: GraphNodeId | None = None,
+) -> GraphFrontierActivation:
+    reference = ActivationReference(
+        GraphActivationIdentity(GraphRunId("run"), superstep, source_node_id or node_id),
+        GraphRouteId(route),
+    )
+    return GraphFrontierActivation(node_id, RoutedActivationCause((reference,)))
+
+
+def _continue_activation(
+    node_id: GraphNodeId,
+    *,
+    source_node_id: GraphNodeId = A,
+    superstep: int = 0,
+) -> GraphFrontierActivation:
+    return GraphFrontierActivation(
+        node_id,
+        RoutedActivationCause(
+            (
+                ActivationReference(
+                    GraphActivationIdentity(GraphRunId("run"), superstep, source_node_id),
+                ),
+            )
+        ),
+    )
+
+
+def test_advance_preserves_and_validates_the_successful_predecessor_cause() -> None:
+    settled = settle(
+        claim(running(A)),
+        SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),
+    )
+    activation = _routed_activation()
+
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(settled.revision, (activation,), ()),
+    )
+
+    assert advanced.frontier.nodes[0].activation == activation
+
+
+def test_each_feedback_round_persists_only_its_immediate_predecessor_cause() -> None:
+    first_settlement = settle(
+        claim(running(A)),
+        SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),
+    )
+    first_activation = _routed_activation(superstep=0)
+    first_repeat = reduce_graph_run(
+        first_settlement,
+        AdvanceGraphFrontier(first_settlement.revision, (first_activation,), ()),
+    )
+    second_settlement = settle(
+        claim(first_repeat, attempt="second"),
+        SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),
+    )
+    second_activation = _routed_activation(superstep=1)
+
+    second_repeat = reduce_graph_run(
+        second_settlement,
+        AdvanceGraphFrontier(second_settlement.revision, (second_activation,), ()),
+    )
+
+    assert first_repeat.frontier.nodes[0].activation == first_activation
+    assert second_repeat.frontier.nodes[0].activation == second_activation
+    assert isinstance(first_repeat.frontier.nodes[0].cause, RoutedActivationCause)
+    assert isinstance(second_repeat.frontier.nodes[0].cause, RoutedActivationCause)
+    assert first_repeat.frontier.nodes[0].cause.references[0].activation == GraphActivationIdentity(
+        GraphRunId("run"), 0, A
+    )
+    assert second_repeat.frontier.nodes[0].cause.references[0].activation == GraphActivationIdentity(
+        GraphRunId("run"), 1, A
+    )
+
+
+@pytest.mark.parametrize(
+    "activation, match",
+    [
+        (_routed_activation(source_node_id=B), "not a settled success"),
+        (_routed_activation(route="other"), "route does not match"),
+        (_routed_activation(superstep=1), "wrong frontier"),
+    ],
+)
+def test_advance_rejects_a_forged_predecessor_cause(
+    activation: GraphFrontierActivation,
+    match: str,
+) -> None:
+    settled = settle(
+        claim(running(A)),
+        SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match=match):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (activation,), ()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("activation", "match"),
+    [
+        (
+            GraphFrontierActivation(
+                A,
+                RoutedActivationCause(
+                    (
+                        ActivationReference(
+                            GraphActivationIdentity(GraphRunId("other"), 0, A),
+                            GraphRouteId("continue"),
+                        ),
+                    )
+                ),
+            ),
+            "wrong frontier",
+        ),
+    ],
+)
+def test_advance_rejects_a_foreign_run_activation(
+    activation: GraphFrontierActivation,
+    match: str,
+) -> None:
+    settled = settle(
+        claim(running(A)),
+        SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match=match):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (activation,), ()),
+        )
+
+
+def test_advance_rejects_a_frontier_that_contains_a_failed_source() -> None:
+    leased = claim(running(A))
+    failed = settle(leased, FailedGraphNodeOutcome(A, GraphFailure("failed")))
+    activation = _routed_activation()
+
+    with pytest.raises(GraphStateTransitionError, match="running graph"):
+        # A failed source makes the run terminal.  The reducer must reject the
+        # advance before it can manufacture a cause.
+        reduce_graph_run(
+            failed,
+            AdvanceGraphFrontier(failed.revision, (activation,), ()),
+        )
+
+
+def test_advance_rejects_a_start_cause_after_the_initial_frontier() -> None:
+    settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+
+    with pytest.raises(GraphStateTransitionError, match="must carry routed causes"):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(
+                settled.revision,
+                (GraphFrontierActivation(B, StartActivationCause()),),
+                (),
+            ),
+        )
+
+
+def test_advance_requires_one_current_source_alongside_historical_causes() -> None:
+    first = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    repeated = reduce_graph_run(
+        first,
+        AdvanceGraphFrontier(first.revision, (_continue_activation(A),), ()),
+    )
+    settled = settle(claim(repeated, attempt="second"), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    historical_only = GraphFrontierActivation(
+        B,
+        RoutedActivationCause((ActivationReference(GraphActivationIdentity(settled.run_id, 0, A)),)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="requires a current settled source"):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (historical_only,), ()),
+        )
+
+
+def test_advance_requires_historical_causes_to_complete_one_persisted_join() -> None:
+    first = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    repeated = reduce_graph_run(
+        first,
+        AdvanceGraphFrontier(first.revision, (_continue_activation(A),), ()),
+    )
+    settled = settle(claim(repeated, attempt="second"), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause(
+            (
+                ActivationReference(GraphActivationIdentity(settled.run_id, 0, B)),
+                ActivationReference(GraphActivationIdentity(settled.run_id, 1, A)),
+            )
+        ),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="complete one pending join"):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (activation,), ()),
+        )
+
+
 @pytest.mark.parametrize(
     "command",
     [
-        StartGraphRun(GraphRunId(""), GraphDefinitionId("graph"), GraphDefinitionVersion(1), (A,)),
-        StartGraphRun(GraphRunId(" run"), GraphDefinitionId("graph"), GraphDefinitionVersion(1), (A,)),
-        StartGraphRun(GraphRunId("run"), GraphDefinitionId(""), GraphDefinitionVersion(1), (A,)),
-        StartGraphRun(GraphRunId("run"), GraphDefinitionId("graph"), GraphDefinitionVersion(0), (A,)),
+        StartGraphRun(
+            GraphRunId(""),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (GraphFrontierActivation(A, StartActivationCause()),),
+        ),
+        StartGraphRun(
+            GraphRunId(" run"),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (GraphFrontierActivation(A, StartActivationCause()),),
+        ),
+        StartGraphRun(
+            GraphRunId("run"),
+            GraphDefinitionId(""),
+            GraphDefinitionVersion(1),
+            (GraphFrontierActivation(A, StartActivationCause()),),
+        ),
+        StartGraphRun(
+            GraphRunId("run"),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(0),
+            (GraphFrontierActivation(A, StartActivationCause()),),
+        ),
         StartGraphRun(GraphRunId("run"), GraphDefinitionId("graph"), GraphDefinitionVersion(1), ()),
-        StartGraphRun(GraphRunId("run"), GraphDefinitionId("graph"), GraphDefinitionVersion(1), (B, A)),
-        StartGraphRun(GraphRunId("run"), GraphDefinitionId("graph"), GraphDefinitionVersion(1), (A, A)),
         StartGraphRun(
             GraphRunId("run"),
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            (A,),
+            (
+                GraphFrontierActivation(B, StartActivationCause()),
+                GraphFrontierActivation(A, StartActivationCause()),
+            ),
+        ),
+        StartGraphRun(
+            GraphRunId("run"),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (
+                GraphFrontierActivation(A, StartActivationCause()),
+                GraphFrontierActivation(A, StartActivationCause()),
+            ),
+        ),
+        StartGraphRun(
+            GraphRunId("run"),
+            GraphDefinitionId("graph"),
+            GraphDefinitionVersion(1),
+            (GraphFrontierActivation(A, StartActivationCause()),),
             resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId(""), 1),
         ),
         StartGraphRun(
             GraphRunId("run"),
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
-            (A,),
+            (GraphFrontierActivation(A, StartActivationCause()),),
             resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("input"), 0),
         ),
     ],
@@ -157,7 +438,7 @@ def test_claim_rejects_invalid_lifecycle_and_attempt() -> None:
     with pytest.raises(GraphStateTransitionError, match="quiescent"):
         claim(active)
     failed = settle(active, FailedGraphNodeOutcome(A, GraphFailure("failed")))
-    with pytest.raises(GraphStateTransitionError, match="executable"):
+    with pytest.raises(GraphStateTransitionError, match="quiescent running"):
         claim(failed)
 
 
@@ -181,11 +462,32 @@ def test_settle_one_node_keeps_sibling_pending_and_token() -> None:
     assert frontier_status(settled.frontier).name == "EXECUTABLE"
 
 
+def test_failed_node_keeps_the_same_claim_until_every_sibling_settles() -> None:
+    leased = claim(running(A, B))
+    assert leased.execution is not None
+    token = leased.execution.token
+
+    partially_failed = settle(leased, FailedGraphNodeOutcome(A, GraphFailure("failed")))
+
+    assert partially_failed.status is GraphRunStatus.RUNNING
+    assert isinstance(partially_failed.frontier.nodes[0].settlement, FailedGraphNode)
+    assert isinstance(partially_failed.frontier.nodes[1].settlement, PendingGraphNode)
+    assert partially_failed.execution == GraphExecutionLease(token)
+    assert frontier_status(partially_failed.frontier).name == "EXECUTABLE"
+
+    terminal = settle(partially_failed, SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    assert terminal.status is GraphRunStatus.FAILED
+    assert terminal.execution is terminal.resources is None
+    assert frontier_status(terminal.frontier).name == "FAILED"
+
+
 def test_each_typed_outcome_uses_the_same_single_node_transition() -> None:
     success = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
     assert frontier_status(success.frontier).name == "SETTLED"
     failure = settle(claim(running(A)), FailedGraphNodeOutcome(A, GraphFailure("failed")))
     assert isinstance(failure.frontier.nodes[0].settlement, FailedGraphNode)
+    assert failure.status is GraphRunStatus.FAILED
+    assert frontier_status(failure.frontier).name == "FAILED"
     interrupted = settle(
         claim(running(A)),
         InterruptedGraphNodeOutcome(
@@ -215,6 +517,28 @@ def test_interrupt_identity_and_codec_are_checked_at_settlement() -> None:
         )
 
 
+def test_failure_has_terminal_priority_after_an_interrupted_sibling_settles() -> None:
+    leased = claim(running(A, B))
+    assert leased.execution is not None
+    partially_failed = settle(leased, FailedGraphNodeOutcome(A, GraphFailure("failed")))
+    identity = GraphNodeInterruptIdentity(
+        partially_failed.run_id,
+        partially_failed.superstep,
+        B,
+        leased.execution.token.generation,
+    )
+
+    terminal = settle(
+        partially_failed,
+        InterruptedGraphNodeOutcome(B, identity, GraphInterruptPayload(b"question")),
+    )
+
+    assert terminal.status is GraphRunStatus.FAILED
+    assert isinstance(terminal.frontier.nodes[0].settlement, FailedGraphNode)
+    assert isinstance(terminal.frontier.nodes[1].settlement, InterruptedGraphNode)
+    assert terminal.execution is terminal.resources is None
+
+
 def test_last_settlement_only_creates_a_stable_settled_revision() -> None:
     leased = claim(running(A))
     settled = settle(leased, SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
@@ -228,25 +552,186 @@ def test_last_settlement_only_creates_a_stable_settled_revision() -> None:
 
 def test_advance_is_a_standalone_revision_and_replaces_the_frontier() -> None:
     settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
-    progress = GraphJoinProgress((A, B), C, frozenset({A}))
+    reference = ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, A))
+    progress = GraphJoinProgress((A, B), C, (reference,))
+    activation = _continue_activation(B)
     advanced = reduce_graph_run(
         settled,
-        AdvanceGraphFrontier(settled.revision, (B,), (progress,)),
+        AdvanceGraphFrontier(settled.revision, (activation,), (progress,)),
     )
     assert advanced.superstep == 1
-    assert advanced.frontier == GraphFrontierState((GraphFrontierNode(B, PendingGraphNode(UseStepRequestInput())),))
+    assert advanced.frontier == GraphFrontierState(
+        (GraphFrontierNode(B, PendingGraphNode(UseStepRequestInput()), activation.cause),)
+    )
     assert advanced.join_progress == (progress,)
+
+
+def _partial_join_state() -> tuple[GraphRunState, GraphJoinProgress]:
+    settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    reference = ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, A))
+    progress = GraphJoinProgress((A, B), C, (reference,))
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(settled.revision, (_continue_activation(B),), (progress,)),
+    )
+    return advanced, progress
+
+
+def test_advance_preserves_unrelated_partial_join_progress() -> None:
+    partial, progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause((ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),)),
+    )
+
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(settled.revision, (activation,), (progress,)),
+    )
+
+    assert advanced.join_progress == (progress,)
+
+
+def test_advance_rejects_dropping_unrelated_partial_join_progress() -> None:
+    partial, _progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause((ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="cannot be discarded"):
+        reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, (activation,), ()))
+
+
+def test_advance_rejects_injecting_a_historical_join_arrival() -> None:
+    settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    forged = ActivationReference(GraphActivationIdentity(settled.run_id, 0, B))
+    activation = _continue_activation(C)
+
+    with pytest.raises(GraphStateTransitionError, match="current settled successes"):
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(
+                settled.revision,
+                (activation,),
+                (GraphJoinProgress((A, B), C, (forged,)),),
+            ),
+        )
+
+
+def test_advance_rejects_replacing_a_historical_join_arrival() -> None:
+    partial, progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    replacement = GraphJoinProgress(
+        progress.sources,
+        progress.target,
+        (ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),),
+    )
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause((ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="remove or replace"):
+        reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, (activation,), (replacement,)))
+
+
+def test_advance_consumes_partial_join_progress_only_with_the_complete_join_activation() -> None:
+    partial, progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause(
+            (
+                progress.arrived[0],
+                ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),
+            )
+        ),
+    )
+
+    advanced = reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, (activation,), ()))
+
+    assert advanced.join_progress == ()
+    assert advanced.frontier.nodes[0].activation == activation
+
+
+def test_advance_rejects_retaining_a_join_progress_record_after_consumption() -> None:
+    partial, progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause(
+            (
+                progress.arrived[0],
+                ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B)),
+            )
+        ),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="cannot be retained"):
+        reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, (activation,), (progress,)))
 
 
 def test_complete_rejects_discarding_unresolved_join_progress_atomically() -> None:
     settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
-    invalid = replace(
+    reference = ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, A))
+    progressed = reduce_graph_run(
         settled,
-        join_progress=(GraphJoinProgress((A, B), C, frozenset({A})),),
+        AdvanceGraphFrontier(
+            settled.revision,
+            (_continue_activation(B),),
+            (GraphJoinProgress((A, B), C, (reference,)),),
+        ),
     )
+    invalid = settle(claim(progressed), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
     with pytest.raises(GraphStateTransitionError, match="unresolved join"):
         reduce_graph_run(invalid, CompleteGraphFrontier(invalid.revision))
     assert invalid.frontier.nodes
+
+
+def _partial_terminal_join_state() -> tuple[GraphRunState, GraphJoinProgress]:
+    settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    reference = ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, A))
+    progress = GraphJoinProgress((A, B), GraphNodeId(END), (reference,))
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(settled.revision, (_continue_activation(B),), (progress,)),
+    )
+    return advanced, progress
+
+
+def test_complete_consumes_a_terminal_join_progress_with_an_explicit_proof() -> None:
+    partial, progress = _partial_terminal_join_state()
+    settled = settle(claim(partial, attempt="terminal-join"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+
+    completed = reduce_graph_run(
+        settled,
+        CompleteGraphFrontier(settled.revision, ((progress.sources, progress.target),)),
+    )
+
+    assert completed.status is GraphRunStatus.COMPLETED
+    assert completed.join_progress == ()
+
+
+def test_advance_consumes_a_terminal_join_progress_before_an_unrelated_successor() -> None:
+    partial, progress = _partial_terminal_join_state()
+    settled = settle(claim(partial, attempt="terminal-join"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    successor = _continue_activation(C, source_node_id=B, superstep=settled.superstep)
+
+    advanced = reduce_graph_run(
+        settled,
+        AdvanceGraphFrontier(
+            settled.revision,
+            (successor,),
+            (),
+            ((progress.sources, progress.target),),
+        ),
+    )
+
+    assert advanced.join_progress == ()
+    assert advanced.frontier.nodes[0].activation == successor
 
 
 def test_fence_preserves_partial_settlements_and_pending_input() -> None:
@@ -269,6 +754,7 @@ def test_fence_preserves_override_and_execution_sequence() -> None:
                 GraphFrontierNode(
                     A,
                     PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"retry"))),
+                    StartActivationCause(),
                 ),
             )
         ),
@@ -347,12 +833,12 @@ def test_node_settlement_order_preserves_every_outcome_without_batch_coverage(
 
 
 def test_start_preserves_parent_and_rejects_invalid_parent_identity() -> None:
-    parent = ParentGraphActivation(GraphRunId("parent"), 2, GraphNodeId("nested"))
+    parent = GraphActivationIdentity(GraphRunId("parent"), 2, GraphNodeId("nested"))
     command = StartGraphRun(
         child_graph_run_id(parent.run_id, parent.superstep, parent.node_id),
         GraphDefinitionId("graph"),
         GraphDefinitionVersion(1),
-        (A,),
+        (GraphFrontierActivation(A, StartActivationCause()),),
         parent=parent,
         resume_input_codec=CODEC,
     )
@@ -372,12 +858,21 @@ def test_failure_settlement_rejects_unstable_reason(reason: str) -> None:
         settle(leased, FailedGraphNodeOutcome(A, GraphFailure(reason)))
 
 
-@pytest.mark.parametrize("node_ids", [(), (B, A), (B, B)])
-def test_advance_rejects_each_noncanonical_next_frontier(node_ids: tuple[GraphNodeId, ...]) -> None:
+@pytest.mark.parametrize(
+    "activations",
+    [
+        (),
+        (_continue_activation(B), _continue_activation(A)),
+        (_continue_activation(B), _continue_activation(B)),
+    ],
+)
+def test_advance_rejects_each_noncanonical_next_frontier(
+    activations: tuple[GraphFrontierActivation, ...],
+) -> None:
     settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
 
-    with pytest.raises(GraphStateTransitionError, match="non-empty and canonical"):
-        reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, node_ids, ()))
+    with pytest.raises(GraphStateTransitionError, match=r"malformed|canonical"):
+        reduce_graph_run(settled, AdvanceGraphFrontier(settled.revision, activations, ()))
 
 
 def test_claim_rejects_corrupt_resource_snapshot_without_mutating_state() -> None:
@@ -395,16 +890,19 @@ def test_claim_rejects_corrupt_resource_snapshot_without_mutating_state() -> Non
 def test_resolution_and_lifecycle_guards_fail_closed() -> None:
     from mote_kernel.state.graph_state.execution_transitions import (
         advance_graph_frontier,
+        claim_graph_execution,
         complete_graph_frontier,
         fence_graph_execution,
         settle_graph_node,
     )
 
     settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    with pytest.raises(GraphStateTransitionError, match="executable frontier"):
+        claim_graph_execution(settled, ClaimGraphExecution(settled.revision, ATTEMPT, None))
     with pytest.raises(GraphStateTransitionError, match="running graph"):
         complete_graph_frontier(replace(settled, status=GraphRunStatus.COMPLETED), CompleteGraphFrontier(0))
     with pytest.raises(GraphStateTransitionError, match="settled frontier"):
-        advance_graph_frontier(running(A), AdvanceGraphFrontier(0, (B,), ()))
+        advance_graph_frontier(running(A), AdvanceGraphFrontier(0, (_continue_activation(B),), ()))
     active = claim(running(A))
     assert active.execution is not None
     with pytest.raises(GraphStateTransitionError, match="quiescent"):
@@ -413,7 +911,14 @@ def test_resolution_and_lifecycle_guards_fail_closed() -> None:
             CompleteGraphFrontier(settled.revision),
         )
     with pytest.raises(GraphStateTransitionError, match="canonical"):
-        advance_graph_frontier(settled, AdvanceGraphFrontier(settled.revision, (B, B), ()))
+        advance_graph_frontier(
+            settled,
+            AdvanceGraphFrontier(
+                settled.revision,
+                (_continue_activation(B), _continue_activation(B)),
+                (),
+            ),
+        )
     with pytest.raises(GraphStateTransitionError, match="running graph execution"):
         settle_graph_node(
             replace(settled, status=GraphRunStatus.COMPLETED),
@@ -459,6 +964,174 @@ def test_claim_guard_rejects_a_corrupt_empty_pending_frontier(monkeypatch: pytes
             SettleGraphNode(
                 settled.revision,
                 partial.execution.token,
+                SucceededGraphNodeOutcome(A, ContinueGraphRouting()),
+            ),
+        )
+
+
+def _forged_unhashable_reference() -> ActivationReference:
+    reference = object.__new__(ActivationReference)
+    object.__setattr__(reference, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+    object.__setattr__(reference, "route", cast(GraphRouteId, []))
+    return reference
+
+
+def _arrival(node_id: GraphNodeId, superstep: int = 0) -> ActivationReference:
+    return ActivationReference(GraphActivationIdentity(GraphRunId("run"), superstep, node_id))
+
+
+def test_next_activation_rejects_duplicate_source_occurrences() -> None:
+    settled = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    cause = object.__new__(RoutedActivationCause)
+    object.__setattr__(
+        cause,
+        "references",
+        (
+            ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, A)),
+            ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, A), GraphRouteId("other")),
+        ),
+    )
+    activation = GraphFrontierActivation(B, cause)
+
+    with pytest.raises(GraphStateTransitionError, match="repeat one source"):
+        transitions._validate_next_activations(settled, (activation,))
+
+
+def test_join_progress_index_rejects_each_malformed_record_shape() -> None:
+    with pytest.raises(GraphStateTransitionError, match="must be a tuple"):
+        transitions._index_join_progress(cast(tuple[GraphJoinProgress, ...], []), "state")
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        transitions._index_join_progress(cast(tuple[GraphJoinProgress, ...], (object(),)), "state")
+    malformed_key = GraphJoinProgress(
+        (cast(GraphNodeId, []),),
+        C,
+        (),
+    )
+    with pytest.raises(GraphStateTransitionError, match="unhashable key"):
+        transitions._index_join_progress((malformed_key,), "state")
+    valid = GraphJoinProgress((A, B), C, (_arrival(A),))
+    with pytest.raises(GraphStateTransitionError, match="repeats one join"):
+        transitions._index_join_progress((valid, valid), "state")
+
+
+def test_current_success_reference_scan_ignores_non_successful_nodes() -> None:
+    assert transitions._current_successful_references(running(A)) == frozenset()
+
+
+def test_join_progress_delta_rejects_overlap_unhashable_values_and_noncurrent_additions() -> None:
+    partial, progress = _partial_join_state()
+    settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
+    key = (progress.sources, progress.target)
+    with pytest.raises(GraphStateTransitionError, match="more than once"):
+        transitions._validate_join_progress_delta(settled, (), frozenset({key}), (key,))
+
+    settled_a = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    malformed = GraphJoinProgress((A, B), C, (_forged_unhashable_reference(),))
+    with pytest.raises(GraphStateTransitionError, match="unhashable arrivals"):
+        transitions._validate_join_progress_delta(settled_a, (malformed,), frozenset(), ())
+
+    prior_bad = replace(settled_a, join_progress=(malformed,))
+    valid = GraphJoinProgress((A, B), C, (_arrival(A),))
+    with pytest.raises(GraphStateTransitionError, match="state join progress contains unhashable arrivals"):
+        transitions._validate_join_progress_delta(prior_bad, (valid,), frozenset(), ())
+
+    partial_again, prior = _partial_join_state()
+    settled_b = settle(
+        claim(partial_again, attempt="join-source-2"),
+        SucceededGraphNodeOutcome(B, ContinueGraphRouting()),
+    )
+    extra = ActivationReference(GraphActivationIdentity(settled_b.run_id, 0, C))
+    changed = GraphJoinProgress(prior.sources, prior.target, (prior.arrived[0], extra))
+    with pytest.raises(GraphStateTransitionError, match="current settled successes"):
+        transitions._validate_join_progress_delta(settled_b, (changed,), frozenset(), ())
+
+
+def test_join_consumption_rejects_malformed_missing_incomplete_duplicate_and_unsorted_keys() -> None:
+    state = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    key = ((A, B), C)
+    with pytest.raises(GraphStateTransitionError, match="must be a tuple"):
+        transitions._validate_join_consumption(
+            state,
+            cast(tuple[tuple[tuple[GraphNodeId, ...], GraphNodeId], ...], []),
+            frozenset(),
+        )
+    with pytest.raises(GraphStateTransitionError, match="key is malformed"):
+        transitions._validate_join_consumption(
+            state,
+            (cast(tuple[tuple[GraphNodeId, ...], GraphNodeId], ("bad",)),),
+            frozenset(),
+        )
+    with pytest.raises(GraphStateTransitionError, match="does not exist"):
+        transitions._validate_join_consumption(state, (key,), frozenset())
+
+    progress = GraphJoinProgress((A, B), C, (_arrival(A),))
+    complete = replace(state, join_progress=(progress,))
+    with pytest.raises(GraphStateTransitionError, match="not complete"):
+        transitions._validate_join_consumption(complete, (key,), frozenset())
+
+    complete_from_other_source = replace(
+        settle(claim(running(B)), SucceededGraphNodeOutcome(B, ContinueGraphRouting())),
+        join_progress=(progress,),
+    )
+    with pytest.raises(GraphStateTransitionError, match="canonical and distinct"):
+        transitions._validate_join_consumption(
+            complete_from_other_source,
+            (key, key),
+            transitions._current_successful_references(complete_from_other_source),
+        )
+
+    duplicate_source_state = settle(
+        claim(
+            reduce_graph_run(
+                state,
+                AdvanceGraphFrontier(state.revision, (_continue_activation(A),), ()),
+            ),
+            attempt="repeat",
+        ),
+        SucceededGraphNodeOutcome(A, ContinueGraphRouting()),
+    )
+    duplicate_source_progress = replace(
+        duplicate_source_state,
+        join_progress=(GraphJoinProgress((A, B), C, (_arrival(A),)),),
+    )
+    with pytest.raises(GraphStateTransitionError, match="repeats one source"):
+        transitions._validate_join_consumption(
+            duplicate_source_progress,
+            (key,),
+            transitions._current_successful_references(duplicate_source_progress),
+        )
+
+    first_key = ((A, B), C)
+    second_key = ((B, C), GraphNodeId("d"))
+    both = replace(
+        settle(claim(running(B, GraphNodeId("d"))), SucceededGraphNodeOutcome(B, ContinueGraphRouting())),
+        join_progress=(
+            GraphJoinProgress((A, B), C, (_arrival(A),)),
+            GraphJoinProgress((B, C), GraphNodeId("d"), (_arrival(C),)),
+        ),
+    )
+    with pytest.raises(GraphStateTransitionError, match="canonical order"):
+        transitions._validate_join_consumption(
+            both,
+            (second_key, first_key),
+            transitions._current_successful_references(both),
+        )
+
+
+def test_settlement_rejects_reusing_a_committed_success_evidence_entry() -> None:
+    leased = claim(running(A))
+    assert leased.execution is not None
+    duplicate = replace(
+        leased,
+        settled_activations=(ActivationReference(GraphActivationIdentity(leased.run_id, 0, A)),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="already been committed"):
+        transitions.settle_graph_node(
+            duplicate,
+            SettleGraphNode(
+                duplicate.revision,
+                leased.execution.token,
                 SucceededGraphNodeOutcome(A, ContinueGraphRouting()),
             ),
         )

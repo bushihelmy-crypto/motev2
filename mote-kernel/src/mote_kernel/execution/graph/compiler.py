@@ -1,6 +1,7 @@
 """Deterministic compiler for named value bindings and control topology."""
 
-from typing import TypeAlias, TypeVar
+from dataclasses import dataclass
+from typing import TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
     DuplicateBoundaryError,
@@ -10,11 +11,13 @@ from mote_kernel.execution.errors import (
     UnreachableNodeError,
 )
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
+from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
+    CompiledActivationRule,
     DefinitionScope,
+    FeedbackInputBinding,
     FrameDescriptor,
     FrameDescriptorIdentity,
     FrameKind,
@@ -37,6 +40,8 @@ from mote_kernel.execution.graph.ports import (
     ResolvedValueSource,
 )
 from mote_kernel.execution.graph.topology import (
+    ActivationGate,
+    CompiledActivationRules,
     CompiledGraph,
     FrontierTransitionPlan,
     frozen_map,
@@ -46,12 +51,42 @@ from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 RouteRequirements: TypeAlias = tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
-ActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+_RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+
+
+def _activation_gate_sort_key(
+    gate: ActivationGate,
+) -> tuple[tuple[GraphNodeId, tuple[tuple[bool, str], ...]], ...]:
+    return tuple(
+        (source, tuple(sorted((route is not None, route or "") for route in routes))) for source, routes in gate
+    )
+
+
+def _compiled_activation_gate(
+    gate: _RawActivationGate,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> ActivationGate:
+    return tuple(
+        (
+            source,
+            frozenset(conditional_targets[source])
+            if route is None and conditional_targets[source]
+            else frozenset((route,)),
+        )
+        for source, route in sorted(gate, key=lambda item: (item[0], item[1] is not None, item[1] or ""))
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _FeedbackResolution:
+    initial: GraphInputPort
+    repeat: NodeOutputPort
+    repeat_selection: PublicationSelection
 
 
 def _all_single_source_gates(
     source: GraphNodeId,
-    gates: list[ActivationGate],
+    gates: list[_RawActivationGate],
 ) -> bool:
     return bool(gates) and all(len(gate) == 1 and gate[0][0] == source for gate in gates)
 
@@ -93,12 +128,14 @@ def _collect_graph_inputs(
     definition: GraphDefinition[GraphValueT],
 ) -> OutputDeclarations[GraphValueT]:
     descriptors: dict[str, NominalTypeDescriptor[GraphValueT]] = {}
-    refs = [
-        binding.source
-        for node in definition.nodes
-        for binding in node.inputs.entries
-        if isinstance(binding.source, GraphInputRef)
-    ]
+    refs: list[GraphInputRef[GraphValueT]] = []
+    for node in definition.nodes:
+        for binding in node.inputs.entries:
+            source = binding.source
+            if isinstance(source, GraphInputRef):
+                refs.append(source)
+            elif isinstance(source, FeedbackInputBinding) and isinstance(source.initial, GraphInputRef):
+                refs.append(source.initial)
     refs.extend(output.source for output in definition.outputs.entries if isinstance(output.source, GraphInputRef))
     for ref in refs:
         existing = descriptors.get(ref.name)
@@ -108,6 +145,28 @@ def _collect_graph_inputs(
     return OutputDeclarations(
         tuple(OutputDeclaration(name, descriptor) for name, descriptor in sorted(descriptors.items()))
     )
+
+
+@overload
+def _resolve_source(
+    source: GraphInputRef[GraphValueT],
+    *,
+    scope: DefinitionScope,
+    graph_inputs: OutputDeclarations[GraphValueT],
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
+    consumer: GraphNodeId | None,
+) -> tuple[GraphInputPort, NominalTypeDescriptor[GraphValueT]]: ...
+
+
+@overload
+def _resolve_source(
+    source: NodeOutputRef,
+    *,
+    scope: DefinitionScope,
+    graph_inputs: OutputDeclarations[GraphValueT],
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
+    consumer: GraphNodeId | None,
+) -> tuple[NodeOutputPort, NominalTypeDescriptor[GraphValueT]]: ...
 
 
 def _resolve_source(
@@ -126,6 +185,19 @@ def _resolve_source(
     outputs = node_outputs.get(source.node_id)
     if outputs is None:
         raise UnknownNodeError(f"value source references unknown node {source.node_id!r}")
+    declaration = _declaration(outputs, source.output_name, owner=f"node {source.node_id!r}")
+    return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
+
+
+def _resolve_feedback_repeat(
+    source: NodeOutputRef,
+    *,
+    scope: DefinitionScope,
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
+) -> tuple[NodeOutputPort, NominalTypeDescriptor[GraphValueT]]:
+    outputs = node_outputs.get(source.node_id)
+    if outputs is None:
+        raise UnknownNodeError(f"feedback repeat references unknown node {source.node_id!r}")
     declaration = _declaration(outputs, source.output_name, owner=f"node {source.node_id!r}")
     return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
 
@@ -190,7 +262,7 @@ def _can_reach(
 def _guaranteed_sets(
     node_ids: tuple[GraphNodeId, ...],
     entries: tuple[GraphNodeId, ...],
-    activation_gates: dict[GraphNodeId, list[ActivationGate]],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
 ) -> dict[GraphNodeId, frozenset[GraphNodeId]]:
     guarantees = {node_id: frozenset((node_id,)) for node_id in node_ids}
     entry_set = frozenset(entries)
@@ -233,8 +305,6 @@ def _terminal_guarantees(
     guarantees: dict[GraphNodeId, frozenset[GraphNodeId]],
     terminal_gates: tuple[frozenset[GraphNodeId], ...],
 ) -> frozenset[GraphNodeId]:
-    if not terminal_gates:
-        return frozenset()
     alternatives: list[frozenset[GraphNodeId]] = []
     for gate in terminal_gates:
         guaranteed: set[GraphNodeId] = set()
@@ -245,6 +315,123 @@ def _terminal_guarantees(
     for alternative in alternatives[1:]:
         common.intersection_update(alternative)
     return frozenset(common)
+
+
+def _validate_cycle_exits(
+    node_ids: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+    terminal_gates: tuple[frozenset[GraphNodeId], ...],
+) -> None:
+    """Require every control cycle to have a statically reachable exit.
+
+    A control self-loop is otherwise an implicit request to keep creating
+    frontiers forever.  ``max_supersteps`` is an execution safety fuse, not a
+    graph completion rule, so a cycle with no path to an END gate is rejected
+    while the definition is still immutable and trusted.
+    """
+
+    cyclic = frozenset(
+        node_id
+        for node_id in node_ids
+        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
+    )
+    if not cyclic:
+        return
+    terminal_sources = tuple(source for gate in terminal_gates for source in gate)
+    if not terminal_sources or any(
+        not any(_can_reach(node_id, terminal, successors) for terminal in terminal_sources) for node_id in cyclic
+    ):
+        raise GraphValidationError(
+            f"control cycle {tuple(sorted(cyclic))!r} has no statically reachable successful exit"
+        )
+
+
+def _reject_cyclic_joins(
+    joins: tuple[JoinEdge, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+) -> None:
+    repeatable = _cycle_reachable_nodes(tuple(sorted(successors)), successors)
+    for join in joins:
+        if any(source in repeatable for source in join.sources):
+            raise GraphValidationError("a join in a control cycle requires occurrence identity")
+
+
+def _gates_can_coexist(
+    first: _RawActivationGate,
+    second: _RawActivationGate,
+    requirements: dict[GraphNodeId, RouteRequirements] | None = None,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None = None,
+) -> bool:
+    """Return whether two gates can be satisfied by one frontier.
+
+    The first slice has no occurrence identity and therefore cannot safely
+    collapse two independent gates for one target.  The only statically
+    obvious mutually-exclusive shape is two conditional routes selected by
+    the same source; a source emits exactly one route contribution.  Every
+    other pair is rejected at compile time, leaving no runtime "pick one"
+    behavior or silent double activation.
+    """
+
+    if requirements is not None and conditional_targets is not None:
+        first_requirement = _gate_route_requirements(first, requirements, conditional_targets)
+        second_requirement = _gate_route_requirements(second, requirements, conditional_targets)
+        if first_requirement is None or second_requirement is None:
+            return False
+        return _merge_route_requirements((first_requirement, second_requirement)) is not None
+    if len(first) != 1 or len(second) != 1:
+        return True
+    first_source, first_route = first[0]
+    second_source, second_route = second[0]
+    return not (
+        first_source == second_source
+        and first_route is not None
+        and second_route is not None
+        and first_route != second_route
+    )
+
+
+def _reject_ambiguous_activation_gates(
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
+    requirements: dict[GraphNodeId, RouteRequirements],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> None:
+    for target, gates in activation_gates.items():
+        ordered = tuple(gates)
+        for position, first in enumerate(ordered):
+            if any(
+                _gates_can_coexist(first, second, requirements, conditional_targets)
+                for second in ordered[position + 1 :]
+            ):
+                raise GraphValidationError(f"target {target!r} has multiple activation gates without an explicit Join")
+
+
+def _reject_repeatable_join_sources(
+    joins: tuple[JoinEdge, ...],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+) -> None:
+    """Reject Join sources that can be activated more than once in P1.
+
+    Join progress currently identifies a source by its node identity.  A
+    source with two simultaneously satisfiable incoming gates could therefore
+    contribute two occurrences that cannot be distinguished.  Cyclic sources
+    are already rejected by ``_reject_cyclic_joins``; this pass closes the
+    acyclic fan-in case as well.
+    """
+
+    repeatable = set(_cycle_reachable_nodes(tuple(sorted(successors)), successors))
+    changed = True
+    while changed:
+        changed = False
+        for node_id, gates in activation_gates.items():
+            if node_id in repeatable:
+                continue
+            if any(any(source in repeatable for source, _route in gate) for gate in gates):
+                repeatable.add(node_id)
+                changed = True
+    for join in joins:
+        if any(source in repeatable or len(activation_gates[source]) > 1 for source in join.sources):
+            raise GraphValidationError("a join source can have more than one activation occurrence")
 
 
 def _merge_route_requirements(
@@ -267,7 +454,7 @@ def _source_route_requirements(
     requirements: dict[GraphNodeId, RouteRequirements],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
 ) -> RouteRequirements:
-    source_requirements = dict(requirements[source])
+    source_requirements = dict(requirements.get(source, ()))
     declared_routes = frozenset(conditional_targets[source])
     if selected_route is None and not declared_routes:
         return tuple(sorted(source_requirements.items()))
@@ -278,7 +465,7 @@ def _source_route_requirements(
 
 
 def _gate_route_requirements(
-    gate: ActivationGate,
+    gate: _RawActivationGate,
     requirements: dict[GraphNodeId, RouteRequirements],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
 ) -> RouteRequirements | None:
@@ -316,11 +503,11 @@ def _alternative_route_requirements(
 def _validate_joint_activation_paths(
     node_ids: tuple[GraphNodeId, ...],
     entries: tuple[GraphNodeId, ...],
-    activation_gates: dict[GraphNodeId, list[ActivationGate]],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
     data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     joins: tuple[JoinEdge, ...],
-) -> None:
+) -> dict[GraphNodeId, RouteRequirements]:
     dependency_successors = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for target in node_ids:
         for gate in activation_gates[target]:
@@ -372,8 +559,6 @@ def _validate_joint_activation_paths(
         requirements[node_id] = requirement
 
     for join in joins:
-        if any(source in variable for source in join.sources) or (join.target != END and join.target in variable):
-            continue
         gate = tuple((source, None) for source in join.sources)
         source_requirements = tuple(
             _source_route_requirements(source, None, requirements, conditional_targets) for source in join.sources
@@ -386,6 +571,7 @@ def _validate_joint_activation_paths(
             raise GraphValidationError(
                 f"join {join.sources!r} -> {join.target!r} can receive only a partial source set on a route"
             )
+    return requirements
 
 
 def _cycle_reachable_nodes(
@@ -436,7 +622,7 @@ def _input_publication_selection(
     source: NodeOutputPort,
     target: GraphNodeId,
     absolute_levels: dict[GraphNodeId, int],
-    activation_gates: dict[GraphNodeId, list[ActivationGate]],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
 ) -> PublicationSelection:
     absolute = absolute_levels.get(source.node_id)
     if absolute is not None:
@@ -459,6 +645,62 @@ def _output_publication_selection(
     if terminal_gates and all(gate == frozenset((source.node_id,)) for gate in terminal_gates):
         return PublicationSelection(PublicationSelectionKind.RELATIVE, 0)
     raise GraphValidationError(f"graph output source {source.node_id!r} has no unique completion activation coordinate")
+
+
+def _compile_activation_rules(
+    nodes: dict[GraphNodeId, GraphNode[GraphValueT]],
+    node_ids: tuple[GraphNodeId, ...],
+    scope: DefinitionScope,
+    feedback_bindings: dict[GraphNodeId, tuple[tuple[str, _FeedbackResolution], ...]],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    joins_by_source: dict[GraphNodeId, list[JoinEdge]],
+    edges: tuple[Edge, ...],
+    graph_outputs: GraphOutputBindings[GraphValueT],
+) -> CompiledActivationRules[GraphValueT]:
+    declared = tuple(
+        (node_id, input_name, resolution)
+        for node_id in node_ids
+        for input_name, resolution in feedback_bindings[node_id]
+    )
+    if not declared:
+        return CompiledActivationRules(())
+    if scope:
+        raise GraphValidationError("the first feedback slice does not permit feedback in a nested graph")
+    if len(declared) != 1:
+        raise GraphValidationError("the first feedback slice permits exactly one feedback input")
+    target, input_name, resolution = declared[0]
+    if len(node_ids) != 1 or not isinstance(nodes[target], CallableNodeDefinition):
+        raise GraphValidationError("the first feedback slice permits one callable target node")
+    if (
+        direct_targets[target]
+        or joins_by_source[target]
+        or any(not isinstance(edge, ConditionalEdge) for edge in edges)
+    ):
+        raise GraphValidationError("feedback target cannot have ordinary or join control edges")
+    routes = conditional_targets[target]
+    feedback_routes = tuple(route for route, destination in routes.items() if destination == target)
+    terminal_routes = tuple(route for route, destination in routes.items() if destination == END)
+    if len(routes) != 2 or len(feedback_routes) != 1 or len(terminal_routes) != 1:
+        raise GraphValidationError("feedback target requires exactly one self feedback route and one terminal route")
+    if len(graph_outputs.entries) != 1:
+        raise GraphValidationError("feedback target requires exactly one graph output")
+    output = graph_outputs.entries[0]
+    if not isinstance(output.source, NodeOutputPort) or output.source != resolution.repeat:
+        raise GraphValidationError("feedback graph output must publish the target repeat output")
+    return CompiledActivationRules(
+        (
+            CompiledActivationRule(
+                target,
+                input_name,
+                resolution.initial,
+                resolution.repeat,
+                resolution.repeat_selection,
+                feedback_routes[0],
+                terminal_routes[0],
+            ),
+        )
+    )
 
 
 def _compile_graph(
@@ -496,18 +738,50 @@ def _compile_graph(
         for node_id in node_ids
     }
     input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
+    feedback_bindings_by_node: dict[GraphNodeId, tuple[tuple[str, _FeedbackResolution], ...]] = {}
     data_dependencies = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for node_id in node_ids:
         node = nodes[node_id]
         resolved: list[ResolvedInputBinding[GraphValueT]] = []
+        feedback_bindings: list[tuple[str, _FeedbackResolution]] = []
         for binding in node.inputs.entries:
-            source, descriptor = _resolve_source(
-                binding.source,
-                scope=scope,
-                graph_inputs=graph_inputs,
-                node_outputs=node_outputs,
-                consumer=node_id,
-            )
+            declared_source = binding.source
+            if isinstance(declared_source, FeedbackInputBinding):
+                if not isinstance(declared_source.initial, GraphInputRef):
+                    raise GraphValidationError(
+                        f"feedback input {binding.local_name!r} on node {node_id!r} "
+                        "must use a graph input initial source"
+                    )
+                source, descriptor = _resolve_source(
+                    declared_source.initial,
+                    scope=scope,
+                    graph_inputs=graph_inputs,
+                    node_outputs=node_outputs,
+                    consumer=node_id,
+                )
+                repeat, repeat_descriptor = _resolve_feedback_repeat(
+                    declared_source.repeat,
+                    scope=scope,
+                    node_outputs=node_outputs,
+                )
+                if descriptor.value_type is not repeat_descriptor.value_type:
+                    raise GraphValidationError(
+                        f"feedback input {binding.local_name!r} initial and repeat sources have different exact types"
+                    )
+                feedback = _FeedbackResolution(
+                    source,
+                    repeat,
+                    PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
+                )
+                feedback_bindings.append((binding.local_name, feedback))
+            else:
+                source, descriptor = _resolve_source(
+                    declared_source,
+                    scope=scope,
+                    graph_inputs=graph_inputs,
+                    node_outputs=node_outputs,
+                    consumer=node_id,
+                )
             if isinstance(source, NodeOutputPort):
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
@@ -519,6 +793,7 @@ def _compile_graph(
                 )
             )
         resolved_bindings = ResolvedInputBindings(tuple(resolved))
+        feedback_bindings_by_node[node_id] = tuple(feedback_bindings)
         if isinstance(node, NestedGraphNodeDefinition):
             expected = nested_graphs[node_id].graph_input_descriptor.declarations.entries
             if len(resolved_bindings.entries) != len(expected) or any(
@@ -534,7 +809,7 @@ def _compile_graph(
     direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {node_id: set() for node_id in node_ids}
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {node_id: {} for node_id in node_ids}
     joins_by_source: dict[GraphNodeId, list[JoinEdge]] = {node_id: [] for node_id in node_ids}
-    activation_gates: dict[GraphNodeId, list[ActivationGate]] = {node_id: [] for node_id in node_ids}
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {node_id: [] for node_id in node_ids}
     gates_to_end: list[frozenset[GraphNodeId]] = []
     joins: list[JoinEdge] = []
     for edge in definition.edges:
@@ -597,8 +872,9 @@ def _compile_graph(
     unreachable = set(node_ids) - reached
     if unreachable:
         raise UnreachableNodeError(f"unreachable nodes: {', '.join(sorted(unreachable))}")
+    _reject_cyclic_joins(tuple(joins), successors)
 
-    _validate_joint_activation_paths(
+    route_requirements = _validate_joint_activation_paths(
         node_ids,
         entries,
         activation_gates,
@@ -606,6 +882,8 @@ def _compile_graph(
         conditional_targets,
         tuple(joins),
     )
+    _reject_repeatable_join_sources(tuple(joins), activation_gates, successors)
+    _reject_ambiguous_activation_gates(activation_gates, route_requirements, conditional_targets)
 
     guarantees = _guaranteed_sets(node_ids, entries, activation_gates)
     for target, sources in data_dependencies.items():
@@ -617,46 +895,18 @@ def _compile_graph(
         tuple(gates_to_end),
         successors,
     )
+    _validate_cycle_exits(node_ids, successors, terminal_gates)
     terminal_guarantees = _terminal_guarantees(guarantees, terminal_gates)
     absolute_levels = _absolute_activation_levels(node_ids, entries, successors)
-    materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
-    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {}
-    for ordinal, node_id in enumerate(node_ids):
-        bindings = input_bindings_by_node[node_id]
-        published_bindings = ResolvedInputBindings(
-            tuple(
-                ResolvedInputBinding(
-                    binding.destination,
-                    binding.source,
-                    binding.descriptor,
-                    None
-                    if isinstance(binding.source, GraphInputPort)
-                    else _input_publication_selection(
-                        binding.source,
-                        node_id,
-                        absolute_levels,
-                        activation_gates,
-                    ),
-                )
-                for binding in bindings.entries
-            )
-        )
-        input_declarations = OutputDeclarations(
-            tuple(
-                OutputDeclaration(binding.destination.local_name, binding.descriptor)
-                for binding in published_bindings.entries
-            )
-        )
-        materializations[node_id] = MaterializationPlan(
-            published_bindings,
-            _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations),
-        )
-        publications[node_id] = _frame_descriptor(
+    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {
+        node_id: _frame_descriptor(
             definition,
             FrameKind.NODE_OUTPUT,
             ordinal,
             node_outputs[node_id],
         )
+        for ordinal, node_id in enumerate(node_ids)
+    }
     graph_output_bindings: list[GraphOutputBinding[GraphValueT]] = []
     for output in definition.outputs.entries:
         source, descriptor = _resolve_source(
@@ -682,6 +932,54 @@ def _compile_graph(
         )
     graph_outputs = GraphOutputBindings(tuple(graph_output_bindings))
 
+    activation_rules = _compile_activation_rules(
+        nodes,
+        node_ids,
+        scope,
+        feedback_bindings_by_node,
+        direct_targets,
+        conditional_targets,
+        joins_by_source,
+        definition.edges,
+        graph_outputs,
+    )
+
+    materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
+    for ordinal, node_id in enumerate(node_ids):
+        bindings = input_bindings_by_node[node_id]
+        published_bindings: list[ResolvedInputBinding[GraphValueT]] = []
+        for binding in bindings.entries:
+            rule = activation_rules.for_input(node_id, binding.destination.local_name)
+            source = binding.source
+            if isinstance(source, NodeOutputPort):
+                publication = _input_publication_selection(
+                    source,
+                    node_id,
+                    absolute_levels,
+                    activation_gates,
+                )
+            else:
+                publication = None
+            published_bindings.append(
+                ResolvedInputBinding(
+                    binding.destination,
+                    rule if rule is not None else source,
+                    binding.descriptor,
+                    None if rule is not None else publication,
+                )
+            )
+        resolved_bindings = ResolvedInputBindings(tuple(published_bindings))
+        input_declarations = OutputDeclarations(
+            tuple(
+                OutputDeclaration(binding.destination.local_name, binding.descriptor)
+                for binding in resolved_bindings.entries
+            )
+        )
+        materializations[node_id] = MaterializationPlan(
+            resolved_bindings,
+            _frame_descriptor(definition, FrameKind.NODE_INPUT, ordinal, input_declarations),
+        )
+
     transition = FrontierTransitionPlan(
         entries,
         frozen_map({node_id: tuple(sorted(targets)) for node_id, targets in direct_targets.items()}),
@@ -696,6 +994,18 @@ def _compile_graph(
         frozen_map(publications),
         graph_outputs,
         resource_order,
+        activation_rules,
+        frozen_map(
+            {
+                node_id: tuple(
+                    sorted(
+                        (_compiled_activation_gate(gate, conditional_targets) for gate in gates),
+                        key=_activation_gate_sort_key,
+                    )
+                )
+                for node_id, gates in activation_gates.items()
+            }
+        ),
     )
     return CompiledGraph(
         definition_id=definition.definition_id,

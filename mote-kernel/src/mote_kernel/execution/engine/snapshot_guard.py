@@ -3,7 +3,12 @@
 from typing import TypeVar
 
 from mote_kernel.execution.engine.resume_input import require_resume_input_binding
-from mote_kernel.execution.engine.routing import _declared_joins, validate_routing_contribution
+from mote_kernel.execution.engine.routing import (
+    _declared_joins,
+    frontier_admission_error,
+    settled_activation_admission_error,
+    validate_routing_contribution,
+)
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.topology import CompiledGraph
@@ -11,6 +16,7 @@ from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.state.graph_state import (
     GraphRunState,
     GraphRunStatus,
+    GraphStateTransitionError,
     PendingGraphNode,
     routing_contributions,
     validate_graph_run_state,
@@ -23,17 +29,28 @@ def require_snapshot_matches_graph(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
 ) -> None:
-    validate_graph_run_state(state)
+    try:
+        validate_graph_run_state(state)
+    except GraphStateTransitionError as error:
+        raise InvalidExecutionSnapshotError(str(error)) from error
     if state.definition_id != graph.definition_id or state.definition_version != graph.version:
         raise SnapshotMismatchError("graph run does not match the compiled graph identity and version")
     unknown = tuple(node.node_id for node in state.frontier.nodes if node.node_id not in graph.nodes)
     if unknown:
         raise InvalidExecutionSnapshotError(f"snapshot frontier contains unknown nodes: {unknown!r}")
     if state.status is not GraphRunStatus.RUNNING:
+        ledger_error = settled_activation_admission_error(graph, state)
+        if ledger_error is not None:
+            raise InvalidExecutionSnapshotError(ledger_error)
         return
+    if state.superstep == 0 and tuple(node.node_id for node in state.frontier.nodes) != graph.transition.entries:
+        raise InvalidExecutionSnapshotError("initial frontier does not exactly match the compiled graph entries")
     declared_joins = _declared_joins(graph)
     if any((progress.sources, progress.target) not in declared_joins for progress in state.join_progress):
         raise InvalidExecutionSnapshotError("snapshot references unknown join progress")
+    admission_error = frontier_admission_error(graph, state)
+    if admission_error is not None:
+        raise InvalidExecutionSnapshotError(admission_error)
     require_resume_input_binding(graph, state)
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)

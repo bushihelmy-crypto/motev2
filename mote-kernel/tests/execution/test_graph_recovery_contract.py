@@ -95,88 +95,6 @@ async def test_recovered_settled_conditional_uses_only_its_authoritative_route(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["safe", "missing"])
-async def test_recovered_concrete_skip_keeps_its_route_and_rejects_missing_boundary_before_commit(
-    route: str,
-) -> None:
-    calls = {"source": 0, "safe": 0, "consumer": 0}
-
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        calls["source"] += 1
-        return Graph.failure("failed")
-
-    async def safe(_values: Graph.Values[str]) -> Graph.Values[str]:
-        calls["safe"] += 1
-        return Graph.values()
-
-    async def consume(_values: Graph.Values[str]) -> Graph.Values[str]:
-        calls["consumer"] += 1
-        return Graph.values()
-
-    graph = Graph[str](f"recovery.skip-route.{route}")
-    graph.add_node("source", fail, inputs={}, outputs={"value": str})
-    graph.add_node("safe", safe, inputs={}, outputs={})
-    graph.add_node(
-        "consumer",
-        consume,
-        inputs={"value": Graph.node_output("source", "value")},
-        outputs={},
-    )
-    graph.add_conditional_edge("source", "safe", "safe")
-    graph.add_conditional_edge("source", "missing", "consumer")
-    graph.set_outputs({})
-    failed = await graph.run(Graph.values())
-    assert isinstance(failed, Graph.AwaitingResumeResult)
-
-    commits = CommitLog()
-    if route == "missing":
-        with pytest.raises(Graph.ValueUnavailableError, match="required nodes"):
-            await graph.run(
-                state=failed.state,
-                resume=(graph.skip_failed("source", "operator skip", route=route),),
-                commit=commits,
-            )
-        assert commits.transitions == []
-    else:
-        result = await graph.run(
-            state=failed.state,
-            resume=(graph.skip_failed("source", "operator skip", route=route),),
-            commit=commits,
-        )
-        assert isinstance(result, Graph.CompletedResult)
-    assert calls["source"] == 1
-    assert calls["consumer"] == 0
-    assert calls["safe"] == (1 if route == "safe" else 0)
-
-
-@pytest.mark.asyncio
-async def test_recovered_plain_skip_rejects_a_missing_graph_output_before_commit() -> None:
-    calls = 0
-
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        nonlocal calls
-        calls += 1
-        return Graph.failure("failed")
-
-    graph = Graph[str]("recovery.plain-skip-output")
-    graph.add_node("source", fail, inputs={}, outputs={"value": str})
-    graph.set_outputs({"value": Graph.node_output("source", "value")})
-    paused = await graph.run(Graph.values())
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-
-    commits = CommitLog()
-    with pytest.raises(Graph.ValueUnavailableError, match="graph outputs"):
-        await graph.run(
-            state=paused.state,
-            resume=(graph.skip_failed("source", "operator skip"),),
-            commit=commits,
-        )
-
-    assert commits.transitions == []
-    assert calls == 1
-
-
-@pytest.mark.asyncio
 async def test_recovery_worklist_merges_parallel_completion_orders_by_full_semantics() -> None:
     captured: GraphRunState | None = None
     calls = {"a": 0, "b": 0, "c": 0}
@@ -658,7 +576,7 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
         if calls == 1:
             return Graph.success(Graph.values(query="first"), route="child")
         if calls == 2:
-            return Graph.failure("pause between child runs")
+            return Graph.interrupt(b"continue between child runs")
         if calls == 3:
             return Graph.success(Graph.values(query="second"), route="child")
         return Graph.success(Graph.values(query="unused"), route="done")
@@ -671,6 +589,7 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
         return transition.candidate_state
 
     graph = Graph[str](f"recovery.repeated-parent.{lineage}")
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
     graph.add_node("produce", produce, inputs={}, outputs={"query": str})
     graph.add_node(
         "child",
@@ -697,7 +616,13 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed("produce"),),
+        resume=(
+            graph.resume_interrupted(
+                "produce",
+                paused.interrupts[0].interrupt_id,
+                Graph.values(),
+            ),
+        ),
         max_supersteps=8,
         commit=second_commits,
     )
@@ -742,6 +667,7 @@ async def test_recovered_existing_nested_activation_requires_its_exact_child_sna
 
 def leaf_graph(definition_id: str, operation: NodeCallable[str]) -> Graph[str]:
     child = Graph[str](definition_id)
+    child.set_resume_codec("empty", 1, encode_empty, decode_empty)
     child.add_node("leaf", operation, inputs={}, outputs={"value": str})
     child.set_outputs({"value": Graph.node_output("leaf", "value")})
     return child
@@ -752,10 +678,10 @@ async def test_recovered_family_drives_resource_waiter_to_quiescence_and_retains
     captured: GraphRunState | None = None
     calls = {"a": 0, "b": 0}
 
-    async def fail_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["a"] += 1
         if calls["a"] == 1:
-            return Graph.failure("failed-a")
+            return Graph.interrupt(b"continue-a")
         return Graph.values(value="a")
 
     async def succeed(_values: Graph.Values[str]) -> Graph.Values[str]:
@@ -774,7 +700,7 @@ async def test_recovered_family_drives_resource_waiter_to_quiescence_and_retains
 
     graph = Graph[str]("recovery.resource-waiter")
     graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
-    graph.add_node("a", fail_once, inputs={}, outputs={"value": str}, resources=("exclusive",))
+    graph.add_node("a", interrupt_once, inputs={}, outputs={"value": str}, resources=("exclusive",))
     graph.add_node("b", succeed, inputs={}, outputs={"value": str}, resources=("exclusive",))
     graph.add_node(
         "final",
@@ -797,7 +723,13 @@ async def test_recovered_family_drives_resource_waiter_to_quiescence_and_retains
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed("a"),),
+        resume=(
+            graph.resume_interrupted(
+                "a",
+                paused.interrupts[0].interrupt_id,
+                Graph.values(),
+            ),
+        ),
         max_parallel_tasks=2,
     )
 
@@ -815,10 +747,10 @@ async def test_recovered_family_drives_runnable_child_while_sibling_child_is_par
         calls["starter"] += 1
         return Graph.values()
 
-    async def fail_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
         calls["parked"] += 1
         if calls["parked"] == 1:
-            return Graph.failure("parked")
+            return Graph.interrupt(b"continue-parked")
         return Graph.values(value="resumed")
 
     async def succeed(_values: Graph.Values[str]) -> Graph.Values[str]:
@@ -834,7 +766,7 @@ async def test_recovered_family_drives_runnable_child_while_sibling_child_is_par
 
     parent = Graph[str]("recovery.multiple-children")
     parent.add_node("starter", starter, inputs={}, outputs={})
-    parent.add_node("parked", leaf_graph("recovery.parked-child", fail_once), inputs={})
+    parent.add_node("parked", leaf_graph("recovery.parked-child", interrupt_once), inputs={})
     parent.add_node("runnable", leaf_graph("recovery.runnable-child", succeed), inputs={})
     parent.add_edge("starter", "parked")
     parent.add_edge("starter", "runnable")
@@ -846,69 +778,22 @@ async def test_recovered_family_drives_runnable_child_while_sibling_child_is_par
     paused = await parent.run(state=captured)
     assert isinstance(paused, Graph.AwaitingResumeResult)
     assert calls == {"starter": 1, "parked": 1, "runnable": 1}
+    parked = next(interrupt for interrupt in paused.interrupts if interrupt.scope == ("parked",))
     completed = await parent.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(parent.resume_failed("leaf", scope=("parked",)),),
+        resume=(
+            parent.resume_interrupted(
+                "leaf",
+                parked.interrupt_id,
+                Graph.values(),
+                scope=("parked",),
+            ),
+        ),
     )
 
     assert isinstance(completed, Graph.CompletedResult)
     assert calls == {"starter": 1, "parked": 2, "runnable": 1}
-
-
-@pytest.mark.asyncio
-async def test_aborted_child_cannot_restart_and_parent_skip_does_not_rebuild_it() -> None:
-    calls = {"source": 0, "consumer": 0}
-
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        calls["source"] += 1
-        return Graph.failure("child failed")
-
-    async def consume(_values: Graph.Values[str]) -> Graph.Values[str]:
-        calls["consumer"] += 1
-        return Graph.values()
-
-    child = Graph[str]("recovery.aborted-child")
-    child.add_node("source", fail, inputs={}, outputs={"value": str})
-    child.add_node(
-        "consumer",
-        consume,
-        inputs={"value": Graph.node_output("source", "value")},
-        outputs={},
-    )
-    child.add_conditional_edge("source", "continue", "consumer")
-    child.set_outputs({})
-    parent = Graph[str]("recovery.aborted-parent")
-    parent.add_node("nested", child, inputs={})
-    parent.set_outputs({})
-
-    first = await parent.run(Graph.values())
-    assert isinstance(first, Graph.AwaitingResumeResult)
-    commits = CommitLog()
-    with pytest.raises(Graph.ValueUnavailableError, match="required nodes"):
-        await parent.run(
-            state=first.state,
-            continuation=first.continuation,
-            resume=(parent.skip_failed("source", "abort child", route="continue", scope=("nested",)),),
-            commit=commits,
-        )
-    assert commits.transitions == []
-
-    for restart in (
-        parent.resume_failed("nested"),
-        parent.resume_failed_with("nested", Graph.values()),
-    ):
-        commits = CommitLog()
-        with pytest.raises(Graph.SnapshotMismatchError, match="cannot be restarted"):
-            await parent.run(
-                state=first.state,
-                continuation=first.continuation,
-                resume=(restart,),
-                commit=commits,
-            )
-        assert commits.transitions == []
-
-    assert calls == {"source": 1, "consumer": 0}
 
 
 @pytest.mark.asyncio

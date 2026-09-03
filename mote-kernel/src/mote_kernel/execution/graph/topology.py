@@ -2,12 +2,13 @@
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.edge import JoinEdge
 from mote_kernel.execution.graph.ports import (
+    CompiledActivationRule,
     DefinitionScope,
     FrameDescriptor,
     GraphOutputBindings,
@@ -25,6 +26,8 @@ from mote_kernel.state.graph_state import (
 KeyT = TypeVar("KeyT", bound=str)
 ValueT_co = TypeVar("ValueT_co", covariant=True)
 GraphValueT = TypeVar("GraphValueT")
+ActivationGateSource: TypeAlias = tuple[GraphNodeId, frozenset[GraphRouteId | None]]
+ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +48,23 @@ class FrozenMap(Mapping[KeyT, ValueT_co], Generic[KeyT, ValueT_co]):
 
 
 @dataclass(frozen=True, slots=True)
+class CompiledActivationRules(Generic[GraphValueT]):
+    """Compiler-admitted feedback rules indexed by target input."""
+
+    entries: tuple[CompiledActivationRule[GraphValueT], ...]
+
+    def for_input(
+        self,
+        node_id: GraphNodeId,
+        input_name: str,
+    ) -> CompiledActivationRule[GraphValueT] | None:
+        return next(
+            (rule for rule in self.entries if rule.target == node_id and rule.input_name == input_name),
+            None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
@@ -54,6 +74,8 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]
     resource_order: tuple[ResourceId, ...]
+    activation_rules: CompiledActivationRules[GraphValueT]
+    activation_gates: FrozenMap[GraphNodeId, tuple[ActivationGate, ...]]
 
 
 @dataclass(frozen=True, slots=True)

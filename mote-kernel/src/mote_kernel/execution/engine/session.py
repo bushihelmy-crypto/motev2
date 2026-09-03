@@ -208,6 +208,9 @@ class _GraphExecutionSession(Generic[GraphValueT]):
                     if not pending_node_ids(self._state.frontier):
                         self._disposition = _SessionDisposition.QUIESCENT
                         raise StopAsyncIteration
+                    if all(node_id in self._graph.nested_graphs for node_id in pending_node_ids(self._state.frontier)):
+                        self._disposition = _SessionDisposition.QUIESCENT
+                        raise StopAsyncIteration
                     raise ResultCollectionError("no executable pending node can be scheduled")
 
                 event = await self._scheduler.next_completion()

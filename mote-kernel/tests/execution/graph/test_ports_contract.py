@@ -1,13 +1,19 @@
 import typing
+from collections.abc import Mapping
+from typing import cast
 
 import pytest
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.ports import (
+    FeedbackInputBinding,
+    GraphInputRef,
+    NodeOutputRef,
     PublicationSelection,
     PublicationSelectionKind,
     canonical_nominal_type,
+    normalize_facade_input_bindings,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -78,3 +84,27 @@ def test_graph_output_normalizer_requires_a_mapping() -> None:
 def test_graph_output_normalizer_rejects_type_declarations_in_source_position() -> None:
     with pytest.raises(GraphValidationError, match="must bind"):
         normalize_graph_output_declarations({"value": str})
+
+
+def test_feedback_binding_requires_exact_internal_reference_types() -> None:
+    seed = Graph.graph_input("seed", str)
+    repeat = Graph.node_output("loop", "value")
+
+    with pytest.raises(GraphValidationError, match="feedback initial"):
+        FeedbackInputBinding(cast(GraphInputRef[str], object()), repeat)
+    with pytest.raises(GraphValidationError, match="feedback repeat"):
+        FeedbackInputBinding(seed, cast(NodeOutputRef, object()))
+
+
+def test_public_facade_normalizer_rejects_internal_feedback_declarations() -> None:
+    feedback = FeedbackInputBinding(
+        Graph.graph_input("seed", str),
+        Graph.node_output("loop", "value"),
+    )
+    values = cast(
+        Mapping[str, GraphInputRef[str] | NodeOutputRef],
+        {"value": feedback},
+    )
+
+    with pytest.raises(GraphValidationError, match=r"not available through Graph\.add_node"):
+        normalize_facade_input_bindings(values)

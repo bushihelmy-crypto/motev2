@@ -11,7 +11,6 @@ import mote_kernel.execution.engine.superstep as superstep_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_input
 from mote_kernel.execution.engine.frontier import FrontierPreparation
-from mote_kernel.execution.engine.resume_admission import prepare_resume
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
@@ -51,24 +50,16 @@ from mote_kernel.execution.identity import (
     root_scope_run,
 )
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.request import (
-    OverrideNodeInput,
-    ResumeFailedNodeRequest,
-    ResumeInterruptedNodeRequest,
-    ResumeRequest,
-    SkipFailedNodeRequest,
-    StepRequest,
-    UseMaterializedInput,
-)
+from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import (
     AbortedChild,
     AbortedGraph,
     ActiveChild,
-    AwaitingResume,
     ChildProjection,
     CompletedChild,
     CompletedGraph,
+    FailedGraph,
     MissingChild,
     ReadyToResolve,
     TaskFailure,
@@ -83,15 +74,16 @@ from mote_kernel.execution.run_context import (
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
+    ActivationReference,
     ClaimGraphExecution,
     CompleteGraphFrontier,
     ContinueGraphRouting,
     FenceGraphExecution,
     GraphAbortReason,
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphInterruptId,
     GraphJoinProgress,
     GraphNodeId,
     GraphResumeInputCodecId,
@@ -101,16 +93,13 @@ from mote_kernel.state.graph_state import (
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
-    InterruptedGraphNode,
     OverrideGraphNodeInput,
-    ParentGraphActivation,
     PendingGraphNode,
     ResourceId,
     ResourceSnapshot,
     SettleGraphNode,
     SucceededGraphNodeOutcome,
     child_graph_run_id,
-    graph_interrupt_id,
     reduce_graph_run,
 )
 
@@ -129,24 +118,6 @@ class _Codec:
         return value["value"].encode()
 
     def decode(self, payload: bytes) -> Graph.Values[str]:
-        return Graph.values(value=payload.decode())
-
-
-class _TrackingCodec:
-    def __init__(self) -> None:
-        self.events: list[str] = []
-        self.tamper: str | None = None
-
-    def encode(self, value: Graph.Values[str]) -> bytes:
-        self.events.append("encode")
-        return value["value"].encode()
-
-    def decode(self, payload: bytes) -> Graph.Values[str]:
-        self.events.append("decode")
-        if self.tamper == "name":
-            return Graph.values(other="input")
-        if self.tamper == "type":
-            return cast(Graph.Values[str], Graph.values(value=True))
         return Graph.values(value=payload.decode())
 
 
@@ -338,8 +309,8 @@ def started_nested_child(
     parent_state: GraphRunState,
     parent_scope: ScopeRunCoordinate,
     node_id: GraphNodeId,
-) -> tuple[ParentGraphActivation, CompiledGraph[str], ScopeRunCoordinate, GraphRunState]:
-    activation = ParentGraphActivation(parent_state.run_id, parent_state.superstep, node_id)
+) -> tuple[GraphActivationIdentity, CompiledGraph[str], ScopeRunCoordinate, GraphRunState]:
+    activation = GraphActivationIdentity(parent_state.run_id, parent_state.superstep, node_id)
     child_graph = parent_graph.nested_graphs[node_id]
     coordinate = child_scope_run_for_activation(parent_scope, activation)
     command = project_start_graph_command(child_graph, coordinate.graph_run_id, activation)
@@ -468,7 +439,7 @@ async def test_execute_scope_rejection_does_not_consume_prepared_claim() -> None
     await session.aclose()
 
 
-async def test_typed_failure_returns_awaiting_resume_without_retry() -> None:
+async def test_typed_failure_enters_terminal_failed_without_retry() -> None:
     calls = 0
 
     async def fail(values: Graph.Values[str]) -> Graph.Outcome[str]:
@@ -481,7 +452,9 @@ async def test_typed_failure_returns_awaiting_resume_without_retry() -> None:
     state, results = await run_frontier(executor, graph, started(graph), "input")
     assert isinstance(results[0], TaskFailure)
     disposition = executor.prepare(string_request(graph, state, "input"))
-    assert disposition == AwaitingResume((GraphNodeId("a"),), ())
+    assert isinstance(disposition, FailedGraph)
+    assert state.status is GraphRunStatus.FAILED
+    assert state.execution is None
     assert calls == 1
 
 
@@ -591,7 +564,9 @@ async def test_prepared_claim_can_issue_exactly_one_session() -> None:
     await session.aclose()
 
 
-async def test_missing_and_active_nested_children_block_parent_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_and_active_nested_children_do_not_hide_claimable_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     materialize_calls = 0
     original_materialize = frontier_module.materialize_node_input
 
@@ -610,25 +585,24 @@ async def test_missing_and_active_nested_children_block_parent_claim(monkeypatch
     graph = nested_graph()
     executor = GraphExecutor(graph)
     parent = started(graph)
-    activation = ParentGraphActivation(parent.run_id, parent.superstep, GraphNodeId("nested"))
+    activation = GraphActivationIdentity(parent.run_id, parent.superstep, GraphNodeId("nested"))
     missing = executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren)
-    assert missing.missing == (MissingChild(activation),)
-    assert missing.active == ()
+    assert isinstance(missing, ExecutableFrontier)
+    assert missing.children == WaitingForChildren((MissingChild(activation),), ())
     active = executor.prepare(string_request(graph, parent, "input", (ActiveChild(activation),)))
-    assert isinstance(active, WaitingForChildren)
-    assert active.missing == ()
-    assert active.active == (ActiveChild(activation),)
-    assert materialize_calls == 0
+    assert isinstance(active, ExecutableFrontier)
+    assert active.children == WaitingForChildren((), (ActiveChild(activation),))
+    assert materialize_calls == 2
 
 
 async def test_completed_nested_child_is_a_precomputed_completion_on_the_same_path() -> None:
     graph = nested_graph()
     executor = GraphExecutor(graph)
     parent = started(graph)
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
+    activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("nested"))
     missing = executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren)
+    assert isinstance(missing, ExecutableFrontier)
+    assert missing.children == WaitingForChildren((MissingChild(activation),), ())
     child_graph = graph.nested_graphs[GraphNodeId("nested")]
     projection = CompletedChild(
         activation,
@@ -661,9 +635,10 @@ async def test_aborted_nested_child_projects_a_typed_failure() -> None:
     graph = nested_graph()
     executor = GraphExecutor(graph)
     parent = started(graph)
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
+    activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("nested"))
     missing = executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
-    assert isinstance(missing, WaitingForChildren)
+    assert isinstance(missing, ExecutableFrontier)
+    assert missing.children == WaitingForChildren((MissingChild(activation),), ())
     projection = AbortedChild(activation, GraphAbortReason("child aborted"))
     execution_request = string_request(graph, parent, "input", (projection,))
     prepared = executor.prepare(execution_request)
@@ -681,7 +656,7 @@ async def test_aborted_nested_child_projects_a_typed_failure() -> None:
 async def test_nested_projection_requires_terminal_child_state() -> None:
     graph = nested_graph()
     parent = started(graph)
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
+    activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("nested"))
     (owner, _evidence_reader) = await fresh_root(
         graph,
         root_scope_run(GraphRunId("projection-owner")),
@@ -837,65 +812,6 @@ async def test_prepare_rejects_reentry_into_an_active_execution() -> None:
         executor.prepare(replace(execution_request, state=claimed))
 
 
-async def test_resume_projection_validates_each_action_variant_and_lifecycle() -> None:
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("failed")
-
-    graph = graph_with_nodes(node("a", fail))
-    executor = GraphExecutor(graph)
-    state, _results = await run_frontier(executor, graph, started(graph), "input")
-    execution_request = string_request(graph, state, "input")
-    with pytest.raises(SnapshotMismatchError, match="non-empty"):
-        prepare_resume(graph, ResumeRequest(state, execution_request.scope_run, execution_request.frames, ()))
-    duplicate = ResumeFailedNodeRequest(
-        (),
-        GraphNodeId("a"),
-        OverrideNodeInput(Graph.values(value="one")),
-    )
-    with pytest.raises(SnapshotMismatchError, match="distinct"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                state,
-                execution_request.scope_run,
-                execution_request.frames,
-                (duplicate, duplicate),
-            ),
-        )
-    with pytest.raises(SnapshotMismatchError, match="unknown frontier"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                state,
-                execution_request.scope_run,
-                execution_request.frames,
-                (
-                    ResumeFailedNodeRequest(
-                        (),
-                        GraphNodeId("missing"),
-                        OverrideNodeInput(Graph.values(value="retry")),
-                    ),
-                ),
-            ),
-        )
-    with pytest.raises(SnapshotMismatchError, match="scoped"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                state,
-                execution_request.scope_run,
-                execution_request.frames,
-                (
-                    ResumeFailedNodeRequest(
-                        (GraphNodeId("foreign"),),
-                        GraphNodeId("a"),
-                        OverrideNodeInput(Graph.values(value="retry")),
-                    ),
-                ),
-            ),
-        )
-
-
 async def test_executor_rejects_graph_ownership_and_parent_shape_mismatches() -> None:
     graph = graph_with_nodes(node("a"))
     executor = GraphExecutor(graph)
@@ -904,7 +820,7 @@ async def test_executor_rejects_graph_ownership_and_parent_shape_mismatches() ->
     with pytest.raises(SnapshotMismatchError, match="compiled graph identity"):
         executor.prepare(string_request(graph, foreign, "input"))
 
-    parent = ParentGraphActivation(GraphRunId("parent"), 0, GraphNodeId("nested"))
+    parent = GraphActivationIdentity(GraphRunId("parent"), 0, GraphNodeId("nested"))
     root_with_parent = replace(
         initial,
         run_id=child_graph_run_id(parent.run_id, parent.superstep, parent.node_id),
@@ -941,343 +857,6 @@ async def test_executor_rejects_graph_ownership_and_parent_shape_mismatches() ->
         outputs=normalize_graph_output_declarations({}),
     )
     GraphExecutor(compile_graph(shared_parent))
-
-
-async def test_resume_rejects_non_failed_and_invalid_input_variants() -> None:
-    graph = graph_with_nodes(node("a"))
-    initial = started(graph)
-    execution_request = string_request(graph, initial, "input")
-    with pytest.raises(SnapshotMismatchError, match="failure resume"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                initial,
-                execution_request.scope_run,
-                execution_request.frames,
-                (
-                    ResumeFailedNodeRequest(
-                        (),
-                        GraphNodeId("a"),
-                        OverrideNodeInput(Graph.values(value="x")),
-                    ),
-                ),
-            ),
-        )
-    with pytest.raises(SnapshotMismatchError, match="interrupt resume"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                initial,
-                execution_request.scope_run,
-                execution_request.frames,
-                (
-                    ResumeInterruptedNodeRequest(
-                        (),
-                        GraphNodeId("a"),
-                        GraphInterruptId("interrupt"),
-                        OverrideNodeInput(Graph.values(value="x")),
-                    ),
-                ),
-            ),
-        )
-    with pytest.raises(SnapshotMismatchError, match="skip"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                initial,
-                execution_request.scope_run,
-                execution_request.frames,
-                (SkipFailedNodeRequest((), GraphNodeId("a"), "skip", None),),
-            ),
-        )
-
-
-async def test_resume_projection_covers_override_default_skip_and_interrupt_input_guards() -> None:
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("failed")
-
-    codec = _Codec()
-    resumable = graph_with_nodes(
-        node("a", fail),
-        definition_id="resumable.graph",
-        resume_input=ResumeInputBinding(
-            GraphResumeInputCodecId("input.v1"),
-            1,
-            codec,
-            codec,
-        ),
-    )
-    executor = GraphExecutor(resumable)
-    initial = started(resumable)
-    execution_request = string_request(resumable, initial, "input")
-    prepared = executor.prepare(execution_request)
-    assert isinstance(prepared, ExecutableFrontier)
-    claimed = reduce_graph_run(initial, prepared.claim.command)
-    with pytest.raises(SnapshotMismatchError, match="quiescent"):
-        prepare_resume(
-            resumable,
-            ResumeRequest(
-                claimed,
-                execution_request.scope_run,
-                execution_request.frames,
-                (),
-            ),
-        )
-    session = executor.issue_session(prepared.claim, claimed)
-    try:
-        result = await session.next(claimed)
-        failed = reduce_graph_run(claimed, result.command)
-    finally:
-        await session.aclose()
-
-    failed_request = replace(execution_request, state=failed)
-    override = prepare_resume(
-        resumable,
-        ResumeRequest(
-            failed,
-            failed_request.scope_run,
-            failed_request.frames,
-            (
-                ResumeFailedNodeRequest(
-                    (),
-                    GraphNodeId("a"),
-                    OverrideNodeInput(Graph.values(value="retry")),
-                ),
-            ),
-        ),
-    )
-    assert override.command.actions[0].node_id == GraphNodeId("a")
-    assert len(override.inputs) == 1
-    default = prepare_resume(
-        resumable,
-        ResumeRequest(
-            failed,
-            failed_request.scope_run,
-            failed_request.frames,
-            (ResumeFailedNodeRequest((), GraphNodeId("a"), UseMaterializedInput()),),
-        ),
-    )
-    assert default.command.actions[0].node_id == GraphNodeId("a")
-    assert len(default.inputs) == 1
-    skip = prepare_resume(
-        resumable,
-        ResumeRequest(
-            failed,
-            failed_request.scope_run,
-            failed_request.frames,
-            (SkipFailedNodeRequest((), GraphNodeId("a"), "operator", None),),
-        ),
-    )
-    assert skip.command.actions[0].node_id == GraphNodeId("a")
-    assert skip.inputs == ()
-
-    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.interrupt(b"question")
-
-    interrupted_graph = graph_with_nodes(
-        node("a", interrupt),
-        definition_id="resumable.interrupt",
-        resume_input=ResumeInputBinding(
-            GraphResumeInputCodecId("input.v1"),
-            1,
-            codec,
-            codec,
-        ),
-    )
-    interrupt_executor = GraphExecutor(interrupted_graph)
-    interrupt_initial = started(interrupted_graph)
-    interrupt_request = string_request(interrupted_graph, interrupt_initial, "input")
-    interrupt_prepared = interrupt_executor.prepare(interrupt_request)
-    assert isinstance(interrupt_prepared, ExecutableFrontier)
-    interrupt_claimed = reduce_graph_run(interrupt_initial, interrupt_prepared.claim.command)
-    interrupt_session = interrupt_executor.issue_session(
-        interrupt_prepared.claim,
-        interrupt_claimed,
-    )
-    try:
-        interrupt_result = await interrupt_session.next(interrupt_claimed)
-        interrupted = reduce_graph_run(interrupt_claimed, interrupt_result.command)
-    finally:
-        await interrupt_session.aclose()
-    interrupt_settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(interrupt_settlement, InterruptedGraphNode)
-    identity = interrupt_settlement.interrupt.identity
-    interrupt_id = graph_interrupt_id(
-        identity.run_id,
-        identity.superstep,
-        identity.node_id,
-        identity.execution_generation,
-    )
-    prepared_interrupt = prepare_resume(
-        interrupted_graph,
-        ResumeRequest(
-            interrupted,
-            interrupt_request.scope_run,
-            interrupt_request.frames,
-            (
-                ResumeInterruptedNodeRequest(
-                    (),
-                    GraphNodeId("a"),
-                    interrupt_id,
-                    OverrideNodeInput(Graph.values(value="answer")),
-                ),
-            ),
-        ),
-    )
-    assert len(prepared_interrupt.inputs) == 1
-
-
-async def test_override_resume_admission_preserves_validation_and_codec_order() -> None:
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("failed")
-
-    codec = _TrackingCodec()
-    graph = graph_with_nodes(
-        node("a", fail),
-        definition_id="resume.admission.order",
-        resume_input=ResumeInputBinding(
-            GraphResumeInputCodecId("input.v1"),
-            1,
-            codec,
-            codec,
-        ),
-    )
-    executor = GraphExecutor(graph)
-    initial = started(graph)
-    initial_request = string_request(graph, initial, "input")
-    with pytest.raises(SnapshotMismatchError, match="failure resume"):
-        prepare_resume(
-            graph,
-            ResumeRequest(
-                initial,
-                initial_request.scope_run,
-                initial_request.frames,
-                (
-                    ResumeFailedNodeRequest(
-                        (),
-                        GraphNodeId("a"),
-                        OverrideNodeInput(Graph.values(value="retry")),
-                    ),
-                ),
-            ),
-        )
-    assert codec.events == []
-
-    failed, _results = await run_frontier(executor, graph, initial, "input")
-    failed_request = string_request(graph, failed, "input")
-    failed_resume_request = ResumeRequest(
-        failed,
-        failed_request.scope_run,
-        failed_request.frames,
-        (
-            ResumeFailedNodeRequest(
-                (),
-                GraphNodeId("a"),
-                OverrideNodeInput(Graph.values(value="retry")),
-            ),
-        ),
-    )
-    codec.events.clear()
-    failed_prepared = prepare_resume(graph, failed_resume_request)
-    assert codec.events == ["encode", "decode"]
-    assert failed_prepared.command.actions[0].node_id == GraphNodeId("a")
-    assert len(failed_prepared.inputs) == 1
-    assert failed_prepared.inputs[0].frame.entries[0] == NamedValue("value", "retry")
-    resumed = reduce_graph_run(failed, failed_prepared.command)
-    assert isinstance(resumed.frontier.nodes[0].settlement, PendingGraphNode)
-
-    codec.tamper = "name"
-    codec.events.clear()
-    tampered_name_request = replace(failed_resume_request)
-    name_state = tampered_name_request.state
-    name_frames = tampered_name_request.frames
-    with pytest.raises(GraphValueAdmissionError) as name_error:
-        prepare_resume(graph, tampered_name_request)
-    assert str(name_error.value) == (
-        "node input names do not match the compiled descriptor: expected ('value',), got ('other',)"
-    )
-    assert name_error.value.__cause__ is None
-    assert codec.events == ["encode", "decode"]
-    assert tampered_name_request.state is name_state
-    assert tampered_name_request.frames is name_frames
-
-    codec.tamper = "type"
-    codec.events.clear()
-    tampered_type_request = replace(failed_resume_request)
-    type_state = tampered_type_request.state
-    type_frames = tampered_type_request.frames
-    with pytest.raises(GraphValueAdmissionError) as type_error:
-        prepare_resume(graph, tampered_type_request)
-    assert str(type_error.value) == "node input value for 'value' does not have its exact declared type"
-    assert type_error.value.__cause__ is None
-    assert codec.events == ["encode", "decode"]
-    assert tampered_type_request.state is type_state
-    assert tampered_type_request.frames is type_frames
-
-    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.interrupt(b"question")
-
-    interrupt_codec = _TrackingCodec()
-    interrupted_graph = graph_with_nodes(
-        node("a", interrupt),
-        definition_id="resume.admission.interrupt.order",
-        resume_input=ResumeInputBinding(
-            GraphResumeInputCodecId("input.v1"),
-            1,
-            interrupt_codec,
-            interrupt_codec,
-        ),
-    )
-    interrupt_executor = GraphExecutor(interrupted_graph)
-    interrupt_initial = started(interrupted_graph)
-    interrupted, _results = await run_frontier(interrupt_executor, interrupted_graph, interrupt_initial, "input")
-    interrupt_request = string_request(interrupted_graph, interrupted, "input")
-    interrupt_settlement = interrupted.frontier.nodes[0].settlement
-    assert isinstance(interrupt_settlement, InterruptedGraphNode)
-    identity = interrupt_settlement.interrupt.identity
-    stale_request = ResumeRequest(
-        interrupted,
-        interrupt_request.scope_run,
-        interrupt_request.frames,
-        (
-            ResumeInterruptedNodeRequest(
-                (),
-                GraphNodeId("a"),
-                GraphInterruptId("stale"),
-                OverrideNodeInput(Graph.values(value="answer")),
-            ),
-        ),
-    )
-    with pytest.raises(SnapshotMismatchError, match="does not match"):
-        prepare_resume(interrupted_graph, stale_request)
-    assert interrupt_codec.events == []
-
-    interrupt_id = graph_interrupt_id(
-        identity.run_id,
-        identity.superstep,
-        identity.node_id,
-        identity.execution_generation,
-    )
-    interrupt_codec.events.clear()
-    interrupt_prepared = prepare_resume(
-        interrupted_graph,
-        ResumeRequest(
-            interrupted,
-            interrupt_request.scope_run,
-            interrupt_request.frames,
-            (
-                ResumeInterruptedNodeRequest(
-                    (),
-                    GraphNodeId("a"),
-                    interrupt_id,
-                    OverrideNodeInput(Graph.values(value="answer")),
-                ),
-            ),
-        ),
-    )
-    assert interrupt_codec.events == ["encode", "decode"]
-    assert len(interrupt_prepared.inputs) == 1
-    assert interrupt_prepared.inputs[0].frame.entries[0] == NamedValue("value", "answer")
 
 
 async def test_prepare_rejects_an_empty_resource_admission_projection(
@@ -1528,7 +1107,7 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
     root_executor = GraphExecutor(root)
     root_state = reduce_graph_run(None, project_start_graph_command(root, GraphRunId("nested-run")))
     root_scope = root_scope_run(root_state.run_id)
-    child_activation = ParentGraphActivation(root_state.run_id, 0, GraphNodeId("root"))
+    child_activation = GraphActivationIdentity(root_state.run_id, 0, GraphNodeId("root"))
     child_wait = root_executor.prepare(string_request(root, root_state, "input", (MissingChild(child_activation),)))
     assert isinstance(child_wait, WaitingForChildren)
     assert child_wait.missing == (MissingChild(child_activation),)
@@ -1539,7 +1118,7 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
         GraphNodeId("root"),
     )
     child_executor = GraphExecutor(child_graph)
-    grandchild_activation = ParentGraphActivation(child_state.run_id, 0, GraphNodeId("child"))
+    grandchild_activation = GraphActivationIdentity(child_state.run_id, 0, GraphNodeId("child"))
 
     grandchild_wait = child_executor.prepare(
         string_request(
@@ -1588,7 +1167,7 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
     )
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("entry-run")))
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("nested"))
+    activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("nested"))
     missing = executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren)
     _activation, _child_graph, _coordinate, child_state = started_nested_child(
@@ -1621,7 +1200,7 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
     )
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("join-run")))
-    activation = ParentGraphActivation(parent.run_id, 0, GraphNodeId("a"))
+    activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("a"))
     missing = executor.prepare(string_request(graph, parent, "input", (MissingChild(activation),)))
     assert isinstance(missing, WaitingForChildren)
     child_graph = graph.nested_graphs[GraphNodeId("a")]
@@ -1636,7 +1215,7 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
         GraphJoinProgress(
             (GraphNodeId("a"), GraphNodeId("b")),
             GraphNodeId("joined"),
-            frozenset({GraphNodeId("a")}),
+            (ActivationReference(GraphActivationIdentity(parent.run_id, 0, GraphNodeId("a"))),),
         ),
     )
 

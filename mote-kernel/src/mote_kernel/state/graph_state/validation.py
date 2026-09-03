@@ -2,19 +2,28 @@
 
 from mote_kernel.state.graph_state.frontier_model import (
     FailedGraphNode,
+    GraphActivationCause,
     GraphFrontierState,
+    GraphFrontierStatus,
     GraphNodeInterruptIdentity,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
     PendingGraphNode,
-    SkippedGraphNode,
+    RoutedActivationCause,
+    StartActivationCause,
     SucceededGraphNode,
     UseStepRequestInput,
+    frontier_node,
     frontier_status,
     pending_node_ids,
 )
-from mote_kernel.state.graph_state.identity import child_graph_run_id, is_canonical_identity
-from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
+from mote_kernel.state.graph_state.identity import (
+    ActivationReference,
+    GraphActivationIdentity,
+    child_graph_run_id,
+    is_canonical_identity,
+)
+from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
 from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution, SelectGraphRoute
 
@@ -28,7 +37,55 @@ def _require_identity(value: str, field: str) -> None:
         raise GraphStateTransitionError(f"{field} must be non-empty and trimmed")
 
 
-def _validate_join_progress(progress: tuple[GraphJoinProgress, ...]) -> None:
+def _validate_settled_activations(state: GraphRunState) -> None:
+    """Validate the committed success ledger used by historical causes.
+
+    A coordinate in a cause is not proof that its producer actually ran.  The
+    reducer records one route-bearing reference when a node success is
+    committed; later causes and Join arrivals must point at that exact entry.
+    The ledger is intentionally part of ``GraphRunState`` so the reducer can
+    enforce that local invariant.  Authenticity of historical entries is a
+    persistence/evidence concern and is checked at the compiled-graph
+    admission boundary when that evidence is available.
+    """
+
+    evidence = state.settled_activations
+    if type(evidence) is not tuple:
+        raise GraphStateTransitionError("settled activation evidence must be a tuple")
+    if any(type(reference) is not ActivationReference for reference in evidence):
+        raise GraphStateTransitionError("settled activation evidence contains an invalid reference")
+    try:
+        canonical = tuple(sorted(set(evidence), key=ActivationReference.canonical_key))
+    except TypeError as error:
+        raise GraphStateTransitionError("settled activation evidence contains an unhashable value") from error
+    if evidence != canonical:
+        raise GraphStateTransitionError("settled activation evidence must be canonical and distinct")
+    activation_ids = tuple(reference.activation for reference in evidence)
+    if len(activation_ids) != len(set(activation_ids)):
+        raise GraphStateTransitionError("settled activation evidence repeats one activation")
+    for reference in evidence:
+        activation = reference.activation
+        if (
+            type(activation) is not GraphActivationIdentity
+            or activation.run_id != state.run_id
+            or activation.superstep > state.superstep
+        ):
+            raise GraphStateTransitionError("settled activation evidence has an invalid coordinate")
+        if reference.route is not None:
+            _require_identity(reference.route, "settled activation route identity")
+        if activation.superstep == state.superstep:
+            current = frontier_node(state.frontier, activation.node_id)
+            if current is None or not isinstance(current.settlement, SucceededGraphNode):
+                raise GraphStateTransitionError("current settled activation evidence has no successful frontier node")
+            selected = (
+                current.settlement.routing.route if isinstance(current.settlement.routing, SelectGraphRoute) else None
+            )
+            if reference.route != selected:
+                raise GraphStateTransitionError("settled activation evidence route does not match its settlement")
+
+
+def _validate_join_progress(state: GraphRunState) -> None:
+    progress = state.join_progress
     if progress != tuple(sorted(progress, key=lambda item: (item.sources, item.target))):
         raise GraphStateTransitionError("join progress must use canonical order")
     seen: set[tuple[tuple[str, ...], str]] = set()
@@ -40,8 +97,30 @@ def _validate_join_progress(progress: tuple[GraphJoinProgress, ...]) -> None:
         for source in join.sources:
             _require_identity(source, "join source identity")
         _require_identity(join.target, "join target identity")
-        if not join.arrived or not join.arrived < frozenset(join.sources):
+        arrived = join.arrived
+        if (
+            type(arrived) is not tuple
+            or not arrived
+            or any(type(reference) is not ActivationReference for reference in arrived)
+            or arrived != tuple(sorted(set(arrived), key=ActivationReference.canonical_key))
+        ):
+            raise GraphStateTransitionError("join progress arrivals must be canonical and distinct")
+        arrived_sources = tuple(reference.activation.node_id for reference in arrived)
+        if len(arrived_sources) != len(set(arrived_sources)) or not set(arrived_sources) < set(join.sources):
             raise GraphStateTransitionError("join progress must contain partial arrivals")
+        for reference in arrived:
+            activation = reference.activation
+            if (
+                type(activation) is not GraphActivationIdentity
+                or activation.run_id != state.run_id
+                or activation.superstep >= state.superstep
+                or activation.node_id not in join.sources
+            ):
+                raise GraphStateTransitionError("join progress contains an invalid predecessor arrival")
+            if reference.route is not None:
+                _require_identity(reference.route, "join arrival route identity")
+            if reference not in state.settled_activations:
+                raise GraphStateTransitionError("join progress arrival lacks committed settlement evidence")
         key = (join.sources, join.target)
         if key in seen:
             raise GraphStateTransitionError("graph state repeats join progress")
@@ -68,6 +147,40 @@ def _validate_routing(routing: GraphRoutingContribution) -> None:
             raise GraphStateTransitionError("frontier node has an unsupported routing contribution")
 
 
+def _validate_activation_cause(state: GraphRunState, cause: GraphActivationCause) -> None:
+    if type(cause) is StartActivationCause:
+        if state.superstep != 0:
+            raise GraphStateTransitionError("START activation cause is valid only at superstep zero")
+        return
+    if type(cause) is not RoutedActivationCause:
+        raise GraphStateTransitionError("frontier node has an unsupported activation cause")
+    if state.superstep == 0:
+        raise GraphStateTransitionError("initial frontier nodes must carry the START cause")
+    references = cause.references
+    if type(references) is not tuple or not references:
+        raise GraphStateTransitionError("routed activation cause requires non-empty references")
+    if any(type(reference) is not ActivationReference for reference in references):
+        raise GraphStateTransitionError("routed activation cause contains an invalid reference")
+    if any(type(reference.activation) is not GraphActivationIdentity for reference in references):
+        raise GraphStateTransitionError("routed activation cause contains an invalid activation identity")
+    for reference in references:
+        activation = reference.activation
+        _require_identity(activation.run_id, "activation cause run identity")
+        if type(activation.superstep) is not int or activation.superstep < 0:
+            raise GraphStateTransitionError("activation cause superstep must be a non-negative integer")
+        _require_identity(activation.node_id, "activation cause node identity")
+        if reference.route is not None:
+            _require_identity(reference.route, "activation cause route identity")
+    if references != tuple(sorted(set(references), key=ActivationReference.canonical_key)):
+        raise GraphStateTransitionError("routed activation cause references are not canonical and distinct")
+    for reference in cause.references:
+        activation = reference.activation
+        if activation.run_id != state.run_id or activation.superstep >= state.superstep:
+            raise GraphStateTransitionError("routed activation cause references a non-predecessor activation")
+        if reference not in state.settled_activations:
+            raise GraphStateTransitionError("routed activation cause lacks committed settlement evidence")
+
+
 def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) -> None:
     """Validate one durable or transition-local Frontier against its run coordinates."""
 
@@ -77,6 +190,7 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
     needs_codec = False
     for node in frontier.nodes:
         _require_identity(node.node_id, "frontier node identity")
+        _validate_activation_cause(state, node.cause)
         # The wildcard also rejects malformed values reconstructed outside the
         # statically typed in-process construction path.
         match node.settlement:
@@ -107,10 +221,6 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
                 if identity.node_id != node.node_id:
                     raise GraphStateTransitionError("interrupt identity node does not match its frontier node")
                 _validate_interrupt_identity(state, identity)
-            case SkippedGraphNode(failure=failure, reason=reason, routing=routing):
-                _require_identity(failure, "skipped graph failure")
-                _require_identity(reason, "graph skip reason")
-                _validate_routing(routing)
             case _:
                 raise GraphStateTransitionError("frontier node has an unsupported settlement")
     codec = state.resume_input_codec
@@ -131,6 +241,7 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         raise GraphStateTransitionError("graph definition version must be positive")
     if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
         raise GraphStateTransitionError("graph counters cannot be negative")
+    _validate_settled_activations(state)
     if state.parent is not None:
         _require_identity(state.parent.run_id, "parent graph run identity")
         _require_identity(state.parent.node_id, "parent graph node identity")
@@ -142,7 +253,7 @@ def validate_graph_run_state(state: GraphRunState) -> None:
             state.parent.node_id,
         ):
             raise GraphStateTransitionError("child graph run identity does not match its parent activation")
-    _validate_join_progress(state.join_progress)
+    _validate_join_progress(state)
     validate_graph_frontier(state, state.frontier)
     if state.resources is not None:
         try:
@@ -173,7 +284,8 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         case GraphRunStatus.RUNNING:
             if not state.frontier.nodes:
                 raise GraphStateTransitionError("a running graph requires a non-empty frontier")
-            frontier_status(state.frontier)
+            if frontier_status(state.frontier) is GraphFrontierStatus.FAILED:
+                raise GraphStateTransitionError("a quiescent failed frontier requires terminal failed status")
             if state.abort is not None:
                 raise GraphStateTransitionError("a running graph cannot retain an abort")
             # The resource and execution checks above already require a Pending
@@ -184,6 +296,15 @@ def validate_graph_run_state(state: GraphRunState) -> None:
                 raise GraphStateTransitionError("a completed graph must use the canonical empty position")
             if state.abort is not None:
                 raise GraphStateTransitionError("a completed graph cannot retain an abort")
+        case GraphRunStatus.FAILED:
+            if (
+                not state.frontier.nodes
+                or frontier_status(state.frontier) is not GraphFrontierStatus.FAILED
+                or state.resources is not None
+                or state.execution is not None
+                or state.abort is not None
+            ):
+                raise GraphStateTransitionError("a failed graph must retain one quiescent failed diagnostic frontier")
         case GraphRunStatus.ABORTED:
             if not state.frontier.nodes or state.abort is None or state.resources is not None:
                 raise GraphStateTransitionError("an aborted graph must retain one quiescent diagnostic frontier")

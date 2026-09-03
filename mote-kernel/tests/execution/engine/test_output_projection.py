@@ -19,6 +19,7 @@ from mote_kernel.state.graph_state import (
     GraphFrontierNode,
     GraphFrontierState,
     GraphRunId,
+    StartActivationCause,
     SucceededGraphNode,
 )
 
@@ -117,7 +118,11 @@ def test_routing_aborts_when_completion_output_is_unavailable() -> None:
     state = replace(
         state,
         frontier=GraphFrontierState(
-            (GraphFrontierNode(state.frontier.nodes[0].node_id, SucceededGraphNode(ContinueGraphRouting())),)
+            (
+                GraphFrontierNode(
+                    state.frontier.nodes[0].node_id, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()
+                ),
+            )
         ),
     )
 

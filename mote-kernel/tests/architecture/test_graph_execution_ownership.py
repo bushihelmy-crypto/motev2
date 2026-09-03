@@ -95,7 +95,6 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphInterruptPayload",
                 "GraphResumeInputPayload",
                 "GraphResumeInputCodecId",
-                "GraphSkipReason",
                 "GraphResumeInputCodec",
                 "UseStepRequestInput",
                 "OverrideGraphNodeInput",
@@ -106,7 +105,6 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphNodeInterruptIdentity",
                 "GraphNodeInterrupt",
                 "InterruptedGraphNode",
-                "SkippedGraphNode",
                 "GraphNodeSettlement",
                 "GraphFrontierNode",
                 "GraphFrontierState",
@@ -124,8 +122,6 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "SettleGraphNode",
                 "AdvanceGraphFrontier",
                 "CompleteGraphFrontier",
-                "ResumeFailedNode",
-                "SkipFailedNode",
                 "ResumeInterruptedNode",
                 "GraphNodeResumeAction",
                 "ResumeGraphNodes",
@@ -168,10 +164,17 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "_GraphContinuation",
             }
         ),
-        "execution/engine/routing.py": frozenset({"validate_routing_contribution", "resolve_routing"}),
+        "execution/engine/routing.py": frozenset(
+            {
+                "PublicationHistoryWindow",
+                "publication_history_window",
+                "validate_routing_contribution",
+                "resolve_routing",
+            }
+        ),
         "execution/engine/resume_admission.py": frozenset({"prepare_resume"}),
         "execution/engine/task.py": frozenset({"TaskId", "task_identity", "GraphTask", "ExecutableTask"}),
-        "execution/identity.py": frozenset({"ScopeRunCoordinate", "StableActivation"}),
+        "execution/identity.py": frozenset({"ScopeRunCoordinate", "StableActivation", "stable_activation"}),
         "execution/claim.py": frozenset(
             {
                 "ExecutionClaimOwner",
@@ -193,7 +196,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
 
 def test_static_execution_and_resource_types_reuse_state_owned_identities() -> None:
     assert _class_fields("state/graph_state/model.py", "GraphExecutionLease") == {"token": "GraphExecutionToken"}
-    assert _class_fields("state/graph_state/model.py", "ParentGraphActivation") == {
+    assert _class_fields("state/graph_state/identity.py", "GraphActivationIdentity") == {
         "run_id": "GraphRunId",
         "superstep": "int",
         "node_id": "GraphNodeId",
@@ -312,19 +315,17 @@ def test_node_invocation_belongs_to_the_single_execution_scheduler() -> None:
     assert _call_owner_modules("operation") == ("execution/engine/scheduler.py",)
 
 
-def test_resume_substitution_uses_the_single_publication_store_and_presence_only_overlay() -> None:
-    overlay = _top_level_definition("execution/run_context.py", "CandidateFrameAvailability")
-    assert isinstance(overlay, ast.ClassDef)
-    methods = {node.name for node in overlay.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+def test_resume_input_and_confirmed_values_share_the_single_scoped_frame_index() -> None:
+    availability = _top_level_definition("execution/run_context.py", "ScopedFrameAvailability")
+    assert isinstance(availability, ast.ClassDef)
+    methods = {node.name for node in availability.body if isinstance(node, ast.FunctionDef)}
     assert methods == {"has_graph_input", "has_publication", "has_resume_input", "has_child_boundary"}
-    assert "lookup" not in methods
-    assert _class_fields("execution/run_context.py", "CandidateFrameAvailability") == {
-        "confirmed": "'ScopedFrameIndex[GraphValueT]'",
-        "substitutions": "tuple[AdmittedSubstitution[GraphValueT], ...]",
+    assert _class_fields("execution/run_context.py", "ScopedFrameIndex") == {
+        "graph_inputs": "tuple[AdmittedGraphInput[GraphValueT], ...]",
+        "publications": "tuple[ConfirmedPublication[GraphValueT], ...]",
+        "resume_inputs": "tuple[AdmittedResumeInput[GraphValueT], ...]",
+        "child_boundaries": "tuple[ConfirmedChildBoundary[GraphValueT], ...]",
     }
-    assert _class_fields("execution/run_context.py", "ScopedFrameIndex")["publications"] == (
-        "tuple[ConfirmedPublication[GraphValueT], ...]"
-    )
 
 
 def test_execution_requests_read_authoritative_graph_state() -> None:
@@ -426,7 +427,6 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
     assert _call_owner_modules("reduce_graph_run") == (
         "execution/claim.py",
         "execution/engine/recovery.py",
-        "execution/engine/resume_admission.py",
         "execution/engine/session.py",
         "execution/family_driver.py",
         "execution/invocation.py",
@@ -510,7 +510,7 @@ def test_graph_runtime_has_no_forwarding_only_compatibility_modules() -> None:
     )
 
 
-def test_graph_run_lifecycle_has_exactly_three_current_states() -> None:
+def test_graph_run_lifecycle_has_one_running_and_three_terminal_states() -> None:
     status = _top_level_definition("state/graph_state/model.py", "GraphRunStatus")
     assert isinstance(status, ast.ClassDef)
     members = {
@@ -520,7 +520,7 @@ def test_graph_run_lifecycle_has_exactly_three_current_states() -> None:
         for target in statement.targets
         if isinstance(target, ast.Name)
     }
-    assert members == {"RUNNING", "COMPLETED", "ABORTED"}
+    assert members == {"RUNNING", "COMPLETED", "FAILED", "ABORTED"}
 
 
 def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() -> None:
@@ -533,6 +533,8 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",
         "resource_order": "tuple[ResourceId, ...]",
+        "activation_rules": "CompiledActivationRules[GraphValueT]",
+        "activation_gates": "FrozenMap[GraphNodeId, tuple[ActivationGate, ...]]",
     }
     compiled_graph = _top_level_definition("execution/graph/topology.py", "CompiledGraph")
     assert isinstance(compiled_graph, ast.ClassDef)

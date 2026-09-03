@@ -16,13 +16,13 @@ from mote_kernel.execution.result import (
     AbortedGraph,
     AwaitingResume,
     CompletedGraph,
+    FailedGraph,
     ReadyToResolve,
     WaitingForChildren,
 )
 from mote_kernel.state.graph_state import (
     GraphFrontierStatus,
     GraphRunStatus,
-    failed_node_ids,
     frontier_status,
     interrupted_node_ids,
 )
@@ -33,6 +33,7 @@ GraphValueT = TypeVar("GraphValueT")
 @dataclass(frozen=True, slots=True)
 class ExecutableFrontier(Generic[GraphValueT]):
     claim: PreparedExecutionClaim[GraphValueT]
+    children: WaitingForChildren[GraphValueT] | None
 
 
 PrepareDisposition: TypeAlias = (
@@ -41,6 +42,7 @@ PrepareDisposition: TypeAlias = (
     | ReadyToResolve
     | AwaitingResume
     | CompletedGraph
+    | FailedGraph
     | AbortedGraph
 )
 
@@ -54,24 +56,31 @@ def prepare_superstep(
     state = request.state
     if state.status is GraphRunStatus.COMPLETED:
         return CompletedGraph()
+    if state.status is GraphRunStatus.FAILED:
+        return FailedGraph()
     if state.status is GraphRunStatus.ABORTED:
         return AbortedGraph()
     status = frontier_status(state.frontier)
     if status is GraphFrontierStatus.SETTLED:
         return ReadyToResolve(resolve_routing(graph, state, request.scope_run, request.frames))
     if status is GraphFrontierStatus.AWAITING_RESUME:
-        return AwaitingResume(failed_node_ids(state.frontier), interrupted_node_ids(state.frontier))
+        return AwaitingResume(interrupted_node_ids(state.frontier))
     if state.execution is not None:
         raise ResultCollectionError("active execution requires its original execution session")
     frontier = prepare_frontier(graph, request)
-    if isinstance(frontier, WaitingForChildren):
-        return frontier
+    children: WaitingForChildren[GraphValueT] | None = (
+        WaitingForChildren[GraphValueT](frontier.missing_children, frontier.active_children)
+        if frontier.missing_children or frontier.active_children
+        else None
+    )
+    if children is not None and not frontier.executables and not frontier.nested_results:
+        return children
     claim = prepare_claim(
         owner,
         frontier,
         claim_resource_snapshot(graph, frontier.tasks),
     )
-    return ExecutableFrontier(claim)
+    return ExecutableFrontier(claim, children)
 
 
 __all__ = ["prepare_superstep"]

@@ -6,8 +6,9 @@ from mote_kernel.execution.identity import (
     StableActivation,
     child_scope_run_for_activation,
     root_scope_run,
+    stable_activation,
 )
-from mote_kernel.state.graph_state import GraphNodeId, GraphRunId, ParentGraphActivation
+from mote_kernel.state.graph_state import GraphActivationIdentity, GraphNodeId, GraphRunId
 
 
 @pytest.mark.parametrize(
@@ -39,7 +40,15 @@ def test_stable_activation_rejects_invalid_execution_position(
 
 def test_child_scope_requires_parent_from_the_same_scoped_run() -> None:
     scope_run = root_scope_run(GraphRunId("run"))
-    foreign_parent = ParentGraphActivation(GraphRunId("other"), 0, GraphNodeId("nested"))
+    foreign_parent = GraphActivationIdentity(GraphRunId("other"), 0, GraphNodeId("nested"))
 
     with pytest.raises(SnapshotMismatchError, match="does not belong"):
         child_scope_run_for_activation(scope_run, foreign_parent)
+
+
+def test_stable_activation_requires_state_identity_from_the_same_scoped_run() -> None:
+    scope_run = root_scope_run(GraphRunId("run"))
+    foreign = GraphActivationIdentity(GraphRunId("other"), 0, GraphNodeId("node"))
+
+    with pytest.raises(SnapshotMismatchError, match="does not belong"):
+        stable_activation(scope_run, foreign)

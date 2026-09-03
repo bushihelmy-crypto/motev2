@@ -27,7 +27,6 @@ from mote_kernel.execution.run_context import (
     ContinuationSnapshot,
     ExecutionPublicationProvenance,
     ScopedFrameIndex,
-    SkipSubstitutionProvenance,
     _admit_continuation,
     _CompiledFamilyIdentity,
 )
@@ -38,10 +37,13 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphExecutionToken,
+    GraphFrontierState,
     GraphNodeId,
     GraphRunId,
     GraphRunState,
+    PendingGraphNode,
     SettleGraphNode,
+    UseStepRequestInput,
     reduce_graph_run,
 )
 
@@ -100,6 +102,23 @@ async def empty(_values: Graph.Values[str]) -> Graph.Values[str]:
     return Graph.values()
 
 
+def encode_empty(_value: Graph.Values[str]) -> bytes:
+    return b""
+
+
+def decode_empty(_payload: bytes) -> Graph.Values[str]:
+    return Graph.values()
+
+
+def resume_empty_interrupt(
+    graph: Graph[str],
+    paused: Graph.AwaitingResumeResult[str],
+    node_id: str,
+) -> Graph.ResumeAction[str]:
+    interrupt = next(view for view in paused.interrupts if view.node_id == node_id)
+    return graph.resume_interrupted(node_id, interrupt.interrupt_id, Graph.values())
+
+
 async def _completed_empty(definition_id: str) -> tuple[Graph[str], Graph.CompletedResult[str]]:
     graph = Graph[str](definition_id)
     graph.add_node("node", empty, inputs={}, outputs={})
@@ -109,28 +128,18 @@ async def _completed_empty(definition_id: str) -> tuple[Graph[str], Graph.Comple
     return graph, result
 
 
-async def _completed_substitution(
+async def _completed_output_publication(
     definition_id: str,
 ) -> tuple[Graph[str], Graph.CompletedResult[str], ConfirmedPublication[str]]:
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("declined")
+    async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value="published")
 
     graph = Graph[str](definition_id)
-    graph.add_node("source", fail, inputs={}, outputs={"value": str})
+    graph.add_node("source", publish, inputs={}, outputs={"value": str})
     graph.set_outputs({"value": Graph.node_output("source", "value")})
-    paused = await graph.run(Graph.values())
-    assert isinstance(paused, Graph.AwaitingResumeResult)
-    completed = await graph.run(
-        state=paused.state,
-        continuation=paused.continuation,
-        resume=(graph.skip_failed("source", "replacement", output=Graph.values(value="replacement")),),
-    )
+    completed = await graph.run(Graph.values())
     assert isinstance(completed, Graph.CompletedResult)
-    publication = next(
-        record
-        for record in _layout(completed.continuation).reveal().frames.publications
-        if isinstance(record.provenance, SkipSubstitutionProvenance)
-    )
+    publication = _layout(completed.continuation).reveal().frames.publications[0]
     return graph, completed, publication
 
 
@@ -403,26 +412,34 @@ async def test_complete_continuation_rejects_descending_resume_input_coordinates
     left_calls = 0
     right_calls = 0
 
-    async def fail_left_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_left_once(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal left_calls
         left_calls += 1
-        return Graph.failure("retry left") if left_calls == 1 else Graph.values()
+        if left_calls == 1:
+            return Graph.interrupt(b"left")
+        return Graph.success(Graph.values())
 
-    async def fail_right_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_right_once(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal right_calls
         right_calls += 1
-        return Graph.failure("retry right") if right_calls == 1 else Graph.values()
+        if right_calls == 1:
+            return Graph.interrupt(b"right")
+        return Graph.success(Graph.values())
 
     graph = Graph[str]("continuation.descending-resume-inputs")
-    graph.add_node("left", fail_left_once, inputs={}, outputs={})
-    graph.add_node("right", fail_right_once, inputs={}, outputs={})
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
+    graph.add_node("left", interrupt_left_once, inputs={}, outputs={})
+    graph.add_node("right", interrupt_right_once, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed("left"), graph.resume_failed("right")),
+        resume=(
+            resume_empty_interrupt(graph, paused, "left"),
+            resume_empty_interrupt(graph, paused, "right"),
+        ),
     )
     assert isinstance(completed, Graph.CompletedResult)
     layout = _layout(completed.continuation)
@@ -505,27 +522,23 @@ async def test_complete_continuation_rejects_a_malformed_publication_record() ->
 async def test_complete_continuation_rejects_a_malformed_resume_input_record() -> None:
     calls = 0
 
-    async def fail_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
-        return Graph.failure("retry") if calls == 1 else Graph.values()
-
-    def encode_empty(_values: Graph.Values[str]) -> bytes:
-        return b""
-
-    def decode_empty(_payload: bytes) -> Graph.Values[str]:
-        return Graph.values()
+        if calls == 1:
+            return Graph.interrupt(b"question")
+        return Graph.success(Graph.values())
 
     graph = Graph[str]("continuation.malformed-resume-record")
     graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
-    graph.add_node("node", fail_once, inputs={}, outputs={})
+    graph.add_node("node", interrupt_once, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed_with("node", Graph.values()),),
+        resume=(resume_empty_interrupt(graph, paused, "node"),),
     )
     assert isinstance(completed, Graph.CompletedResult)
     layout = _layout(completed.continuation)
@@ -725,31 +738,28 @@ async def test_complete_continuation_readmits_publication_frame_content() -> Non
 
 
 @pytest.mark.asyncio
-async def test_valid_historical_substitution_continuation_survives_frontier_advance() -> None:
-    graph, completed, publication = await _completed_substitution("continuation.valid-substitution")
+async def test_valid_historical_publication_continuation_survives_completion() -> None:
+    graph, completed, publication = await _completed_output_publication("continuation.valid-publication")
 
     repeated = await graph.run(state=completed.state, continuation=completed.continuation)
 
     assert isinstance(repeated, Graph.CompletedResult)
-    assert repeated.outputs["value"] == "replacement"
+    assert repeated.outputs["value"] == "published"
     assert publication.coordinate.activation.node_id == GraphNodeId("source")
     assert all(node.node_id != GraphNodeId("source") for node in completed.state.frontier.nodes)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["provenance", "revision", "descriptor", "lineage", "frame"])
-async def test_substitution_continuation_rejects_each_integrity_violation(tamper: str) -> None:
-    graph, completed, publication = await _completed_substitution(f"continuation.substitution-{tamper}")
+async def test_publication_continuation_rejects_each_integrity_violation(tamper: str) -> None:
+    graph, completed, publication = await _completed_output_publication(f"continuation.publication-{tamper}")
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
     malformed = publication
     if tamper == "provenance":
         malformed = replace(
             malformed,
-            provenance=cast(
-                SkipSubstitutionProvenance,
-                ExecutionPublicationProvenance(GraphExecutionToken(0, GraphExecutionAttemptId("invalid"))),
-            ),
+            provenance=cast(ExecutionPublicationProvenance, object()),
         )
     elif tamper == "revision":
         malformed = replace(malformed, acknowledged_revision=completed.state.revision + 1)
@@ -778,7 +788,7 @@ async def test_substitution_continuation_rejects_each_integrity_violation(tamper
         malformed = replace(
             malformed,
             frame=_make_node_output_frame(
-                Graph.values(other="replacement"),
+                Graph.values(other="published"),
                 normalize_output_declarations({"other": str}),
             ),
         )
@@ -792,22 +802,23 @@ async def test_substitution_continuation_rejects_each_integrity_violation(tamper
 async def test_complete_continuation_rejects_an_inconsistent_resume_input() -> None:
     calls = 0
 
-    async def fail_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return Graph.failure("retry")
-        return Graph.values()
+            return Graph.interrupt(b"question")
+        return Graph.success(Graph.values())
 
     graph = Graph[str]("continuation.resume-input")
-    graph.add_node("node", fail_once, inputs={}, outputs={})
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
+    graph.add_node("node", interrupt_once, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed("node"),),
+        resume=(resume_empty_interrupt(graph, paused, "node"),),
     )
     assert isinstance(completed, Graph.CompletedResult)
     layout = _layout(completed.continuation)
@@ -833,27 +844,23 @@ async def test_complete_continuation_rejects_an_inconsistent_resume_input() -> N
 async def test_complete_continuation_readmits_resume_input_frame_content() -> None:
     calls = 0
 
-    async def fail_once(_values: Graph.Values[str]) -> Graph.Values[str] | Graph.Outcome[str]:
+    async def interrupt_once(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
-        return Graph.failure("retry") if calls == 1 else Graph.values()
-
-    def encode_empty(_values: Graph.Values[str]) -> bytes:
-        return b""
-
-    def decode_empty(_payload: bytes) -> Graph.Values[str]:
-        return Graph.values()
+        if calls == 1:
+            return Graph.interrupt(b"question")
+        return Graph.success(Graph.values())
 
     graph = Graph[str]("continuation.resume-frame-content")
     graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
-    graph.add_node("node", fail_once, inputs={}, outputs={})
+    graph.add_node("node", interrupt_once, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
-        resume=(graph.resume_failed_with("node", Graph.values()),),
+        resume=(resume_empty_interrupt(graph, paused, "node"),),
     )
     assert isinstance(completed, Graph.CompletedResult)
     layout = _layout(completed.continuation)
@@ -950,12 +957,13 @@ async def test_complete_continuation_requires_each_current_success_publication()
     async def succeed(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values()
 
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("pause")
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"pause")
 
     graph = Graph[str]("continuation.current-publication")
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
     graph.add_node("success", succeed, inputs={}, outputs={})
-    graph.add_node("failure", fail, inputs={}, outputs={})
+    graph.add_node("interrupt", interrupt, inputs={}, outputs={})
     graph.set_outputs({})
     paused = await graph.run(Graph.values())
     assert isinstance(paused, Graph.AwaitingResumeResult)
@@ -969,18 +977,63 @@ async def test_complete_continuation_requires_each_current_success_publication()
 
 
 @pytest.mark.asyncio
-async def test_complete_continuation_validates_a_parked_ordinary_input_source() -> None:
+async def test_complete_continuation_requires_a_pending_node_input_source() -> None:
     async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value="published")
 
-    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.failure("park child")
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"pause")
+
+    graph = Graph[str]("continuation.pending-input")
+    graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
+    graph.add_node("producer", publish, inputs={}, outputs={"value": str})
+    graph.add_node(
+        "consumer",
+        interrupt,
+        inputs={"value": Graph.node_output("producer", "value")},
+        outputs={},
+    )
+    graph.add_edge("producer", "consumer")
+    graph.set_outputs({})
+    paused = await graph.run(Graph.values())
+    assert isinstance(paused, Graph.AwaitingResumeResult)
+    node = paused.state.frontier.nodes[0]
+    pending = replace(
+        paused.state,
+        frontier=GraphFrontierState((replace(node, settlement=PendingGraphNode(UseStepRequestInput())),)),
+    )
+    layout = _layout(paused.continuation)
+    snapshot = layout.reveal()
+    layout.install(
+        replace(
+            snapshot,
+            root_state=pending,
+            frames=replace(snapshot.frames, publications=()),
+        )
+    )
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="current node input source"):
+        await graph.run(state=pending, continuation=paused.continuation)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_input_consumer_settles_before_nested_child_awaits_resume() -> None:
+    async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values(value="published")
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"park child")
+
+    consumed = 0
 
     async def consume(_values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal consumed
+        consumed += 1
         return Graph.values()
 
     child = Graph[str]("continuation.parked-child")
-    child.add_node("leaf", fail, inputs={}, outputs={})
+    child.set_resume_codec("empty", 1, encode_empty, decode_empty)
+    child.add_node("leaf", interrupt, inputs={}, outputs={})
     child.set_outputs({})
     parent = Graph[str]("continuation.parked-parent")
     parent.add_node("producer", publish, inputs={}, outputs={"value": str})
@@ -994,25 +1047,17 @@ async def test_complete_continuation_validates_a_parked_ordinary_input_source() 
     parent.add_edge("producer", "child")
     parent.add_edge("producer", "consumer")
     parent.set_outputs({})
-    paused = await parent.run(Graph.values())
+    paused = await parent.run(Graph.values(), max_parallel_tasks=1)
     assert isinstance(paused, Graph.AwaitingResumeResult)
+    assert consumed == 1
 
-    repeated = await parent.run(state=paused.state, continuation=paused.continuation)
+    repeated = await parent.run(
+        state=paused.state,
+        continuation=paused.continuation,
+        max_parallel_tasks=1,
+    )
     assert isinstance(repeated, Graph.AwaitingResumeResult)
-    layout = _layout(repeated.continuation)
-    snapshot = layout.reveal()
-    producer_publication = next(
-        publication
-        for publication in snapshot.frames.publications
-        if publication.coordinate.activation.node_id == GraphNodeId("producer")
-    )
-    retained = tuple(
-        publication for publication in snapshot.frames.publications if publication is not producer_publication
-    )
-    layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=retained)))
-
-    with pytest.raises(Graph.SnapshotMismatchError, match="current node input source"):
-        await parent.run(state=repeated.state, continuation=repeated.continuation)
+    assert consumed == 1
 
 
 @pytest.mark.asyncio

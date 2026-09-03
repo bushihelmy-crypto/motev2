@@ -1,57 +1,37 @@
-"""Pure preparation and whole-invocation admission for graph resumes."""
+"""Pure preparation of interrupted-node resumes."""
 
-from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from mote_kernel.execution.engine.resume_input import (
     _require_node_materialization,
     _resume_input_coordinate,
     decode_resume_input,
     encode_resume_input,
-    materialize_node_input,
     require_resume_input_binding,
 )
-from mote_kernel.execution.engine.routing import resolve_routing_facts, validate_routing_contribution
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
-from mote_kernel.execution.errors import GraphValuePublicationError, GraphValueUnavailableError, SnapshotMismatchError
+from mote_kernel.execution.errors import SnapshotMismatchError
+from mote_kernel.execution.graph.ports import CompiledActivationRule
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.graph.values import NodeInputFrame, _make_node_output_frame
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.graph.values import NodeInputFrame
+from mote_kernel.execution.identity import stable_activation
 from mote_kernel.execution.request import (
     OverrideNodeInput,
-    ResumeFailedNodeRequest,
     ResumeInterruptedNodeRequest,
     ResumeRequest,
 )
 from mote_kernel.execution.result import PreparedResume
-from mote_kernel.execution.run_context import (
-    AdmittedResumeInput,
-    AdmittedSubstitution,
-    CandidateFrameAvailability,
-    PreparedSubstitution,
-    PublicationAvailabilityCoordinate,
-    ScopedFrameIndex,
-    SkipSubstitutionProvenance,
-)
+from mote_kernel.execution.run_context import AdmittedResumeInput
 from mote_kernel.state.graph_state import (
-    ContinueGraphRouting,
-    FailedGraphNode,
+    GraphActivationIdentity,
     GraphNodeId,
-    GraphRouteId,
-    GraphRunState,
     GraphRunStatus,
-    GraphSkipReason,
     InterruptedGraphNode,
     OverrideGraphNodeInput,
-    ResumeFailedNode,
     ResumeGraphNodes,
     ResumeInterruptedNode,
-    SelectGraphRoute,
-    SkipFailedNode,
-    UseStepRequestInput,
     frontier_node,
     graph_interrupt_id,
-    reduce_graph_run,
 )
 
 GraphValueT = TypeVar("GraphValueT")
@@ -78,6 +58,8 @@ def prepare_resume(
     if state.status is not GraphRunStatus.RUNNING or state.execution is not None or state.resources is not None:
         raise SnapshotMismatchError("resume requires one quiescent running graph")
     require_resume_input_binding(graph, state)
+    if any(type(action) is not ResumeInterruptedNodeRequest for action in request.actions):
+        raise SnapshotMismatchError("resume request has an unsupported action")
     requested_ids = tuple(action.node_id for action in request.actions)
     if (
         not requested_ids
@@ -85,176 +67,41 @@ def prepare_resume(
         or any(action.scope != request.scope_run.scope for action in request.actions)
     ):
         raise SnapshotMismatchError("resume actions must be non-empty, distinct, canonical, and scoped")
-    actions: list[ResumeFailedNode | ResumeInterruptedNode | SkipFailedNode] = []
+    actions: list[ResumeInterruptedNode] = []
     admitted_inputs: list[AdmittedResumeInput[GraphValueT]] = []
-    substitutions: list[PreparedSubstitution[GraphValueT]] = []
     for requested in request.actions:
         current = frontier_node(state.frontier, requested.node_id)
         if current is None:
             raise SnapshotMismatchError("resume request references an unknown frontier node")
-        activation = StableActivation(request.scope_run, state.superstep, requested.node_id)
-        if isinstance(requested, ResumeFailedNodeRequest | ResumeInterruptedNodeRequest):
-            plan = _require_node_materialization(graph, requested.node_id)
-            if isinstance(requested, ResumeFailedNodeRequest):
-                if not isinstance(current.settlement, FailedGraphNode):
-                    raise SnapshotMismatchError("failure resume requires a failed node")
-                if isinstance(requested.input, OverrideNodeInput):
-                    binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
-                else:
-                    binding = UseStepRequestInput()
-                    frame = materialize_node_input(
-                        graph,
-                        state,
-                        request.scope_run,
-                        request.frames,
-                        requested.node_id,
-                        failed_retry_input=binding,
-                    )
-                actions.append(ResumeFailedNode(requested.node_id, binding))
-            else:
-                if not isinstance(current.settlement, InterruptedGraphNode):
-                    raise SnapshotMismatchError("interrupt resume requires an interrupted node")
-                identity = current.settlement.interrupt.identity
-                if requested.interrupt_id != graph_interrupt_id(
-                    identity.run_id,
-                    identity.superstep,
-                    identity.node_id,
-                    identity.execution_generation,
-                ):
-                    raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
-                binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
-                actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
-            admitted_inputs.append(
-                AdmittedResumeInput(
-                    _resume_input_coordinate(activation, plan),
-                    frame,
-                )
+        activation = stable_activation(
+            request.scope_run,
+            GraphActivationIdentity(state.run_id, state.superstep, requested.node_id),
+        )
+        plan = _require_node_materialization(graph, requested.node_id)
+        if not isinstance(current.settlement, InterruptedGraphNode):
+            raise SnapshotMismatchError("interrupt resume requires an interrupted node")
+        identity = current.settlement.interrupt.identity
+        if requested.interrupt_id != graph_interrupt_id(
+            identity.run_id,
+            identity.superstep,
+            identity.node_id,
+            identity.execution_generation,
+        ):
+            raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
+        if any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries):
+            raise SnapshotMismatchError("feedback activation cannot use an input override")
+        binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
+        actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
+        admitted_inputs.append(
+            AdmittedResumeInput(
+                _resume_input_coordinate(activation, plan),
+                frame,
             )
-        else:
-            if not isinstance(current.settlement, FailedGraphNode):
-                raise SnapshotMismatchError("skip requires a failed node")
-            routing = (
-                ContinueGraphRouting() if requested.route is None else SelectGraphRoute(GraphRouteId(requested.route))
-            )
-            validate_routing_contribution(graph, requested.node_id, routing)
-            reason = GraphSkipReason(requested.reason)
-            actions.append(SkipFailedNode(requested.node_id, reason, routing))
-            if requested.output is not None:
-                publication = graph.transition.publications[requested.node_id]
-                frame = _make_node_output_frame(requested.output, publication.declarations)
-                substitutions.append(
-                    PreparedSubstitution(
-                        PublicationAvailabilityCoordinate(activation, publication.identity),
-                        frame,
-                        SkipSubstitutionProvenance(),
-                    )
-                )
+        )
     return PreparedResume(
         ResumeGraphNodes(state.revision, tuple(actions)),
         tuple(admitted_inputs),
-        tuple(substitutions),
     )
-
-
-@dataclass(frozen=True, slots=True)
-class ScopedResumeCandidate(Generic[GraphValueT]):
-    graph: CompiledGraph[GraphValueT]
-    scope_run: ScopeRunCoordinate
-    previous: GraphRunState
-    successor: GraphRunState
-    substitutions: tuple[AdmittedSubstitution[GraphValueT], ...]
-    command: ResumeGraphNodes
-
-
-def admit_resume_candidates(
-    candidates: tuple[ScopedResumeCandidate[GraphValueT], ...],
-    frames: ScopedFrameIndex[GraphValueT],
-) -> CandidateFrameAvailability[GraphValueT]:
-    substitutions = tuple(substitution for candidate in candidates for substitution in candidate.substitutions)
-    candidate_skip_node_ids = tuple(
-        frozenset(action.node_id for action in candidate.command.actions if isinstance(action, SkipFailedNode))
-        for candidate in candidates
-    )
-    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
-        if candidate.previous.run_id != candidate.scope_run.graph_run_id or candidate.successor.run_id != (
-            candidate.scope_run.graph_run_id
-        ):
-            raise SnapshotMismatchError("resume candidate states do not match their scoped graph run")
-        if reduce_graph_run(candidate.previous, candidate.command) != candidate.successor:
-            raise SnapshotMismatchError("resume candidate successor is not the exact command reduction")
-        for substitution in candidate.substitutions:
-            activation = substitution.coordinate.activation
-            try:
-                publication = candidate.graph.transition.publications[activation.node_id]
-            except KeyError as error:
-                raise SnapshotMismatchError("resume substitution references an unknown publication node") from error
-            if (
-                activation.scope_run != candidate.scope_run
-                or activation.superstep != candidate.previous.superstep
-                or substitution.expected_revision != candidate.successor.revision
-                or type(substitution.provenance) is not SkipSubstitutionProvenance
-                or substitution.coordinate.descriptor != publication.identity
-                or activation.node_id not in skip_node_ids
-            ):
-                raise SnapshotMismatchError("resume substitution evidence does not match its admitted scoped successor")
-    canonical = tuple(sorted(substitutions, key=lambda substitution: substitution.coordinate))
-    publication_counts: dict[PublicationAvailabilityCoordinate[GraphValueT], int] = {}
-    duplicate_nodes: set[GraphNodeId] = set()
-    collision_nodes: list[GraphNodeId] = []
-    for substitution in canonical:
-        coordinate = substitution.coordinate
-        count = publication_counts.get(coordinate, 0) + 1
-        publication_counts[coordinate] = count
-        if count == 2:
-            duplicate_nodes.add(coordinate.activation.node_id)
-        if frames.has_publication(coordinate):
-            collision_nodes.append(coordinate.activation.node_id)
-    if duplicate_nodes:
-        duplicates = tuple(sorted(duplicate_nodes))
-        raise GraphValuePublicationError(
-            f"resume substitution nodes {duplicates!r} supplied duplicate publication coordinates"
-        )
-    if collision_nodes:
-        collisions = tuple(sorted(collision_nodes))
-        raise GraphValuePublicationError(
-            f"resume substitution nodes {collisions!r} collide with confirmed publications"
-        )
-    availability = CandidateFrameAvailability(frames, canonical)
-    for candidate, skip_node_ids in zip(candidates, candidate_skip_node_ids, strict=True):
-        facts = resolve_routing_facts(candidate.graph, candidate.successor, candidate.scope_run, availability)
-        unavailable = tuple(
-            sorted(
-                {
-                    (target.node_id, target.unavailable_inputs)
-                    for target in (*facts.control_targets, *facts.completed_join_targets)
-                    if target.unavailable_inputs
-                }
-            )
-        )
-        if unavailable:
-            raise GraphValueUnavailableError(
-                f"resume of scoped graph {candidate.scope_run.scope!r} "
-                f"for actions {tuple(sorted(skip_node_ids))!r} "
-                f"leaves required nodes and consumer inputs {unavailable!r} unavailable"
-            )
-        substituted_node_ids = {substitution.coordinate.activation.node_id for substitution in candidate.substitutions}
-        if (
-            not skip_node_ids.issubset(substituted_node_ids)
-            and not any(
-                (
-                    facts.control_targets,
-                    facts.completed_join_targets,
-                    facts.remaining_join_progress,
-                )
-            )
-            and facts.unavailable_graph_outputs
-        ):
-            actions = tuple(sorted(skip_node_ids))
-            raise GraphValueUnavailableError(
-                f"resume actions {actions!r} in scoped graph {candidate.scope_run.scope!r} "
-                f"leave graph outputs/bindings {facts.unavailable_graph_outputs!r} unavailable"
-            )
-    return availability
 
 
 __all__: list[str] = []
