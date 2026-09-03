@@ -13,6 +13,7 @@ from mote_kernel.execution.engine.routing import (
     _gate_matches_cause,
     _join_arrivals_for_frontier,
     _post_advance_error,
+    frontier_admission_error,
     resolve_routing,
     resolve_routing_facts,
     validate_routing_contribution,
@@ -918,6 +919,19 @@ def test_frontier_admission_rejects_unknown_and_provenance_inconsistencies() -> 
     assert _frontier_gate_error(routed_graph, missing_evidence) == (
         "frontier activation 'b' lacks committed predecessor settlement evidence"
     )
+
+
+def test_frontier_admission_rejects_a_ghost_settled_activation_without_keyerror() -> None:
+    graph = topology("a", "b", edges=(direct("a", "b"),), entries=("a",))
+    state = _settled_routing_state(
+        "b",
+        RoutedActivationCause((reference("a"),)),
+        superstep=1,
+        evidence=(reference("a"), reference("ghost")),
+    )
+
+    assert frontier_admission_error(graph, state) == "settled activation references unknown node 'ghost'"
+    assert _post_advance_error(graph, state) == "settled activation references unknown node 'ghost'"
 
 
 def test_feedback_admission_requires_committed_predecessor_evidence() -> None:

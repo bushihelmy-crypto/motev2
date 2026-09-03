@@ -172,6 +172,35 @@ def validate_routing_contribution(
             raise UnknownRouteError("node selected an unknown conditional route")
 
 
+def settled_activation_admission_error(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> str | None:
+    """Return a topology error for one State-owned settled activation ledger.
+
+    ``GraphRunState`` owns the ledger, while the compiled graph owns its node
+    and route universe.  State validation can check the shape of a reference,
+    but only this compiled-graph admission boundary can reject a canonical
+    reference to a node or route that this graph never declared.
+    """
+
+    for reference in state.settled_activations:
+        activation = reference.activation
+        node_id = activation.node_id
+        if node_id not in graph.nodes:
+            return f"settled activation references unknown node {node_id!r}"
+        conditional = graph.transition.conditional_targets[node_id]
+        route = reference.route
+        if conditional:
+            if route is None:
+                return f"conditional settled activation {node_id!r} lacks its selected route"
+            if route not in conditional:
+                return f"settled activation {node_id!r} selected an unknown route {route!r}"
+        elif route is not None:
+            return f"non-conditional settled activation {node_id!r} selected route {route!r}"
+    return None
+
+
 def _success_routes(
     graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
@@ -322,6 +351,11 @@ def _post_advance_error(
     candidates: dict[GraphNodeId, list[tuple[ActivationReference, ...]]] = {}
     for reference in previous:
         source = reference.activation.node_id
+        if source not in graph.nodes:
+            # Keep this private helper total even when called directly by an
+            # owner-level diagnostic or a malformed snapshot bypassing the
+            # outer admission function.
+            return f"settled activation references unknown node {source!r}"
         routes = graph.transition.conditional_targets[source]
         if routes and reference.route is None:
             return "conditional predecessor settlement lacks its selected route"
@@ -401,6 +435,9 @@ def frontier_admission_error(
 ) -> str | None:
     """Return a deterministic topology/provenance error for one snapshot."""
 
+    ledger_error = settled_activation_admission_error(graph, state)
+    if ledger_error is not None:
+        return ledger_error
     if state.status is GraphRunStatus.COMPLETED:
         return None
     return _frontier_gate_error(graph, state) or _post_advance_error(graph, state)
@@ -588,4 +625,5 @@ __all__ = [
     "_node_output_coordinate",
     "_success_routes",
     "frontier_admission_error",
+    "settled_activation_admission_error",
 ]

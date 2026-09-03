@@ -43,8 +43,10 @@ def _validate_settled_activations(state: GraphRunState) -> None:
     A coordinate in a cause is not proof that its producer actually ran.  The
     reducer records one route-bearing reference when a node success is
     committed; later causes and Join arrivals must point at that exact entry.
-    The ledger is intentionally part of ``GraphRunState`` so a recovered
-    snapshot cannot manufacture a predecessor merely by copying coordinates.
+    The ledger is intentionally part of ``GraphRunState`` so the reducer can
+    enforce that local invariant.  Authenticity of historical entries is a
+    persistence/evidence concern and is checked at the compiled-graph
+    admission boundary when that evidence is available.
     """
 
     evidence = state.settled_activations

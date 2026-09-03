@@ -1086,8 +1086,185 @@ def test_snapshot_guard_admits_only_compiled_activation_gates() -> None:
     )
 
     for forged in (forged_source, forged_route):
-        with pytest.raises(InvalidExecutionSnapshotError, match=r"activation gate|settlement evidence"):
+        with pytest.raises(
+            InvalidExecutionSnapshotError,
+            match=r"unknown node|selected route|activation gate|settlement evidence",
+        ):
             require_snapshot_matches_graph(graph, forged)
+
+
+def test_snapshot_guard_rejects_a_ghost_settled_activation_even_when_the_frontier_is_valid() -> None:
+    graph = compiled_graph(
+        "a",
+        "b",
+        entries=("a",),
+        edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),),
+    )
+    base = running_state(superstep=1, frontier=("b",))
+    predecessor = ActivationReference(
+        GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
+    )
+    ghost = ActivationReference(
+        GraphActivationIdentity(base.run_id, 0, GraphNodeId("ghost")),
+    )
+    state = replace(
+        base,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    PendingGraphNode(UseStepRequestInput()),
+                    RoutedActivationCause((predecessor,)),
+                ),
+            )
+        ),
+        settled_activations=tuple(sorted((predecessor, ghost), key=ActivationReference.canonical_key)),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="settled activation references unknown node 'ghost'"):
+        require_snapshot_matches_graph(graph, state)
+
+
+def test_snapshot_guard_rejects_a_settled_route_not_declared_by_the_compiled_node() -> None:
+    graph = compiled_graph(
+        "a",
+        "b",
+        entries=("a",),
+        edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),),
+    )
+    base = running_state(superstep=1, frontier=("b",))
+    bogus = ActivationReference(
+        GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
+        GraphRouteId("bogus"),
+    )
+    state = replace(
+        base,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    SucceededGraphNode(ContinueGraphRouting()),
+                    RoutedActivationCause((bogus,)),
+                ),
+            )
+        ),
+        settled_activations=(bogus,),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="selected route"):
+        require_snapshot_matches_graph(graph, state)
+
+
+@pytest.mark.parametrize(
+    ("route", "message"),
+    [(None, "lacks its selected route"), ("bogus", "selected an unknown route")],
+)
+def test_snapshot_guard_rejects_invalid_conditional_settled_routes(
+    route: str | None,
+    message: str,
+) -> None:
+    graph = compiled_graph(
+        "a",
+        "b",
+        entries=("a",),
+        edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId("ok"), GraphNodeId("b")),),
+    )
+    base = running_state(superstep=1, frontier=("b",))
+    reference = ActivationReference(
+        GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
+        GraphRouteId(route) if route is not None else None,
+    )
+    state = replace(
+        base,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    PendingGraphNode(UseStepRequestInput()),
+                    RoutedActivationCause((reference,)),
+                ),
+            )
+        ),
+        settled_activations=(reference,),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match=message):
+        require_snapshot_matches_graph(graph, state)
+
+
+def test_snapshot_guard_rejects_a_ghost_ledger_on_a_terminal_state() -> None:
+    graph = compiled_graph(
+        "a",
+        "b",
+        entries=("a",),
+        edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),),
+    )
+    state = running_state(superstep=1, frontier=("b",))
+    ghost = ActivationReference(
+        GraphActivationIdentity(state.run_id, 0, GraphNodeId("ghost")),
+    )
+    terminal = replace(
+        state,
+        status=GraphRunStatus.FAILED,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    FailedGraphNode(GraphFailure("failed")),
+                    RoutedActivationCause((ghost,)),
+                ),
+            )
+        ),
+        settled_activations=(ghost,),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="unknown node 'ghost'"):
+        require_snapshot_matches_graph(graph, terminal)
+
+
+@pytest.mark.asyncio
+async def test_public_state_recovery_rejects_a_ghost_ledger_before_any_callable() -> None:
+    calls = {"source": 0, "target": 0}
+
+    async def source(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls["source"] += 1
+        return Graph.values()
+
+    async def target(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls["target"] += 1
+        return Graph.values()
+
+    graph = Graph[str]("public.ghost-ledger")
+    graph.add_node("source", source, inputs={}, outputs={})
+    graph.add_node("target", target, inputs={}, outputs={})
+    graph.add_edge("source", "target")
+    graph.set_outputs({})
+
+    state = running_state(
+        definition_id="public.ghost-ledger",
+        superstep=1,
+        frontier=("target",),
+    )
+    ghost = ActivationReference(
+        GraphActivationIdentity(state.run_id, 0, GraphNodeId("ghost")),
+    )
+    state = replace(
+        state,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("target"),
+                    PendingGraphNode(UseStepRequestInput()),
+                    RoutedActivationCause((ghost,)),
+                ),
+            )
+        ),
+        settled_activations=(ghost,),
+    )
+
+    with pytest.raises(InvalidExecutionSnapshotError, match="unknown node 'ghost'"):
+        await graph.run(state=state)
+    assert calls == {"source": 0, "target": 0}
 
 
 def test_snapshot_guard_rejects_a_start_activation_outside_compiled_entries() -> None:

@@ -6,6 +6,7 @@ from mote_kernel.execution.engine.resume_input import require_resume_input_bindi
 from mote_kernel.execution.engine.routing import (
     _declared_joins,
     frontier_admission_error,
+    settled_activation_admission_error,
     validate_routing_contribution,
 )
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError, SnapshotMismatchError
@@ -38,6 +39,9 @@ def require_snapshot_matches_graph(
     if unknown:
         raise InvalidExecutionSnapshotError(f"snapshot frontier contains unknown nodes: {unknown!r}")
     if state.status is not GraphRunStatus.RUNNING:
+        ledger_error = settled_activation_admission_error(graph, state)
+        if ledger_error is not None:
+            raise InvalidExecutionSnapshotError(ledger_error)
         return
     if state.superstep == 0 and tuple(node.node_id for node in state.frontier.nodes) != graph.transition.entries:
         raise InvalidExecutionSnapshotError("initial frontier does not exactly match the compiled graph entries")

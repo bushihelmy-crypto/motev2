@@ -1,6 +1,6 @@
 # Graph 延迟回环 P1 当前代码评审（2026-09-03）
 
-状态：**P1 设计与代码审查通过；完整交付门禁有条件通过（待根目录 pre-commit 实测）**
+状态：**P1 设计与代码审查通过；完整交付门禁通过**
 
 评审对象：当前工作树中的 Graph 延迟反馈回环 P1，包括 declaration/compiler、compiled topology、
 `GraphRunState`/reducer、live routing、state-led recovery、nested family driver、公开 facade 边界、测试、示例和全部质量门禁。
@@ -45,7 +45,7 @@
   `tests/execution/test_feedback_runtime.py`、
   `tests/execution/engine/test_routing.py`、
   `tests/state/graph_state/test_execution_transitions.py`、
-  `tests/state/graph_state/test_state_validation.py`，共 **211 passed**（0.24s）。
+  `tests/state/graph_state/test_state_validation.py`，共 **212 passed**（0.27s）。
 - `git diff --check` 对 Graph/State/本评审文档相关路径无格式错误。
 - 上述结果与后续 recovery/family 复核共同证明当前生产调用链的设计约束和回归行为；它们不把恶意手工 State 自动升级成生产缺陷，信任边界见 3.2。
 - 当前实施计划的预写数字，以及旧 acceptance/re-review 文档的历史状态，都不替代本轮代码和命令实测；旧文档保持不修改。
@@ -85,6 +85,13 @@ State/publication commit。因此本轮将它记录为**必须明确的信任边
 `frontier_admission_error()` 直接抛出原始 `KeyError('ghost')`（来自 `_post_advance_error()` 对
 `graph.transition.conditional_targets[source]` 的索引），而不是统一的 `InvalidExecutionSnapshotError`/
 `InvalidRoutingCommandError`。这既不能向调用者表达“快照拒绝”，也说明历史 ledger 的 graph-membership 校验缺口独立存在。
+
+**P1 补防（2026-09-03）**：这一项已经在当前实现中收口。compiled-graph admission 现在会先扫描完整
+`settled_activations` ledger，拒绝不属于当前图的节点、条件节点未声明的 route，以及普通节点携带 route 的记录；
+`Graph.run(state=...)` 和 routing 都在调用 callable 前走同一条 typed admission 边界，未知节点不再泄漏原始 `KeyError`。
+对应回归覆盖了 ledger-only ghost、非法历史 route、直接 routing 和公开 state recovery（callable 调用数为零）。
+这只解决“记录不属于图”的确定性拓扑问题；图内坐标但没有真实提交 provenance 的伪造，仍按上文约定留给 P2 的
+commit-linked durable evidence reader，不用可复制的 `verified` 标记冒充证明。
 
 ## 4. 设计与代码审查记录
 
@@ -136,7 +143,7 @@ owner 或制造兼容路径。
 
 ### 5.1 测试覆盖
 
-- compiler/runtime/routing/State 定向回归集实测 **211 passed**；recovery 相关集 **96 passed**；核心 recovery/family/graph
+- compiler/runtime/routing/State 定向回归集实测 **212 passed**；recovery 相关集 **96 passed**；核心 recovery/family/graph
   contract **101 passed**；`tests/execution/test_graph_examples.py` **16 passed**。
 - 综合 P1/recovery/continuation 集 **125 passed**，recovery contract + mixed child recovery **25 passed**；本轮再跑的
   recovery/continuation/mixed 选择集为 **109 passed, 52 deselected**。
@@ -165,24 +172,22 @@ ruff check / ruff format --check       PASS（234 files）
 pyright                                 PASS（0 errors, 0 warnings）
 complexity ratchet + semantic index    PASS（22 passed）
 complexity health                       PASS
-pytest + coverage                       1316 passed；6956 statements / 2388 branches；100.00%
+pytest + coverage                       1323 passed；6980 statements / 2406 branches；100.00%
 build --no-isolation                    PASS（sdist + wheel）
 twine check                             PASS（2 artifacts）
 ```
 
-复杂度实际值与当前配置上限相等（cognitive complexity 2775、max cyclomatic 78、max cognitive 131、hotspots 72）；这只是
-门禁事实，不是“提高 ratchet 后设计自动合格”的证明。根目录 `pre-commit run --all-files` 尚未在本轮运行，原因是工作树存在
-大量跨项目用户改动，且部分 hook 带自动修写风险；不能把计划文档中的“全仓通过”当作实测结果。
+复杂度实际值与当前配置上限相等（cognitive complexity 2794、max cyclomatic 78、max cognitive 131、hotspots 72）；这只是
+门禁事实，不是“提高 ratchet 后设计自动合格”的证明。根目录 `pre-commit run --all-files` 已实测通过；Cloudflare
+TypeScript Persistence 因迁移目录没有匹配文件按规则跳过，其余 hook 全部通过。
 
 ## 7. 最终结论
 
 **结论：P1 设计与生产代码 review 通过；本目录 `make check` 全部通过。**
 
-本轮没有发现新的、能改变真实生产调用链结果的 P1 缺陷，因此在这里停止，不做代码攻击式扩张。唯一需要保留的是 3.2 的两项
-条件信任边界：它们依赖当前持久化 State 的 authoritative 假设，尚无证据表明真实 P1 reducer/live 路径会生成这种状态，故不升级
-为当前阻断。P2 的 durable evidence reader、State+publication 原子提交、retention/release、codec、跨语言 conformance 和
-公开 durable feedback API 不属于本次 P1 判定。
+本轮没有发现新的、能改变真实生产调用链结果的 P1 缺陷；3.2 中 ghost 的拓扑准入缺口已补齐，仍需保留的是“图内坐标但没有真实
+提交 provenance”的条件信任边界。它依赖 P2 的 commit-linked durable evidence reader 与 State/publication 原子提交，不能用
+可复制的 State 字段替代。P2 的 retention/release、codec、跨语言 conformance 和公开 durable feedback API 不属于本次 P1 判定。
 
-完整交付门禁仍是**有条件通过**：本轮没有运行 monorepo 根目录 `pre-commit run --all-files`，因为工作树含大量跨项目用户改动且
-部分 hook 带自动修写风险；不能把实施计划中的预写结果当作实测。补做根目录 pre-commit 并确认不改写无关文件后，才可把“全部门禁
-通过”改成无条件结论。
+完整交付门禁现为**无条件通过**：本目录 `make check` 与 monorepo 根目录 `pre-commit run --all-files` 均已实测通过。
+工作树中 Cloudflare 迁移改动仍未纳入本次 kernel 提交。

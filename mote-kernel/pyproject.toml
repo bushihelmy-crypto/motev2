@@ -107,12 +107,14 @@ quote-style = "double"
 # the new ceiling, while regressions require an explicit architecture decision.
 # The 2026-09-03 package-wide audit is recorded in
 # docs/graph-delayed-loop-implementation-plan.zh-CN.md#143-p1-收口架构审计.
+# The 2026-09-03 ledger-admission defense adds one compiled-topology check;
+# its measured structural cost is ratcheted here rather than hidden or suppressed.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 694
+top_level_definitions = 695
 type_definitions = 408
 dataclass_types = 234
 dataclass_fields = 657
-decision_points = 2059
+decision_points = 2068
 logical_clone_pairs = 16
 statement_clone_pairs = 22
 near_clone_pairs = 15
@@ -120,11 +122,11 @@ record_shape_clone_pairs = 24
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
-function_definitions = 525
+function_definitions = 526
 method_definitions = 221
 nested_function_definitions = 20
-semantic_nodes = 38381
-cognitive_complexity = 2775
+semantic_nodes = 38509
+cognitive_complexity = 2794
 await_points = 93
 exception_handlers = 69
 attribute_writes = 87
@@ -132,12 +134,12 @@ task_creations = 12
 max_cyclomatic_complexity = 78
 max_cognitive_complexity = 131
 max_nesting_depth = 6
-internal_call_edges = 740
+internal_call_edges = 742
 recursive_call_components = 5
 max_call_fan_out = 24
 max_call_chain_depth = 17
 max_call_chain_cognitive = 304
-cross_module_call_edges = 800
+cross_module_call_edges = 801
 cross_module_call_pairs = 236
 max_runtime_module_fan_out = 24
 internal_import_edges = 362

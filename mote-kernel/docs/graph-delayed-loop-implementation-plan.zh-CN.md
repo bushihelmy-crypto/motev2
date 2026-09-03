@@ -894,8 +894,9 @@ availability 和 activation batch validation 的重复逻辑。人工审计又�
 failure 同样必须触发 awaiting child 的终局清理；recovery 中 awaiting child 不能挡住普通 Pending，模拟 session 排空后
 必须 fence execution。live 与 state-led proof 现已使用同一顺序。
 
-最终门禁结果为：ruff 与 format 通过、pyright 0 error、复杂度 ratchet 与 zero-debt health 通过、1316 个测试全部通过，
-生产包 6956 条语句和 2388 个分支覆盖率均为 100%，sdist/wheel 构建及 twine 校验通过。清理得到的复杂度下降已同步
+最终门禁结果为：ruff 与 format 通过、pyright 0 error、复杂度 ratchet 与 zero-debt health 通过、1323 个测试全部通过，
+生产包 6980 条语句和 2406 个分支覆盖率均为 100%，sdist/wheel 构建及 twine 校验通过。ledger compiled-graph admission
+防御的结构成本已按实测值同步
 锁紧 ratchet，不留可回涨的旧上限。2026-09-03 从 monorepo 根目录运行 `pre-commit run --all-files`，全部 hook
 通过；其中 Cloudflare TypeScript Persistence 因当前迁移目录没有匹配文件而按规则跳过。
 
