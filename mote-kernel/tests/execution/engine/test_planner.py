@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
-from tests.execution.engine.factories import callable_node, compiled_graph, running_state, terminal_state
+from tests.execution.engine.factories import callable_node, compiled_graph, join_progress, running_state, terminal_state
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.planner import plan_tasks
@@ -28,7 +28,6 @@ from mote_kernel.state.graph_state import (
     GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
-    GraphJoinProgress,
     GraphNodeId,
     GraphNodeInterrupt,
     GraphNodeInterruptIdentity,
@@ -211,10 +210,11 @@ def test_running_frontier_and_join_progress_must_belong_to_compiled_graph() -> N
     with pytest.raises(InvalidExecutionSnapshotError, match="unknown nodes"):
         plan_tasks(compiled_graph("a"), running_state(frontier=("unknown",)), LIMITS)
 
-    progress = GraphJoinProgress(
-        (GraphNodeId("a"), GraphNodeId("b")),
-        GraphNodeId("c"),
+    progress = join_progress(
+        ("a", "b"),
+        "c",
         (ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, GraphNodeId("a"))),),
+        target_superstep=2,
     )
     with pytest.raises(InvalidExecutionSnapshotError, match="unknown join"):
         plan_tasks(

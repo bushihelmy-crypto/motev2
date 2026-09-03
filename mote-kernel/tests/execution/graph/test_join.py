@@ -1,5 +1,5 @@
 import pytest
-from tests.execution.graph.factories import graph, node
+from tests.execution.graph.factories import compiled_join, graph, node
 
 from mote_kernel.execution.errors import GraphValidationError, InvalidJoinError, UnreachableNodeError
 from mote_kernel.execution.graph.compiler import compile_graph
@@ -47,8 +47,8 @@ def test_direct_edges_and_multiple_joins_coexist_deterministically() -> None:
 
     assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))
     assert compiled.transition.joins_by_source[GraphNodeId("a")] == (
-        JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d")),
-        JoinEdge((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("e")),
+        compiled_join(("a", "b"), "d", (2, 1)),
+        compiled_join(("a", "c"), "e", (2, 1)),
     )
 
 
@@ -88,5 +88,5 @@ def test_join_reachability_reaches_fixed_point() -> None:
     )
 
     assert compile_graph(definition).transition.joins_by_source[GraphNodeId("c")] == (
-        JoinEdge((GraphNodeId("c"), GraphNodeId("d")), GraphNodeId("e")),
+        compiled_join(("c", "d"), "e", (2, 1)),
     )

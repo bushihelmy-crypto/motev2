@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import TypeAlias
 
 import pytest
+from tests.execution.graph.factories import compiled_join
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
@@ -16,7 +17,7 @@ from mote_kernel.execution.graph.compiler import (
     _FeedbackResolution,
     _gates_can_coexist,
     _RawActivationGate,
-    _reject_repeatable_join_sources,
+    _repeatable_nodes,
     _RouteRequirementProof,
     compile_graph,
 )
@@ -36,6 +37,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.graph.topology import CompiledJoin
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -314,8 +316,41 @@ def test_compiler_accepts_a_join_gate_for_all_required_producers() -> None:
 
     compiled = compile_graph(definition((target, right, left), edges=(edge,)))
 
-    assert compiled.transition.joins_by_source[GraphNodeId("left")] == (edge,)
+    assert compiled.transition.joins_by_source[GraphNodeId("left")] == (compiled_join(("left", "right"), "target"),)
     assert len(compiled.transition.materializations[GraphNodeId("target")].bindings.entries) == 2
+
+
+def test_cyclic_join_inputs_use_the_compiled_occurrence_offsets() -> None:
+    tick = node("tick", inputs={}, outputs={})
+    left = node("left", inputs={}, outputs={"value": str})
+    right = node("right", inputs={}, outputs={"value": str})
+    joined = node(
+        "joined",
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={},
+    )
+    compiled = compile_graph(
+        definition(
+            (tick, left, right, joined),
+            edges=(
+                DirectEdge(GraphNodeId("tick"), GraphNodeId("left")),
+                DirectEdge(GraphNodeId("tick"), GraphNodeId("right")),
+                JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+                ConditionalEdge(GraphNodeId("joined"), GraphRouteId("again"), GraphNodeId("tick")),
+                ConditionalEdge(GraphNodeId("joined"), GraphRouteId("done"), END),
+            ),
+            entries=("tick",),
+        )
+    )
+
+    bindings = compiled.transition.materializations[GraphNodeId("joined")].bindings.entries
+    assert tuple(binding.publication for binding in bindings) == (
+        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
+        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
+    )
 
 
 def test_compiler_requires_nested_inputs_to_match_child_boundary_exactly() -> None:
@@ -603,12 +638,12 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
         )
 
 
-def test_compiler_rejects_cross_superstep_join_without_occurrence_identity() -> None:
+def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
     decision = node("decision", inputs={}, outputs={})
     left = node("left", inputs={}, outputs={})
     right = node("right", inputs={}, outputs={})
 
-    with pytest.raises(GraphValidationError, match="occurrence identity"):
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
         compile_graph(
             definition(
                 (decision, left, right),
@@ -646,35 +681,23 @@ def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> 
     assert not _gates_can_coexist(((source, left),), ((source, right),))
 
 
-def test_repeatable_join_source_propagation_reaches_acyclic_dependents() -> None:
+def test_repeatable_node_propagation_reaches_acyclic_dependents() -> None:
     source = GraphNodeId("source")
     dependent = GraphNodeId("dependent")
-    other = GraphNodeId("other")
-    target = GraphNodeId("target")
     successors: dict[GraphNodeId, set[GraphNodeId]] = {
         source: {source},
         dependent: set(),
-        other: set(),
-        target: set(),
     }
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {
         source: [((source, None),)],
         dependent: [((source, None),)],
-        other: [],
-        target: [],
     }
 
-    with pytest.raises(GraphValidationError, match="more than one activation occurrence"):
-        _reject_repeatable_join_sources(
-            (JoinEdge((dependent, other), target),),
-            (),
-            activation_gates,
-            successors,
-        )
+    assert _repeatable_nodes((), activation_gates, successors) == frozenset((source, dependent))
 
 
-def test_explicit_entry_with_an_incoming_gate_makes_descendants_repeatable() -> None:
-    with pytest.raises(GraphValidationError, match="more than one activation occurrence"):
+def test_explicit_entry_with_an_incoming_gate_has_no_cross_cohort_join_identity() -> None:
+    with pytest.raises(GraphValidationError, match="no provable occurrence identity"):
         compile_graph(
             definition(
                 tuple(node(node_id, inputs={}, outputs={}) for node_id in ("a", "dependent", "other", "s", "target")),
@@ -785,7 +808,7 @@ def test_feedback_compiler_rejects_a_multi_node_target_before_edge_checks() -> N
         loop: {GraphRouteId("continue"): loop, GraphRouteId("done"): END},
         extra: {},
     }
-    joins_by_source: dict[GraphNodeId, list[JoinEdge]] = {loop: [], extra: []}
+    joins_by_source: dict[GraphNodeId, list[CompiledJoin]] = {loop: [], extra: []}
     edges: tuple[Edge, ...] = (
         ConditionalEdge(loop, GraphRouteId("continue"), loop),
         ConditionalEdge(loop, GraphRouteId("done"), END),

@@ -30,6 +30,8 @@ from mote_kernel.state.graph_state import (
     GraphFailure,
     GraphFrontierNode,
     GraphFrontierState,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphJoinProgress,
     GraphNodeId,
     GraphRouteId,
@@ -118,6 +120,39 @@ def conditional(source: str, route: str, target: str) -> ConditionalEdge:
 
 def join(sources: tuple[str, ...], target: str) -> JoinEdge:
     return JoinEdge(tuple(GraphNodeId(source) for source in sources), GraphNodeId(target))
+
+
+def join_occurrence(
+    sources: tuple[str, ...],
+    target: str,
+    *,
+    target_superstep: int,
+    run_id: str = "run",
+) -> GraphJoinOccurrenceIdentity:
+    return GraphJoinOccurrenceIdentity(
+        GraphJoinIdentity(tuple(sorted(GraphNodeId(source) for source in sources)), GraphNodeId(target)),
+        GraphRunId(run_id),
+        target_superstep,
+    )
+
+
+def join_progress(
+    sources: tuple[str, ...],
+    target: str,
+    arrived: tuple[ActivationReference, ...],
+    *,
+    target_superstep: int,
+    run_id: str = "run",
+) -> GraphJoinProgress:
+    return GraphJoinProgress(
+        join_occurrence(
+            sources,
+            target,
+            target_superstep=target_superstep,
+            run_id=run_id,
+        ),
+        arrived,
+    )
 
 
 def running_state(

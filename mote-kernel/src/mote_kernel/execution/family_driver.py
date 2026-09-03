@@ -11,7 +11,7 @@ from typing import Generic, Protocol, TypeAlias, TypeVar, cast, final
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.engine.admission import admit_child_graph_input, project_graph_outputs
 from mote_kernel.execution.engine.resume_input import materialize_node_input
-from mote_kernel.execution.engine.routing import frontier_admission_error
+from mote_kernel.execution.engine.routing import transition_admission_error
 from mote_kernel.execution.engine.session import GraphExecutionSession, consume_node_origin_cancellation
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
@@ -143,7 +143,7 @@ async def commit_transition(
     """Reduce, expose, and confirm one authoritative state transition."""
 
     candidate = reduce_graph_run(previous_state, command)
-    if admission_error := frontier_admission_error(graph, candidate):
+    if admission_error := transition_admission_error(graph, previous_state, command, candidate):
         raise SnapshotMismatchError(admission_error)
     if admitted_successor is not None and candidate != admitted_successor:
         raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")

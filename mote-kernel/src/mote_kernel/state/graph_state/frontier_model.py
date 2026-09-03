@@ -6,6 +6,7 @@ from typing import NewType, TypeAlias
 
 from mote_kernel.state.graph_state.identity import (
     ActivationReference,
+    GraphJoinOccurrenceIdentity,
     GraphNodeId,
     GraphRunId,
     is_canonical_identity,
@@ -28,6 +29,7 @@ class RoutedActivationCause:
     """The settled routing facts that admitted a new activation."""
 
     references: tuple[ActivationReference, ...]
+    join_occurrence: GraphJoinOccurrenceIdentity | None = None
 
     def __post_init__(self) -> None:
         if type(self.references) is not tuple or not self.references:
@@ -42,6 +44,22 @@ class RoutedActivationCause:
         )
         if self.references != canonical:
             raise ValueError("routed activation cause references must be canonical and distinct")
+        occurrence = self.join_occurrence
+        if occurrence is None:
+            if len(self.references) != 1:
+                raise ValueError("non-Join routed cause requires exactly one reference")
+            return
+        if type(occurrence) is not GraphJoinOccurrenceIdentity:
+            raise ValueError("routed Join cause requires GraphJoinOccurrenceIdentity")
+        source_ids = tuple(reference.activation.node_id for reference in self.references)
+        if len(source_ids) != len(set(source_ids)) or set(source_ids) != set(occurrence.join.sources):
+            raise ValueError("routed Join cause must contain exactly one reference per source")
+        if any(
+            reference.activation.run_id != occurrence.run_id
+            or reference.activation.superstep >= occurrence.target_superstep
+            for reference in self.references
+        ):
+            raise ValueError("routed Join cause references must precede their target coordinate")
 
 
 GraphActivationCause: TypeAlias = StartActivationCause | RoutedActivationCause

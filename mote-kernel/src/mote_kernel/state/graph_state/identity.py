@@ -54,6 +54,42 @@ class ActivationReference:
         )
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class GraphJoinIdentity:
+    """The canonical identity of one declared control Join."""
+
+    sources: tuple[GraphNodeId, ...]
+    target: GraphNodeId
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.sources) is not tuple
+            or len(self.sources) < 2
+            or any(not is_canonical_identity(source) for source in self.sources)
+            or self.sources != tuple(sorted(set(self.sources)))
+        ):
+            raise ValueError("graph Join sources must be distinct and canonical")
+        if not is_canonical_identity(self.target) or self.target in self.sources:
+            raise ValueError("graph Join target must be canonical and distinct from its sources")
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class GraphJoinOccurrenceIdentity:
+    """One Join definition at one compiler-projected target coordinate."""
+
+    join: GraphJoinIdentity
+    run_id: GraphRunId
+    target_superstep: int
+
+    def __post_init__(self) -> None:
+        if type(self.join) is not GraphJoinIdentity:
+            raise ValueError("graph Join occurrence requires GraphJoinIdentity")
+        if not is_canonical_identity(self.run_id):
+            raise ValueError("graph Join occurrence run_id must be canonical")
+        if type(self.target_superstep) is not int or self.target_superstep < 1:
+            raise ValueError("graph Join target superstep must be a positive integer")
+
+
 def is_canonical_identity(value: str) -> bool:
     return type(value) is str and bool(value) and value == value.strip() and "\n" not in value and "\r" not in value
 
@@ -103,6 +139,8 @@ __all__ = [
     "GraphDefinitionVersion",
     "GraphExecutionAttemptId",
     "GraphInterruptId",
+    "GraphJoinIdentity",
+    "GraphJoinOccurrenceIdentity",
     "GraphNodeId",
     "GraphRouteId",
     "GraphRunId",

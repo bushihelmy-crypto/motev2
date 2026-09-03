@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import NewType, TypeAlias
+from typing import NewType
 
 from mote_kernel.state.graph_state.frontier_model import GraphFrontierState, GraphResumeInputCodec
 from mote_kernel.state.graph_state.identity import (
@@ -11,7 +11,7 @@ from mote_kernel.state.graph_state.identity import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphNodeId,
+    GraphJoinOccurrenceIdentity,
     GraphRunId,
 )
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
@@ -44,12 +44,8 @@ class GraphExecutionLease:
 
 @dataclass(frozen=True, slots=True)
 class GraphJoinProgress:
-    sources: tuple[GraphNodeId, ...]
-    target: GraphNodeId
+    occurrence: GraphJoinOccurrenceIdentity
     arrived: tuple[ActivationReference, ...]
-
-
-GraphJoinProgressKey: TypeAlias = tuple[tuple[GraphNodeId, ...], GraphNodeId]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +76,6 @@ __all__ = [
     "GraphExecutionLease",
     "GraphExecutionToken",
     "GraphJoinProgress",
-    "GraphJoinProgressKey",
     "GraphRunState",
     "GraphRunStatus",
 ]

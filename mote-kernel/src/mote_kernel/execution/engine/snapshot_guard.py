@@ -46,7 +46,7 @@ def require_snapshot_matches_graph(
     if state.superstep == 0 and tuple(node.node_id for node in state.frontier.nodes) != graph.transition.entries:
         raise InvalidExecutionSnapshotError("initial frontier does not exactly match the compiled graph entries")
     declared_joins = _declared_joins(graph)
-    if any((progress.sources, progress.target) not in declared_joins for progress in state.join_progress):
+    if any(progress.occurrence.join not in declared_joins for progress in state.join_progress):
         raise InvalidExecutionSnapshotError("snapshot references unknown join progress")
     admission_error = frontier_admission_error(graph, state)
     if admission_error is not None:

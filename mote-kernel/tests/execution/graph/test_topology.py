@@ -3,9 +3,11 @@ from dataclasses import FrozenInstanceError
 import pytest
 from tests.execution.graph.factories import graph, node
 
+from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
-from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
+from mote_kernel.execution.graph.topology import CompiledJoin
+from mote_kernel.state.graph_state import GraphJoinIdentity, GraphNodeId, GraphRouteId
 
 
 def test_compiled_indexes_are_total_and_sorted_for_every_node() -> None:
@@ -56,3 +58,25 @@ def test_compiled_indexes_are_deeply_immutable() -> None:
         compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("next")] = GraphNodeId("b")  # type: ignore[index]
     with pytest.raises(TypeError):
         compiled.transition.joins_by_source[GraphNodeId("a")] = ()  # type: ignore[index]
+
+
+def test_compiled_join_requires_one_positive_offset_for_every_canonical_source() -> None:
+    identity = GraphJoinIdentity(
+        (GraphNodeId("left"), GraphNodeId("right")),
+        GraphNodeId("target"),
+    )
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        CompiledJoin(identity, ((GraphNodeId("left"), 1),))
+    with pytest.raises(ValueError, match="positive integers"):
+        CompiledJoin(
+            identity,
+            ((GraphNodeId("left"), 0), (GraphNodeId("right"), 1)),
+        )
+
+    compiled = CompiledJoin(
+        identity,
+        ((GraphNodeId("left"), 2), (GraphNodeId("right"), 1)),
+    )
+    with pytest.raises(SnapshotMismatchError, match="does not contain"):
+        compiled.target_offset(GraphNodeId("foreign"))

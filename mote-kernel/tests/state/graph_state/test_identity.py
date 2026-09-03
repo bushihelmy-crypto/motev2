@@ -5,6 +5,8 @@ import pytest
 from mote_kernel.state.graph_state import (
     ActivationReference,
     GraphActivationIdentity,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphNodeId,
     GraphRouteId,
     GraphRunId,
@@ -38,6 +40,37 @@ def test_activation_reference_rejects_invalid_identity_and_route() -> None:
         ActivationReference(cast(GraphActivationIdentity, object()))
     with pytest.raises(ValueError, match="route"):
         ActivationReference(activation, GraphRouteId(" route"))
+
+
+@pytest.mark.parametrize(
+    ("sources", "target"),
+    [
+        ((GraphNodeId("a"),), GraphNodeId("c")),
+        ((GraphNodeId("a"), GraphNodeId("a")), GraphNodeId("c")),
+        ((GraphNodeId("b"), GraphNodeId("a")), GraphNodeId("c")),
+        ((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("a")),
+    ],
+)
+def test_join_identity_rejects_noncanonical_shapes(
+    sources: tuple[GraphNodeId, ...],
+    target: GraphNodeId,
+) -> None:
+    with pytest.raises(ValueError):
+        GraphJoinIdentity(sources, target)
+
+
+def test_join_occurrence_identity_is_run_and_target_coordinate_specific() -> None:
+    join = GraphJoinIdentity((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("c"))
+    first = GraphJoinOccurrenceIdentity(join, GraphRunId("run"), 2)
+
+    assert first != GraphJoinOccurrenceIdentity(join, GraphRunId("run"), 3)
+    assert first != GraphJoinOccurrenceIdentity(join, GraphRunId("other"), 2)
+    with pytest.raises(ValueError, match="GraphJoinIdentity"):
+        GraphJoinOccurrenceIdentity(cast(GraphJoinIdentity, object()), GraphRunId("run"), 2)
+    with pytest.raises(ValueError, match="run_id"):
+        GraphJoinOccurrenceIdentity(join, GraphRunId(" bad"), 2)
+    with pytest.raises(ValueError, match="positive"):
+        GraphJoinOccurrenceIdentity(join, GraphRunId("run"), 0)
 
 
 @pytest.mark.parametrize(

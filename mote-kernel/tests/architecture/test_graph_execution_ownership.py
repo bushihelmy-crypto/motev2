@@ -528,7 +528,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "entries": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
-        "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
+        "joins_by_source": "FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",

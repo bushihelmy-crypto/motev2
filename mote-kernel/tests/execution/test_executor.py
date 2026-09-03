@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import TypeAlias, TypeVar, cast
 
 import pytest
+from tests.execution.engine.factories import join_progress
 
 import mote_kernel.execution.engine.admission as admission_module
 import mote_kernel.execution.engine.frontier as frontier_module
@@ -84,7 +85,6 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphJoinProgress,
     GraphNodeId,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
@@ -1212,10 +1212,12 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
     after_child = await run_and_resolve(executor, graph, parent, "input", (projection,))
     assert tuple(item.node_id for item in after_child.frontier.nodes) == (GraphNodeId("b"),)
     assert after_child.join_progress == (
-        GraphJoinProgress(
-            (GraphNodeId("a"), GraphNodeId("b")),
-            GraphNodeId("joined"),
+        join_progress(
+            ("a", "b"),
+            "joined",
             (ActivationReference(GraphActivationIdentity(parent.run_id, 0, GraphNodeId("a"))),),
+            target_superstep=2,
+            run_id=parent.run_id,
         ),
     )
 

@@ -6,7 +6,6 @@ from typing import Generic, TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
-from mote_kernel.execution.graph.edge import JoinEdge
 from mote_kernel.execution.graph.ports import (
     CompiledActivationRule,
     DefinitionScope,
@@ -17,8 +16,11 @@ from mote_kernel.execution.graph.ports import (
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphNodeId,
     GraphRouteId,
 )
@@ -73,11 +75,46 @@ class CompiledActivationRules(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
+class CompiledJoin:
+    """One Join definition and its source-to-target occurrence projection."""
+
+    identity: GraphJoinIdentity
+    source_target_offsets: tuple[tuple[GraphNodeId, int], ...]
+
+    def __post_init__(self) -> None:
+        sources = tuple(source for source, _offset in self.source_target_offsets)
+        if sources != self.identity.sources:
+            raise ValueError("compiled Join offsets must exactly cover its canonical sources")
+        if any(type(offset) is not int or offset < 1 for _source, offset in self.source_target_offsets):
+            raise ValueError("compiled Join source offsets must be positive integers")
+
+    def target_offset(self, source: GraphNodeId) -> int:
+        """Return the target-coordinate offset for one declared source."""
+
+        offset = next(
+            (offset for candidate, offset in self.source_target_offsets if candidate == source),
+            None,
+        )
+        if offset is None:
+            raise SnapshotMismatchError("compiled Join does not contain the arrival source")
+        return offset
+
+    def occurrence_for(self, activation: GraphActivationIdentity) -> GraphJoinOccurrenceIdentity:
+        """Project one admitted source activation into its Join occurrence."""
+
+        return GraphJoinOccurrenceIdentity(
+            self.identity,
+            activation.run_id,
+            activation.superstep + self.target_offset(activation.node_id),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
-    joins_by_source: FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]
+    joins_by_source: FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]

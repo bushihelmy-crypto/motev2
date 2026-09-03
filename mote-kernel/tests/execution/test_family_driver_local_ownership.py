@@ -5,7 +5,7 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
-from tests.execution.engine.factories import compiled_graph, leased_state, running_state
+from tests.execution.engine.factories import compiled_graph, direct, leased_state, running_state
 
 import mote_kernel.execution.family_driver as family_driver
 from mote_kernel.execution import Graph
@@ -65,11 +65,13 @@ from mote_kernel.execution.run_context import (
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
+    ClaimGraphExecution,
     CompleteGraphFrontier,
     ContinueGraphRouting,
     FailedGraphNodeOutcome,
     GraphAbortReason,
     GraphActivationIdentity,
+    GraphExecutionAttemptId,
     GraphFailure,
     GraphFrontierState,
     GraphNodeId,
@@ -309,13 +311,54 @@ async def test_owner_transition_rejects_a_candidate_that_fails_frontier_admissio
 
     owner = root_owner(graph, state, commit=capture)
 
-    def reject_frontier_admission(_graph: CompiledGraph[str], _state: GraphRunState) -> str:
+    def reject_transition_admission(
+        _graph: CompiledGraph[str],
+        _previous_state: GraphRunState | None,
+        _command: GraphRunCommand,
+        _candidate_state: GraphRunState,
+    ) -> str:
         return "admission failed"
 
-    monkeypatch.setattr(family_driver, "frontier_admission_error", reject_frontier_admission)
+    monkeypatch.setattr(family_driver, "transition_admission_error", reject_transition_admission)
 
     with pytest.raises(SnapshotMismatchError, match="admission failed"):
         await owner._transition(AbortGraphRun(state.revision, GraphAbortReason("abort")))
+
+    assert commits == []
+
+
+@pytest.mark.asyncio
+async def test_commit_boundary_rejects_a_forged_completion_that_discards_a_successor() -> None:
+    graph = compiled_graph("a", "b", edges=(direct("a", "b"),))
+    state = running_state()
+    claimed = reduce_graph_run(
+        state,
+        ClaimGraphExecution(state.revision, GraphExecutionAttemptId("completion-forgery"), None),
+    )
+    assert claimed.execution is not None
+    settled = reduce_graph_run(
+        claimed,
+        SettleGraphNode(
+            claimed.revision,
+            claimed.execution.token,
+            SucceededGraphNodeOutcome(GraphNodeId("a"), ContinueGraphRouting()),
+        ),
+    )
+    commits: list[GraphTransition[str]] = []
+
+    async def capture(transition: GraphTransition[str], /) -> GraphRunState:
+        commits.append(transition)
+        return transition.candidate_state
+
+    with pytest.raises(SnapshotMismatchError, match="discarded a compiled successor"):
+        await commit_transition(
+            root_scope_run(settled.run_id),
+            settled,
+            CompleteGraphFrontier(settled.revision),
+            None,
+            capture,
+            graph=graph,
+        )
 
     assert commits == []
 

@@ -30,12 +30,15 @@ from mote_kernel.state.graph_state.frontier_model import (
     frontier_status,
     pending_node_ids,
 )
-from mote_kernel.state.graph_state.identity import ActivationReference, GraphActivationIdentity
+from mote_kernel.state.graph_state.identity import (
+    ActivationReference,
+    GraphActivationIdentity,
+    GraphJoinOccurrenceIdentity,
+)
 from mote_kernel.state.graph_state.model import (
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
-    GraphJoinProgressKey,
     GraphRunState,
     GraphRunStatus,
 )
@@ -103,9 +106,10 @@ def _validate_activation_batch(
 def _validate_next_activations(
     state: GraphRunState,
     declared: tuple[GraphFrontierActivation, ...],
-) -> frozenset[GraphJoinProgressKey]:
+) -> frozenset[GraphJoinOccurrenceIdentity]:
     _validate_activation_batch(declared, "next frontier")
-    consumed_progress: set[GraphJoinProgressKey] = set()
+    progress_by_occurrence = _index_join_progress(state.join_progress, "state")
+    consumed_progress: set[GraphJoinOccurrenceIdentity] = set()
     for activation in declared:
         cause = activation.cause
         if type(cause) is not RoutedActivationCause:
@@ -132,35 +136,45 @@ def _validate_next_activations(
                 raise GraphStateTransitionError("next activation cause route does not match source settlement")
         if not current_references:
             raise GraphStateTransitionError("next activation cause requires a current settled source")
-        if historical_references:
-            history = tuple(historical_references)
-            source_ids = {reference.activation.node_id for reference in cause.references}
-            matches = tuple(
-                progress
-                for progress in state.join_progress
-                if progress.target == activation.node_id
-                and progress.arrived == history
-                and set(progress.sources) == source_ids
-            )
-            if len(matches) != 1:
-                raise GraphStateTransitionError("historical activation references do not complete one pending join")
-            progress = matches[0]
-            key: GraphJoinProgressKey = (progress.sources, progress.target)
-            consumed_progress.add(key)
+        occurrence = cause.join_occurrence
+        if occurrence is None:
+            if historical_references or len(cause.references) != 1:
+                raise GraphStateTransitionError("non-Join activation cause must carry one current source")
+            continue
+        if (
+            occurrence.run_id != state.run_id
+            or occurrence.join.target != activation.node_id
+            or occurrence.target_superstep != state.superstep + 1
+            or set(source_ids) != set(occurrence.join.sources)
+        ):
+            raise GraphStateTransitionError("next Join activation cause has the wrong occurrence identity")
+        progress = progress_by_occurrence.get(occurrence)
+        history = tuple(historical_references)
+        if progress is None:
+            if history:
+                raise GraphStateTransitionError("historical Join references lack matching pending progress")
+        else:
+            if progress.arrived != history:
+                raise GraphStateTransitionError("Join activation history does not match pending progress")
+            consumed_progress.add(occurrence)
     return frozenset(consumed_progress)
 
 
 def _index_join_progress(
     progress: tuple[GraphJoinProgress, ...],
     label: str,
-) -> dict[GraphJoinProgressKey, GraphJoinProgress]:
+) -> dict[GraphJoinOccurrenceIdentity, GraphJoinProgress]:
     if type(progress) is not tuple:
         raise GraphStateTransitionError(f"{label} join progress must be a tuple")
-    indexed: dict[GraphJoinProgressKey, GraphJoinProgress] = {}
+    indexed: dict[GraphJoinOccurrenceIdentity, GraphJoinProgress] = {}
     for item in progress:
-        if type(item) is not GraphJoinProgress or type(item.sources) is not tuple or type(item.arrived) is not tuple:
+        if (
+            type(item) is not GraphJoinProgress
+            or type(item.occurrence) is not GraphJoinOccurrenceIdentity
+            or type(item.arrived) is not tuple
+        ):
             raise GraphStateTransitionError(f"{label} join progress contains a malformed record")
-        key = (item.sources, item.target)
+        key = item.occurrence
         try:
             hash(key)
         except TypeError as error:
@@ -191,8 +205,8 @@ def _current_successful_references(state: GraphRunState) -> frozenset[Activation
 def _validate_join_progress_delta(
     state: GraphRunState,
     declared: tuple[GraphJoinProgress, ...],
-    consumed: frozenset[GraphJoinProgressKey],
-    explicitly_consumed: tuple[GraphJoinProgressKey, ...],
+    consumed: frozenset[GraphJoinOccurrenceIdentity],
+    explicitly_consumed: tuple[GraphJoinOccurrenceIdentity, ...],
 ) -> None:
     """Ensure an advance only appends current successes or consumes a Join once."""
 
@@ -232,38 +246,40 @@ def _validate_join_progress_delta(
 
 def _validate_join_consumption(
     state: GraphRunState,
-    declared: tuple[GraphJoinProgressKey, ...],
+    declared: tuple[GraphJoinOccurrenceIdentity, ...],
     current: frozenset[ActivationReference],
-) -> frozenset[GraphJoinProgressKey]:
+) -> frozenset[GraphJoinOccurrenceIdentity]:
     if type(declared) is not tuple:
         raise GraphStateTransitionError("consumed join progress must be a tuple")
     previous = _index_join_progress(state.join_progress, "state")
-    consumed: set[GraphJoinProgressKey] = set()
-    for key in declared:
-        if (
-            type(key) is not tuple
-            or len(key) != 2
-            or type(key[0]) is not tuple
-            or type(key[1]) is not str
-            or not key[0]
-            or any(type(source) is not str for source in key[0])
-            or key[0] != tuple(sorted(set(key[0])))
-        ):
-            raise GraphStateTransitionError("consumed join progress key is malformed")
-        if key in consumed:
+    consumed: set[GraphJoinOccurrenceIdentity] = set()
+    for occurrence in declared:
+        if type(occurrence) is not GraphJoinOccurrenceIdentity:
+            raise GraphStateTransitionError("consumed join occurrence is malformed")
+        try:
+            hash(occurrence)
+            coordinate_matches = (
+                occurrence.run_id == state.run_id and occurrence.target_superstep == state.superstep + 1
+            )
+        except (AttributeError, TypeError) as error:
+            raise GraphStateTransitionError("consumed join occurrence is malformed") from error
+        if not coordinate_matches:
+            raise GraphStateTransitionError("consumed join occurrence has the wrong target coordinate")
+        if occurrence in consumed:
             raise GraphStateTransitionError("consumed join progress keys must be canonical and distinct")
-        progress = previous.get(key)
+        progress = previous.get(occurrence)
         if progress is None:
             raise GraphStateTransitionError("consumed join progress does not exist in the current state")
-        current_arrivals = tuple(reference for reference in current if reference.activation.node_id in progress.sources)
+        sources = occurrence.join.sources
+        current_arrivals = tuple(reference for reference in current if reference.activation.node_id in sources)
         arrivals = (*progress.arrived, *current_arrivals)
         source_ids = tuple(reference.activation.node_id for reference in arrivals)
         if len(source_ids) != len(set(source_ids)):
             raise GraphStateTransitionError("join progress repeats one source activation")
-        if set(source_ids) != set(progress.sources):
+        if set(source_ids) != set(sources):
             raise GraphStateTransitionError("consumed join progress is not complete")
-        consumed.add(key)
-    if tuple(sorted(consumed, key=lambda item: (item[0], item[1]))) != declared:
+        consumed.add(occurrence)
+    if tuple(sorted(consumed)) != declared:
         raise GraphStateTransitionError("consumed join progress keys must use canonical order")
     return frozenset(consumed)
 
