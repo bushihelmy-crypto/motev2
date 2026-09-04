@@ -221,6 +221,10 @@ validator，不属于另一套运行时状态结构。以后多分枝时使用�
 - 多条路线共享一个 publication，但没有互斥证明或 Join；共享一个值不能自动去重 activation；
 - 同一 target 的重复 edge、重复 cause 或无法唯一匹配的 rule。
 
+这里的“先后”不能只看节点是否支配另一个节点。只有单来源、一次性的 initial gate 具有 compiler 证明的绝对 activation
+坐标，并且所有 repeat gate source 都严格经过该来源时，才可以证明两类 gate 的轮次不重叠；循环或坐标不明一律按可能
+同时到达处理，要求互斥 route 或显式 Join。
+
 第一阶段仍只开放一个 direct self-feedback cause，以及与它互斥的一条 terminal route；上述 generic 互斥多路线和
 Join 是后续沿同一 rule/cause/recovery 模型扩展，不能通过 runtime 选“第一条”或把重复激活静默合并。
 
@@ -294,9 +298,9 @@ join、nested 和多分枝仍按第 6.3 节的阶段边界处理。
 
 ```text
 TaskSuccess.output
-  -> SettleGraphNode + GraphTransition.result
+  -> SettleGraphNode + GraphTransition.writes.settlement
   -> exact GraphRunState candidate
-  -> 同一 CommitKey 下的一个 result/publication evidence
+  -> 同一 CommitKey 下的一个 settlement/publication evidence write-set
   -> ScopedFrameIndex 的 execution-local projection
 ```
 
@@ -426,7 +430,7 @@ admit graph input
 ```text
 execute producer activation
   -> admit NodeOutputFrame
-  -> SettleGraphNode + GraphTransition.result + publication evidence
+  -> SettleGraphNode + GraphTransition.writes.settlement + publication evidence
   -> reduce_graph_run() 得到 exact candidate
   -> same CommitKey atomic commit(State + result/publication)
   -> replace authoritative State
@@ -741,7 +745,8 @@ pre-commit run --all-files         # monorepo root
 | Materialization | `execution/engine/resume_input.py` | seed/repeat rule、`RELATIVE(1)` 与 cause identity 一致、缺证据错误；禁止扫描“最新值” |
 | Routing | `execution/engine/routing.py`、`frontier.py` | 在唯一 gate 命中前保留 `(target, cause)`；feedback route 生成一次 next activation，terminal route 只完成；禁止 target set 提前去重 |
 | Settlement/result | `execution/engine/settlement.py`、`execution/result.py` | 唯一 task result → settlement/result evidence |
-| Commit owner | `execution/family_driver.py` | same CommitKey + canonical EvidenceFingerprint 原子提交、确认后 frame 安装/重建 |
+| Commit contract | `execution/commit.py` | same CommitKey + typed write-set 原子提交边界、exact candidate 确认 |
+| Family owner | `execution/family_driver.py` | 仅在确认后安装/重建 frame，维护 parent/child 生命周期与清理顺序 |
 | Failure boundary | `execution/facade.py`、`request.py`、`result.py`、`engine/superstep.py`、`engine/resume_admission.py`、`engine/resume_input.py`、`state/graph_state/frontier_model.py`、`recovery_transitions.py` | 增加 durable terminal Failed disposition/result；移除 failed resume/skip/Skipped 路径，不保留兼容别名或隐藏入口 |
 | Recovery | `execution/invocation.py`、`recovery.py`、`run_context.py` | exact State head + live evidence version join、self predecessor/cause admission、evidence projection/release、limits admission；不得把 Failed 改回 Pending |
 | Persistence | `mote-infra/persistence` | state/result/input records、read/reconcile、迁移和 CAS；interrupt/child 以后再接入，不存 failed-retry evidence |

@@ -1,11 +1,11 @@
-# pyright: reportPrivateUsage=false
-
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Never
+from typing import Never, Protocol, cast
 
 import pytest
 from tests.execution.engine.factories import join_progress
 
+import mote_kernel.execution.engine.recovery as recovery_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.recovery import (
     AdmittedResumeFact,
@@ -16,17 +16,7 @@ from mote_kernel.execution.engine.recovery import (
     RecoverySettlementKind,
     RecoveryStateBinding,
     RecoveryTransferState,
-    _boundary,
-    _NestedCombination,
-    _NestedOutcome,
-    _prove_scope,
-    _recovery_cycle_signature,
-    _RecoveryCycleSignature,
-    _RecoveryFamily,
-    _RecoveryProofBudget,
-    _RecoveryWorkItem,
-    _ScopeBoundaryKind,
-    _settle_nested_outcomes,
+    ScopeControlStateCoordinate,
     preflight_recovery,
     recovery_traversal_key,
 )
@@ -113,6 +103,132 @@ from mote_kernel.state.graph_state import (
     graph_interrupt_id,
     reduce_graph_run,
 )
+
+
+class _RecoveryWorkItemView(Protocol):
+    state: GraphRunState
+    availability: RecoveryAvailabilityCoordinates[str]
+    live: tuple[GraphNodeId, ...]
+    children: tuple[ChildRecoveryDisposition, ...]
+    invocation_new_children: tuple[GraphNodeId, ...]
+
+
+class _RecoveryBoundaryView(Protocol):
+    kind: object
+    availability: RecoveryAvailabilityCoordinates[str]
+    control: ScopeControlStateCoordinate
+    state: GraphRunState
+
+
+class _NestedOutcomeView(Protocol):
+    node_id: GraphNodeId
+    boundary: _RecoveryBoundaryView
+
+
+class _NestedCombinationView(Protocol):
+    outcomes: tuple[_NestedOutcomeView, ...]
+    availability: RecoveryAvailabilityCoordinates[str]
+
+
+class _RecoveryFamilyView(Protocol):
+    bindings: tuple[RecoveryStateBinding, ...]
+    limits: ExecutionLimits
+    admitted_actions: tuple[AdmittedResumeFact, ...]
+
+
+class _BoundaryKindView(Protocol):
+    EXECUTION_LIMIT: object
+
+
+class _RecoveryPrivateView(Protocol):
+    _boundary: Callable[..., _RecoveryBoundaryView]
+    _NestedCombination: Callable[..., _NestedCombinationView]
+    _NestedOutcome: Callable[..., _NestedOutcomeView]
+    _prove_scope: Callable[..., tuple[_RecoveryBoundaryView, ...]]
+    _recovery_cycle_signature: Callable[..., object | None]
+    _RecoveryFamily: Callable[..., _RecoveryFamilyView]
+    _RecoveryProofBudget: Callable[..., object]
+    _RecoveryWorkItem: Callable[..., _RecoveryWorkItemView]
+    _ScopeBoundaryKind: _BoundaryKindView
+    _settle_nested_outcomes: Callable[..., tuple[GraphRunState, RecoveryAvailabilityCoordinates[str]]]
+
+    @staticmethod
+    def boundary(
+        module: object,
+        kind: object,
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+        availability: RecoveryAvailabilityCoordinates[str],
+    ) -> _RecoveryBoundaryView:
+        return cast(_RecoveryPrivateView, module)._boundary(kind, state, scope_run, availability)
+
+    @staticmethod
+    def combination(module: object, *args: object) -> _NestedCombinationView:
+        return cast(_RecoveryPrivateView, module)._NestedCombination(*args)
+
+    @staticmethod
+    def outcome(module: object, *args: object) -> _NestedOutcomeView:
+        return cast(_RecoveryPrivateView, module)._NestedOutcome(*args)
+
+    @staticmethod
+    def prove_scope(
+        module: object,
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+        availability: RecoveryAvailabilityCoordinates[str],
+        family: _RecoveryFamilyView,
+    ) -> tuple[_RecoveryBoundaryView, ...]:
+        return cast(_RecoveryPrivateView, module)._prove_scope(graph, state, scope_run, availability, family)
+
+    @staticmethod
+    def cycle_signature(
+        module: object,
+        graph: CompiledGraph[str],
+        item: _RecoveryWorkItemView,
+        scope_run: ScopeRunCoordinate,
+        window: PublicationHistoryWindow,
+    ) -> object | None:
+        return cast(_RecoveryPrivateView, module)._recovery_cycle_signature(graph, item, scope_run, window)
+
+    @staticmethod
+    def family(module: object, *args: object) -> _RecoveryFamilyView:
+        return cast(_RecoveryPrivateView, module)._RecoveryFamily(*args)
+
+    @staticmethod
+    def proof_budget(module: object, *args: object) -> object:
+        return cast(_RecoveryPrivateView, module)._RecoveryProofBudget(*args)
+
+    @staticmethod
+    def work_item(module: object, *args: object) -> _RecoveryWorkItemView:
+        return cast(_RecoveryPrivateView, module)._RecoveryWorkItem(*args)
+
+    @staticmethod
+    def boundary_kind(module: object) -> _BoundaryKindView:
+        return cast(_RecoveryPrivateView, module)._ScopeBoundaryKind
+
+    @staticmethod
+    def settle_nested_outcomes(
+        module: object,
+        graph: CompiledGraph[str],
+        state: GraphRunState,
+        scope_run: ScopeRunCoordinate,
+        combination: _NestedCombinationView,
+    ) -> tuple[GraphRunState, RecoveryAvailabilityCoordinates[str]]:
+        return cast(_RecoveryPrivateView, module)._settle_nested_outcomes(graph, state, scope_run, combination)
+
+
+class _CompiledOwnerView(Protocol):
+    graph: CompiledGraph[str]
+
+
+class _GraphPrivateView(Protocol):
+    def _compile(self) -> _CompiledOwnerView: ...
+
+    @staticmethod
+    def compile(graph: object) -> _CompiledOwnerView:
+        return cast(_GraphPrivateView, graph)._compile()
+
 
 _EMPTY_RECOVERY_AVAILABILITY = RecoveryAvailabilityCoordinates[str]()
 _EMPTY_PUBLICATION_HISTORY_WINDOW = PublicationHistoryWindow((), 0)
@@ -225,10 +341,11 @@ def _cycle_signature(
     state: GraphRunState,
     availability: RecoveryAvailabilityCoordinates[str] = _EMPTY_RECOVERY_AVAILABILITY,
     window: PublicationHistoryWindow = _EMPTY_PUBLICATION_HISTORY_WINDOW,
-) -> _RecoveryCycleSignature:
-    signature = _recovery_cycle_signature(
+) -> object:
+    signature = _RecoveryPrivateView.cycle_signature(
+        recovery_module,
         graph,
-        _RecoveryWorkItem(state, availability),
+        _RecoveryPrivateView.work_item(recovery_module, state, availability),
         root_scope_run(state.run_id),
         window,
     )
@@ -329,9 +446,10 @@ def test_recovery_cycle_signature_never_merges_an_active_resource_state() -> Non
     )
 
     assert (
-        _recovery_cycle_signature(
+        _RecoveryPrivateView.cycle_signature(
+            recovery_module,
             graph,
-            _RecoveryWorkItem(claimed, RecoveryAvailabilityCoordinates()),
+            _RecoveryPrivateView.work_item(recovery_module, claimed, RecoveryAvailabilityCoordinates()),
             root_scope_run(claimed.run_id),
             PublicationHistoryWindow((), 0),
         )
@@ -1036,19 +1154,35 @@ def test_recovery_worklist_skips_a_duplicate_transfer_state(
     graph = empty_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("duplicate-transfer-run")))
     scope_run = root_scope_run(state.run_id)
-    family = _RecoveryFamily((), ExecutionLimits(4, 1), (), _RecoveryProofBudget())
+    family = _RecoveryPrivateView.family(
+        recovery_module,
+        (),
+        ExecutionLimits(4, 1),
+        (),
+        _RecoveryPrivateView.proof_budget(recovery_module),
+    )
 
     def duplicate(
         _graph: CompiledGraph[str],
-        item: _RecoveryWorkItem[str],
+        item: _RecoveryWorkItemView,
         _scope: ScopeRunCoordinate,
-        _family: _RecoveryFamily,
-    ) -> tuple[_RecoveryWorkItem[str], ...]:
+        _family: _RecoveryFamilyView,
+    ) -> tuple[_RecoveryWorkItemView, ...]:
         return (item, item)
 
     monkeypatch.setattr("mote_kernel.execution.engine.recovery._expand_quiescent_executable", duplicate)
 
-    assert _prove_scope(graph, state, scope_run, _EMPTY_RECOVERY_AVAILABILITY, family) == ()
+    assert (
+        _RecoveryPrivateView.prove_scope(
+            recovery_module,
+            graph,
+            state,
+            scope_run,
+            _EMPTY_RECOVERY_AVAILABILITY,
+            family,
+        )
+        == ()
+    )
 
 
 def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) -> CompiledGraph[str]:
@@ -1133,19 +1267,21 @@ def test_nested_settlement_rejects_a_nonterminal_child_outcome() -> None:
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("invalid-child-outcome")))
     scope_run = root_scope_run(state.run_id)
     availability = RecoveryAvailabilityCoordinates[str]()
-    boundary = _boundary(
-        _ScopeBoundaryKind.EXECUTION_LIMIT,
+    boundary = _RecoveryPrivateView.boundary(
+        recovery_module,
+        _RecoveryPrivateView.boundary_kind(recovery_module).EXECUTION_LIMIT,
         state,
         scope_run,
         availability,
     )
-    combination = _NestedCombination(
-        (_NestedOutcome(GraphNodeId("child"), boundary),),
+    combination = _RecoveryPrivateView.combination(
+        recovery_module,
+        (_RecoveryPrivateView.outcome(recovery_module, GraphNodeId("child"), boundary),),
         availability,
     )
 
     with pytest.raises(SnapshotMismatchError, match="non-terminal child outcome"):
-        _settle_nested_outcomes(graph, state, scope_run, combination)
+        _RecoveryPrivateView.settle_nested_outcomes(recovery_module, graph, state, scope_run, combination)
 
 
 @pytest.mark.parametrize(
@@ -1389,7 +1525,7 @@ def test_recovery_preflight_cleans_up_awaiting_child_after_ordinary_failure() ->
     parent.add_node("ordinary", empty_node, inputs={}, outputs={})
     parent.add_node("waiting", child, inputs={})
     parent.set_outputs({})
-    graph = parent._compile().graph
+    graph = _GraphPrivateView.compile(parent).graph
     root_state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("ordinary-failure-parent")))
     root_scope = root_scope_run(root_state.run_id)
 

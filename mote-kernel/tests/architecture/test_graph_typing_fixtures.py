@@ -185,7 +185,7 @@ CASES = (
     ),
     NegativeTypingCase(
         "feedback_wrong_initial.py",
-        ('parameter "initial"', '"NodeOutputRef"', '"GraphInputRef', "reportArgumentType"),
+        ('parameter "initial"', '"Literal[42]"', '"NodeOutputRef"', '"GraphInputRef', "reportArgumentType"),
     ),
     NegativeTypingCase(
         "feedback_cross_universe.py",

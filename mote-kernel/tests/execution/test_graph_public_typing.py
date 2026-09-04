@@ -25,7 +25,7 @@ class TypedResultConsumer:
         self.interrupts: list[bytes] = []
 
     async def __call__(self, transition: Graph.Transition[str]) -> Graph.State:
-        result = transition.result
+        result = transition.writes.settlement
         if isinstance(result, Graph.SuccessResult):
             with pytest.raises(Graph.Error, match="settlement admission"):
                 replace(result, _seal=1)
@@ -33,10 +33,12 @@ class TypedResultConsumer:
         elif isinstance(result, Graph.FailureResult):
             with pytest.raises(Graph.Error, match="settlement admission"):
                 replace(result, _seal=1)
+            assert transition.writes.publications == ()
             self.failures.append(result.failure)
         elif isinstance(result, Graph.InterruptResult):
             with pytest.raises(Graph.Error, match="settlement admission"):
                 replace(result, _seal=1)
+            assert transition.writes.publications == ()
             self.interrupts.append(result.request_payload)
         return transition.candidate_state
 

@@ -629,11 +629,11 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
 
     assert isinstance(completed, Graph.CompletedResult)
     child_outputs = tuple(
-        transition.result.output["query"]
+        transition.writes.settlement.output["query"]
         for transition in (*first_commits.transitions, *second_commits.transitions)
         if transition.scope == ()
-        and isinstance(transition.result, Graph.SuccessResult)
-        and transition.result.node_id == "child"
+        and isinstance(transition.writes.settlement, Graph.SuccessResult)
+        and transition.writes.settlement.node_id == "child"
     )
     assert child_outputs == ("first", "second")
     assert calls == 4

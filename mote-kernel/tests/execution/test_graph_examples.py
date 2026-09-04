@@ -52,8 +52,8 @@ async def test_cyclic_join_runs_two_distinct_occurrences_and_reads_each_cohort()
         return Graph.success(Graph.values(total=values["left"] + values["right"]), route=route)
 
     async def commit(transition: Graph.Transition[int], /) -> Graph.State:
-        if isinstance(transition.result, Graph.SuccessResult):
-            settled.append(transition.result.node_id)
+        if isinstance(transition.writes.settlement, Graph.SuccessResult):
+            settled.append(transition.writes.settlement.node_id)
         return transition.candidate_state
 
     seed = Graph.graph_input("seed", int)
@@ -174,8 +174,8 @@ async def test_conditional_mood_radio_completes_after_the_selected_branch(mood: 
     settled: list[str] = []
 
     async def commit(transition: Graph.Transition[str], /) -> Graph.State:
-        if isinstance(transition.result, Graph.SuccessResult):
-            settled.append(transition.result.node_id)
+        if isinstance(transition.writes.settlement, Graph.SuccessResult):
+            settled.append(transition.writes.settlement.node_id)
         return transition.candidate_state
 
     result = await build_mood_graph().run(

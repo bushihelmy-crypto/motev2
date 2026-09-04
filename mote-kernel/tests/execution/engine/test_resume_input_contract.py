@@ -206,11 +206,12 @@ def feedback_state(
 ) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
     run_id = GraphRunId("run")
     node_id = GraphNodeId("loop")
+    route = next(iter(graph.transition.activation_rules.entries[0].repeat_gates[0][0][1]))
     cause = RoutedActivationCause(
         (
             ActivationReference(
                 GraphActivationIdentity(run_id, predecessor_superstep, node_id),
-                graph.transition.activation_rules.entries[0].feedback_route,
+                route,
             ),
         )
     )
@@ -224,7 +225,7 @@ def feedback_state(
         settled_activations=(
             ActivationReference(
                 GraphActivationIdentity(run_id, predecessor_superstep, node_id),
-                graph.transition.activation_rules.entries[0].feedback_route,
+                route,
             ),
         ),
     )
@@ -259,7 +260,7 @@ def multiple_feedback_state(
 ) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
     run_id = GraphRunId("multiple-run")
     node_id = GraphNodeId("loop")
-    route = graph.transition.activation_rules.entries[0].feedback_route
+    route = next(iter(graph.transition.activation_rules.entries[0].repeat_gates[0][0][1]))
     reference = ActivationReference(
         GraphActivationIdentity(run_id, 0, node_id),
         route,

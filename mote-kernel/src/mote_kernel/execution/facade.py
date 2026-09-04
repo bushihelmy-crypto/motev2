@@ -8,6 +8,12 @@ from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
 from uuid import uuid4
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
+from mote_kernel.execution.commit import (
+    GraphCommit,
+    GraphCommitKey,
+    GraphCommitWriteSet,
+    GraphTransition,
+)
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.recovery import preflight_recovery
 from mote_kernel.execution.errors import (
@@ -21,8 +27,6 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.family_driver import (
-    GraphCommit,
-    GraphTransition,
     admit_continued_root,
     fresh_root,
     project_graph_result,
@@ -187,6 +191,8 @@ class Graph(Generic[GraphValueT]):
     Outcome = GraphOutcome
     ResumeAction = ResumeNodeRequest
     Commit = GraphCommit
+    CommitKey = GraphCommitKey
+    CommitWriteSet = GraphCommitWriteSet
     Transition = GraphTransition
     SuccessResult = _GraphSuccessResult
     FailureResult = _GraphFailureResult
@@ -250,13 +256,15 @@ class Graph(Generic[GraphValueT]):
     @staticmethod
     def feedback(
         *,
-        initial: GraphInputRef[ValueT],
+        initial: GraphInputRef[ValueT] | NodeOutputRef,
         repeat: NodeOutputRef,
     ) -> FeedbackInputBinding[ValueT]:
-        """Bind a first activation to graph input and later activations to the previous output."""
+        """Bind two explicit activation gates to their typed publications."""
 
-        if type(initial) is not GraphInputRef:
-            raise GraphValidationError("feedback initial must be a graph input reference")
+        if type(initial) not in (GraphInputRef, NodeOutputRef):
+            raise GraphValidationError("feedback initial must be a graph input or node output reference")
+        if type(repeat) is not NodeOutputRef:
+            raise GraphValidationError("feedback repeat must be a node output reference")
         return FeedbackInputBinding(initial, repeat)
 
     @staticmethod

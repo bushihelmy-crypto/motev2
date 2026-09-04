@@ -1,5 +1,7 @@
 """Invocation-local scoped frames and opaque continuation snapshots."""
 
+from __future__ import annotations
+
 from dataclasses import InitVar, dataclass, field, replace
 from typing import Generic, Never, Protocol, SupportsIndex, TypeAlias, TypeVar, final, overload
 
@@ -42,6 +44,41 @@ class ResumeInputAvailabilityCoordinate(Generic[GraphValueT]):
 class ChildBoundaryAvailabilityCoordinate(Generic[GraphValueT]):
     child_scope_run: ScopeRunCoordinate
     descriptor: FrameDescriptorIdentity
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class GraphInputEvidence(Generic[GraphValueT]):
+    """A graph input staged for the same commit as its Start transition."""
+
+    coordinate: GraphInputAvailabilityCoordinate[GraphValueT]
+    frame: GraphInputFrame[GraphValueT] = field(compare=False, repr=False, hash=False)
+
+    def __post_init__(self) -> None:
+        if type(self.coordinate) is not GraphInputAvailabilityCoordinate or type(self.frame) is not GraphInputFrame:
+            raise SnapshotMismatchError("graph input evidence has an invalid typed frame")
+
+    def __hash__(self) -> Never:
+        raise TypeError("graph input evidence is unhashable")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class GraphPublicationEvidence(Generic[GraphValueT]):
+    """A node output staged for the same commit as its settlement."""
+
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT]
+    frame: NodeOutputFrame[GraphValueT] = field(compare=False, repr=False, hash=False)
+    provenance: ExecutionPublicationProvenance
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.coordinate) is not PublicationAvailabilityCoordinate
+            or type(self.frame) is not NodeOutputFrame
+            or type(self.provenance) is not ExecutionPublicationProvenance
+        ):
+            raise SnapshotMismatchError("publication evidence has an invalid typed frame")
+
+    def __hash__(self) -> Never:
+        raise TypeError("publication evidence is unhashable")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -206,7 +243,7 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     def add_graph_input(
         self,
         record: AdmittedGraphInput[GraphValueT],
-    ) -> "ScopedFrameIndex[GraphValueT]":
+    ) -> ScopedFrameIndex[GraphValueT]:
         if any(existing.coordinate == record.coordinate for existing in self.graph_inputs):
             raise GraphValuePublicationError("graph input coordinate was admitted more than once")
         return replace(
@@ -217,7 +254,7 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     def add_publication(
         self,
         record: ConfirmedPublication[GraphValueT],
-    ) -> "ScopedFrameIndex[GraphValueT]":
+    ) -> ScopedFrameIndex[GraphValueT]:
         if any(existing.coordinate == record.coordinate for existing in self.publications):
             raise GraphValuePublicationError("stable activation was published more than once")
         return replace(
@@ -228,7 +265,7 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     def add_resume_input(
         self,
         record: AdmittedResumeInput[GraphValueT],
-    ) -> "ScopedFrameIndex[GraphValueT]":
+    ) -> ScopedFrameIndex[GraphValueT]:
         if any(existing.coordinate == record.coordinate for existing in self.resume_inputs):
             raise GraphValuePublicationError("resume input coordinate was admitted more than once")
         return replace(
@@ -239,7 +276,7 @@ class ScopedFrameIndex(Generic[GraphValueT]):
     def add_child_boundary(
         self,
         record: ConfirmedChildBoundary[GraphValueT],
-    ) -> "ScopedFrameIndex[GraphValueT]":
+    ) -> ScopedFrameIndex[GraphValueT]:
         if any(existing.coordinate == record.coordinate for existing in self.child_boundaries):
             raise GraphValuePublicationError("child boundary coordinate was confirmed more than once")
         return replace(

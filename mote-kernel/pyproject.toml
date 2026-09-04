@@ -137,54 +137,59 @@ quote-style = "double"
 # Graph.feedback adds one deliberate method to the sole public facade and
 # removes the facade-only rejection normalizer; its canonical binding/compiler
 # path is ratcheted at the resulting measured shape.
+# The atomic Graph commit boundary now has one complete owner in
+# execution/commit.py: typed write-set construction, exact acknowledgement,
+# and post-confirmation frame staging stay together instead of being hidden in
+# family-driver wiring.  The resulting measured shape is ratcheted as an
+# intentional ownership boundary, not reduced through aliases or wrappers.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 705
-type_definitions = 413
-dataclass_types = 242
-dataclass_fields = 678
-decision_points = 2213
+top_level_definitions = 718
+type_definitions = 418
+dataclass_types = 247
+dataclass_fields = 691
+decision_points = 2355
 logical_clone_pairs = 16
-statement_clone_pairs = 25
+statement_clone_pairs = 29
 near_clone_pairs = 17
-record_shape_clone_pairs = 28
+record_shape_clone_pairs = 31
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
-function_definitions = 546
-method_definitions = 234
+function_definitions = 561
+method_definitions = 241
 nested_function_definitions = 22
-semantic_nodes = 40767
-cognitive_complexity = 2996
-await_points = 124
-exception_handlers = 82
-attribute_writes = 89
+semantic_nodes = 42748
+cognitive_complexity = 3221
+await_points = 121
+exception_handlers = 83
+attribute_writes = 87
 task_creations = 16
-max_cyclomatic_complexity = 81
-max_cognitive_complexity = 133
+max_cyclomatic_complexity = 83
+max_cognitive_complexity = 132
 max_nesting_depth = 6
-internal_call_edges = 765
+internal_call_edges = 781
 recursive_call_components = 5
 max_call_fan_out = 23
 max_call_chain_depth = 17
 max_call_chain_cognitive = 315
-cross_module_call_edges = 817
-cross_module_call_pairs = 245
+cross_module_call_edges = 851
+cross_module_call_pairs = 251
 max_runtime_module_fan_out = 24
-internal_import_edges = 369
+internal_import_edges = 379
 import_cycle_components = 0
-max_module_fan_out = 24
+max_module_fan_out = 25
 max_module_dependency_depth = 29
-ambiguous_internal_dispatches = 59
-transparent_private_definitions = 35
+ambiguous_internal_dispatches = 60
+transparent_private_definitions = 36
 thin_single_use_methods = 12
-low_usage_private_definitions = 181
-linear_private_call_chain_links = 35
+low_usage_private_definitions = 180
+linear_private_call_chain_links = 36
 production_unreferenced_definitions = 10
 low_cohesion_classes = 3
-max_methods_per_class = 29
-max_fields_per_class = 33
+max_methods_per_class = 28
+max_fields_per_class = 35
 max_class_components = 4
-complexity_hotspots = 82
+complexity_hotspots = 87
 stateful_async_hotspots = 7
 unused_private_definitions = 0
 unread_private_fields = 0

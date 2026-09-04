@@ -5,6 +5,7 @@ from itertools import chain
 from typing import TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import (
+    GraphValidationError,
     InvalidRoutingCommandError,
     JoinProgressError,
     RoutingDeadlockError,
@@ -13,6 +14,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.ports import (
+    ActivationGate,
     CompiledActivationRule,
     GraphInputPort,
     NodeOutputPort,
@@ -22,7 +24,6 @@ from mote_kernel.execution.graph.ports import (
     require_publication_selection,
 )
 from mote_kernel.execution.graph.topology import (
-    ActivationGate,
     CompiledGraph,
     CompiledJoin,
 )
@@ -39,6 +40,7 @@ from mote_kernel.state.graph_state import (
     CompleteGraphFrontier,
     ContinueGraphRouting,
     GraphAbortReason,
+    GraphActivationCause,
     GraphActivationIdentity,
     GraphFrontierActivation,
     GraphFrontierStatus,
@@ -94,18 +96,28 @@ class PublicationHistoryWindow:
     relative_horizon: int
 
 
+@dataclass(frozen=True, slots=True)
+class FeedbackSourceSelection:
+    """The source selected by one admitted feedback cause."""
+
+    source: GraphInputPort | NodeOutputPort
+    publication: PublicationSelection | None
+    predecessor: GraphActivationIdentity | None
+
+
 def publication_history_window(graph: CompiledGraph[GraphValueT]) -> PublicationHistoryWindow:
     absolute_supersteps: set[int] = set()
     relative_horizon = 0
     selections = chain(
         (
-            (
-                binding.source.repeat_selection
-                if isinstance(binding.source, CompiledActivationRule)
-                else binding.publication
-            )
+            selection
             for _node_id, plan in graph.transition.materializations.entries
             for binding in plan.bindings.entries
+            for selection in (
+                (binding.source.initial_selection, binding.source.repeat_selection)
+                if isinstance(binding.source, CompiledActivationRule)
+                else (binding.publication,)
+            )
         ),
         (binding.publication for binding in graph.transition.graph_outputs.entries),
     )
@@ -221,33 +233,125 @@ def _success_routes(
     return routes or (None,)
 
 
+def _gate_matches_cause(
+    gate: ActivationGate,
+    cause: RoutedActivationCause,
+) -> bool:
+    actual = tuple(
+        sorted(
+            ((reference.activation.node_id, reference.route) for reference in cause.references),
+            key=lambda item: (item[0], item[1] is not None, item[1] or ""),
+        )
+    )
+    if len(actual) != len(gate):
+        return False
+    return all(
+        source == actual_source and actual_route in allowed_routes
+        for (source, allowed_routes), (actual_source, actual_route) in zip(gate, actual, strict=True)
+    )
+
+
+def feedback_source_for_cause(
+    state: GraphRunState,
+    node_id: GraphNodeId,
+    target_superstep: int,
+    cause: GraphActivationCause,
+    rule: CompiledActivationRule[GraphValueT],
+) -> FeedbackSourceSelection:
+    """Resolve a feedback input from one exact activation cause.
+
+    The cause is the only phase discriminator.  A graph-input initial source
+    can be selected only by START at superstep zero; a node-output initial or
+    repeat source must match exactly one compiled gate and its publication
+    coordinate.  No fallback to a newer/older publication is permitted.
+    """
+
+    if rule.target != node_id:
+        raise InvalidRoutingCommandError("feedback rule target does not match activation target")
+    if type(target_superstep) is not int or target_superstep < 0:
+        raise InvalidRoutingCommandError("feedback activation has an invalid target coordinate")
+    if type(cause) is StartActivationCause:
+        if target_superstep != 0 or not isinstance(rule.initial, GraphInputPort):
+            if rule.repeat.node_id == node_id and target_superstep > 0:
+                raise InvalidRoutingCommandError("feedback predecessor activation cause must be routed")
+            raise InvalidRoutingCommandError("initial feedback activation must carry the START cause")
+        return FeedbackSourceSelection(rule.initial, None, None)
+    if type(cause) is not RoutedActivationCause:
+        if rule.repeat.node_id == node_id and isinstance(rule.initial, GraphInputPort):
+            raise InvalidRoutingCommandError("feedback activation predecessor cause must be routed")
+        raise InvalidRoutingCommandError("feedback activation has an unsupported cause")
+
+    # Keep the original direct self-feedback guarantee explicit.  The general
+    # gate/selection proof below handles multi-node and Join cycles, while this
+    # closed shape additionally requires the immediately preceding activation
+    # of the same node.
+    if (
+        rule.repeat.node_id == node_id
+        and isinstance(rule.initial, GraphInputPort)
+        and (
+            len(cause.references) != 1
+            or cause.join_occurrence is not None
+            or target_superstep < 1
+            or cause.references[0].activation != GraphActivationIdentity(state.run_id, target_superstep - 1, node_id)
+            or rule.repeat_selection.kind is not PublicationSelectionKind.RELATIVE
+            or rule.repeat_selection.superstep != 1
+            or len(rule.repeat_gates) != 1
+            or rule.repeat_gates[0] != ((node_id, frozenset((cause.references[0].route,))),)
+        )
+    ):
+        raise InvalidRoutingCommandError(
+            "initial feedback activation must carry the START cause"
+            if target_superstep == 0
+            else "feedback activation cause is not the immediate predecessor activation"
+        )
+
+    initial_matches = tuple(_gate_matches_cause(gate, cause) for gate in rule.initial_gates)
+    repeat_matches = tuple(_gate_matches_cause(gate, cause) for gate in rule.repeat_gates)
+    initial_count = sum(initial_matches)
+    repeat_count = sum(repeat_matches)
+    if initial_count + repeat_count != 1:
+        raise InvalidRoutingCommandError("feedback activation does not match exactly one initial or repeat gate")
+    initial = initial_count == 1
+    source = rule.initial if initial else rule.repeat
+    publication = rule.initial_selection if initial else rule.repeat_selection
+    if not isinstance(source, NodeOutputPort):
+        raise InvalidRoutingCommandError("routed feedback activation requires a node-output source")
+    references = tuple(reference for reference in cause.references if reference.activation.node_id == source.node_id)
+    if len(references) != 1:
+        raise InvalidRoutingCommandError("feedback activation cause lacks its declared source publication")
+    reference = references[0]
+    if (
+        reference.activation.run_id != state.run_id
+        or reference.activation.superstep >= target_superstep
+        or reference not in state.settled_activations
+    ):
+        raise InvalidRoutingCommandError("feedback activation predecessor lacks committed settlement evidence")
+    selection = require_publication_selection(
+        publication,
+        InvalidRoutingCommandError("feedback source lacks a compiled publication selection"),
+    )
+    try:
+        selected_superstep = selection.resolve(target_superstep)
+    except GraphValidationError as error:
+        raise InvalidRoutingCommandError(
+            "feedback activation cause does not select its compiled publication"
+        ) from error
+    if selected_superstep != reference.activation.superstep:
+        raise InvalidRoutingCommandError("feedback activation cause does not select its compiled publication")
+    return FeedbackSourceSelection(source, selection, reference.activation)
+
+
 def require_feedback_activation_cause(
     state: GraphRunState,
     node_id: GraphNodeId,
     rule: CompiledActivationRule[GraphValueT],
 ) -> GraphActivationIdentity | None:
-    """Validate one target's state-owned feedback cause and return its predecessor."""
+    """Validate the current frontier's feedback cause and return its predecessor."""
 
     source = frontier_node(state.frontier, node_id)
     if source is None:
         raise InvalidRoutingCommandError("feedback activation is not present in the current frontier")
-    if state.superstep == 0:
-        if type(source.cause) is not StartActivationCause:
-            raise InvalidRoutingCommandError("initial feedback activation must carry the START cause")
-        return None
-    if (
-        type(source.cause) is not RoutedActivationCause
-        or source.cause.join_occurrence is not None
-        or len(source.cause.references) != 1
-    ):
-        raise InvalidRoutingCommandError("feedback activation lacks one predecessor activation cause")
-    reference = source.cause.references[0]
-    expected = GraphActivationIdentity(state.run_id, state.superstep - 1, node_id)
-    if reference.activation != expected or reference.route != rule.feedback_route:
-        raise InvalidRoutingCommandError("feedback activation cause is not the immediate predecessor activation")
-    if reference not in state.settled_activations:
-        raise InvalidRoutingCommandError("feedback activation predecessor lacks committed settlement evidence")
-    return reference.activation
+    return feedback_source_for_cause(state, node_id, state.superstep, source.cause, rule).predecessor
 
 
 def _declared_joins(
@@ -295,24 +399,6 @@ def _pending_join_arrivals(
             raise JoinProgressError("snapshot Join progress has misprojected arrival evidence")
         arrivals[occurrence] = list(progress.arrived)
     return arrivals
-
-
-def _gate_matches_cause(
-    gate: ActivationGate,
-    cause: RoutedActivationCause,
-) -> bool:
-    sources = tuple(
-        sorted(
-            ((reference.activation.node_id, reference.route) for reference in cause.references),
-            key=lambda item: (item[0], item[1] is not None, item[1] or ""),
-        )
-    )
-    if len(gate) != len(sources):
-        return False
-    return all(
-        expected_source == actual_source and actual_route in allowed_routes
-        for (expected_source, allowed_routes), (actual_source, actual_route) in zip(gate, sources, strict=True)
-    )
 
 
 def _frontier_gate_error(
@@ -530,17 +616,28 @@ def unavailable_graph_outputs(
 def _required_target(
     graph: CompiledGraph[GraphValueT],
     target: GraphNodeId,
+    activation: GraphFrontierActivation,
+    state: GraphRunState,
     scope_run: ScopeRunCoordinate,
     activation_superstep: int,
     frames: ScopedFrameAvailability[GraphValueT],
 ) -> RequiredTarget:
+    if activation.node_id != target:
+        raise InvalidRoutingCommandError("compiled successor activation does not match its target")
     unavailable: list[str] = []
     for binding in graph.transition.materializations[target].bindings.entries:
         source = binding.source
         publication = binding.publication
         if isinstance(source, CompiledActivationRule):
-            publication = source.repeat_selection
-            source = source.repeat
+            selected = feedback_source_for_cause(
+                state,
+                target,
+                activation_superstep,
+                activation.cause,
+                source,
+            )
+            source = selected.source
+            publication = selected.publication
         if not _value_available(graph, scope_run, source, publication, activation_superstep, frames):
             unavailable.append(f"{binding.destination.local_name}<-{_source_label(source)}")
     return RequiredTarget(target, tuple(unavailable))
@@ -658,17 +755,22 @@ def resolve_routing_facts(
     if admission_error is not None:
         raise InvalidRoutingCommandError(admission_error)
     control = _resolve_control(graph, state)
+    activation_by_target = {activation.node_id: activation for activation in control.activations}
 
-    required_targets = {
-        target: _required_target(
+    required_targets: dict[GraphNodeId, RequiredTarget] = {}
+    for target in sorted(control.direct_targets | control.join_targets):
+        activation = activation_by_target.get(target)
+        if activation is None:
+            raise InvalidRoutingCommandError(f"compiled successor target {target!r} lacks an admitted activation")
+        required_targets[target] = _required_target(
             graph,
             target,
+            activation,
+            state,
             scope_run,
             state.superstep + 1,
             frames,
         )
-        for target in sorted(control.direct_targets | control.join_targets)
-    }
     control_facts = tuple(required_targets[target] for target in sorted(control.direct_targets))
     completed_join_facts = tuple(required_targets[target] for target in sorted(control.join_targets))
     output_diagnostics = unavailable_graph_outputs(graph, scope_run, state.superstep, frames)

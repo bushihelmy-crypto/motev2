@@ -90,11 +90,13 @@ def test_graph_feedback_requires_exact_reference_types() -> None:
 
     with pytest.raises(GraphValidationError, match="feedback initial"):
         Graph.feedback(initial=cast(GraphInputRef[str], object()), repeat=repeat)
-    with pytest.raises(GraphValidationError, match="graph input reference"):
-        Graph.feedback(
-            initial=cast(GraphInputRef[str], Graph.node_output("previous", "value")),
-            repeat=repeat,
-        )
+    assert Graph.feedback(
+        initial=Graph.node_output("previous", "value"),
+        repeat=repeat,
+    ) == FeedbackInputBinding(
+        Graph.node_output("previous", "value"),
+        repeat,
+    )
     with pytest.raises(GraphValidationError, match="feedback repeat"):
         Graph.feedback(initial=seed, repeat=cast(NodeOutputRef, object()))
 

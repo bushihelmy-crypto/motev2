@@ -56,10 +56,12 @@ class NodeOutputRef:
 class FeedbackInputBinding(Generic[GraphValueT]):
     """An internal input declaration that crosses activation boundaries.
 
-    ``initial`` is used for the START activation and ``repeat`` is used only
-    when a compiled routed cause explicitly selects the feedback rule.  The
+    ``initial`` is used when the target is reached through its declared
+    initial activation gate and ``repeat`` is used when it is reached through
+    its declared repeat gate.  A graph-input initial source denotes the START
+    gate; a node-output initial source denotes one explicit routed gate.  The
     compiler, rather than this value object, decides whether the two sources
-    are legal for a particular target node.
+    and their gates are legal for a particular target node.
     """
 
     initial: "GraphInputRef[GraphValueT] | NodeOutputRef"
@@ -103,6 +105,13 @@ class GraphOutputPort:
 
 
 ResolvedValueSource: TypeAlias = GraphInputPort | NodeOutputPort
+
+# An activation gate is a tuple of source nodes and the route domain each
+# source may contribute.  It lives with the port declarations so compiled
+# feedback rules and the topology plan share one gate shape without an import
+# cycle.
+ActivationGateSource: TypeAlias = tuple[GraphNodeId, frozenset[GraphRouteId | None]]
+ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,11 +172,12 @@ class CompiledActivationRule(Generic[GraphValueT]):
 
     target: GraphNodeId
     input_name: str
-    initial: GraphInputPort
+    initial: GraphInputPort | NodeOutputPort
     repeat: NodeOutputPort
     repeat_selection: PublicationSelection
-    feedback_route: GraphRouteId
-    terminal_route: GraphRouteId
+    initial_gates: tuple[ActivationGate, ...]
+    repeat_gates: tuple[ActivationGate, ...]
+    initial_selection: PublicationSelection | None = None
 
 
 ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledActivationRule[GraphValueT]

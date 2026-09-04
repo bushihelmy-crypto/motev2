@@ -101,7 +101,8 @@ owner 不变：
 - `GraphRunState`/`GraphRunCommand`/`reduce_graph_run` 是状态事实和转换的唯一 owner；
 - routing 保留 `(target, cause)` candidate，验证唯一 gate 后才投影 activation；
 - `ScopedFrameIndex` 只保存本次进程调用可见的 typed frame，不是第二个 State 或长期缓存真相；
-- family driver 递归驱动 parent/child，但不创建 nested 专用 runner；
+- `execution/commit.py` 独占 typed transition/write-set、exact acknowledgement 和确认后的 frame staging；family driver 递归驱动
+  parent/child，但不创建 nested 专用 runner，也不复制提交规则；
 - recovery/preflight 只做无副作用 admission proof，不调用节点、不提交第二份状态，也不成为第二 runner。
 
 State 不读取 `CompiledGraph`；Execution 可以根据 compiled topology 创建 command，但不能直接修改 State。任何新事实都必须放进
@@ -119,6 +120,7 @@ State 不读取 `CompiledGraph`；Execution 可以根据 compiled topology 创�
 3. 一个 producer activation 只有一个 canonical publication；多个 consumer 通过同一 publication coordinate 读取，不复制 per-binding 值。
 4. 同一 target 在同一个 frontier occurrence 只能有 0 或 1 个 activation。routing 在 collapse 前必须保留所有 candidate；零条或多条都 fail closed。
 5. 普通 `NodeOutputRef` 仍表示同一 activation 内的数据依赖，普通 data cycle 继续在 compiler 拒绝。跨 activation 的回环只能由已批准的 typed declaration 表达。
+6. feedback target 的多个 activation gate 先做 route 互斥证明；只有单来源 initial gate 具备 compiler 证明的绝对 activation 坐标，且所有 repeat gate source 都严格受它支配时，才可证明两者轮次不重叠。循环或坐标不明时不能只凭节点拓扑放行，必须由互斥 route 或显式 Join 收口。
 
 ### 3.2 Join 和 scope
 

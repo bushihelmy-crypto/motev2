@@ -15,6 +15,7 @@ from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, N
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
+    ActivationGate,
     CompiledActivationRule,
     DefinitionScope,
     FeedbackInputBinding,
@@ -40,7 +41,6 @@ from mote_kernel.execution.graph.ports import (
     ResolvedValueSource,
 )
 from mote_kernel.execution.graph.topology import (
-    ActivationGate,
     CompiledActivationRules,
     CompiledGraph,
     CompiledJoin,
@@ -80,9 +80,8 @@ def _compiled_activation_gate(
 
 @dataclass(frozen=True, slots=True)
 class _FeedbackResolution:
-    initial: GraphInputPort
+    initial: ResolvedValueSource
     repeat: NodeOutputPort
-    repeat_selection: PublicationSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +268,8 @@ def _can_reach(
     target: GraphNodeId,
     successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> bool:
+    if source not in successors or target not in successors:
+        return False
     pending = [source]
     visited: set[GraphNodeId] = set()
     while pending:
@@ -280,6 +281,30 @@ def _can_reach(
         visited.add(current)
         pending.extend(sorted(successors[current], reverse=True))
     return False
+
+
+def _dominates(
+    source: GraphNodeId,
+    target: GraphNodeId,
+    entries: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+) -> bool:
+    """Return whether every control path to ``target`` passes ``source``."""
+
+    if source == target:
+        return True
+    if target in entries:
+        return False
+    pending = [entry for entry in entries if entry != source]
+    reached: set[GraphNodeId] = set(pending)
+    while pending:
+        current = pending.pop()
+        for successor in successors[current]:
+            if successor == source or successor in reached:
+                continue
+            reached.add(successor)
+            pending.append(successor)
+    return target not in reached
 
 
 def _guaranteed_sets(
@@ -407,8 +432,11 @@ def _reject_ambiguous_activation_gates(
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
     requirements: dict[GraphNodeId, _RouteRequirementProof],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    feedback_targets: frozenset[GraphNodeId] = frozenset(),
 ) -> None:
     for target, gates in activation_gates.items():
+        if target in feedback_targets:
+            continue
         ordered = tuple(gates)
         for position, first in enumerate(ordered):
             if any(
@@ -753,16 +781,167 @@ def _output_publication_selection(
     raise GraphValidationError(f"graph output source {source.node_id!r} has no unique completion activation coordinate")
 
 
+def _gate_contains_source(gate: _RawActivationGate, source: NodeOutputPort) -> bool:
+    return any(candidate == source.node_id for candidate, _route in gate)
+
+
+def _one_shot_initial_precedes_repeat(
+    initial_gate: _RawActivationGate,
+    repeat_gate: _RawActivationGate,
+    entries: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+    absolute_levels: dict[GraphNodeId, int],
+) -> bool:
+    """Prove that a one-shot initial gate cannot overlap a repeat gate.
+
+    A node-level dominance relation is insufficient once the initial source
+    can execute in a cycle: one activation may emit both the next source
+    occurrence and its downstream repeat occurrence.  The only ordering proof
+    admitted here starts with a source that has one compiler-owned absolute
+    activation coordinate.  Every repeat source must be strictly downstream
+    of that one-shot source, so its target gate is at least one frontier later.
+    Unknown or repeatable coordinates remain a compile-time ambiguity.
+    """
+
+    if len(initial_gate) != 1 or not repeat_gate:
+        return False
+    initial_source = initial_gate[0][0]
+    if initial_source not in absolute_levels:
+        return False
+    repeat_sources = tuple(source for source, _route in repeat_gate)
+    if initial_source in repeat_sources:
+        return False
+    return all(
+        _can_reach(initial_source, source, successors) and _dominates(initial_source, source, entries, successors)
+        for source in repeat_sources
+    )
+
+
+def _feedback_publication_selection(
+    source: NodeOutputPort,
+    target: GraphNodeId,
+    gate: ActivationGate,
+    absolute_levels: dict[GraphNodeId, int],
+    joins_by_target: dict[GraphNodeId, list[CompiledJoin]],
+) -> PublicationSelection:
+    """Choose the one publication coordinate proved by a feedback gate."""
+
+    absolute = absolute_levels.get(source.node_id)
+    if absolute is not None:
+        return PublicationSelection(PublicationSelectionKind.ABSOLUTE, absolute)
+    if len(gate) == 1:
+        return PublicationSelection(PublicationSelectionKind.RELATIVE, 1)
+    gate_sources = tuple(candidate for candidate, _route in gate)
+    candidates = tuple(join for join in joins_by_target[target] if join.identity.sources == gate_sources)
+    if len(candidates) != 1:
+        raise GraphValidationError(
+            f"feedback source {source.node_id!r} has no unique Join publication coordinate for {target!r}"
+        )
+    return PublicationSelection(
+        PublicationSelectionKind.RELATIVE,
+        candidates[0].target_offset(source.node_id),
+    )
+
+
+def _feedback_gate_partition(
+    target: GraphNodeId,
+    initial: GraphInputPort | NodeOutputPort,
+    repeat: NodeOutputPort,
+    entries: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+    gates: tuple[_RawActivationGate, ...],
+    requirements: dict[GraphNodeId, _RouteRequirementProof],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    absolute_levels: dict[GraphNodeId, int],
+) -> tuple[tuple[ActivationGate, ...], tuple[ActivationGate, ...]]:
+    """Partition every target gate into one explicit initial/repeat family.
+
+    A feedback declaration is not permission to pick an arbitrary incoming
+    edge.  Every gate must be named by exactly one side of the declaration,
+    and distinct gates must be statically mutually exclusive.  A Join is one
+    gate (and therefore already supplies the required synchronization); two
+    independent gates that may arrive together are rejected here.
+    """
+
+    if isinstance(initial, GraphInputPort):
+        if target not in entries:
+            raise GraphValidationError(
+                f"feedback target {target!r} with a graph-input initial source must be a graph entry"
+            )
+        initial_gates: tuple[_RawActivationGate, ...] = ()
+    else:
+        if target in entries:
+            raise GraphValidationError(
+                f"feedback target {target!r} with a node-output initial source cannot also be a graph entry"
+            )
+        initial_gates = tuple(gate for gate in gates if _gate_contains_source(gate, initial))
+
+    repeat_gates = tuple(gate for gate in gates if _gate_contains_source(gate, repeat))
+    if not repeat_gates:
+        raise GraphValidationError(
+            f"feedback target {target!r} repeat source {repeat.node_id!r} has no activation gate"
+        )
+    if not isinstance(initial, GraphInputPort) and not initial_gates:
+        raise GraphValidationError(f"feedback target {target!r} initial source has no activation gate")
+    overlap = set(initial_gates).intersection(repeat_gates)
+    if overlap:
+        raise GraphValidationError(f"feedback target {target!r} initial and repeat sources share an activation gate")
+    covered = set(initial_gates).union(repeat_gates)
+    if any(gate not in covered for gate in gates):
+        raise GraphValidationError(f"feedback target {target!r} has an uncontrolled activation gate")
+
+    for gates in (initial_gates, repeat_gates):
+        for position, first in enumerate(gates):
+            for second in gates[position + 1 :]:
+                if _gates_can_coexist(first, second, requirements, conditional_targets):
+                    raise GraphValidationError(
+                        f"feedback target {target!r} has activation gates that can arrive together without a Join"
+                    )
+    for initial_gate in initial_gates:
+        for repeat_gate in repeat_gates:
+            if not _gates_can_coexist(initial_gate, repeat_gate, requirements, conditional_targets):
+                continue
+            if _one_shot_initial_precedes_repeat(
+                initial_gate,
+                repeat_gate,
+                entries,
+                successors,
+                absolute_levels,
+            ):
+                continue
+            raise GraphValidationError(
+                f"feedback target {target!r} has activation gates that can arrive together without a Join"
+            )
+    compiled_initial = tuple(
+        sorted(
+            (_compiled_activation_gate(gate, conditional_targets) for gate in initial_gates),
+            key=_activation_gate_sort_key,
+        )
+    )
+    compiled_repeat = tuple(
+        sorted(
+            (_compiled_activation_gate(gate, conditional_targets) for gate in repeat_gates),
+            key=_activation_gate_sort_key,
+        )
+    )
+    return compiled_initial, compiled_repeat
+
+
 def _compile_activation_rules(
     nodes: dict[GraphNodeId, GraphNode[GraphValueT]],
     node_ids: tuple[GraphNodeId, ...],
-    scope: DefinitionScope,
     feedback_bindings: dict[GraphNodeId, tuple[tuple[str, _FeedbackResolution], ...]],
+    entries: tuple[GraphNodeId, ...],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
     direct_targets: dict[GraphNodeId, set[GraphNodeId]],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     joins_by_source: dict[GraphNodeId, list[CompiledJoin]],
+    joins_by_target: dict[GraphNodeId, list[CompiledJoin]],
+    requirements: dict[GraphNodeId, _RouteRequirementProof],
     edges: tuple[Edge, ...],
     graph_outputs: GraphOutputBindings[GraphValueT],
+    absolute_levels: dict[GraphNodeId, int],
 ) -> CompiledActivationRules[GraphValueT]:
     declared = tuple(
         (node_id, input_name, resolution)
@@ -771,44 +950,135 @@ def _compile_activation_rules(
     )
     if not declared:
         return CompiledActivationRules(())
-    if scope:
-        raise GraphValidationError("feedback declarations are not permitted in a nested graph")
-    target = declared[0][0]
-    if len(node_ids) != 1 or not isinstance(nodes[target], CallableNodeDefinition):
-        raise GraphValidationError("feedback graph requires one callable target node")
-    if (
-        direct_targets[target]
-        or joins_by_source[target]
-        or any(not isinstance(edge, ConditionalEdge) for edge in edges)
-    ):
-        raise GraphValidationError("feedback target cannot have ordinary or join control edges")
-    routes = conditional_targets[target]
-    feedback_routes = tuple(route for route, destination in routes.items() if destination == target)
-    terminal_routes = tuple(route for route, destination in routes.items() if destination == END)
-    if len(routes) != 2 or len(feedback_routes) != 1 or len(terminal_routes) != 1:
-        raise GraphValidationError("feedback target requires exactly one self feedback route and one terminal route")
-    if len(graph_outputs.entries) != 1:
-        raise GraphValidationError("feedback target requires exactly one graph output")
-    if any(candidate.repeat.node_id != target for _declared_target, _name, candidate in declared):
-        raise GraphValidationError("feedback repeat source must be the target node output")
-    repeat_sources = frozenset(candidate.repeat for _declared_target, _name, candidate in declared)
-    output = graph_outputs.entries[0]
-    if not isinstance(output.source, NodeOutputPort) or output.source not in repeat_sources:
-        raise GraphValidationError("feedback graph output must publish the target repeat output")
-    return CompiledActivationRules(
-        tuple(
-            CompiledActivationRule(
-                declared_target,
-                declared_input,
-                declared_resolution.initial,
-                declared_resolution.repeat,
-                declared_resolution.repeat_selection,
-                feedback_routes[0],
-                terminal_routes[0],
-            )
-            for declared_target, declared_input, declared_resolution in declared
+    by_target: dict[GraphNodeId, list[tuple[str, _FeedbackResolution]]] = {}
+    for target, input_name, resolution in declared:
+        by_target.setdefault(target, []).append((input_name, resolution))
+
+    rules: list[CompiledActivationRule[GraphValueT]] = []
+    for target in node_ids:
+        declarations = by_target.get(target)
+        if not declarations:
+            continue
+
+        # A self-repeat rule is still allowed only in the original closed
+        # two-route shape.  The check is shared by all bindings on the target;
+        # their value ports may differ, but the control topology cannot.
+        self_repeat = tuple(
+            resolution
+            for _input_name, resolution in declarations
+            if resolution.repeat.node_id == target and isinstance(resolution.initial, GraphInputPort)
         )
-    )
+        feedback_route: GraphRouteId | None = None
+        if self_repeat:
+            if len(node_ids) != 1 or not isinstance(nodes[target], CallableNodeDefinition):
+                raise GraphValidationError("feedback graph requires one callable target node")
+            if (
+                direct_targets[target]
+                or joins_by_source[target]
+                or any(not isinstance(edge, ConditionalEdge) for edge in edges)
+            ):
+                raise GraphValidationError("feedback target cannot have ordinary or join control edges")
+            routes = conditional_targets[target]
+            feedback_routes = tuple(route for route, destination in routes.items() if destination == target)
+            terminal_routes = tuple(route for route, destination in routes.items() if destination == END)
+            if len(routes) != 2 or len(feedback_routes) != 1 or len(terminal_routes) != 1:
+                raise GraphValidationError(
+                    "feedback target requires exactly one self feedback route and one terminal route"
+                )
+            if len(graph_outputs.entries) != 1:
+                raise GraphValidationError("feedback target requires exactly one graph output")
+            output = graph_outputs.entries[0]
+            repeat_sources = frozenset(resolution.repeat for resolution in self_repeat)
+            if not isinstance(output.source, NodeOutputPort) or output.source not in repeat_sources:
+                raise GraphValidationError("feedback graph output must publish the target repeat output")
+            feedback_route = feedback_routes[0]
+
+        expected_partition: tuple[tuple[ActivationGate, ...], tuple[ActivationGate, ...]] | None = None
+        for input_name, resolution in declarations:
+            initial_source = resolution.initial
+            repeat_source = resolution.repeat
+            if isinstance(initial_source, NodeOutputPort) and initial_source.node_id == target:
+                raise GraphValidationError(
+                    f"feedback target {target!r} initial source cannot be the target's own output"
+                )
+            initial_gates, repeat_gates = _feedback_gate_partition(
+                target,
+                initial_source,
+                repeat_source,
+                entries,
+                successors,
+                tuple(activation_gates[target]),
+                requirements,
+                conditional_targets,
+                absolute_levels,
+            )
+            partition = (initial_gates, repeat_gates)
+            if expected_partition is None:
+                expected_partition = partition
+            elif partition != expected_partition:
+                raise GraphValidationError(
+                    f"feedback target {target!r} bindings must share one activation gate partition"
+                )
+            if not _can_reach(target, repeat_source.node_id, successors) or not _can_reach(
+                repeat_source.node_id,
+                target,
+                successors,
+            ):
+                raise GraphValidationError(
+                    f"feedback target {target!r} and repeat source {repeat_source.node_id!r} "
+                    "do not form a control cycle"
+                )
+
+            initial_selection: PublicationSelection | None = None
+            if isinstance(initial_source, NodeOutputPort):
+                selections = tuple(
+                    _feedback_publication_selection(
+                        initial_source,
+                        target,
+                        gate,
+                        absolute_levels,
+                        joins_by_target,
+                    )
+                    for gate in initial_gates
+                )
+                if not selections or len(set(selections)) != 1:
+                    raise GraphValidationError(
+                        f"feedback target {target!r} initial source has no unique publication coordinate"
+                    )
+                initial_selection = selections[0]
+            repeat_selections = tuple(
+                _feedback_publication_selection(
+                    repeat_source,
+                    target,
+                    gate,
+                    absolute_levels,
+                    joins_by_target,
+                )
+                for gate in repeat_gates
+            )
+            if len(set(repeat_selections)) != 1:
+                raise GraphValidationError(
+                    f"feedback target {target!r} repeat source has no unique publication coordinate"
+                )
+            repeat_selection = repeat_selections[0]
+            if self_repeat:
+                if not isinstance(initial_source, GraphInputPort) or repeat_source.node_id != target:
+                    raise GraphValidationError("feedback target mixes incompatible self and predecessor rules")
+                if repeat_gates != (((target, frozenset((feedback_route,))),),):
+                    raise GraphValidationError("feedback repeat gate must select the feedback route")
+            rules.append(
+                CompiledActivationRule(
+                    target,
+                    input_name,
+                    initial_source,
+                    repeat_source,
+                    repeat_selection,
+                    initial_gates,
+                    repeat_gates,
+                    initial_selection,
+                )
+            )
+    return CompiledActivationRules(tuple(rules))
 
 
 def _compile_graph(
@@ -855,17 +1125,15 @@ def _compile_graph(
         for binding in node.inputs.entries:
             declared_source = binding.source
             if isinstance(declared_source, FeedbackInputBinding):
-                if not isinstance(declared_source.initial, GraphInputRef):
-                    raise GraphValidationError(
-                        f"feedback input {binding.local_name!r} on node {node_id!r} "
-                        "must use a graph input initial source"
-                    )
                 source, descriptor = _resolve_source(
                     declared_source.initial,
                     scope=scope,
                     graph_inputs=graph_inputs,
                     node_outputs=node_outputs,
-                    consumer=node_id,
+                    # A feedback source is deliberately allowed to refer to
+                    # the target itself; unlike an ordinary binding it is
+                    # materialized from a prior activation publication.
+                    consumer=None,
                 )
                 repeat, repeat_descriptor = _resolve_feedback_repeat(
                     declared_source.repeat,
@@ -879,7 +1147,6 @@ def _compile_graph(
                 feedback = _FeedbackResolution(
                     source,
                     repeat,
-                    PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
                 )
                 feedback_bindings.append((binding.local_name, feedback))
             else:
@@ -890,7 +1157,7 @@ def _compile_graph(
                     node_outputs=node_outputs,
                     consumer=node_id,
                 )
-            if isinstance(source, NodeOutputPort):
+            if not isinstance(declared_source, FeedbackInputBinding) and isinstance(source, NodeOutputPort):
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
                 ResolvedInputBinding(
@@ -984,7 +1251,13 @@ def _compile_graph(
         data_dependencies,
         conditional_targets,
     )
-    _reject_ambiguous_activation_gates(activation_gates, route_requirements, conditional_targets)
+    feedback_targets = frozenset(node_id for node_id, bindings in feedback_bindings_by_node.items() if bindings)
+    _reject_ambiguous_activation_gates(
+        activation_gates,
+        route_requirements,
+        conditional_targets,
+        feedback_targets,
+    )
 
     guarantees = _guaranteed_sets(node_ids, entries, activation_gates)
     for target, sources in data_dependencies.items():
@@ -1052,13 +1325,18 @@ def _compile_graph(
     activation_rules = _compile_activation_rules(
         nodes,
         node_ids,
-        scope,
         feedback_bindings_by_node,
+        entries,
+        activation_gates,
+        successors,
         direct_targets,
         conditional_targets,
         joins_by_source,
+        joins_by_target,
+        route_requirements,
         definition.edges,
         graph_outputs,
+        absolute_levels,
     )
 
     materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}

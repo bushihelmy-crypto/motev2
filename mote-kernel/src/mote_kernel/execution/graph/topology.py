@@ -2,11 +2,12 @@
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Generic, TypeAlias, TypeVar
+from typing import Generic, TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.ports import (
+    ActivationGate,
     CompiledActivationRule,
     DefinitionScope,
     FrameDescriptor,
@@ -28,8 +29,6 @@ from mote_kernel.state.graph_state import (
 KeyT = TypeVar("KeyT", bound=str)
 ValueT_co = TypeVar("ValueT_co", covariant=True)
 GraphValueT = TypeVar("GraphValueT")
-ActivationGateSource: TypeAlias = tuple[GraphNodeId, frozenset[GraphRouteId | None]]
-ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 
 
 @dataclass(frozen=True, slots=True)

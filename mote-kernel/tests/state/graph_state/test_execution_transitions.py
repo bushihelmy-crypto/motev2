@@ -1,7 +1,6 @@
-# pyright: reportPrivateUsage=false
-
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
-from typing import cast
+from typing import Protocol, cast
 
 import pytest
 
@@ -67,6 +66,30 @@ B = GraphNodeId("b")
 C = GraphNodeId("c")
 ATTEMPT = GraphExecutionAttemptId("attempt")
 CODEC = GraphResumeInputCodec(GraphResumeInputCodecId("input.v1"), 1)
+
+
+class _TransitionsPrivateView(Protocol):
+    _current_successful_references: Callable[[GraphRunState], frozenset[ActivationReference]]
+    _validate_join_progress_delta: Callable[..., None]
+
+    @staticmethod
+    def current_successful_references(module: object, state: GraphRunState) -> frozenset[ActivationReference]:
+        return cast(_TransitionsPrivateView, module)._current_successful_references(state)
+
+    @staticmethod
+    def validate_join_progress_delta(
+        module: object,
+        state: GraphRunState,
+        declared: tuple[GraphJoinProgress, ...],
+        consumed: frozenset[GraphJoinOccurrenceIdentity],
+        explicitly_consumed: tuple[GraphJoinOccurrenceIdentity, ...],
+    ) -> None:
+        cast(_TransitionsPrivateView, module)._validate_join_progress_delta(
+            state,
+            declared,
+            consumed,
+            explicitly_consumed,
+        )
 
 
 def join_occurrence(
@@ -142,6 +165,28 @@ def test_start_initializes_every_durable_field_and_default_binding() -> None:
     assert state.resume_input_codec == CODEC
     assert state.join_progress == ()
     assert state.resources is state.execution is state.abort is state.parent is None
+
+
+def test_successful_reference_projection_ignores_non_successful_settlements() -> None:
+    failed = settle(claim(running(A)), FailedGraphNodeOutcome(A, GraphFailure("failed")))
+
+    assert _TransitionsPrivateView.current_successful_references(transitions, failed) == frozenset()
+
+
+def test_join_progress_delta_rejects_unhashable_historical_arrivals() -> None:
+    occurrence = join_occurrence()
+    malformed_arrival = cast(ActivationReference, [])
+    malformed = GraphJoinProgress(occurrence, (malformed_arrival,))
+    state = replace(running(A), join_progress=(malformed,))
+
+    with pytest.raises(GraphStateTransitionError, match="state join progress contains unhashable arrivals"):
+        _TransitionsPrivateView.validate_join_progress_delta(
+            transitions,
+            state,
+            (GraphJoinProgress(occurrence, ()),),
+            frozenset(),
+            (),
+        )
 
 
 def test_start_installs_the_explicit_state_owned_activation_cause() -> None:
@@ -1029,7 +1074,10 @@ def test_next_activation_rejects_duplicate_source_occurrences() -> None:
     activation = GraphFrontierActivation(B, cause)
 
     with pytest.raises(GraphStateTransitionError, match="repeat one source"):
-        transitions._validate_next_activations(settled, (activation,))
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (activation,), ()),
+        )
 
 
 def test_next_activation_rejects_multi_source_non_join_and_wrong_join_coordinates() -> None:
@@ -1042,7 +1090,10 @@ def test_next_activation_rejects_multi_source_non_join_and_wrong_join_coordinate
     object.__setattr__(ordinary, "references", references)
     object.__setattr__(ordinary, "join_occurrence", None)
     with pytest.raises(GraphStateTransitionError, match="non-Join activation cause"):
-        transitions._validate_next_activations(settled, (GraphFrontierActivation(C, ordinary),))
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (GraphFrontierActivation(C, ordinary),), ()),
+        )
 
     wrong_target = GraphNodeId("other-target")
     wrong_occurrence = GraphJoinOccurrenceIdentity(
@@ -1051,9 +1102,13 @@ def test_next_activation_rejects_multi_source_non_join_and_wrong_join_coordinate
         settled.superstep + 1,
     )
     with pytest.raises(GraphStateTransitionError, match="wrong occurrence identity"):
-        transitions._validate_next_activations(
+        reduce_graph_run(
             settled,
-            (GraphFrontierActivation(C, RoutedActivationCause(references, wrong_occurrence)),),
+            AdvanceGraphFrontier(
+                settled.revision,
+                (GraphFrontierActivation(C, RoutedActivationCause(references, wrong_occurrence)),),
+                (),
+            ),
         )
 
 
@@ -1071,46 +1126,81 @@ def test_next_join_activation_history_must_equal_its_pending_progress() -> None:
     )
 
     with pytest.raises(GraphStateTransitionError, match="history does not match"):
-        transitions._validate_next_activations(settled, (activation,))
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(settled.revision, (activation,), (progress,)),
+        )
 
 
 def test_join_progress_index_rejects_each_malformed_record_shape() -> None:
+    state = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
     with pytest.raises(GraphStateTransitionError, match="must be a tuple"):
-        transitions._index_join_progress(cast(tuple[GraphJoinProgress, ...], []), "state")
+        reduce_graph_run(
+            state,
+            AdvanceGraphFrontier(state.revision, (_continue_activation(A),), cast(tuple[GraphJoinProgress, ...], [])),
+        )
     with pytest.raises(GraphStateTransitionError, match="malformed record"):
-        transitions._index_join_progress(cast(tuple[GraphJoinProgress, ...], (object(),)), "state")
+        reduce_graph_run(
+            state,
+            AdvanceGraphFrontier(
+                state.revision,
+                (_continue_activation(A),),
+                cast(tuple[GraphJoinProgress, ...], (object(),)),
+            ),
+        )
     malformed_occurrence = object.__new__(GraphJoinOccurrenceIdentity)
     object.__setattr__(malformed_occurrence, "join", cast(GraphJoinIdentity, []))
     object.__setattr__(malformed_occurrence, "run_id", GraphRunId("run"))
     object.__setattr__(malformed_occurrence, "target_superstep", 2)
     malformed_key = GraphJoinProgress(malformed_occurrence, ())
     with pytest.raises(GraphStateTransitionError, match="unhashable key"):
-        transitions._index_join_progress((malformed_key,), "state")
+        reduce_graph_run(
+            state,
+            AdvanceGraphFrontier(state.revision, (_continue_activation(A),), (malformed_key,)),
+        )
     valid = join_progress((_arrival(A),))
     with pytest.raises(GraphStateTransitionError, match="repeats one join"):
-        transitions._index_join_progress((valid, valid), "state")
-
-
-def test_current_success_reference_scan_ignores_non_successful_nodes() -> None:
-    assert transitions._current_successful_references(running(A)) == frozenset()
+        reduce_graph_run(
+            state,
+            AdvanceGraphFrontier(state.revision, (_continue_activation(A),), (valid, valid)),
+        )
 
 
 def test_join_progress_delta_rejects_overlap_unhashable_values_and_noncurrent_additions() -> None:
     partial, progress = _partial_join_state()
     settled = settle(claim(partial, attempt="join-source"), SucceededGraphNodeOutcome(B, ContinueGraphRouting()))
     key = progress.occurrence
+    current = ActivationReference(GraphActivationIdentity(settled.run_id, settled.superstep, B))
+    complete = GraphFrontierActivation(
+        C,
+        RoutedActivationCause((progress.arrived[0], current), key),
+    )
     with pytest.raises(GraphStateTransitionError, match="more than once"):
-        transitions._validate_join_progress_delta(settled, (), frozenset({key}), (key,))
+        reduce_graph_run(
+            settled,
+            AdvanceGraphFrontier(
+                settled.revision,
+                (complete,),
+                (),
+                (key,),
+            ),
+        )
 
     settled_a = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
     malformed = join_progress((_forged_unhashable_reference(),))
     with pytest.raises(GraphStateTransitionError, match="unhashable arrivals"):
-        transitions._validate_join_progress_delta(settled_a, (malformed,), frozenset(), ())
+        reduce_graph_run(
+            settled_a,
+            AdvanceGraphFrontier(settled_a.revision, (_continue_activation(A),), (malformed,)),
+        )
 
     prior_bad = replace(settled_a, join_progress=(malformed,))
     valid = join_progress((_arrival(A),))
-    with pytest.raises(GraphStateTransitionError, match="state join progress contains unhashable arrivals"):
-        transitions._validate_join_progress_delta(prior_bad, (valid,), frozenset(), ())
+    with pytest.raises(GraphStateTransitionError, match="join progress arrivals contain an unhashable value"):
+        reduce_graph_run(
+            prior_bad,
+            AdvanceGraphFrontier(prior_bad.revision, (_continue_activation(A),), (valid,)),
+        )
 
     partial_again, prior = _partial_join_state()
     settled_b = settle(
@@ -1119,54 +1209,81 @@ def test_join_progress_delta_rejects_overlap_unhashable_values_and_noncurrent_ad
     )
     extra = ActivationReference(GraphActivationIdentity(settled_b.run_id, 0, C))
     changed = GraphJoinProgress(prior.occurrence, (prior.arrived[0], extra))
+    current_activation = GraphFrontierActivation(
+        C,
+        RoutedActivationCause(
+            (ActivationReference(GraphActivationIdentity(settled_b.run_id, settled_b.superstep, B)),)
+        ),
+    )
     with pytest.raises(GraphStateTransitionError, match="current settled successes"):
-        transitions._validate_join_progress_delta(settled_b, (changed,), frozenset(), ())
+        reduce_graph_run(
+            settled_b,
+            AdvanceGraphFrontier(settled_b.revision, (current_activation,), (changed,)),
+        )
 
 
 def test_join_consumption_rejects_malformed_missing_incomplete_duplicate_and_unsorted_keys() -> None:
     state = settle(claim(running(A)), SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
     key = join_occurrence(target_superstep=1)
     with pytest.raises(GraphStateTransitionError, match="must be a tuple"):
-        transitions._validate_join_consumption(
+        reduce_graph_run(
             state,
-            cast(tuple[GraphJoinOccurrenceIdentity, ...], []),
-            frozenset(),
+            CompleteGraphFrontier(state.revision, cast(tuple[GraphJoinOccurrenceIdentity, ...], [])),
         )
     with pytest.raises(GraphStateTransitionError, match="occurrence is malformed"):
-        transitions._validate_join_consumption(
+        reduce_graph_run(
             state,
-            (cast(GraphJoinOccurrenceIdentity, "bad"),),
-            frozenset(),
+            CompleteGraphFrontier(state.revision, (cast(GraphJoinOccurrenceIdentity, "bad"),)),
         )
     unhashable = object.__new__(GraphJoinOccurrenceIdentity)
     object.__setattr__(unhashable, "join", cast(GraphJoinIdentity, []))
     object.__setattr__(unhashable, "run_id", state.run_id)
     object.__setattr__(unhashable, "target_superstep", state.superstep + 1)
     with pytest.raises(GraphStateTransitionError, match="occurrence is malformed"):
-        transitions._validate_join_consumption(state, (unhashable,), frozenset())
+        reduce_graph_run(state, CompleteGraphFrontier(state.revision, (unhashable,)))
     with pytest.raises(GraphStateTransitionError, match="wrong target coordinate"):
-        transitions._validate_join_consumption(
+        reduce_graph_run(
             state,
-            (join_occurrence(target_superstep=state.superstep + 2),),
-            frozenset(),
+            CompleteGraphFrontier(
+                state.revision,
+                (join_occurrence(target_superstep=state.superstep + 2),),
+            ),
         )
     with pytest.raises(GraphStateTransitionError, match="does not exist"):
-        transitions._validate_join_consumption(state, (key,), frozenset())
+        reduce_graph_run(state, CompleteGraphFrontier(state.revision, (key,)))
 
-    progress = join_progress((_arrival(A),), occurrence=key)
-    complete = replace(state, join_progress=(progress,))
+    progress = join_progress(
+        (_arrival(A),),
+        occurrence=join_occurrence((A, B), GraphNodeId("target"), target_superstep=2),
+    )
+    base = state
+    partial = reduce_graph_run(
+        base,
+        AdvanceGraphFrontier(
+            base.revision,
+            (_continue_activation(C),),
+            (progress,),
+        ),
+    )
+    incomplete_state = settle(
+        claim(partial, attempt="incomplete-join"),
+        SucceededGraphNodeOutcome(C, ContinueGraphRouting()),
+    )
     with pytest.raises(GraphStateTransitionError, match="not complete"):
-        transitions._validate_join_consumption(complete, (key,), frozenset())
+        reduce_graph_run(incomplete_state, CompleteGraphFrontier(incomplete_state.revision, (progress.occurrence,)))
 
-    complete_from_other_source = replace(
-        settle(claim(running(B)), SucceededGraphNodeOutcome(B, ContinueGraphRouting())),
-        join_progress=(progress,),
+    duplicate_partial, duplicate_progress = _partial_join_state()
+    duplicate_complete = settle(
+        claim(duplicate_partial, attempt="duplicate-consumption"),
+        SucceededGraphNodeOutcome(B, ContinueGraphRouting()),
     )
     with pytest.raises(GraphStateTransitionError, match="canonical and distinct"):
-        transitions._validate_join_consumption(
-            complete_from_other_source,
-            (key, key),
-            transitions._current_successful_references(complete_from_other_source),
+        reduce_graph_run(
+            duplicate_complete,
+            CompleteGraphFrontier(
+                duplicate_complete.revision,
+                (duplicate_progress.occurrence, duplicate_progress.occurrence),
+            ),
         )
 
     duplicate_source_state = settle(
@@ -1184,26 +1301,38 @@ def test_join_consumption_rejects_malformed_missing_incomplete_duplicate_and_uns
         join_progress=(join_progress((_arrival(A),)),),
     )
     with pytest.raises(GraphStateTransitionError, match="repeats one source"):
-        transitions._validate_join_consumption(
+        reduce_graph_run(
             duplicate_source_progress,
-            (duplicate_source_progress.join_progress[0].occurrence,),
-            transitions._current_successful_references(duplicate_source_progress),
+            CompleteGraphFrontier(
+                duplicate_source_progress.revision,
+                (duplicate_source_progress.join_progress[0].occurrence,),
+            ),
         )
 
-    first_key = join_occurrence(target_superstep=1)
-    second_key = join_occurrence((B, C), GraphNodeId("d"), target_superstep=1)
-    both = replace(
-        settle(claim(running(B, GraphNodeId("d"))), SucceededGraphNodeOutcome(B, ContinueGraphRouting())),
-        join_progress=(
-            join_progress((_arrival(A),), occurrence=first_key),
-            join_progress((_arrival(C),), occurrence=second_key),
+    first_key = join_occurrence(target_superstep=2)
+    second_key = join_occurrence((B, C), GraphNodeId("d"), target_superstep=2)
+    initial = claim(running(A, C), attempt="canonical-sources")
+    settled_a = settle(initial, SucceededGraphNodeOutcome(A, ContinueGraphRouting()))
+    settled_ac = settle(settled_a, SucceededGraphNodeOutcome(C, ContinueGraphRouting()))
+    both_partial = reduce_graph_run(
+        settled_ac,
+        AdvanceGraphFrontier(
+            settled_ac.revision,
+            (_continue_activation(B),),
+            (
+                join_progress((_arrival(A),), occurrence=first_key),
+                join_progress((_arrival(C),), occurrence=second_key),
+            ),
         ),
     )
+    both = settle(
+        claim(both_partial, attempt="canonical-current"),
+        SucceededGraphNodeOutcome(B, ContinueGraphRouting()),
+    )
     with pytest.raises(GraphStateTransitionError, match="canonical order"):
-        transitions._validate_join_consumption(
+        reduce_graph_run(
             both,
-            (second_key, first_key),
-            transitions._current_successful_references(both),
+            CompleteGraphFrontier(both.revision, (second_key, first_key)),
         )
 
 

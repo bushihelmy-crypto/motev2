@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import pickle
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Protocol, cast
 
@@ -55,6 +56,26 @@ class CommitLog:
     async def __call__(self, transition: Graph.Transition[str], /) -> Graph.State:
         self.transitions.append(transition)
         assert transition.candidate_state == reduce_graph_run(transition.previous_state, transition.command)
+        writes = transition.writes
+        assert writes.commit_key.run_id == transition.candidate_state.run_id
+        assert writes.commit_key.revision == transition.candidate_state.revision
+        if isinstance(transition.command, StartGraphRun):
+            assert len(writes.graph_inputs) == 1
+            assert writes.settlement is None
+        else:
+            assert writes.graph_inputs == ()
+        if isinstance(transition.command, SettleGraphNode):
+            settlement = writes.settlement
+            assert settlement is not None
+            assert settlement.node_id == transition.command.outcome.node_id
+            if isinstance(settlement, Graph.SuccessResult):
+                assert len(writes.publications) == 1
+                assert writes.publications[0] is settlement.publication
+            else:
+                assert writes.publications == ()
+        else:
+            assert writes.settlement is None
+            assert writes.publications == ()
         return transition.candidate_state
 
 
@@ -342,10 +363,12 @@ async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_o
         Graph.interrupt(BytesSubclass(b"review"))
 
     first_transition = commits.transitions[0]
-    with pytest.raises(Graph.SnapshotMismatchError, match="family driver"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="execution commit owner"):
         replace(first_transition, _seal=1)
     successful_settlement = next(
-        transition.result for transition in commits.transitions if isinstance(transition.result, Graph.SuccessResult)
+        transition.writes.settlement
+        for transition in commits.transitions
+        if isinstance(transition.writes.settlement, Graph.SuccessResult)
     )
     with pytest.raises(Graph.Error, match="settlement admission"):
         replace(successful_settlement, _seal=1)
@@ -503,7 +526,7 @@ async def test_run_commits_each_resource_node_transition_and_immediately_admits_
         CompleteGraphFrontier,
     ]
     settlements = [transition for transition in commits.transitions if isinstance(transition.command, SettleGraphNode)]
-    admitted = [transition.result for transition in settlements]
+    admitted = [transition.writes.settlement for transition in settlements]
     assert all(isinstance(item, Graph.SuccessResult) for item in admitted)
     assert [item.node_id for item in admitted if isinstance(item, Graph.SuccessResult)] == ["a", "b"]
     first_resources = settlements[0].candidate_state.resources
@@ -2012,7 +2035,10 @@ async def test_invalid_limits_reject_resume_before_consuming_the_settlement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrong_confirmation", ["wrong-type", "wrong-revision"])
-async def test_run_requires_exact_authoritative_commit_confirmation(wrong_confirmation: str) -> None:
+async def test_run_requires_exact_authoritative_commit_confirmation(
+    wrong_confirmation: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
         return values
 
@@ -2020,13 +2046,35 @@ async def test_run_requires_exact_authoritative_commit_confirmation(wrong_confir
     graph.add_node("node", echo, inputs={"value": input_ref()}, outputs={"value": str})
     graph.set_outputs({})
 
+    seen: list[Graph.Transition[str]] = []
+
     async def reject(transition: Graph.Transition[str], /) -> Graph.State:
+        seen.append(transition)
         if wrong_confirmation == "wrong-type":
             return cast(GraphRunState, "not-state")
         return replace(transition.candidate_state, revision=transition.candidate_state.revision + 1)
 
+    installed = 0
+    original_add_graph_input = cast(
+        Callable[[ScopedFrameIndex[str], AdmittedGraphInput[str]], ScopedFrameIndex[str]],
+        ScopedFrameIndex[str].add_graph_input,
+    )
+
+    def record_graph_input(
+        frames: ScopedFrameIndex[str],
+        record: AdmittedGraphInput[str],
+    ) -> ScopedFrameIndex[str]:
+        nonlocal installed
+        installed += 1
+        return original_add_graph_input(frames, record)
+
+    monkeypatch.setattr(ScopedFrameIndex, "add_graph_input", record_graph_input)
+
     with pytest.raises(Graph.SnapshotMismatchError, match="exact authoritative"):
         await graph.run(Graph.values(value="input"), commit=reject)
+    assert len(seen) == 1
+    assert len(seen[0].writes.graph_inputs) == 1
+    assert installed == 0
 
 
 class CommitAcknowledgementLostError(RuntimeError):
@@ -2581,7 +2629,14 @@ async def test_facade_drives_nested_graph_through_the_same_execution_owner() -> 
 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == "nested"
-    assert any(transition.scope == ("child",) for transition in commits.transitions)
+    child_starts = tuple(
+        transition
+        for transition in commits.transitions
+        if transition.scope == ("child",) and isinstance(transition.command, StartGraphRun)
+    )
+    assert len(child_starts) == 1
+    assert len(child_starts[0].writes.graph_inputs) == 1
+    assert child_starts[0].writes.graph_inputs[0].coordinate.scope_run.scope == ("child",)
 
 
 @pytest.mark.asyncio
@@ -2802,8 +2857,8 @@ async def test_commit_origin_cancellation_preserves_active_family_leases() -> No
         if (
             transition.scope == ()
             and isinstance(transition.command, SettleGraphNode)
-            and transition.result is not None
-            and transition.result.node_id == "ordinary"
+            and transition.writes.settlement is not None
+            and transition.writes.settlement.node_id == "ordinary"
         ):
             raise original
         return transition.candidate_state
@@ -2919,9 +2974,13 @@ async def test_failed_child_cleans_up_awaiting_child_only_after_pending_siblings
         (("waiting",), "leaf", b"question"),
     )
     settlement_order = tuple(
-        GraphNodeId(transition.result.node_id)
+        GraphNodeId(transition.writes.settlement.node_id)
         for transition in commits.transitions
-        if transition.scope == () and isinstance(transition.command, SettleGraphNode) and transition.result is not None
+        if (
+            transition.scope == ()
+            and isinstance(transition.command, SettleGraphNode)
+            and transition.writes.settlement is not None
+        )
     )
     assert settlement_order.index(GraphNodeId("ordinary")) < settlement_order.index(GraphNodeId("waiting"))
     assert settlement_order.index(GraphNodeId("resource")) < settlement_order.index(GraphNodeId("waiting"))
@@ -2956,9 +3015,13 @@ async def test_ordinary_failure_cleans_up_awaiting_child_at_terminal_failure() -
         (("waiting",), "leaf", b"question"),
     )
     settlement_order = tuple(
-        GraphNodeId(transition.result.node_id)
+        GraphNodeId(transition.writes.settlement.node_id)
         for transition in commits.transitions
-        if transition.scope == () and isinstance(transition.command, SettleGraphNode) and transition.result is not None
+        if (
+            transition.scope == ()
+            and isinstance(transition.command, SettleGraphNode)
+            and transition.writes.settlement is not None
+        )
     )
     assert settlement_order == (GraphNodeId("failed"), GraphNodeId("waiting"))
 

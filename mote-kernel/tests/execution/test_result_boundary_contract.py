@@ -22,7 +22,7 @@ def test_commit_result_rejects_a_task_result_subclass() -> None:
     task = GraphTask(TaskId("task"), GraphRunId("run"), 0, GraphNodeId("node"))
 
     with pytest.raises(NodeExecutionContractError, match="unsupported variant"):
-        _commit_result(TaskFailureSubclass(task, "failed"))
+        _commit_result(TaskFailureSubclass(task, "failed"), None)
 
 
 @pytest.mark.asyncio

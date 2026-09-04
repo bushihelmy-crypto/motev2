@@ -130,6 +130,18 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
         ),
         "state/graph_state/model.py": frozenset({"GraphExecutionToken", "GraphExecutionLease", "GraphRunState"}),
         "state/graph_state/reducer.py": frozenset({"reduce_graph_run"}),
+        "execution/commit.py": frozenset(
+            {
+                "GraphCommitKey",
+                "GraphCommitWriteSet",
+                "GraphTransition",
+                "GraphCommit",
+                "prepare_transition",
+                "confirm_transition",
+                "commit_transition",
+                "apply_commit_writes",
+            }
+        ),
         "execution/graph/resume_input.py": frozenset(
             {"ResumeInputEncoder", "ResumeInputDecoder", "ResumeInputBinding"}
         ),
@@ -160,6 +172,8 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "PublicationAvailabilityCoordinate",
                 "ResumeInputAvailabilityCoordinate",
                 "ChildBoundaryAvailabilityCoordinate",
+                "GraphInputEvidence",
+                "GraphPublicationEvidence",
                 "ScopedFrameIndex",
                 "_GraphContinuation",
             }
@@ -427,9 +441,9 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
     } & {node.id for node in ast.walk(graph) if isinstance(node, ast.Name)}
     assert _call_owner_modules("reduce_graph_run") == (
         "execution/claim.py",
+        "execution/commit.py",
         "execution/engine/recovery.py",
         "execution/engine/session.py",
-        "execution/family_driver.py",
         "execution/invocation.py",
     )
 
@@ -472,7 +486,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
         "_PlannedState": ("execution/invocation.py",),
         "PlannedFence": ("execution/invocation.py",),
         "PlannedResume": ("execution/invocation.py",),
-        "GraphTransition": ("execution/family_driver.py",),
+        "GraphTransition": ("execution/commit.py",),
         "project_graph_result": ("execution/family_driver.py",),
     }
 

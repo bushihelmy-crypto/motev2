@@ -5,7 +5,7 @@ from typing import TypeVar, cast
 from mote_kernel.execution.engine.routing import (
     _graph_input_coordinate,
     _node_output_coordinate,
-    require_feedback_activation_cause,
+    feedback_source_for_cause,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -146,27 +146,13 @@ def _feedback_source_for_state(
     rule: CompiledActivationRule[GraphValueT],
 ) -> tuple[GraphInputPort | NodeOutputPort, PublicationSelection | None, int]:
     try:
-        predecessor = require_feedback_activation_cause(
-            state,
-            rule.target,
-            rule,
-        )
+        node = frontier_node(state.frontier, rule.target)
+        if node is None:
+            raise InvalidRoutingCommandError("feedback activation is not present in the current frontier")
+        selected = feedback_source_for_cause(state, rule.target, state.superstep, node.cause, rule)
     except InvalidRoutingCommandError as error:
         raise SnapshotMismatchError(str(error)) from error
-    if predecessor is None:
-        return rule.initial, None, state.superstep
-    return rule.repeat, rule.repeat_selection, state.superstep
-
-
-def _validate_feedback_bindings(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    node_id: GraphNodeId,
-    plan: MaterializationPlan[GraphValueT],
-) -> None:
-    for binding in plan.bindings.entries:
-        if isinstance(binding.source, CompiledActivationRule):
-            _feedback_source_for_state(state, binding.source)
+    return selected.source, selected.publication, state.superstep
 
 
 def node_inputs_available(
@@ -214,7 +200,6 @@ def pending_node_input_available(
     if node is None or not isinstance(node.settlement, PendingGraphNode):
         raise SnapshotMismatchError("input availability requires a current pending node")
     plan = _require_node_materialization(graph, node_id)
-    _validate_feedback_bindings(graph, state, node_id, plan)
     has_feedback = any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries)
     if isinstance(node.settlement.input, OverrideGraphNodeInput):
         if has_feedback:
@@ -254,12 +239,11 @@ def materialize_node_input(
             raise SnapshotMismatchError("effective input requires a current pending node")
     activation = stable_activation(scope_run, GraphActivationIdentity(state.run_id, state.superstep, node_id))
     plan = _require_node_materialization(graph, node_id)
-    # Validate the state-owned cause before consulting an override or cached
-    # frame.  Neither is allowed to turn a forged or stale feedback cause into
-    # a valid input.
-    _validate_feedback_bindings(graph, state, node_id, plan)
+    # A feedback binding must always be resolved from the state-owned cause;
+    # neither an override nor a cached frame may replace that selection.
+    has_feedback = any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries)
     if isinstance(effective_input, OverrideGraphNodeInput):
-        if any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries):
+        if has_feedback:
             raise SnapshotMismatchError("feedback activation cannot use an input override")
         return decode_resume_input(graph, node_id, bytes(effective_input.payload))
     resume_coordinate = _resume_input_coordinate(activation, plan)

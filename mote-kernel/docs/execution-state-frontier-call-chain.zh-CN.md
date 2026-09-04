@@ -283,7 +283,7 @@ session.next() 被取消
 
 ## 8. 唯一权威 reducer / commit 路径
 
-权威状态推进集中在 `family_driver.commit_transition()`：
+权威状态推进集中在 `execution.commit.commit_transition()`：
 
 ```text
 previous_state + GraphRunCommand
@@ -294,7 +294,7 @@ previous_state + GraphRunCommand
   |     previous_state,
   |     command,
   |     candidate_state,
-  |     optional typed node result)
+  |     complete typed write-set)
   |
   +-- 没有 commit callback ------> candidate 作为进程内确认结果
   |
@@ -322,12 +322,13 @@ authoritative transition、commit 和确认都经过 `commit_transition()`。
 | `GraphRunState` | State | 整个 Graph Run 的可恢复控制快照 |
 | `GraphRunCommand` | State | 封闭的状态转换输入 union |
 | `reduce_graph_run` | State | pure transition、invariant 校验与 revision 推进 |
-| `GraphTransition` / commit callback | Execution 边界 | 暴露 reducer candidate 并要求精确提交确认 |
+| `GraphTransition` / commit callback | `execution/commit.py` | 暴露 reducer candidate 和完整 write-set，并要求精确提交确认 |
 
 ## 10. 代码导航
 
 - Public 入口：[`execution/facade.py`](../src/mote_kernel/execution/facade.py)
-- Graph-family 驱动与提交：[`execution/family_driver.py`](../src/mote_kernel/execution/family_driver.py)
+- Graph-family 驱动：[`execution/family_driver.py`](../src/mote_kernel/execution/family_driver.py)
+- 原子 transition/write-set 与提交确认：[`execution/commit.py`](../src/mote_kernel/execution/commit.py)
 - Executor：[`execution/executor.py`](../src/mote_kernel/execution/executor.py)
 - Frontier prepare：[`execution/engine/frontier.py`](../src/mote_kernel/execution/engine/frontier.py)
 - Superstep 分流：[`execution/engine/superstep.py`](../src/mote_kernel/execution/engine/superstep.py)

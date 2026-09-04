@@ -1,12 +1,10 @@
-# pyright: reportPrivateUsage=false
-
 import pytest
 
 from mote_kernel.execution import Graph
+from mote_kernel.execution.commit import GraphTransition
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.errors import GraphValueUnavailableError
 from mote_kernel.execution.family_driver import (
-    GraphTransition,
     admit_continued_root,
     fresh_root,
     project_graph_result,
@@ -375,3 +373,228 @@ async def test_feedback_continuation_reuses_transient_publication_after_lost_adv
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["value"] == 2
     assert seen == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_multi_node_feedback_cycle_reads_the_declared_previous_node_publication() -> None:
+    seen: list[tuple[str, int]] = []
+    graph = Graph[int]("feedback.multi-node.runtime")
+    seed = graph.graph_input("seed", int)
+
+    async def first(values: Graph.Values[int]) -> Graph.Values[int]:
+        value = values["value"]
+        seen.append(("a", value))
+        return Graph.values(value=value + 1)
+
+    async def middle(values: Graph.Values[int]) -> Graph.Values[int]:
+        value = values["value"]
+        seen.append(("b", value))
+        return Graph.values(value=value + 10)
+
+    async def last(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        value = values["value"]
+        seen.append(("c", value))
+        return Graph.success(Graph.values(value=value + 100), route="again" if value < 120 else "done")
+
+    graph.add_node(
+        "a",
+        first,
+        inputs={"value": Graph.feedback(initial=seed, repeat=graph.node_output("c", "value"))},
+        outputs={"value": int},
+    )
+    graph.add_node("b", middle, inputs={"value": graph.node_output("a", "value")}, outputs={"value": int})
+    graph.add_node("c", last, inputs={"value": graph.node_output("b", "value")}, outputs={"value": int})
+    graph.add_edge(Graph.START, "a")
+    graph.add_edge("a", "b")
+    graph.add_edge("b", "c")
+    graph.add_conditional_edge("c", "again", "a")
+    graph.add_conditional_edge("c", "done", Graph.END)
+    graph.set_outputs({"value": graph.node_output("c", "value")})
+
+    result = await graph.run(Graph.values(seed=0))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 222
+    assert seen == [("a", 0), ("b", 1), ("c", 11), ("a", 111), ("b", 112), ("c", 122)]
+
+
+@pytest.mark.asyncio
+async def test_feedback_can_use_a_node_output_as_the_initial_source() -> None:
+    seen: list[tuple[str, int]] = []
+    graph = Graph[int]("feedback.node-seed.runtime")
+    seed = graph.graph_input("seed", int)
+
+    async def source(values: Graph.Values[int]) -> Graph.Values[int]:
+        value = values["value"]
+        seen.append(("source", value))
+        return Graph.values(value=value + 5)
+
+    async def target(values: Graph.Values[int]) -> Graph.Values[int]:
+        value = values["value"]
+        seen.append(("target", value))
+        return Graph.values(value=value + 1)
+
+    async def worker(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        value = values["value"]
+        seen.append(("worker", value))
+        return Graph.success(Graph.values(value=value + 100), route="again" if value < 120 else "done")
+
+    graph.add_node("source", source, inputs={"value": seed}, outputs={"value": int})
+    graph.add_node(
+        "target",
+        target,
+        inputs={
+            "value": Graph.feedback(
+                initial=graph.node_output("source", "value"),
+                repeat=graph.node_output("worker", "value"),
+            )
+        },
+        outputs={"value": int},
+    )
+    graph.add_node("worker", worker, inputs={"value": graph.node_output("target", "value")}, outputs={"value": int})
+    graph.add_edge("source", "target")
+    graph.add_edge("target", "worker")
+    graph.add_conditional_edge("worker", "again", "target")
+    graph.add_conditional_edge("worker", "done", Graph.END)
+    graph.set_outputs({"value": graph.node_output("worker", "value")})
+
+    result = await graph.run(Graph.values(seed=0))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 308
+    assert seen == [
+        ("source", 0),
+        ("target", 5),
+        ("worker", 6),
+        ("target", 106),
+        ("worker", 107),
+        ("target", 207),
+        ("worker", 208),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mutually_exclusive_feedback_routes_activate_a_target_once_per_round() -> None:
+    branch_calls = 0
+    target_calls = 0
+    graph = Graph[int]("feedback.exclusive.runtime")
+    seed = graph.graph_input("seed", int)
+
+    async def target(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        nonlocal target_calls
+        target_calls += 1
+        return Graph.success(Graph.values(value=values["value"] + 1), route="run")
+
+    async def branch(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        nonlocal branch_calls
+        branch_calls += 1
+        routes = ("left", "right", "done")
+        return Graph.success(Graph.values(value=values["value"] + 10), route=routes[branch_calls - 1])
+
+    graph.add_node(
+        "target",
+        target,
+        inputs={"value": Graph.feedback(initial=seed, repeat=graph.node_output("branch", "value"))},
+        outputs={"value": int},
+    )
+    graph.add_node("branch", branch, inputs={"value": graph.node_output("target", "value")}, outputs={"value": int})
+    graph.add_edge(Graph.START, "target")
+    graph.add_conditional_edge("target", "run", "branch")
+    graph.add_conditional_edge("branch", "left", "target")
+    graph.add_conditional_edge("branch", "right", "target")
+    graph.add_conditional_edge("branch", "done", Graph.END)
+    graph.set_outputs({"value": graph.node_output("branch", "value")})
+
+    result = await graph.run(Graph.values(seed=0))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 33
+    assert target_calls == 3
+    assert branch_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_feedback_repeat_source_can_be_selected_from_an_explicit_join() -> None:
+    target_calls = 0
+    graph = Graph[int]("feedback.join.runtime")
+    seed = graph.graph_input("seed", int)
+
+    async def source(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["value"] + 1)
+
+    async def target(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        nonlocal target_calls
+        target_calls += 1
+        return Graph.success(Graph.values(value=values["value"] + 1), route="loop" if target_calls < 3 else "finish")
+
+    async def fanout(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["value"])
+
+    async def left(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["value"] + 10)
+
+    async def right(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["value"] + 20)
+
+    graph.add_node("source", source, inputs={"value": seed}, outputs={"value": int})
+    graph.add_node(
+        "target",
+        target,
+        inputs={
+            "value": Graph.feedback(
+                initial=graph.node_output("source", "value"),
+                repeat=graph.node_output("left", "value"),
+            )
+        },
+        outputs={"value": int},
+    )
+    graph.add_node("fanout", fanout, inputs={"value": graph.node_output("target", "value")}, outputs={"value": int})
+    graph.add_node("left", left, inputs={"value": graph.node_output("fanout", "value")}, outputs={"value": int})
+    graph.add_node("right", right, inputs={"value": graph.node_output("fanout", "value")}, outputs={"value": int})
+    graph.add_edge("source", "target")
+    graph.add_conditional_edge("target", "loop", "fanout")
+    graph.add_conditional_edge("target", "finish", Graph.END)
+    graph.add_edge("fanout", "left")
+    graph.add_edge("fanout", "right")
+    graph.add_join(("left", "right"), "target")
+    graph.set_outputs({"value": graph.node_output("target", "value")})
+
+    result = await graph.run(Graph.values(seed=0))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 24
+    assert target_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_nested_feedback_reuses_the_child_family_owner_and_local_publications() -> None:
+    seen: list[int] = []
+    child = Graph[int]("feedback.nested.child")
+    child_seed = child.graph_input("seed", int)
+
+    async def loop(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        value = values["value"]
+        seen.append(value)
+        return Graph.success(Graph.values(value=value + 1), route="again" if value < 2 else "done")
+
+    child.add_node(
+        "loop",
+        loop,
+        inputs={"value": child.feedback(initial=child_seed, repeat=child.node_output("loop", "value"))},
+        outputs={"value": int},
+    )
+    child.add_edge(Graph.START, "loop")
+    child.add_conditional_edge("loop", "again", "loop")
+    child.add_conditional_edge("loop", "done", Graph.END)
+    child.set_outputs({"value": child.node_output("loop", "value")})
+
+    parent = Graph[int]("feedback.nested.parent")
+    parent_seed = parent.graph_input("seed", int)
+    parent.add_node("child", child, inputs={"seed": parent_seed})
+    parent.set_outputs({"value": parent.node_output("child", "value")})
+
+    result = await parent.run(Graph.values(seed=0))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == 3
+    assert seen == [0, 1, 2]
