@@ -134,12 +134,15 @@ quote-style = "double"
 # three domain Ports remain separate owners (rather than a generic port base),
 # and the post-outcome guards remain at their primary-outcome owners; this
 # measured shape is ratcheted rather than hidden behind aliases or tasks.
+# Graph.feedback adds one deliberate method to the sole public facade and
+# removes the facade-only rejection normalizer; its canonical binding/compiler
+# path is ratcheted at the resulting measured shape.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 706
+top_level_definitions = 705
 type_definitions = 413
 dataclass_types = 242
 dataclass_fields = 678
-decision_points = 2214
+decision_points = 2213
 logical_clone_pairs = 16
 statement_clone_pairs = 25
 near_clone_pairs = 17
@@ -148,10 +151,10 @@ thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
 function_definitions = 546
-method_definitions = 233
+method_definitions = 234
 nested_function_definitions = 22
-semantic_nodes = 40777
-cognitive_complexity = 2997
+semantic_nodes = 40767
+cognitive_complexity = 2996
 await_points = 124
 exception_handlers = 82
 attribute_writes = 89
@@ -159,12 +162,12 @@ task_creations = 16
 max_cyclomatic_complexity = 81
 max_cognitive_complexity = 133
 max_nesting_depth = 6
-internal_call_edges = 766
+internal_call_edges = 765
 recursive_call_components = 5
 max_call_fan_out = 23
 max_call_chain_depth = 17
 max_call_chain_cognitive = 315
-cross_module_call_edges = 816
+cross_module_call_edges = 817
 cross_module_call_pairs = 245
 max_runtime_module_fan_out = 24
 internal_import_edges = 369

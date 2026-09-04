@@ -19,7 +19,7 @@ materialization、scheduler、family driver 和结果投影。
 - 不修改 `mote-infra/persistence`，不增加 persistence/recovery adapter、Store facade 或 storage read path；
 - 不定义或实现 durable codec、RecoverySnapshot、read/reconcile、CAS/commit identity、retention/release 或跨语言协议；
 - 不承诺进程崩溃后的自动继续、跨进程 state-only value recovery、crash-safe、exactly-once 或 provider side effect 语义；
-- 不开放公开 durable `Graph.feedback(...)` API，也不为它预留一条内存专用执行路径。
+- `Graph.feedback(...)` 只开放进程内构图声明；本文件不把它宣称为 durable API，也不为它增加内存专用执行路径。
 
 `Graph.Commit` 是现有的**调用方注入的进程内确认接缝**。省略它时，当前实现确认 reducer candidate 以便继续同一进程的调用；
 注入测试 double 时只验证调用顺序、exact candidate 和 State 不变性。两者都不是本文件的持久化实现或崩溃恢复证明。
@@ -51,12 +51,12 @@ value-unavailable/admission 错误停止。它不是从存储读取值的重启�
 | 唯一公开 `Graph` facade、immutable `CompiledGraph` | 已实现 | `execution/facade.py`、`execution/graph/compiler.py` | 复用，不增加 facade/runner |
 | `GraphRunState`、typed cause、settled activation ledger、pure reducer | 已实现 | `state/graph_state/model.py`、`frontier_model.py`、`reducer.py` | 继续扩展同一 State，不建 loop State |
 | direct self-feedback 的 seed/repeat、immediate predecessor、terminal exit | 已实现（内部 typed 路径） | `FeedbackInputBinding`、compiler/routing/materialization；`test_feedback_compiler.py`、`test_feedback_runtime.py` | 只补真实缺口和组合回归 |
-| 公开 facade 接受 feedback declaration | 关闭 | `normalize_facade_input_bindings()` 明确拒绝 `FeedbackInputBinding` | 本文件不新增公开 feedback API |
+| 公开 facade 接受 feedback declaration | 已开放（仅进程内） | `Graph.feedback()` 直接构造 canonical `FeedbackInputBinding`，`add_node()` 复用统一 normalizer/compiler | 不新增 wrapper 或第二执行路径；durable 能力仍关闭 |
 | 普通 direct fan-out、多消费者 | 已实现 | `DirectEdge`、scheduler/session、fan-out 示例和 routing tests | 做顺序/资源组合审计 |
 | conditional route 选择及 route/cause admission | 已实现 | `ConditionalEdge`、`SelectGraphRoute`、compiled activation gates | 复用现有 gate/cause 模型 |
 | 非循环 Join、partial progress、Join-to-END | 已实现 | `JoinEdge`、`GraphJoinProgress`、routing/reducer tests、`parallel_detectives`/`fanout_terminal` | 做组合回归，不另造 Join runner |
 | Join source occurrence identity | 已实现（可证明的循环/可重复 source） | `GraphJoinOccurrenceIdentity`、`CompiledJoin.source_target_offsets`、routing/reducer/admission tests | 复用；无法证明 occurrence 的形状继续 compile fail |
-| multiple feedback binding | 已实现（内部 typed 路径；公开 facade 仍关闭） | `CompiledActivationRules`、compiler/materialization/routing、`test_feedback_compiler.py`、`test_feedback_runtime.py` | 复用固定 repeat source；不扩展普通 data cycle 或 Graph failure retry |
+| multiple feedback binding | 已实现（公开 facade 复用同一 typed 路径） | `CompiledActivationRules`、compiler/materialization/routing、`test_feedback_compiler.py`、`test_feedback_runtime.py` | 复用固定 repeat source；不扩展普通 data cycle 或 Graph failure retry |
 | nested graph、child boundary、scope 隔离、family driver | 已实现（含新语义组合） | `family_driver.py`、nested/family/resource/Join tests | 复用唯一 family owner；不增加 child 专用 runner |
 | resource admission、并发 completion、failure/interrupt 优先级 | 已实现 | resource reducer、session/scheduler、frontier status tests | 做组合和顺序回归 |
 | state-led 调用的值恢复 | 仅支持调用方提供的 transient evidence | `Graph.run(state=...)` + `ScopedFrameIndex`；缺值会 fail closed | 不增加 storage reader 或隐性缓存 |
@@ -150,8 +150,8 @@ P2-M 不是重新实现 direct loop，而是确认当前内部路径没有真实
 - commit 异常、非 exact candidate、重复确认和取消不改变已确认 State；
 - continuation 的 frame/child evidence 只在当前进程使用，state-only 无 evidence 时明确返回 unavailable/admission 错误。
 
-以上行为由当前 P1 compiler/runtime/routing/State 测试覆盖；本阶段未扩展普通 data cycle，也未把 internal
-`FeedbackInputBinding` 变成公开 alias/wrapper。
+以上行为由当前 P1 compiler/runtime/routing/State 测试覆盖；本阶段未扩展普通 data cycle。公开
+`Graph.feedback()` 直接构造同一个 canonical `FeedbackInputBinding`，没有公开 alias/wrapper，也没有第二条执行路径。
 
 ### P3-M1：fan-out、conditional、非循环 Join 的组合收口（已完成）
 

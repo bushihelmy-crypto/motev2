@@ -183,6 +183,23 @@ CASES = (
         "cross_universe.py",
         ('"_GraphValues[str]" is not assignable to "_GraphValues[int]"',),
     ),
+    NegativeTypingCase(
+        "feedback_wrong_initial.py",
+        ('parameter "initial"', '"NodeOutputRef"', '"GraphInputRef', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "feedback_cross_universe.py",
+        ('"FeedbackInputBinding[str]"', '"FeedbackInputBinding[int]"', "is invariant", "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "feedback_nested_node.py",
+        (
+            'parameter "inputs"',
+            '"FeedbackInputBinding[int]"',
+            '"GraphInputRef[int] | NodeOutputRef"',
+            "reportArgumentType",
+        ),
+    ),
 )
 
 

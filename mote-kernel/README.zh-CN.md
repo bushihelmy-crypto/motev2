@@ -31,6 +31,11 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 执行边，因此每个 node-output consumer 还必须声明 incoming control edge。仅依赖 graph input 或没有输入的 root
 仍是 automatic entry；`set_outputs()` 只投影结果，不激活节点。`Graph.values()` 构造 immutable concrete frame。
 
+`Graph.feedback(initial=..., repeat=...)` 为 callable node 的一个输入显式声明“首轮 graph input、后续紧邻上一轮
+node output”。compiler 当前只准入封闭的直接自反馈形状：一个 callable root target、一条显式 `START` 边、一条
+self route、一条 `END` route，并从 target 的 repeat publication 投影 graph output。这是进程内构图契约，不增加
+跨进程 concrete value recovery。
+
 `Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。

@@ -42,14 +42,15 @@ from mote_kernel.execution.graph.outcome import (
     _success,
 )
 from mote_kernel.execution.graph.ports import (
+    FeedbackInputBinding,
     GraphInputRef,
     GraphOutputDeclarations,
     InputBindings,
     NodeOutputRef,
     canonical_nominal_type,
     canonical_port_name,
-    normalize_facade_input_bindings,
     normalize_graph_output_declarations,
+    normalize_input_bindings,
     normalize_output_declarations,
 )
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
@@ -247,6 +248,18 @@ class Graph(Generic[GraphValueT]):
         )
 
     @staticmethod
+    def feedback(
+        *,
+        initial: GraphInputRef[ValueT],
+        repeat: NodeOutputRef,
+    ) -> FeedbackInputBinding[ValueT]:
+        """Bind a first activation to graph input and later activations to the previous output."""
+
+        if type(initial) is not GraphInputRef:
+            raise GraphValidationError("feedback initial must be a graph input reference")
+        return FeedbackInputBinding(initial, repeat)
+
+    @staticmethod
     @overload
     def values() -> "Graph.Values[Never]": ...
 
@@ -282,7 +295,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
@@ -307,7 +320,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
         ],
         outputs: Mapping[
             str,
@@ -318,7 +331,7 @@ class Graph(Generic[GraphValueT]):
     ) -> Self:
         state = self._require_mutable()
         canonical_id = GraphNodeId(canonical_port_name(node_id, kind="node"))
-        bindings = normalize_facade_input_bindings(inputs)
+        bindings = normalize_input_bindings(inputs)
         if isinstance(operation, Graph):
             if outputs is not None or resources:
                 raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")

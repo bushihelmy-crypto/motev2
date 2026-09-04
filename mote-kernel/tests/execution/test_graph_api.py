@@ -247,6 +247,42 @@ async def test_conditional_callable_rejects_an_unknown_declared_route_before_set
 
 
 @pytest.mark.asyncio
+async def test_public_feedback_reads_the_immediately_previous_activation_until_exit() -> None:
+    seen: list[int] = []
+
+    async def increment(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        value = values["value"]
+        seen.append(value)
+        return Graph.success(
+            Graph.values(value=value + 1),
+            route="done" if value == 2 else "again",
+        )
+
+    graph = Graph[int]("public.feedback")
+    graph.add_node(
+        "loop",
+        increment,
+        inputs={
+            "value": Graph.feedback(
+                initial=Graph.graph_input("seed", int),
+                repeat=Graph.node_output("loop", "value"),
+            )
+        },
+        outputs={"value": int},
+    )
+    graph.add_edge(Graph.START, "loop")
+    graph.add_conditional_edge("loop", "again", "loop")
+    graph.add_conditional_edge("loop", "done", Graph.END)
+    graph.set_outputs({"value": Graph.node_output("loop", "value")})
+
+    result = await graph.run(Graph.values(seed=0), run_id="public-feedback-run")
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert seen == [0, 1, 2]
+    assert result.outputs["value"] == 3
+
+
+@pytest.mark.asyncio
 async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_outputs() -> None:
     async def uppercase(values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value=values["value"].upper())
