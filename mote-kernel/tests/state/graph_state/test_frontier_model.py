@@ -14,6 +14,8 @@ from mote_kernel.state.graph_state import (
     GraphFrontierState,
     GraphFrontierStatus,
     GraphInterruptPayload,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphNodeId,
     GraphNodeInterrupt,
     GraphNodeInterruptIdentity,
@@ -140,6 +142,8 @@ def test_frontier_and_nested_settlements_are_deeply_immutable() -> None:
 
 def test_activation_value_objects_reject_malformed_causes() -> None:
     reference = ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, A))
+    other = ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, B))
+    occurrence = GraphJoinOccurrenceIdentity(GraphJoinIdentity((A, B), C), GraphRunId("run"), 1)
 
     with pytest.raises(ValueError, match="at least one"):
         RoutedActivationCause(())
@@ -147,6 +151,20 @@ def test_activation_value_objects_reject_malformed_causes() -> None:
         RoutedActivationCause((cast(ActivationReference, object()),))
     with pytest.raises(ValueError, match="canonical and distinct"):
         RoutedActivationCause((reference, reference))
+    with pytest.raises(ValueError, match="non-Join"):
+        RoutedActivationCause((reference, other))
+    assert RoutedActivationCause((reference, other), occurrence).join_occurrence == occurrence
+    with pytest.raises(ValueError, match="GraphJoinOccurrenceIdentity"):
+        RoutedActivationCause((reference,), cast(GraphJoinOccurrenceIdentity, object()))
+    with pytest.raises(ValueError, match="exactly one reference per source"):
+        RoutedActivationCause((reference,), occurrence)
+    stale = GraphJoinOccurrenceIdentity(GraphJoinIdentity((A, B), C), GraphRunId("run"), 1)
+    stale_references = (
+        ActivationReference(GraphActivationIdentity(GraphRunId("run"), 1, A)),
+        ActivationReference(GraphActivationIdentity(GraphRunId("run"), 1, B)),
+    )
+    with pytest.raises(ValueError, match="precede"):
+        RoutedActivationCause(stale_references, stale)
     with pytest.raises(ValueError, match="node_id"):
         GraphFrontierActivation(GraphNodeId(" bad"), StartActivationCause())
     with pytest.raises(ValueError, match="unsupported variant"):

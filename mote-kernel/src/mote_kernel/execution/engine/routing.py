@@ -8,10 +8,10 @@ from mote_kernel.execution.errors import (
     InvalidRoutingCommandError,
     JoinProgressError,
     RoutingDeadlockError,
+    SnapshotMismatchError,
     UnknownRouteError,
 )
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.edge import JoinEdge
 from mote_kernel.execution.graph.ports import (
     CompiledActivationRule,
     GraphInputPort,
@@ -24,6 +24,7 @@ from mote_kernel.execution.graph.ports import (
 from mote_kernel.execution.graph.topology import (
     ActivationGate,
     CompiledGraph,
+    CompiledJoin,
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate, stable_activation
 from mote_kernel.execution.run_context import (
@@ -41,11 +42,13 @@ from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
     GraphFrontierActivation,
     GraphFrontierStatus,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphJoinProgress,
-    GraphJoinProgressKey,
     GraphNodeId,
     GraphRouteId,
     GraphRoutingContribution,
+    GraphRunCommand,
     GraphRunState,
     GraphRunStatus,
     RoutedActivationCause,
@@ -73,7 +76,16 @@ class RoutingFacts:
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     unavailable_graph_outputs: tuple[str, ...]
     activations: tuple[GraphFrontierActivation, ...]
-    consumed_join_progress: tuple[GraphJoinProgressKey, ...]
+    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlResolution:
+    direct_targets: frozenset[GraphNodeId]
+    join_targets: frozenset[GraphNodeId]
+    remaining_join_progress: tuple[GraphJoinProgress, ...]
+    activations: tuple[GraphFrontierActivation, ...]
+    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,13 +221,6 @@ def _success_routes(
     return routes or (None,)
 
 
-def _join_key(
-    sources: tuple[GraphNodeId, ...],
-    target: GraphNodeId,
-) -> tuple[tuple[GraphNodeId, ...], GraphNodeId]:
-    return (sources, target)
-
-
 def require_feedback_activation_cause(
     state: GraphRunState,
     node_id: GraphNodeId,
@@ -230,7 +235,11 @@ def require_feedback_activation_cause(
         if type(source.cause) is not StartActivationCause:
             raise InvalidRoutingCommandError("initial feedback activation must carry the START cause")
         return None
-    if type(source.cause) is not RoutedActivationCause or len(source.cause.references) != 1:
+    if (
+        type(source.cause) is not RoutedActivationCause
+        or source.cause.join_occurrence is not None
+        or len(source.cause.references) != 1
+    ):
         raise InvalidRoutingCommandError("feedback activation lacks one predecessor activation cause")
     reference = source.cause.references[0]
     expected = GraphActivationIdentity(state.run_id, state.superstep - 1, node_id)
@@ -241,18 +250,51 @@ def require_feedback_activation_cause(
     return reference.activation
 
 
-def _feedback_rules(graph: CompiledGraph[GraphValueT]) -> dict[GraphNodeId, CompiledActivationRule[GraphValueT]]:
-    return {rule.target: rule for rule in graph.transition.activation_rules.entries}
-
-
 def _declared_joins(
     graph: CompiledGraph[GraphValueT],
-) -> dict[tuple[tuple[GraphNodeId, ...], GraphNodeId], JoinEdge]:
-    return {
-        _join_key(edge.sources, edge.target): edge
-        for edges in graph.transition.joins_by_source.values()
-        for edge in edges
-    }
+) -> dict[GraphJoinIdentity, CompiledJoin]:
+    declared: dict[GraphJoinIdentity, CompiledJoin] = {}
+    indexed_sources: dict[GraphJoinIdentity, set[GraphNodeId]] = {}
+    for source, joins in graph.transition.joins_by_source.items():
+        for join in joins:
+            if source not in join.identity.sources:
+                raise SnapshotMismatchError("compiled Join is indexed under a non-source node")
+            existing = declared.setdefault(join.identity, join)
+            if existing != join:
+                raise SnapshotMismatchError("compiled Join identity has conflicting occurrence projections")
+            indexed_sources.setdefault(join.identity, set()).add(source)
+    if any(indexed_sources[identity] != set(identity.sources) for identity in declared):
+        raise SnapshotMismatchError("compiled Join source index is incomplete")
+    return declared
+
+
+def _pending_join_arrivals(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> dict[GraphJoinOccurrenceIdentity, list[ActivationReference]]:
+    declared = _declared_joins(graph)
+    arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
+    for progress in state.join_progress:
+        occurrence = progress.occurrence
+        plan = declared.get(occurrence.join)
+        arrived_sources = tuple(reference.activation.node_id for reference in progress.arrived)
+        if (
+            plan is None
+            or occurrence in arrivals
+            or occurrence.run_id != state.run_id
+            or occurrence.target_superstep <= state.superstep
+            or not progress.arrived
+            or not set(arrived_sources) < set(occurrence.join.sources)
+        ):
+            raise JoinProgressError("snapshot contains invalid Join progress")
+        if len(arrived_sources) != len(set(arrived_sources)):
+            raise JoinProgressError("snapshot Join progress repeats one source activation")
+        if any(reference not in state.settled_activations for reference in progress.arrived):
+            raise JoinProgressError("snapshot Join progress lacks committed settlement evidence")
+        if any(plan.occurrence_for(reference.activation) != occurrence for reference in progress.arrived):
+            raise JoinProgressError("snapshot Join progress has misprojected arrival evidence")
+        arrivals[occurrence] = list(progress.arrived)
+    return arrivals
 
 
 def _gate_matches_cause(
@@ -277,17 +319,19 @@ def _frontier_gate_error(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
 ) -> str | None:
-    feedback_rules = _feedback_rules(graph)
+    try:
+        declared_joins = _declared_joins(graph)
+    except SnapshotMismatchError as error:
+        return str(error)
     for node in state.frontier.nodes:
         if node.node_id not in graph.nodes:
             return f"frontier activation references unknown node {node.node_id!r}"
         cause = node.cause
-        feedback_rule = feedback_rules.get(node.node_id)
-        if feedback_rule is not None:
-            try:
+        try:
+            for feedback_rule in graph.transition.activation_rules.for_target(node.node_id):
                 require_feedback_activation_cause(state, node.node_id, feedback_rule)
-            except InvalidRoutingCommandError as error:
-                return str(error)
+        except InvalidRoutingCommandError as error:
+            return str(error)
         if type(cause) is StartActivationCause:
             if node.node_id not in graph.transition.entries:
                 return f"START activation {node.node_id!r} is not a compiled graph entry"
@@ -295,37 +339,66 @@ def _frontier_gate_error(
         if type(cause) is not RoutedActivationCause:
             return "frontier activation has an unsupported cause"
         gates = graph.transition.activation_gates[node.node_id]
-        if sum(_gate_matches_cause(gate, cause) for gate in gates) != 1:
+        matching_gates = tuple(gate for gate in gates if _gate_matches_cause(gate, cause))
+        if len(matching_gates) != 1:
             return f"frontier activation {node.node_id!r} does not match exactly one compiled activation gate"
+        occurrence = cause.join_occurrence
+        if occurrence is None:
+            if len(matching_gates[0]) != 1:
+                return f"frontier activation {node.node_id!r} lacks its compiled Join occurrence"
+        else:
+            plan = declared_joins.get(occurrence.join)
+            if (
+                plan is None
+                or occurrence.join.target != node.node_id
+                or occurrence.run_id != state.run_id
+                or occurrence.target_superstep != state.superstep
+            ):
+                return f"frontier activation {node.node_id!r} has an unknown Join occurrence"
+            if any(plan.occurrence_for(reference.activation) != occurrence for reference in cause.references):
+                return f"frontier activation {node.node_id!r} has misprojected Join evidence"
         if any(reference not in state.settled_activations for reference in cause.references):
             return f"frontier activation {node.node_id!r} lacks committed predecessor settlement evidence"
     return None
 
 
 def _append_successor_candidate(
-    candidates: dict[GraphNodeId, list[tuple[ActivationReference, ...]]],
+    candidates: dict[GraphNodeId, list[RoutedActivationCause]],
     target: GraphNodeId,
-    references: tuple[ActivationReference, ...],
+    cause: RoutedActivationCause,
 ) -> None:
-    candidates.setdefault(target, []).append(references)
+    candidates.setdefault(target, []).append(cause)
 
 
-def _join_arrivals_for_frontier(
-    edge: JoinEdge,
-    progress: GraphJoinProgress | None,
-    previous: tuple[ActivationReference, ...],
-) -> tuple[ActivationReference, ...]:
-    arrivals = list(progress.arrived if progress is not None else ())
-    for reference in previous:
-        if reference.activation.node_id not in edge.sources:
+def _historical_join_arrivals(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> dict[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
+    """Rebuild every live Join occurrence from committed settlement evidence."""
+
+    arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
+    for reference in state.settled_activations:
+        activation = reference.activation
+        if activation.superstep >= state.superstep:
             continue
-        same_activation = tuple(item for item in arrivals if item.activation == reference.activation)
-        if same_activation:
-            if same_activation[0] != reference:
-                raise JoinProgressError("join source activation occurrence selected two routes")
-            continue
-        arrivals.append(reference)
-    return tuple(sorted(arrivals, key=ActivationReference.canonical_key))
+        if activation.node_id not in graph.nodes:
+            raise JoinProgressError(f"settled activation references unknown node {activation.node_id!r}")
+        for plan in graph.transition.joins_by_source[activation.node_id]:
+            occurrence = plan.occurrence_for(activation)
+            bucket = arrivals.setdefault(occurrence, [])
+            existing = next(
+                (item for item in bucket if item.activation.node_id == activation.node_id),
+                None,
+            )
+            if existing is not None:
+                if existing != reference:
+                    raise JoinProgressError("Join source activation occurrence selected two routes")
+                raise JoinProgressError("Join source activation occurrence repeated")
+            bucket.append(reference)
+    return {
+        occurrence: tuple(sorted(references, key=ActivationReference.canonical_key))
+        for occurrence, references in arrivals.items()
+    }
 
 
 def _post_advance_error(
@@ -348,7 +421,7 @@ def _post_advance_error(
     )
     if not previous:
         return "non-initial frontier has no committed predecessor settlements"
-    candidates: dict[GraphNodeId, list[tuple[ActivationReference, ...]]] = {}
+    candidates: dict[GraphNodeId, list[RoutedActivationCause]] = {}
     for reference in previous:
         source = reference.activation.node_id
         if source not in graph.nodes:
@@ -362,60 +435,48 @@ def _post_advance_error(
         if reference.route is not None and reference.route not in routes:
             return "predecessor settlement selected an unknown route"
         for target in graph.transition.direct_targets[source]:
-            _append_successor_candidate(candidates, target, (reference,))
+            _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
         if reference.route is not None:
             target = routes[reference.route]
             if target != END:
-                _append_successor_candidate(candidates, target, (reference,))
+                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
 
-    declared = _declared_joins(graph)
-    progress_by_key = {_join_key(progress.sources, progress.target): progress for progress in state.join_progress}
     actual = {
-        node.node_id: node.cause.references
-        for node in state.frontier.nodes
-        if isinstance(node.cause, RoutedActivationCause)
+        node.node_id: node.cause for node in state.frontier.nodes if isinstance(node.cause, RoutedActivationCause)
     }
-    expected_progress: dict[GraphJoinProgressKey, tuple[ActivationReference, ...]] = {}
-    for key, edge in declared.items():
-        progress = progress_by_key.get(key)
-        arrivals = _join_arrivals_for_frontier(edge, progress, previous)
-        if not arrivals:
-            continue
+    expected_progress: dict[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]] = {}
+    try:
+        _pending_join_arrivals(graph, state)
+        join_arrivals = _historical_join_arrivals(graph, state)
+    except (JoinProgressError, SnapshotMismatchError) as error:
+        return str(error)
+    for occurrence, arrivals in join_arrivals.items():
         source_ids = tuple(reference.activation.node_id for reference in arrivals)
-        if len(source_ids) != len(set(source_ids)):
-            return "Join source activation occurrence repeated"
-        complete = set(source_ids) == set(edge.sources)
-        target_cause = actual.get(edge.target)
-        target_proves_join = (
-            target_cause is not None
-            and len(target_cause) == len(edge.sources)
-            and {reference.activation.node_id for reference in target_cause} == set(edge.sources)
-            and all(reference in state.settled_activations for reference in target_cause)
-            and any(reference.activation.superstep == state.superstep - 1 for reference in target_cause)
-        )
-        if target_proves_join and target_cause is not None and not complete:
-            # A completed Join may consume an older partial record on the
-            # transition that creates its target.  The post-transition State
-            # no longer carries that consumed record, so use the target's
-            # complete cause as the proof for this edge.
-            _append_successor_candidate(candidates, edge.target, target_cause)
+        identity = occurrence.join
+        complete = set(source_ids) == set(identity.sources)
+        if occurrence.target_superstep < state.superstep:
+            if not complete:
+                return "historical Join occurrence passed its target without every source"
             continue
         if complete:
-            if edge.target == END:
-                # A terminal Join has no frontier target.  Its complete source
-                # evidence is the only durable proof available in this slice.
-                continue
-            _append_successor_candidate(candidates, edge.target, arrivals)
+            if occurrence.target_superstep != state.superstep:
+                return "Join occurrence completed before its target coordinate"
+            if identity.target != END:
+                _append_successor_candidate(
+                    candidates,
+                    identity.target,
+                    RoutedActivationCause(arrivals, occurrence),
+                )
             continue
-        expected_progress[key] = arrivals
+        if occurrence.target_superstep == state.superstep:
+            return "Join occurrence reached its target coordinate without every source"
+        expected_progress[occurrence] = arrivals
 
-    actual_progress = {
-        _join_key(progress.sources, progress.target): progress.arrived for progress in state.join_progress
-    }
+    actual_progress = {progress.occurrence: progress.arrived for progress in state.join_progress}
     if set(actual_progress) != set(expected_progress):
         return "frontier transition lost or invented Join progress"
-    for key, arrivals in expected_progress.items():
-        if actual_progress[key] != arrivals:
+    for occurrence, arrivals in expected_progress.items():
+        if actual_progress[occurrence] != arrivals:
             return "frontier transition changed Join progress without a proven arrival"
 
     for target, target_candidates in candidates.items():
@@ -485,6 +546,106 @@ def _required_target(
     return RequiredTarget(target, tuple(unavailable))
 
 
+def _resolve_control(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> _ControlResolution:
+    """Resolve the sole compiled control successor and Join progression."""
+
+    arrivals = _pending_join_arrivals(graph, state)
+    direct_control_targets: set[GraphNodeId] = set()
+    completed_join_targets: set[GraphNodeId] = set()
+    candidates: dict[GraphNodeId, list[RoutedActivationCause]] = {}
+
+    for node_id, contribution in routing_contributions(state.frontier):
+        validate_routing_contribution(graph, node_id, contribution)
+        for feedback_rule in graph.transition.activation_rules.for_target(node_id):
+            require_feedback_activation_cause(state, node_id, feedback_rule)
+        selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
+        source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)
+        reference = ActivationReference(source_activation, selected_route)
+        for target in graph.transition.direct_targets[node_id]:
+            direct_control_targets.add(target)
+            _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
+        if isinstance(contribution, SelectGraphRoute):
+            target = graph.transition.conditional_targets[node_id][contribution.route]
+            if target != END:
+                direct_control_targets.add(target)
+                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
+        for plan in graph.transition.joins_by_source[node_id]:
+            occurrence = plan.occurrence_for(source_activation)
+            join_arrivals = arrivals.setdefault(occurrence, [])
+            if any(item.activation.node_id == node_id for item in join_arrivals):
+                raise JoinProgressError("join source activation occurrence repeated")
+            join_arrivals.append(reference)
+    remaining: list[GraphJoinProgress] = []
+    consumed_progress: list[GraphJoinOccurrenceIdentity] = []
+    prior_occurrences = frozenset(progress.occurrence for progress in state.join_progress)
+    for occurrence in sorted(arrivals):
+        identity = occurrence.join
+        arrived = tuple(sorted(arrivals[occurrence], key=ActivationReference.canonical_key))
+        arrived_sources = tuple(reference.activation.node_id for reference in arrived)
+        if set(arrived_sources) == set(identity.sources):
+            if occurrence.target_superstep != state.superstep + 1:
+                raise JoinProgressError("completed Join occurrence has the wrong target coordinate")
+            if identity.target != END:
+                completed_join_targets.add(identity.target)
+                _append_successor_candidate(
+                    candidates,
+                    identity.target,
+                    RoutedActivationCause(arrived, occurrence),
+                )
+            elif occurrence in prior_occurrences:
+                consumed_progress.append(occurrence)
+        else:
+            if occurrence.target_superstep <= state.superstep + 1:
+                raise JoinProgressError("partial Join occurrence cannot reach its target coordinate")
+            remaining.append(GraphJoinProgress(occurrence, arrived))
+
+    activations_by_target: dict[GraphNodeId, GraphFrontierActivation] = {}
+    for target, target_candidates in candidates.items():
+        if len(target_candidates) != 1:
+            raise InvalidRoutingCommandError(
+                f"target {target!r} has {len(target_candidates)} activation causes in one frontier"
+            )
+        activations_by_target[target] = GraphFrontierActivation(target, target_candidates[0])
+
+    return _ControlResolution(
+        frozenset(direct_control_targets),
+        frozenset(completed_join_targets),
+        tuple(remaining),
+        tuple(activations_by_target[target] for target in sorted(activations_by_target)),
+        tuple(sorted(consumed_progress)),
+    )
+
+
+def transition_admission_error(
+    graph: CompiledGraph[GraphValueT],
+    previous_state: GraphRunState | None,
+    command: GraphRunCommand,
+    candidate_state: GraphRunState,
+) -> str | None:
+    """Validate topology facts that cannot survive a terminal State reduction."""
+
+    candidate_error = frontier_admission_error(graph, candidate_state)
+    if candidate_error is not None or candidate_state.status is not GraphRunStatus.COMPLETED:
+        return candidate_error
+    if previous_state is None or type(command) is not CompleteGraphFrontier:
+        return "completed graph state lacks its admitted completion transition"
+    previous_error = frontier_admission_error(graph, previous_state)
+    if previous_error is not None:
+        return previous_error
+    try:
+        control = _resolve_control(graph, previous_state)
+    except (InvalidRoutingCommandError, JoinProgressError, SnapshotMismatchError) as error:
+        return str(error)
+    if control.activations or control.remaining_join_progress:
+        return "graph completion discarded a compiled successor or partial Join occurrence"
+    if control.consumed_join_progress != command.consumed_join_progress:
+        return "graph completion consumed the wrong Join occurrences"
+    return None
+
+
 def resolve_routing_facts(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -496,70 +657,7 @@ def resolve_routing_facts(
     admission_error = frontier_admission_error(graph, state)
     if admission_error is not None:
         raise InvalidRoutingCommandError(admission_error)
-    feedback_rules = _feedback_rules(graph)
-    declared = _declared_joins(graph)
-    arrivals: dict[tuple[tuple[GraphNodeId, ...], GraphNodeId], list[ActivationReference]] = {}
-    for progress in state.join_progress:
-        key = _join_key(progress.sources, progress.target)
-        edge = declared.get(key)
-        arrived_sources = tuple(reference.activation.node_id for reference in progress.arrived)
-        if edge is None or key in arrivals or not progress.arrived or not set(arrived_sources) < set(edge.sources):
-            raise JoinProgressError("snapshot contains invalid join progress")
-        if len(arrived_sources) != len(set(arrived_sources)):
-            raise JoinProgressError("snapshot join progress repeats one source activation")
-        if any(reference not in state.settled_activations for reference in progress.arrived):
-            raise JoinProgressError("snapshot join progress lacks committed settlement evidence")
-        arrivals[key] = list(progress.arrived)
-    direct_control_targets: set[GraphNodeId] = set()
-    completed_join_targets: set[GraphNodeId] = set()
-    candidates: dict[GraphNodeId, list[tuple[ActivationReference, ...]]] = {}
-
-    for node_id, contribution in routing_contributions(state.frontier):
-        validate_routing_contribution(graph, node_id, contribution)
-        feedback_rule = feedback_rules.get(node_id)
-        if feedback_rule is not None:
-            require_feedback_activation_cause(state, node_id, feedback_rule)
-        selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
-        source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)
-        reference = ActivationReference(source_activation, selected_route)
-        for target in graph.transition.direct_targets[node_id]:
-            direct_control_targets.add(target)
-            _append_successor_candidate(candidates, target, (reference,))
-        if isinstance(contribution, SelectGraphRoute):
-            target = graph.transition.conditional_targets[node_id][contribution.route]
-            if target != END:
-                direct_control_targets.add(target)
-                _append_successor_candidate(candidates, target, (reference,))
-        for edge in graph.transition.joins_by_source[node_id]:
-            key = _join_key(edge.sources, edge.target)
-            join_arrivals = arrivals.setdefault(key, [])
-            if any(reference.activation.node_id == node_id for reference in join_arrivals):
-                raise JoinProgressError("join source activation occurrence repeated")
-            join_arrivals.append(reference)
-    remaining: list[GraphJoinProgress] = []
-    consumed_progress: list[GraphJoinProgressKey] = []
-    prior_progress_keys = frozenset(_join_key(progress.sources, progress.target) for progress in state.join_progress)
-    for key in sorted(arrivals):
-        edge = declared[key]
-        arrived = tuple(sorted(arrivals[key], key=ActivationReference.canonical_key))
-        arrived_sources = tuple(reference.activation.node_id for reference in arrived)
-        if set(arrived_sources) == set(edge.sources):
-            if edge.target != END:
-                completed_join_targets.add(edge.target)
-                _append_successor_candidate(candidates, edge.target, arrived)
-            elif key in prior_progress_keys:
-                consumed_progress.append(key)
-        else:
-            remaining.append(GraphJoinProgress(edge.sources, edge.target, arrived))
-
-    activations_by_target: dict[GraphNodeId, GraphFrontierActivation] = {}
-    for target, target_candidates in candidates.items():
-        if len(target_candidates) != 1:
-            raise InvalidRoutingCommandError(
-                f"target {target!r} has {len(target_candidates)} activation causes in one frontier"
-            )
-        references = target_candidates[0]
-        activations_by_target[target] = GraphFrontierActivation(target, RoutedActivationCause(references))
+    control = _resolve_control(graph, state)
 
     required_targets = {
         target: _required_target(
@@ -569,18 +667,18 @@ def resolve_routing_facts(
             state.superstep + 1,
             frames,
         )
-        for target in sorted(direct_control_targets | completed_join_targets)
+        for target in sorted(control.direct_targets | control.join_targets)
     }
-    control_facts = tuple(required_targets[target] for target in sorted(direct_control_targets))
-    completed_join_facts = tuple(required_targets[target] for target in sorted(completed_join_targets))
+    control_facts = tuple(required_targets[target] for target in sorted(control.direct_targets))
+    completed_join_facts = tuple(required_targets[target] for target in sorted(control.join_targets))
     output_diagnostics = unavailable_graph_outputs(graph, scope_run, state.superstep, frames)
     return RoutingFacts(
         control_facts,
         completed_join_facts,
-        tuple(remaining),
+        control.remaining_join_progress,
         output_diagnostics,
-        tuple(activations_by_target[target] for target in sorted(activations_by_target)),
-        tuple(sorted(consumed_progress)),
+        control.activations,
+        control.consumed_join_progress,
     )
 
 

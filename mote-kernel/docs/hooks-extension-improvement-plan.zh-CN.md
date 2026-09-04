@@ -192,7 +192,8 @@ HookRequest。每个 priority 只发出一次 invocation；异常和取消直接
 - 删除通用 `HookCommandPolicy`、identity index 和 generic merge/dedupe 协议；
 - 保持 frozen dataclass、具体泛型和 tuple；
 - `hooks.contract` 作为 HookNode 与 invocation binding 的内部集成契约；包级公共导出仍只保留
-  `HookNode`，不提供外部 `HookPort` SPI；
+  `HookNode`，不提供包级公共 `HookPort` SPI；`HookPort` 实现在 `hooks/port.py`，不在包级
+  导出；
 - invocation 返回值在 Port 边界执行 exact nominal admission；
 - 由 `HookPayloadAdmission` 集中声明并复用五个具体 nominal descriptor，覆盖 request、
   snapshot、plan、stage/final result 的 value/state/config/command 元素；
@@ -200,7 +201,15 @@ HookRequest。每个 priority 只发出一次 invocation；异常和取消直接
   下一 priority；
 - 修正文档注释，去掉“already-merged”但实际未归集的表述。
 
-### 6.2 `node.py`：value/command 链
+### 6.2 `port.py`：Invocation 适配边界
+
+- `HookPort` 只组装 `HookInvocationRequest`、调用 shared `Invocation` 的 strict 路径并校验
+  `HookStageResult`；
+- Port 保持 HookNode 的包内实现，不提供公共 `HookPort` SPI，不拥有重试、状态提交或 transport
+  解析；
+- 独立模块只表达文件职责边界，不建立第二条调用路径。
+
+### 6.3 `node.py`：value/command 链
 
 - `_HookProgress` 只保存当前 request、固定 plan 和有序 command tuple；
 - P1/P2/P3 只更新当前 value，不替换 state；
@@ -208,7 +217,7 @@ HookRequest。每个 priority 只发出一次 invocation；异常和取消直接
 - P3 产生唯一最终 `HookResult`；
 - 不建立 command map、state reducer、跨调用缓存或隐式 registry。
 
-### 6.3 `node.py`：沿用 Graph 的拓扑冻结边界
+### 6.4 `node.py`：沿用 Graph 的拓扑冻结边界
 
 本轮只在构造期间完成四节点和边的全部组装，不主动调用私有 `_compile()`，不增加
 `seal/finalize` 或第二套 mutation guard。
@@ -221,7 +230,7 @@ Graph 自己拒绝 builder mutation。构造完成到首次成功编译之间仍
 后 Graph 现有 mutation guard 生效。若未来产品要求构造完成即不可修改，应另开
 execution/Graph 加固任务，不在 Hooks 内复制冻结状态机。
 
-### 6.4 `identity.py`：无歧义但不重复 version
+### 6.5 `identity.py`：无歧义但不重复 version
 
 definition ID 与 Graph version 必须各自只有一个来源：
 
@@ -240,7 +249,7 @@ hook_definition_version = parent_definition_version
 - 不把 Graph version 重复编码进 definition ID；编码逻辑放在 `hooks/identity.py`，不新建
   `utils/common/helpers`。
 
-### 6.5 装配校验
+### 6.6 装配校验
 
 required capability 在构造期至少检查：
 
@@ -253,7 +262,7 @@ required capability 在构造期至少检查：
 `runtime_checkable Protocol` 只能做浅层结构检查，不能伪装成完整的签名/泛型证明；不做
 深层反射，不把静态类型检查搬到运行时。
 
-### 6.6 `plan.py`
+### 6.7 `plan.py`
 
 - 保留 `HookConfigSnapshot`、`HookPlan`、`HookPriorityPlan` 的不可变外壳；
 - Plan 不增加 command reducer、handler 调度、重试或恢复字段；

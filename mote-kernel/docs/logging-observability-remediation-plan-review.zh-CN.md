@@ -14,6 +14,11 @@
 本文是对整改计划的复审记录。本文只修订文档边界，不修改生产代码、测试或 Events、Failover、Cloudflare 等其他工作树内容。
 本轮代码已按计划实施，专项门禁已通过；全仓门禁中的无关工作树失败在计划第 10.2 节记录，不能归因于本整改。
 
+> **2026-09-03 架构修订：** 后续决定将 `LogSinkPort` 与 `ObservabilityPort` 接到共享
+> `mote_kernel.invocation.Invocation`。因此本文早先把诊断 Port 称为“同步旁路”的表述均由当前契约替代：Port 现在是
+> async 的 typed adapter，接收配置注入的普通 Invocation，并在边界固定使用 best-effort；transport/runtime 仍由
+> `mote-infra/invocation` 和配置选择。以下历史评审结论只在不与这条修订冲突的部分继续有效。
+
 ## 1. 结论先行
 
 整改方向成立，修订后的计划可以作为实现依据。已将评审中有道理的部分落入计划、回复和设计文档；不属于
@@ -55,15 +60,17 @@ Logging/Observability owner 或与用户已确认结果冲突的建议，记录�
 
 ### 3.2 诊断适配器故障
 
-`LogSinkPort.write()` 和 `ObservabilityPort.record()` 是同步旁路接口。适配器自己误抛普通异常或 `CancelledError` 时，
+`LogSinkPort.write()` 和 `ObservabilityPort.record()` 是 Invocation-backed async 旁路接口。每次调用有有限协作式 deadline（默认 1 秒，
+由 Port 的 keyword-only `timeout_seconds` 覆盖为有限正数）；适配器自己误抛普通异常、`CancelledError` 或达到 deadline 时，
 只丢弃当前 record/observation：
 
 - pre-inner 的 started 诊断失败不阻止 inner 执行；
 - inner 已返回、抛出异常、取消或返回 mismatch 后的诊断失败不改写该业务结果；
+- deadline 与调用方取消同时到达时，保留 deadline 的一个取消计数，额外取消仍传播；适配器主动 `uncancel()` 暂不属于本轮契约；
 - 不因诊断失败重试 inner，不触发 Graph recovery、重放或 reconcile；
 - 不使用 `except BaseException` 吞掉 `KeyboardInterrupt`、`SystemExit` 等系统级中断。
 
-因此，评审中把诊断适配器的异常当作业务取消、停止 inner 或重新选择主异常的表述均不属于当前契约。同步适配器不应主动
+因此，评审中把诊断适配器的异常当作业务取消、停止 inner 或重新选择主异常的表述均不属于当前契约。best-effort 适配器不应主动
 制造业务取消。
 
 ### 3.3 factory

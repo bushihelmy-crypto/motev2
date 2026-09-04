@@ -1,9 +1,14 @@
 # Graph 显式反馈回环实施计划（P1 内部切片实施版）
 
-状态：P1 已完成；typed declaration、compiler proof、State-owned cause、routing、input materialization、live/recovery 同序语义和全量门禁均已闭合；P2 durable recovery 尚未开始，公开 `Graph.feedback(...)` API 尚未开放
+状态：P1 已完成；typed declaration、compiler proof、State-owned cause、routing、input materialization、live/recovery 同序语义和全量门禁均已闭合；`Graph.feedback(...)` 已开放进程内构图声明；P2 durable recovery 尚未开始
 
 本文只规划 Kernel Graph 对“延迟数据回环”的支持，不定义业务策略、Port 状态码或重试参数，也不为失败节点提供
 重试能力。失败重试只有 `mote_kernel.failover` 一个 owner。
+
+2026-09-04 接缝决定：公开 `Graph.feedback(initial=GraphInputRef, repeat=NodeOutputRef)`，并由 callable
+`Graph.add_node()` 直接接纳其返回的 canonical `FeedbackInputBinding`。这只开放已由 compiler/runtime 证明的进程内
+direct self-feedback；nested feedback、普通 data cycle 和跨进程 value recovery 仍关闭。它复用现有 declaration、
+compiler、routing、State cause 与 materialization，不新增 wrapper、runner 或 State owner。
 
 本版根据
 [Graph 延迟数据回环实施计划二次审计](./graph-delayed-loop-implementation-plan-review.zh-CN.md)
@@ -648,7 +653,8 @@ feedback declaration/cause/publication，用于先删除与总体边界冲突的
 - 未支持拓扑在 compile 阶段 fail closed。
 
 P1 的进程内 typed declaration、compiler proof、State cause、routing 和 materialization 已落地，复审整改与全量门禁
-已经闭合。此阶段仍不公开 `Graph.feedback(...)`。durable 读写和重启恢复不属于 P1 的完成范围。
+已经闭合。P1 收口时尚未公开声明；2026-09-04 的后续接缝决定让 `Graph.feedback(...)` 直接复用该 canonical 路径。
+durable 读写和重启恢复仍不属于 P1 的完成范围。
 
 ### P2：durable 单 scope 垂直切片
 
@@ -674,7 +680,8 @@ fresh input atomic evidence
 - self-feedback 的多轮 `A[n] -> A[n + 1]`、terminal exit、immediate-predecessor materialization、release 前后崩溃
   故障注入。
 
-只有 P2 垂直切片全部通过，才开放公开 `Graph.feedback(...)`。
+P2 不再作为进程内 `Graph.feedback(...)` 声明的开放闸门；它负责补齐该声明尚不具备的跨进程 value recovery、
+原子 evidence 读取和 retention 语义。在 P2 完成前，不得把当前公开声明描述成 durable feedback。
 
 ### P3：沿同一模型扩展多分枝
 
@@ -726,7 +733,7 @@ pre-commit run --all-files         # monorepo root
 
 | 层 | 位置 | 任务 |
 | --- | --- | --- |
-| Graph facade | `execution/facade.py` | 在恢复/提交 Port 和垂直切片完成后开放 feedback API |
+| Graph facade | `execution/facade.py` | 已通过 `Graph.feedback()` 开放进程内声明；durable 能力继续由恢复/提交垂直切片约束 |
 | 声明与类型 | `execution/graph/ports.py`、`definition.py` | typed feedback binding、descriptor 和 source selection；允许受限的 `repeat == target.output` |
 | Compiler | `execution/graph/compiler.py`、`topology.py` | self-feedback 两路 route gate、`RELATIVE(1)` immediate-predecessor selection、普通 self-cycle 保持拒绝 |
 | Frontier/State | `state/graph_state/frontier_model.py`、`model.py`、`command.py` | State-owned activation identity/cause、精确 predecessor+route reference、durable run limits 和 frontier command；P3 增加 Join occurrence identity |
@@ -870,8 +877,8 @@ immediate predecessor。该修订没有新增 owner、runner、payload slot 或 
   cause 按相对 predecessor distance 归一化，只有会改变后继的 availability/control facts 进入等价关系；
 - Graph failure 已保持 durable terminal 边界：失败不是 retry signal，Failover 仍是唯一重试 owner。
 
-这部分是 P1 的进程内 typed declaration/compiler/runtime proof，不是 durable persistence 实现。当前仍没有公开
-`Graph.feedback(...)`，也没有引入第二个 runner、State 模型或 feedback 专用 payload slot。
+这部分是 P1 的进程内 typed declaration/compiler/runtime proof，不是 durable persistence 实现。公开
+`Graph.feedback(...)` 直接复用该路径，没有引入第二个 runner、State 模型或 feedback 专用 payload slot。
 
 ### 14.2 有意保留的边界
 
@@ -908,8 +915,8 @@ unread field、未消费 coroutine/task 和 import cycle 全部为零。
 ### 14.4 下一步：P2 durable 垂直切片
 
 P2 将沿 P1 已冻结的 declaration、cause、publication、routing、commit 和 recovery 单一模型补齐：fresh input 原子证据、
-successful settlement/publication 原子提交、exact-head + live-evidence 重建、release/retention 和故障注入。P2 全部门禁通过
-后，才评估开放公开 `Graph.feedback(...)` API。
+successful settlement/publication 原子提交、exact-head + live-evidence 重建、release/retention 和故障注入。P2 全部门禁
+通过后，当前 `Graph.feedback(...)` 才能获得跨进程 durable 语义；不另建 durable 专用 API 或执行路径。
 
 历史取舍仍记录在
 [审计回复](./graph-delayed-loop-implementation-plan-review-response.zh-CN.md)

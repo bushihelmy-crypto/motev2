@@ -1,5 +1,4 @@
 import typing
-from collections.abc import Mapping
 from typing import cast
 
 import pytest
@@ -13,7 +12,6 @@ from mote_kernel.execution.graph.ports import (
     PublicationSelection,
     PublicationSelectionKind,
     canonical_nominal_type,
-    normalize_facade_input_bindings,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -86,25 +84,34 @@ def test_graph_output_normalizer_rejects_type_declarations_in_source_position() 
         normalize_graph_output_declarations({"value": str})
 
 
-def test_feedback_binding_requires_exact_internal_reference_types() -> None:
+def test_graph_feedback_requires_exact_reference_types() -> None:
     seed = Graph.graph_input("seed", str)
     repeat = Graph.node_output("loop", "value")
 
     with pytest.raises(GraphValidationError, match="feedback initial"):
-        FeedbackInputBinding(cast(GraphInputRef[str], object()), repeat)
+        Graph.feedback(initial=cast(GraphInputRef[str], object()), repeat=repeat)
+    with pytest.raises(GraphValidationError, match="graph input reference"):
+        Graph.feedback(
+            initial=cast(GraphInputRef[str], Graph.node_output("previous", "value")),
+            repeat=repeat,
+        )
     with pytest.raises(GraphValidationError, match="feedback repeat"):
-        FeedbackInputBinding(seed, cast(NodeOutputRef, object()))
+        Graph.feedback(initial=seed, repeat=cast(NodeOutputRef, object()))
 
 
-def test_public_facade_normalizer_rejects_internal_feedback_declarations() -> None:
-    feedback = FeedbackInputBinding(
-        Graph.graph_input("seed", str),
-        Graph.node_output("loop", "value"),
+def test_feedback_binding_defends_its_internal_initial_reference_boundary() -> None:
+    with pytest.raises(GraphValidationError, match="feedback initial"):
+        FeedbackInputBinding(
+            cast(GraphInputRef[str], object()),
+            Graph.node_output("loop", "value"),
+        )
+
+
+def test_graph_feedback_constructs_the_canonical_typed_binding() -> None:
+    seed = Graph.graph_input("seed", str)
+    repeat = Graph.node_output("loop", "value")
+
+    assert Graph.feedback(initial=seed, repeat=repeat) == FeedbackInputBinding(
+        seed,
+        repeat,
     )
-    values = cast(
-        Mapping[str, GraphInputRef[str] | NodeOutputRef],
-        {"value": feedback},
-    )
-
-    with pytest.raises(GraphValidationError, match=r"not available through Graph\.add_node"):
-        normalize_facade_input_bindings(values)

@@ -10,6 +10,7 @@ ALLOWED_IMPORT_ROOTS = frozenset(
         "__future__",
         "asyncio",
         "collections",
+        "contextlib",
         "dataclasses",
         "enum",
         "math",

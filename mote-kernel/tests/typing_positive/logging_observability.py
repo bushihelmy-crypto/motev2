@@ -5,20 +5,26 @@ from typing import assert_type
 
 from mote_kernel.execution import Graph
 from mote_kernel.logging import LoggedGraphCommit, LoggedNode
+from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogRecord
 from mote_kernel.observability import ObservedNode
+from mote_kernel.observability.port import ObservabilityPort
 from mote_kernel.observability.record import Observation
 from mote_kernel.observability.span import Span, SpanContext, SpanId, TraceId
 
 
 class Sink:
-    def write(self, _record: LogRecord, /) -> None:
+    async def invoke(self, _record: LogRecord, /) -> None:
         pass
 
 
 class Port:
-    def record(self, _observation: Observation, /) -> None:
+    async def invoke(self, _observation: Observation, /) -> None:
         pass
+
+
+LOG_SINK = LogSinkPort(Sink())
+OBSERVABILITY_PORT = ObservabilityPort(Port())
 
 
 class DeferredNumber:
@@ -42,11 +48,11 @@ def deferred_number(value: str) -> DeferredNumber:
     return DeferredNumber(len(value))
 
 
-logged = LoggedNode(Sink())(text_to_number)
-observed = ObservedNode(Port(), make_span)(text_to_number)
-chained = LoggedNode(Sink())(observed)
-deferred = LoggedNode(Sink())(deferred_number)
-static_only = LoggedNode(Sink(), fields_factory=None)(text_to_number)
+logged = LoggedNode(LOG_SINK)(text_to_number)
+observed = ObservedNode(OBSERVABILITY_PORT, make_span)(text_to_number)
+chained = LoggedNode(LOG_SINK)(observed)
+deferred = LoggedNode(LOG_SINK)(deferred_number)
+static_only = LoggedNode(LOG_SINK, fields_factory=None)(text_to_number)
 
 assert_type(logged, Callable[[str], Awaitable[int]])
 assert_type(observed, Callable[[str], Awaitable[int]])
@@ -66,24 +72,24 @@ async def persistence_commit(transition: Graph.Transition[str], /) -> Graph.Stat
     return transition.candidate_state
 
 
-@LoggedNode(Sink())
+@LoggedNode(LOG_SINK)
 async def decorated_graph_node(values: Graph.Values[str]) -> Graph.Values[str]:
     return await graph_node(values)
 
 
-@ObservedNode(Port(), make_span)
+@ObservedNode(OBSERVABILITY_PORT, make_span)
 async def observed_graph_node(values: Graph.Values[str]) -> Graph.Values[str]:
     return await graph_node(values)
 
 
-@LoggedGraphCommit(Sink())
+@LoggedGraphCommit(LOG_SINK)
 async def decorated_commit(transition: Graph.Transition[str], /) -> Graph.State:
     return await persistence_commit(transition)
 
 
 graph.add_node(
     "work",
-    LoggedNode(Sink())(ObservedNode(Port(), make_span)(graph_node)),
+    LoggedNode(LOG_SINK)(ObservedNode(OBSERVABILITY_PORT, make_span)(graph_node)),
     inputs={"value": Graph.graph_input("value", str)},
     outputs={"value": str},
 )
@@ -91,7 +97,7 @@ graph.set_outputs({"value": Graph.node_output("work", "value")})
 
 
 async def run_graph() -> None:
-    result = await graph.run(Graph.values(value="input"), commit=LoggedGraphCommit(Sink())(persistence_commit))
+    result = await graph.run(Graph.values(value="input"), commit=LoggedGraphCommit(LOG_SINK)(persistence_commit))
     assert_type(result, Graph.Result[str])
 
 

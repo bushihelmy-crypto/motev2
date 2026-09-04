@@ -12,9 +12,9 @@
 - [`architecture.zh-CN.md`](./architecture.zh-CN.md)
 - [`execution-state-frontier-call-chain.zh-CN.md`](./execution-state-frontier-call-chain.zh-CN.md)
 
-本计划以需求方后续确认的“同一 commit 原子提交、执行事实只保存一份”为最终基线。该决定取代当前
-实现中的“状态 callback 返回后再单独调用 event sink”路径，也取代评审稿中基于 post-commit sink 的
-best-effort 建议。
+本计划以需求方后续确认的“同一 commit 原子提交、执行事实只保存一份”为最终基线。原子 persistence/outbox
+仍是 durable Event 的唯一真相；在该确认之后，可选 `EventPort` 经共享 `Invocation` 向配置选定的 runtime 发出一次
+best-effort 通知。这个通知不替代原子事务、不会成为第二条提交路径，也不承诺可靠送达。
 
 ## 1. 最终目标
 
@@ -57,15 +57,15 @@ Event 只保存指向该快照中本次 settlement 的稳定坐标和投递状�
 11. events 在 commit decorator 链内层，logging 在外层；组装方固定顺序，两个包不互相发现或重排。
 12. 并发节点不承诺全局事件顺序；消费者只按稳定身份关联事件。
 13. 根包唯一公共入口仍是 `EventingGraphCommit`，不增加 EventBus、manager、registry 或兼容 API。
-14. 不保留“可丢失的进程内 Events sink”作为第二条路径；若 logging/observability 需要旁路观测，由其自身 decorator
-    负责，不能复用或稀释 durable Events 契约。
+14. 不把可丢失的进程内通知当作 durable Events 路径；可选 `EventPort` 只在 persistence 确认后转发不可变引用，
+    复用共享 `Invocation` 的 best-effort 策略（默认 1 秒有限协作式 deadline，可由 `timeout_seconds` 覆盖为有限正数）。它不能复用或稀释 durable outbox 契约，也不能形成第二个 commit、State 或 dispatcher。
 
 ### 2.1 Owner 边界
 
 | Owner | 唯一职责 | 明确不负责 |
 | --- | --- | --- |
 | State / execution | 生成完整 candidate `GraphRunState` 快照，并以唯一 `Graph.Transition` 调用 commit | Event、数据库、outbox、transport |
-| `mote_kernel.events` | 从 settlement transition 纯投影 Event 引用；把 persistence capability 装饰成普通 `Graph.Commit` | Store、事务实现、恢复、dispatcher、后台任务 |
+| `mote_kernel.events` | 从 settlement transition 纯投影 Event 引用；把 persistence capability 装饰成普通 `Graph.Commit`；确认后可经 `EventPort` 做一次 best-effort Invocation | Store、事务实现、恢复、durable dispatcher、重试、后台任务 |
 | `infra/persistence` | 实现 State 快照与 Event/outbox 的原子事务、历史版本读取和幂等 reconcile | Graph 调度、事件业务投影 |
 | runtime / persistence dispatcher | 按引用读取快照、组装 wire Event、发送、重试和确认 | Graph commit、Graph State 推进 |
 | logging | 在最外层只读记录 commit 生命周期 | 修改 transition、Event 或提交结果 |
@@ -270,7 +270,7 @@ owner 收敛到 candidate snapshot；events 不读取旧字段做兼容 fallback
 
 ```python
 commit = LoggedGraphCommit(log_sink)(
-    EventingGraphCommit(persistence_commit)
+    EventingGraphCommit(persistence_commit, event_port=event_port)
 )
 ```
 
@@ -281,6 +281,7 @@ commit = LoggedGraphCommit(log_sink)(
 -> 非 settlement：构造无 Event 的原子 commit 请求
 -> settlement：根据 candidate snapshot 的稳定坐标构造 Event 引用
 -> 调用内层 persistence commit 恰好一次
+-> persistence 返回 exact candidate 且配置了 EventPort：调用 EventPort 一次（best-effort）
 -> 原样返回 inner 结果
 ```
 
@@ -293,14 +294,17 @@ AtomicCommitRequest
 ```
 
 request 只是事务 envelope，不拥有 State、不复制 candidate，也不增加第二个 commit 入口。内层 persistence port 在一个
-事务中写入完整 snapshot 的物理投影和 outbox。`EventingGraphCommit` 不先调用普通 State commit，再调用 Event port。
+事务中写入完整 snapshot 的物理投影和 outbox。`EventingGraphCommit` 不先调用普通 State commit，也不把 EventPort 当作
+第二个 persistence/commit 入口。
 
-当前 `event_sink`、post-commit `await event_sink(event)` 和 `suppress(Exception)` 路径全部删除，不保留兼容模式。
+旧的 `event_sink`/`post-commit await event_sink(event)` 兼容路径全部删除；当前唯一通知形状是确认后的
+`EventPort.emit(reference)`，由共享 `invoke_best_effort` 隔离适配器自己的普通异常和 `CancelledError`，不重试、不回滚。
 
 ### 6.3 Exact candidate 的所有权
 
 - persistence adapter 必须按照同一事务的 CAS 结果返回 candidate；
-- `EventingGraphCommit` 不自行确认 State，也不提供 `inner=None` fallback；
+- `EventingGraphCommit` 不自行确认 State，也不提供 `inner=None` fallback；它只用 exact candidate 作为是否通知的前置条件，
+  不取代 execution owner 的最终 exact 校验；
 - outer logging 可以只读记录 exact/mismatch，但不能改写结果；
 - execution owner 保留最终 exact-candidate 校验和内存 snapshot 安装。
 
@@ -308,13 +312,16 @@ request 只是事务 envelope，不拥有 State、不复制 candidate，也不�
 
 ### 6.4 异步与不确定提交边界
 
-- Graph 只等待本地 authoritative persistence transaction，不等待远端 Event transport。
+- Graph 只把本地 authoritative persistence transaction 作为 durable 边界，不等待 outbox dispatcher；若配置了 EventPort，
+  wrapper 会显式等待这一单次 best-effort Invocation，但不创建后台 task，也不把它当作 durable delivery。
 - transaction 提交前取消必须不留下任何新版本；transaction 已交给存储后，adapter 必须按 candidate
   run/scope/revision reconcile，不能向 Graph 暴露“可能已提交”后再盲目重试。
 - 数据库确认丢失时，adapter 读取 candidate revision 及对应 Event；两者完整且精确匹配才返回 exact candidate，
   两者都不存在才允许重试，半提交必须 fail closed。
 - transaction 成功后发生的 transport、codec、lease 或远端 ack 失败，只影响 outbox 状态，不改变已确认的 Graph。
-- `EventingGraphCommit` 不创建 task、queue 或 sink；取消和异常只来自它唯一调用的 persistence port。
+- `EventingGraphCommit` 不创建 task、queue 或旧式 sink；persistence 的取消/异常原样传播，EventPort 只隔离适配器自己的普通
+  异常、取消和 deadline；deadline 只占用一个 cancellation count，清理期间额外的调用方取消仍可观察到；提交是否已确认由
+  persistence/reconcile owner 判定。适配器主动 `uncancel()` 暂不属于当前契约。
 
 ## 7. 公共 API 与包结构
 
@@ -330,14 +337,16 @@ from mote_kernel.events import EventingGraphCommit
 src/mote_kernel/events/
 ├── __init__.py     # 只导出 EventingGraphCommit
 ├── commit.py       # Graph.Commit -> atomic persistence request decorator
+├── port.py         # confirmed reference -> best-effort Invocation
 ├── identity.py     # event_id 的确定性身份
 ├── record.py       # immutable Event/outbox 引用记录
 └── projection.py   # settlement transition -> Event record | None
 ```
 
 adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 owner-internal SPI，不从 events 根包导出，
-也不是第二个应用入口。它们放在最接近 `commit.py` 的明确模块中，不建立宽泛 `port.py`、`common`、`utils`、
-`shared` 或 `helpers`。是否单独拆出文件以实际代码长度和所有权为准，不能为了包结构图机械增加空抽象。
+也不是第二个应用入口。`port.py` 只承载已确认引用到共享 Invocation 的 best-effort 适配，不拥有事务、dispatcher 或
+状态；除此之外不建立宽泛的 `common`、`utils`、`shared` 或 `helpers`。是否单独拆出其他文件以实际代码长度和所有权为准，
+不能为了包结构图机械增加空抽象。
 
 删除或替换当前文件职责：
 
@@ -347,7 +356,7 @@ adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 own
 | `contract.py: EventPayload` | 若无真实边界用途则删除，不保留 nominal 空基类 |
 | `graph.py` 中复制 outcome 的 Event payload | 删除；最终 payload 由 dispatcher 从 snapshot 物化 |
 | `projection.py` | 改为从 candidate snapshot 投影稳定 Event/outbox 引用 |
-| `commit.py` post-commit sink | 改为一次性调用 atomic persistence port |
+| `commit.py` post-commit sink | 删除旧 sink 路径；若 assembly 提供通知能力，只在 exact persistence confirmation 后调用 `EventPort` 一次 |
 
 ## 8. 分阶段实施
 
@@ -356,7 +365,7 @@ adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 own
 任务：
 
 - 将 [`events-design.zh-CN.md`](./events-design.zh-CN.md) 改为本计划的原子 commit + 引用模型；
-- 删除“inner 返回后通知 sink”“普通 sink 异常隔离”“本期不做 outbox”等已被推翻的描述；
+- 删除旧 `event_sink` 双路径和“sink 是 durable Event”暗示；写清 `EventPort` 是确认后的 best-effort 通知，而 outbox 才是 durable owner；
 - 固定 events 内层、logging 外层的唯一组装示例；
 - 明确 Event 引用 `GraphRunState` snapshot，不保存参数/结果副本；
 - 将旧评审文件保留为历史审查记录；`events-implementation-plan-review.zh-CN.md` 已被需求方驳回，不能作为实现
@@ -366,7 +375,7 @@ adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 own
 
 - 设计、实施计划和代码注释只描述一条 commit 路径；
 - 全仓文档不再展示 `EventingGraphCommit(event_sink)(persistence_commit)`；
-- 不再出现 events best-effort、post-commit sink 或允许丢 Event 的正式契约。
+- 不再出现旧 sink 兼容路径；正式契约明确 EventPort 可丢通知但不能替代 durable outbox，也不能建立第二执行路径。
 
 ### 阶段 1：确认 GraphRunState 快照完整性
 
@@ -412,7 +421,8 @@ adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 own
 - 将 `EventingGraphCommit` 改为包裹 atomic persistence port，并返回普通 `Graph.Commit`；
 - 对每个 transition 调用 inner 恰好一次；
 - 非 settlement transition 使用 `None` event reference，仍走同一个 inner；
-- 删除 `EventSink`、post-commit await、异常 suppress 和后台通知语义；
+- 删除旧 `EventSink`、旧 post-commit sink 和后台通知语义；异常策略统一复用共享 `invoke_best_effort`，不在 Events 另造 suppress/helper 路径；
+- 增加可选 `EventPort`：只在 persistence 返回 exact candidate 后转发一次 settlement reference，复用 `invoke_best_effort`；
 - 保持 decorator 无 run-local mutable state，可安全复用于并发 run 和嵌套 scope。
 
 验收测试：
@@ -423,6 +433,7 @@ adapter-facing 的 immutable request/Protocol 是 Kernel 与 persistence 的 own
 - Event 引用中不存在业务参数、output 或 DTO 副本；
 - event_id 在相同 transition 重投影时稳定，不同 generation/revision 时不同；
 - inner 对每个 transition 恰好调用一次，返回值、普通异常和取消对象原样传播；
+- EventPort 只在 exact confirmation 后调用一次；适配器普通异常/自身取消/deadline 被隔离，调用方取消传播；
 - decorator 不创建后台 task、队列、registry 或第二 commit；
 - 并发测试只验证身份配对，不锁定跨节点总顺序；
 - nested scope、child run 和 recovery generation 均能唯一定位 `GraphRunState` snapshot 中的 settlement。
@@ -492,9 +503,10 @@ batch 和 lease 属于 persistence/runtime 配置，不写进 `GraphRunState`。
 
 ```python
 persistence_commit = build_persistence_commit(...)
+event_port = EventPort(runtime_invocation)  # Invocation 由 config/infra 解析
 
 commit = LoggedGraphCommit(log_sink)(
-    EventingGraphCommit(persistence_commit)
+    EventingGraphCommit(persistence_commit, event_port=event_port)
 )
 
 result = await graph.run(values, commit=commit)
@@ -511,7 +523,7 @@ result = await graph.run(values, commit=commit)
 
 组合测试：
 
-- 实际顺序为 logging-before -> event projection -> one persistence transaction -> logging-after；
+- 实际顺序为 logging-before -> event projection -> one persistence transaction -> optional EventPort notification -> logging-after；
 - persistence 异常和取消穿过两层 decorator 保持同一对象；
 - outer decorator 不导致 inner 重复调用；
 - exact mismatch 由 execution owner 最终拒绝；
@@ -521,7 +533,7 @@ result = await graph.run(values, commit=commit)
 
 任务：
 
-- 删除旧 EventSink、RecordingSink 风格测试及 post-commit 行为说明；
+- 删除旧 EventSink、RecordingSink 风格测试及兼容 post-commit sink 说明；保留 EventPort 的 Invocation-backed best-effort 测试；
 - 不保留兼容构造重载、别名或 feature flag 双路径；
 - 更新 README、logging/observability 组合示例及所有 Events 文档；
 - 将 Kernel、persistence adapter 和 dispatcher 的 conformance 用例按 owner 放置；
@@ -546,7 +558,8 @@ result = await graph.run(values, commit=commit)
 | 并发 | 身份和值一一对应，不要求全局顺序 |
 | 嵌套 | parent/child run、scope、boundary 和结果引用不串线 |
 | 留存 | pending Event 引用的 snapshot revision 不被 GC |
-| 链式组合 | logging 外层、events 内层、persistence 最内层，各调用一次 |
+| 链式组合 | logging 外层、events 内层、persistence 最内层，各调用一次；EventPort 只在 exact confirmation 后通知 |
+| best-effort 通知 | EventPort 只接收 settlement reference；适配器失败可丢失，不改变已确认 commit，不主动重试 |
 | 公共面 | 根包只导出 EventingGraphCommit，无 EventBus/sink/manager |
 
 ## 10. 明确禁止的实现方式
@@ -564,8 +577,8 @@ result = await graph.run(values, commit=commit)
 - 在 Graph commit 事务中直接等待 Kafka/HTTP/Webhook；
 - 声称跨网络 exactly-once 或依赖全局事件顺序；
 - 使用 `Any`、裸字典、反射、字符串 discriminator 或宽泛共享工具包；
-- 为兼容当前未交付实现保留 post-commit sink 双路径；
-- 在 Events 包内保留任何“允许丢失”的 sink、subscriber 或旁路。
+- 为兼容当前未交付实现保留旧 post-commit sink 双路径；
+- 让 EventPort 复制 State/业务 payload、拥有事务、重试或成为 durable outbox 的第二权威。
 
 ## 11. 验证命令
 
@@ -597,10 +610,11 @@ pre-commit run --all-files
 ### 12.1 Kernel Events 切口完成
 
 - `GraphRunState` 完整快照契约已由 State/execution owner 提供，Events 不维护任何 sidecar 状态；
-- `EventingGraphCommit` 只从 settlement snapshot 投影稳定引用，并调用 persistence port 恰好一次；
+- `EventingGraphCommit` 只从 settlement snapshot 投影稳定引用，并调用 persistence port 恰好一次；确认后可调用 EventPort 一次，
+  且该通知不改变 persistence 结果；
 - 根包唯一公共入口是 `EventingGraphCommit`，可被 logging 等 decorator 包裹；
 - Event/outbox reference 不复制节点参数和结果；
-- 旧 post-commit sink、可丢失旁路和兼容双轨已彻底删除；
+- 旧 post-commit sink、兼容双轨和重复 durable 路径已彻底删除；EventPort 作为明确的 best-effort 通知保留；
 - events 不拥有 transport、retry、Store、Graph、State、runner 或后台任务；
 - Events 和组合定向测试、typing、lint、format 门禁通过。
 

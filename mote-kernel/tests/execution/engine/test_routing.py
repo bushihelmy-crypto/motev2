@@ -4,18 +4,30 @@ from dataclasses import FrozenInstanceError, replace
 from typing import cast
 
 import pytest
-from tests.execution.engine.factories import conditional, direct, join, running_state, topology
+from tests.execution.engine.factories import (
+    conditional,
+    direct,
+    join,
+    join_occurrence,
+    join_progress,
+    running_state,
+    topology,
+)
+from tests.execution.graph.factories import compiled_join
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.routing import (
+    _declared_joins,
     _frontier_gate_error,
     _gate_matches_cause,
-    _join_arrivals_for_frontier,
+    _historical_join_arrivals,
+    _pending_join_arrivals,
     _post_advance_error,
     frontier_admission_error,
     resolve_routing,
     resolve_routing_facts,
+    transition_admission_error,
     validate_routing_contribution,
 )
 from mote_kernel.execution.errors import (
@@ -23,6 +35,7 @@ from mote_kernel.execution.errors import (
     InvalidRoutingCommandError,
     JoinProgressError,
     RoutingDeadlockError,
+    SnapshotMismatchError,
     UnknownRouteError,
 )
 from mote_kernel.execution.graph.compiler import compile_graph
@@ -138,7 +151,15 @@ def routed(
     node_id: str,
     *references: ActivationReference,
 ) -> GraphFrontierActivation:
-    return GraphFrontierActivation(GraphNodeId(node_id), RoutedActivationCause(references))
+    occurrence = None
+    if len(references) > 1:
+        occurrence = join_occurrence(
+            tuple(reference.activation.node_id for reference in references),
+            node_id,
+            target_superstep=max(reference.activation.superstep for reference in references) + 1,
+            run_id=references[0].activation.run_id,
+        )
+    return GraphFrontierActivation(GraphNodeId(node_id), RoutedActivationCause(references, occurrence))
 
 
 def expected_complete() -> CompleteGraphFrontier:
@@ -306,6 +327,67 @@ def test_direct_conditional_and_terminal_routing_use_one_contribution_model() ->
         )
     )
     assert resolve_contributions(topology("a"), continue_for("a"), ()) == expected_complete()
+
+
+def test_compiled_join_source_index_corruption_fails_closed() -> None:
+    base = topology(
+        "a",
+        "b",
+        "c",
+        edges=(join(("a", "b"), "c"),),
+        entries=("a", "b"),
+    )
+    plan = base.transition.joins_by_source[GraphNodeId("a")][0]
+
+    non_source_index = dict(base.transition.joins_by_source)
+    non_source_index[GraphNodeId("c")] = (plan,)
+    non_source = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(non_source_index)),
+    )
+    with pytest.raises(SnapshotMismatchError, match="non-source"):
+        _declared_joins(non_source)
+
+    conflicting_index = dict(base.transition.joins_by_source)
+    conflicting_index[GraphNodeId("b")] = (compiled_join(("a", "b"), "c", offsets=(2, 1)),)
+    conflicting = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(conflicting_index)),
+    )
+    with pytest.raises(SnapshotMismatchError, match="conflicting occurrence projections"):
+        _declared_joins(conflicting)
+
+    incomplete_index = dict(base.transition.joins_by_source)
+    incomplete_index[GraphNodeId("b")] = ()
+    incomplete = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(incomplete_index)),
+    )
+    with pytest.raises(SnapshotMismatchError, match="source index is incomplete"):
+        _declared_joins(incomplete)
+    assert _frontier_gate_error(incomplete, running_state(frontier=("a", "b"))) == (
+        "compiled Join source index is incomplete"
+    )
+
+
+def test_pending_join_progress_requires_the_compiled_occurrence_projection() -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        edges=(direct("a", "b"), join(("a", "b"), "c")),
+        entries=("a",),
+    )
+    progress = join_progress(
+        ("a", "b"),
+        "c",
+        (reference("a"),),
+        target_superstep=3,
+    )
+    state = running_state(superstep=1, frontier=("b",), join_progress=(progress,))
+
+    with pytest.raises(JoinProgressError, match="misprojected arrival evidence"):
+        _pending_join_arrivals(graph, state)
 
 
 def test_self_feedback_route_emits_one_exact_predecessor_activation() -> None:
@@ -480,10 +562,11 @@ def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
     assert first == expected_advance(
         (routed("b", reference("a")), routed("work", reference("a"))),
         (
-            GraphJoinProgress(
-                (GraphNodeId("a"), GraphNodeId("b")),
-                GraphNodeId("c"),
+            join_progress(
+                ("a", "b"),
+                "c",
                 (reference("a"),),
+                target_superstep=2,
             ),
         ),
     )
@@ -604,10 +687,11 @@ def test_chained_joins_advance_across_supersteps() -> None:
     assert second == expected_advance(
         (routed("d", reference("c", superstep=1)),),
         (
-            GraphJoinProgress(
-                (GraphNodeId("c"), GraphNodeId("d")),
-                GraphNodeId("e"),
+            join_progress(
+                ("c", "d"),
+                "e",
                 (reference("c", superstep=1),),
+                target_superstep=3,
             ),
         ),
     )
@@ -674,8 +758,8 @@ def test_persisted_join_progress_order_does_not_change_decision() -> None:
         edges=(direct("a", "b"), direct("a", "c"), join(("a", "b"), "d"), join(("a", "c"), "e")),
         entries=("a",),
     )
-    first = GraphJoinProgress((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("d"), (reference("a"),))
-    second = GraphJoinProgress((GraphNodeId("a"), GraphNodeId("c")), GraphNodeId("e"), (reference("a"),))
+    first = join_progress(("a", "b"), "d", (reference("a"),), target_superstep=2)
+    second = join_progress(("a", "c"), "e", (reference("a"),), target_superstep=2)
     activations = (routed("b", reference("a")), routed("c", reference("a")))
     evidence = (reference("a"), reference("b", superstep=1), reference("c", superstep=1))
     assert resolve_contributions(
@@ -754,12 +838,12 @@ def test_terminal_join_completed_after_a_later_superstep_carries_consumption_pro
 
     assert terminal == CompleteGraphFrontier(
         0,
-        (((GraphNodeId("x"), GraphNodeId("y")), GraphNodeId(END)),),
+        (join_occurrence(("x", "y"), END, target_superstep=3),),
     )
 
 
-def test_join_rejects_a_second_activation_occurrence_of_one_source() -> None:
-    with pytest.raises(GraphValidationError, match="occurrence"):
+def test_join_rejects_a_source_with_two_coexisting_activation_paths() -> None:
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
         topology(
             "a",
             "b",
@@ -781,28 +865,62 @@ def test_join_rejects_a_second_activation_occurrence_of_one_source() -> None:
 
 
 def test_partial_join_without_continuing_work_is_deadlocked() -> None:
-    graph = topology("a", "b", "c", "d", edges=(join(("a", "b", "c"), "d"),), entries=("a", "b", "c"))
+    graph = topology(
+        "a",
+        "x",
+        "b",
+        "c",
+        "d",
+        edges=(direct("x", "b"), direct("b", "c"), join(("a", "c"), "d")),
+        entries=("a", "x"),
+    )
     with pytest.raises(RoutingDeadlockError):
         resolve_contributions(graph, continue_for("a"), ())
+
+
+def test_routing_rejects_join_arrivals_that_cannot_match_the_next_coordinate() -> None:
+    base = topology(
+        "a",
+        "b",
+        "c",
+        edges=(join(("a", "b"), "c"),),
+        entries=("a", "b"),
+    )
+    delayed = compiled_join(("a", "b"), "c", offsets=(2, 2))
+    join_index = dict(base.transition.joins_by_source)
+    join_index[GraphNodeId("a")] = (delayed,)
+    join_index[GraphNodeId("b")] = (delayed,)
+    delayed_graph = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(join_index)),
+    )
+
+    with pytest.raises(JoinProgressError, match="completed Join occurrence has the wrong target coordinate"):
+        resolve_contributions(delayed_graph, continue_for("a", "b"), ())
+    with pytest.raises(JoinProgressError, match="partial Join occurrence cannot reach its target coordinate"):
+        resolve_contributions(base, continue_for("a"), ())
 
 
 @pytest.mark.parametrize(
     "progress",
     [
-        GraphJoinProgress(
-            (GraphNodeId("a"), GraphNodeId("b")),
-            GraphNodeId("c"),
+        join_progress(
+            ("a", "b"),
+            "c",
             (),
+            target_superstep=2,
         ),
-        GraphJoinProgress(
-            (GraphNodeId("a"), GraphNodeId("b")),
-            GraphNodeId("c"),
+        join_progress(
+            ("a", "b"),
+            "c",
             (reference("a"), reference("b")),
+            target_superstep=2,
         ),
-        GraphJoinProgress(
-            (GraphNodeId("a"), GraphNodeId("b")),
-            GraphNodeId("unknown"),
+        join_progress(
+            ("a", "b"),
+            "unknown",
             (reference("a"),),
+            target_superstep=2,
         ),
     ],
 )
@@ -835,10 +953,11 @@ def test_duplicate_recovered_join_progress_fails_closed() -> None:
         edges=(direct("a", "b"), direct("b", "work"), join(("a", "b"), "c")),
         entries=("a",),
     )
-    progress = GraphJoinProgress(
-        (GraphNodeId("a"), GraphNodeId("b")),
-        GraphNodeId("c"),
+    progress = join_progress(
+        ("a", "b"),
+        "c",
         (reference("a"),),
+        target_superstep=2,
     )
     with pytest.raises((JoinProgressError, InvalidRoutingCommandError)):
         resolve_contributions(
@@ -848,6 +967,37 @@ def test_duplicate_recovered_join_progress_fails_closed() -> None:
             superstep=1,
             activations=(routed("b", reference("a")),),
             settled_activations=(reference("a"), reference("b", superstep=1)),
+        )
+
+
+def test_stale_join_occurrence_cannot_combine_with_a_later_source_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mote_kernel.execution.engine.routing as routing
+
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        "work",
+        edges=(direct("a", "b"), direct("b", "work"), join(("a", "b"), "c")),
+        entries=("a",),
+    )
+    stale = join_progress(("a", "b"), "c", (reference("a"),), target_superstep=2)
+    state = _settled_routing_state(
+        "b",
+        RoutedActivationCause((reference("a", superstep=1),)),
+        superstep=2,
+        evidence=(reference("a"), reference("a", superstep=1), reference("b", superstep=2)),
+    )
+    monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
+
+    with pytest.raises(JoinProgressError, match="invalid Join progress"):
+        resolve_routing_facts(
+            graph,
+            replace(state, join_progress=(stale,)),
+            root_scope_run(state.run_id),
+            ScopedFrameIndex(),
         )
 
 
@@ -921,6 +1071,61 @@ def test_frontier_admission_rejects_unknown_and_provenance_inconsistencies() -> 
     )
 
 
+def test_frontier_admission_rejects_misprojected_join_occurrence_evidence() -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        edges=(direct("a", "b"), join(("a", "b"), "c")),
+        entries=("a",),
+    )
+    arrivals = (reference("a"), reference("b"))
+    state = _settled_routing_state(
+        "c",
+        RoutedActivationCause(
+            arrivals,
+            join_occurrence(("a", "b"), "c", target_superstep=2),
+        ),
+        superstep=2,
+        evidence=arrivals,
+    )
+
+    assert _frontier_gate_error(graph, state) == "frontier activation 'c' has misprojected Join evidence"
+
+
+def test_frontier_admission_requires_the_declared_join_occurrence() -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        edges=(join(("a", "b"), "c"),),
+        entries=("a", "b"),
+    )
+    arrivals = (reference("a"), reference("b"))
+    missing = object.__new__(RoutedActivationCause)
+    object.__setattr__(missing, "references", arrivals)
+    object.__setattr__(missing, "join_occurrence", None)
+    missing_state = _settled_routing_state(
+        "c",
+        missing,
+        superstep=1,
+        evidence=arrivals,
+    )
+    assert _frontier_gate_error(graph, missing_state) == "frontier activation 'c' lacks its compiled Join occurrence"
+
+    unknown = RoutedActivationCause(
+        arrivals,
+        join_occurrence(("a", "b"), "foreign", target_superstep=1),
+    )
+    unknown_state = _settled_routing_state(
+        "c",
+        unknown,
+        superstep=1,
+        evidence=arrivals,
+    )
+    assert _frontier_gate_error(graph, unknown_state) == "frontier activation 'c' has an unknown Join occurrence"
+
+
 def test_frontier_admission_rejects_a_ghost_settled_activation_without_keyerror() -> None:
     graph = topology("a", "b", edges=(direct("a", "b"),), entries=("a",))
     state = _settled_routing_state(
@@ -932,6 +1137,67 @@ def test_frontier_admission_rejects_a_ghost_settled_activation_without_keyerror(
 
     assert frontier_admission_error(graph, state) == "settled activation references unknown node 'ghost'"
     assert _post_advance_error(graph, state) == "settled activation references unknown node 'ghost'"
+
+
+def test_completion_transition_admission_replays_the_previous_control_decision() -> None:
+    completed = replace(
+        running_state(),
+        status=GraphRunStatus.COMPLETED,
+        frontier=GraphFrontierState(()),
+    )
+    assert (
+        transition_admission_error(
+            topology("a"),
+            None,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "completed graph state lacks its admitted completion transition"
+    )
+
+    previous = _settled_routing_state(
+        "a",
+        StartActivationCause(),
+        evidence=(reference("a"),),
+    )
+    invalid_previous = replace(previous, settled_activations=(reference("ghost"),))
+    assert (
+        transition_admission_error(
+            topology("a"),
+            invalid_previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "settled activation references unknown node 'ghost'"
+    )
+
+    join_graph = topology(
+        "a",
+        "b",
+        "c",
+        edges=(join(("a", "b"), "c"),),
+        entries=("a", "b"),
+    )
+    assert (
+        transition_admission_error(
+            join_graph,
+            previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "partial Join occurrence cannot reach its target coordinate"
+    )
+
+    forged_consumption = join_occurrence(("a", "b"), "c", target_superstep=1)
+    assert (
+        transition_admission_error(
+            topology("a"),
+            previous,
+            CompleteGraphFrontier(0, (forged_consumption,)),
+            completed,
+        )
+        == "graph completion consumed the wrong Join occurrences"
+    )
 
 
 def test_feedback_admission_requires_committed_predecessor_evidence() -> None:
@@ -958,7 +1224,10 @@ def test_feedback_admission_requires_committed_predecessor_evidence() -> None:
 
 
 def test_gate_matching_rejects_a_reference_count_mismatch() -> None:
-    cause = RoutedActivationCause((reference("a"), reference("b")))
+    cause = RoutedActivationCause(
+        (reference("a"), reference("b")),
+        join_occurrence(("a", "b"), "target", target_superstep=1),
+    )
     assert not _gate_matches_cause(((GraphNodeId("a"), frozenset({None})),), cause)
 
 
@@ -1031,14 +1300,15 @@ def test_post_advance_rejects_duplicate_join_occurrences_and_accepts_terminal_jo
     duplicate = replace(
         duplicate,
         join_progress=(
-            GraphJoinProgress(
-                (GraphNodeId("a"), GraphNodeId("b")),
-                GraphNodeId("c"),
+            join_progress(
+                ("a", "b"),
+                "c",
                 (reference("a"), reference("a")),
+                target_superstep=2,
             ),
         ),
     )
-    assert _post_advance_error(join_graph, duplicate) == "Join source activation occurrence repeated"
+    assert _post_advance_error(join_graph, duplicate) == "snapshot Join progress repeats one source activation"
 
     terminal_graph = topology("a", "b", edges=(join(("a", "b"), END),), entries=("a", "b"))
     terminal = replace(
@@ -1073,13 +1343,131 @@ def test_post_advance_rejects_unmatched_and_unexpected_successors() -> None:
 
 
 def test_join_arrival_rejects_two_routes_for_one_activation() -> None:
-    edge = join(("a", "b"), "c")
+    graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
+    state = replace(
+        running_state(superstep=1, frontier=("c",)),
+        settled_activations=(reference("a", route="left"), reference("a", route="right")),
+    )
     with pytest.raises(JoinProgressError, match="selected two routes"):
-        _join_arrivals_for_frontier(
-            edge,
-            None,
-            (reference("a", route="left"), reference("a", route="right")),
-        )
+        _historical_join_arrivals(graph, state)
+
+    repeated = replace(
+        state,
+        settled_activations=(reference("a"), reference("a")),
+    )
+    with pytest.raises(JoinProgressError, match="occurrence repeated"):
+        _historical_join_arrivals(graph, repeated)
+
+
+def test_historical_join_arrival_rejects_an_unknown_older_ledger_node() -> None:
+    graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
+    state = replace(
+        running_state(superstep=2, frontier=("c",)),
+        settled_activations=(reference("ghost"), reference("a", superstep=1)),
+    )
+
+    with pytest.raises(JoinProgressError, match="unknown node 'ghost'"):
+        _historical_join_arrivals(graph, state)
+
+
+@pytest.mark.parametrize(
+    ("superstep", "work_superstep", "message"),
+    [
+        (2, 1, "Join occurrence reached its target coordinate without every source"),
+        (3, 2, "historical Join occurrence passed its target without every source"),
+    ],
+)
+def test_post_advance_rejects_a_partial_join_at_or_after_its_target_coordinate(
+    superstep: int,
+    work_superstep: int,
+    message: str,
+) -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        "work",
+        edges=(direct("a", "b"), direct("b", "work"), join(("a", "b"), "c")),
+        entries=("a",),
+    )
+    state = replace(
+        running_state(superstep=superstep, frontier=("work",)),
+        settled_activations=(reference("a"), reference("work", superstep=work_superstep)),
+    )
+
+    assert _post_advance_error(graph, state) == message
+
+
+def test_post_advance_rejects_a_complete_join_before_its_compiled_target_coordinate() -> None:
+    base = topology(
+        "a",
+        "b",
+        "c",
+        edges=(join(("a", "b"), "c"),),
+        entries=("a", "b"),
+    )
+    delayed = compiled_join(("a", "b"), "c", offsets=(2, 2))
+    join_index = dict(base.transition.joins_by_source)
+    join_index[GraphNodeId("a")] = (delayed,)
+    join_index[GraphNodeId("b")] = (delayed,)
+    graph = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(join_index)),
+    )
+    state = replace(
+        running_state(superstep=1, frontier=("c",)),
+        settled_activations=(reference("a"), reference("b")),
+    )
+
+    assert _post_advance_error(graph, state) == "Join occurrence completed before its target coordinate"
+
+
+def test_post_advance_requires_the_exact_reconstructed_partial_join_progress() -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        edges=(direct("a", "b"), join(("a", "b"), "c")),
+        entries=("a",),
+    )
+    missing = replace(
+        running_state(superstep=1, frontier=("b",)),
+        settled_activations=(reference("a"),),
+    )
+    assert _post_advance_error(graph, missing) == "frontier transition lost or invented Join progress"
+
+    base = topology(
+        "a",
+        "b",
+        "c",
+        "target",
+        edges=(join(("a", "b", "c"), "target"),),
+        entries=("a", "b", "c"),
+    )
+    delayed = compiled_join(("a", "b", "c"), "target", offsets=(2, 2, 2))
+    join_index = dict(base.transition.joins_by_source)
+    for source in delayed.identity.sources:
+        join_index[source] = (delayed,)
+    delayed_graph = replace(
+        base,
+        transition=replace(base.transition, joins_by_source=frozen_map(join_index)),
+    )
+    occurrence = join_occurrence(("a", "b", "c"), "target", target_superstep=2)
+    incomplete_record = join_progress(
+        ("a", "b", "c"),
+        "target",
+        (reference("a"),),
+        target_superstep=2,
+    )
+    changed = replace(
+        running_state(superstep=1, frontier=("target",)),
+        settled_activations=(reference("a"), reference("b")),
+        join_progress=(incomplete_record,),
+    )
+    assert incomplete_record.occurrence == occurrence
+    assert _post_advance_error(delayed_graph, changed) == (
+        "frontier transition changed Join progress without a proven arrival"
+    )
 
 
 def test_routing_snapshot_rejects_duplicate_join_progress_sources_before_routing(
@@ -1094,10 +1482,11 @@ def test_routing_snapshot_rejects_duplicate_join_progress_sources_before_routing
         superstep=1,
         evidence=(reference("a"), reference("b")),
     )
-    progress = GraphJoinProgress(
-        (GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c")),
-        GraphNodeId("d"),
+    progress = join_progress(
+        ("a", "b", "c"),
+        "d",
         (reference("a"), reference("a")),
+        target_superstep=2,
     )
     monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
 
@@ -1129,10 +1518,11 @@ def test_routing_snapshot_rejects_join_progress_without_settlement_evidence(
         superstep=1,
         evidence=(reference("a"), reference("b")),
     )
-    progress = GraphJoinProgress(
-        (GraphNodeId("a"), GraphNodeId("b"), GraphNodeId("c")),
-        GraphNodeId("d"),
+    progress = join_progress(
+        ("a", "b", "c"),
+        "d",
         (reference("c"),),
+        target_superstep=2,
     )
     monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
 

@@ -7,6 +7,10 @@ dispatcher 的缺口作为跨 owner 后续事项记录，不作为本次 Events 
 本文件与已确认的 `events-design.zh-CN.md`、`events-implementation-plan.zh-CN.md` 一起作为当前口径；同目录带
 `-review` 的早期方案评审保留为历史记录，不覆盖本次已采纳的原子提交设计。
 
+**2026-09-04 语义增补：**在上述原子 persistence 接缝之上，Events 增加了可选的 `EventPort`。它只在 persistence
+返回 exact candidate 后，经共享 `Invocation` 调用一次 best-effort 通知；适配器自己的普通异常和
+`CancelledError` 被隔离，durable outbox 仍是唯一权威投递路径。该 Port 不拥有 State、事务、重试或 dispatcher。
+
 ## 结论
 
 **Events 包本次验收通过；可靠投递 vertical slice 尚未验收。**
@@ -19,7 +23,7 @@ port；重启后还原“节点名称、实际访问参数、执行结果”需�
 
 - `events` 是 commit 装饰器，包住一个原子 persistence commit；Events 不实现数据库、事务或 dispatcher。
 - `events` 在内层，`logging` 在外层；包装顺序由 assembly 决定，Events 不负责重排。
-- Graph 只等待本地原子提交，不等待远端发送。
+- Graph 只把本地原子提交作为 durable 边界，不等待 outbox dispatcher；配置 `EventPort` 时只显式等待一次 best-effort Invocation。
 - 并行节点不要求全局事件顺序，只要求事件和对应节点事实能按身份配对。
 - 持久化实现不属于本期 Events 代码；Events 提供 immutable `AtomicCommitRequest` 作为 owner-internal SPI，
   由 `infra/persistence` 接入。
@@ -33,8 +37,9 @@ port；重启后还原“节点名称、实际访问参数、执行结果”需�
 
 - [`events/__init__.py`](../src/mote_kernel/events/__init__.py) 只导出 `EventingGraphCommit`，没有 EventBus、sink、
   registry 或第二个 runner。
-- [`events/commit.py`](../src/mote_kernel/events/commit.py) 没有创建 task、queue、后台 dispatcher，也没有在
-  persistence 返回后再调用旁路通知。
+- [`events/commit.py`](../src/mote_kernel/events/commit.py) 没有创建 task、queue、后台 dispatcher；可选 `EventPort` 在
+  exact persistence confirmation 后只调用一次旁路通知。
+- [`events/port.py`](../src/mote_kernel/events/port.py) 只持有 typed `Invocation`，不复制业务值、不拥有提交或投递状态。
 - `project_event()` 是纯投影，只对 `SettleGraphNode` 生成一条引用，其他 transition 仍走同一个 persistence 调用。
 - wrapper 对每次调用只调用一次 persistence，异常和取消原样传播，exact candidate 仍由 execution owner 校验。
 - 引用使用 run/scope/superstep/node/generation/revision 组成确定性 `event_id`，没有把业务 DTO 复制到引用里。
@@ -159,7 +164,7 @@ SPI 目前还不能被现有 owner 直接消费，也没有明确的 reference a
 
 ### 7. 完整事件内容测试（跨 owner 后续）
 
-当前 `tests/events/test_events.py` 的 19 个测试验证：引用坐标相等、调用一次、异常传播、并发身份和 wrapper
+当前 `tests/events/test_events.py` 与 `tests/events/test_port.py` 的 30 个测试验证：引用坐标相等、调用一次、异常传播、并发身份和 wrapper
 组合；`test_internal_records_are_exact_immutable_transaction_values` 甚至明确断言引用没有 `input/output/result`。
 
 “引用不复制业务值”本身是对的，但还缺少另一半：

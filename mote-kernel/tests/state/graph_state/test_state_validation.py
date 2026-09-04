@@ -22,6 +22,8 @@ from mote_kernel.state.graph_state import (
     GraphFrontierNode,
     GraphFrontierState,
     GraphInterruptPayload,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
     GraphJoinProgress,
     GraphNodeId,
     GraphNodeInputBinding,
@@ -66,6 +68,45 @@ def arrival(source: GraphNodeId) -> ActivationReference:
     return ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, source))
 
 
+def join_occurrence(
+    sources: tuple[GraphNodeId, ...] = (A, B),
+    target: GraphNodeId = C,
+    *,
+    run_id: GraphRunId | None = None,
+    target_superstep: int = 2,
+) -> GraphJoinOccurrenceIdentity:
+    return GraphJoinOccurrenceIdentity(
+        GraphJoinIdentity(sources, target),
+        run_id or GraphRunId("run"),
+        target_superstep,
+    )
+
+
+def join_progress(
+    arrived: tuple[ActivationReference, ...],
+    *,
+    occurrence: GraphJoinOccurrenceIdentity | None = None,
+) -> GraphJoinProgress:
+    return GraphJoinProgress(occurrence or join_occurrence(), arrived)
+
+
+def forged_join_occurrence(
+    sources: object,
+    target: object,
+    *,
+    run_id: object = GraphRunId("run"),
+    target_superstep: object = 2,
+) -> GraphJoinOccurrenceIdentity:
+    identity = object.__new__(GraphJoinIdentity)
+    object.__setattr__(identity, "sources", sources)
+    object.__setattr__(identity, "target", target)
+    occurrence = object.__new__(GraphJoinOccurrenceIdentity)
+    object.__setattr__(occurrence, "join", identity)
+    object.__setattr__(occurrence, "run_id", run_id)
+    object.__setattr__(occurrence, "target_superstep", target_superstep)
+    return occurrence
+
+
 def forged_reference(
     activation: object,
     route: object = None,
@@ -84,9 +125,13 @@ def forged_identity(run_id: object, superstep: object, node_id: object) -> Graph
     return activation
 
 
-def forged_cause(references: object) -> RoutedActivationCause:
+def forged_cause(
+    references: object,
+    occurrence: object = None,
+) -> RoutedActivationCause:
     cause = object.__new__(RoutedActivationCause)
     object.__setattr__(cause, "references", references)
+    object.__setattr__(cause, "join_occurrence", occurrence)
     return cause
 
 
@@ -152,34 +197,28 @@ def later_running() -> GraphRunState:
     "progress",
     [
         (
-            GraphJoinProgress((A, C), GraphNodeId("z"), (arrival(A),)),
-            GraphJoinProgress((A, B), C, (arrival(A),)),
+            join_progress((arrival(A),), occurrence=join_occurrence((A, C), GraphNodeId("z"))),
+            join_progress((arrival(A),)),
         ),
-        (GraphJoinProgress((), C, (arrival(A),)),),
-        (GraphJoinProgress((A, A), C, (arrival(A),)),),
-        (GraphJoinProgress((A, B), A, (arrival(B),)),),
-        (GraphJoinProgress((GraphNodeId(" a"), B), C, (arrival(A),)),),
-        (GraphJoinProgress((A, B), GraphNodeId(" c"), (arrival(A),)),),
-        (GraphJoinProgress((A, B), C, ()),),
-        (GraphJoinProgress((A, B), C, (arrival(A), arrival(B))),),
+        (join_progress((arrival(A),), occurrence=forged_join_occurrence((), C)),),
+        (join_progress((arrival(A),), occurrence=forged_join_occurrence((A, A), C)),),
+        (join_progress((arrival(B),), occurrence=forged_join_occurrence((A, B), A)),),
+        (join_progress((arrival(A),), occurrence=forged_join_occurrence((GraphNodeId(" a"), B), C)),),
+        (join_progress((arrival(A),), occurrence=forged_join_occurrence((A, B), GraphNodeId(" c"))),),
         (
-            GraphJoinProgress((A, B), C, (arrival(A),)),
-            GraphJoinProgress((A, B), C, (arrival(B),)),
-        ),
-        (
-            GraphJoinProgress(
-                (A, B),
-                C,
-                (ActivationReference(GraphActivationIdentity(GraphRunId("other"), 0, A)),),
+            join_progress(
+                (),
             ),
         ),
+        (join_progress((arrival(A), arrival(B))),),
         (
-            GraphJoinProgress(
-                (A, B),
-                C,
-                (forged_reference(GraphActivationIdentity(GraphRunId("run"), 0, A), GraphRouteId(" bad")),),
-            ),
+            join_progress((arrival(A),)),
+            join_progress((arrival(B),)),
         ),
+        (join_progress((ActivationReference(GraphActivationIdentity(GraphRunId("other"), 0, A)),)),),
+        (join_progress((forged_reference(GraphActivationIdentity(GraphRunId("run"), 0, A), GraphRouteId(" bad")),)),),
+        (join_progress((arrival(A),), occurrence=join_occurrence(run_id=GraphRunId("other"))),),
+        (join_progress((arrival(A),), occurrence=join_occurrence(target_superstep=1)),),
     ],
 )
 def test_invalid_join_progress_fails_closed(progress: tuple[GraphJoinProgress, ...]) -> None:
@@ -191,9 +230,58 @@ def test_join_progress_accepts_canonical_predecessor_references() -> None:
     validate_graph_run_state(
         replace(
             later_running(),
-            join_progress=(GraphJoinProgress((A, B), C, (arrival(A),)),),
+            join_progress=(join_progress((arrival(A),)),),
         )
     )
+
+
+def test_join_progress_hostile_container_and_occurrence_shapes_fail_closed() -> None:
+    invalid_join = object.__new__(GraphJoinOccurrenceIdentity)
+    object.__setattr__(invalid_join, "join", object())
+    object.__setattr__(invalid_join, "run_id", GraphRunId("run"))
+    object.__setattr__(invalid_join, "target_superstep", 2)
+    unhashable_reference = forged_reference(
+        GraphActivationIdentity(GraphRunId("run"), 0, A),
+        [],
+    )
+    cases: tuple[tuple[object, str], ...] = (
+        ([], "typed records"),
+        ((object(),), "typed records"),
+        ((GraphJoinProgress(cast(GraphJoinOccurrenceIdentity, object()), (arrival(A),)),), "identity is malformed"),
+        ((GraphJoinProgress(invalid_join, (arrival(A),)),), "definition identity is malformed"),
+        (
+            (
+                join_progress(
+                    (arrival(A),),
+                    occurrence=forged_join_occurrence((A, B), C, target_superstep="later"),
+                ),
+            ),
+            "target superstep must be positive",
+        ),
+        ((join_progress((unhashable_reference,)),), "unhashable value"),
+    )
+
+    for progress, message in cases:
+        with pytest.raises(GraphStateTransitionError, match=message):
+            validate_graph_run_state(
+                replace(
+                    later_running(),
+                    join_progress=cast(tuple[GraphJoinProgress, ...], progress),
+                )
+            )
+
+
+def test_join_progress_arrivals_must_use_canonical_reference_order() -> None:
+    references = (arrival(A), arrival(B))
+    occurrence = join_occurrence((A, B, C), GraphNodeId("target"))
+    state = replace(
+        later_running(),
+        settled_activations=references,
+        join_progress=(join_progress(tuple(reversed(references)), occurrence=occurrence),),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="canonical and distinct"):
+        validate_graph_run_state(state)
 
 
 @pytest.mark.parametrize(
@@ -259,6 +347,48 @@ def test_recovered_activation_cause_requires_settlement_evidence() -> None:
 
     with pytest.raises(GraphStateTransitionError, match="lacks committed settlement evidence"):
         validate_graph_run_state(replace(base, frontier=frontier))
+
+
+def test_recovered_join_cause_must_name_its_exact_target_coordinate() -> None:
+    references = (arrival(A), arrival(B))
+    cause = RoutedActivationCause(
+        references,
+        join_occurrence(
+            target=GraphNodeId("other-target"),
+            target_superstep=1,
+        ),
+    )
+    state = replace(
+        later_running(),
+        settled_activations=references,
+        frontier=GraphFrontierState((GraphFrontierNode(C, PendingGraphNode(UseStepRequestInput()), cause),)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="does not match its target activation"):
+        validate_graph_run_state(state)
+
+
+def test_recovered_routed_causes_reject_missing_or_mismatched_join_identity() -> None:
+    references = (arrival(A), arrival(B))
+    base = replace(later_running(), settled_activations=references)
+
+    ordinary = forged_cause(references)
+    ordinary_state = replace(
+        base,
+        frontier=GraphFrontierState((GraphFrontierNode(C, PendingGraphNode(UseStepRequestInput()), ordinary),)),
+    )
+    with pytest.raises(GraphStateTransitionError, match="non-Join routed cause"):
+        validate_graph_run_state(ordinary_state)
+
+    target = GraphNodeId("target")
+    occurrence = join_occurrence((A, C), target, target_superstep=1)
+    mismatched = forged_cause(references, occurrence)
+    mismatched_state = replace(
+        base,
+        frontier=GraphFrontierState((GraphFrontierNode(target, PendingGraphNode(UseStepRequestInput()), mismatched),)),
+    )
+    with pytest.raises(GraphStateTransitionError, match="exactly cover"):
+        validate_graph_run_state(mismatched_state)
 
 
 @pytest.mark.parametrize(
@@ -746,8 +876,8 @@ def test_join_progress_rejects_duplicate_records_after_each_record_is_validated(
         later_running(),
         settled_activations=(arrival(A),),
         join_progress=(
-            GraphJoinProgress((A, B), C, (arrival(A),)),
-            GraphJoinProgress((A, B), C, (arrival(A),)),
+            join_progress((arrival(A),)),
+            join_progress((arrival(A),)),
         ),
     )
 

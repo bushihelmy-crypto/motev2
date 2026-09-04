@@ -251,17 +251,6 @@ def normalize_input_bindings(
     return InputBindings(tuple(entries))
 
 
-def normalize_facade_input_bindings(
-    values: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef] | None,
-) -> InputBindings[GraphValueT]:
-    """Admit only capabilities already promised by the public Graph facade."""
-
-    bindings = normalize_input_bindings(values)
-    if any(isinstance(binding.source, FeedbackInputBinding) for binding in bindings.entries):
-        raise GraphValidationError("feedback input declarations are not available through Graph.add_node()")
-    return bindings
-
-
 def normalize_output_declarations(
     values: Mapping[str, type[GraphValueT] | GraphInputRef[GraphValueT] | NodeOutputRef] | None,
 ) -> OutputDeclarations[GraphValueT]:

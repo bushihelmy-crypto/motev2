@@ -4,33 +4,68 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Generator
-from dataclasses import FrozenInstanceError, dataclass, field, is_dataclass, replace
+from dataclasses import FrozenInstanceError, dataclass, is_dataclass, replace
 from typing import cast
 
 import pytest
 
 import mote_kernel.logging as logging_package
 from mote_kernel.execution import Graph
+from mote_kernel.invocation import BEST_EFFORT_TIMEOUT_SECONDS
 from mote_kernel.logging import LoggedGraphCommit, LoggedNode
 from mote_kernel.logging.level import LogLevel
 from mote_kernel.logging.node import NodeLogFields
+from mote_kernel.logging.port import LogSinkPort
 from mote_kernel.logging.record import LogContractError, LogField, LogRecord, LogValue
 
 
-@dataclass
-class RecordingSink:
-    records: list[LogRecord] = field(default_factory=lambda: list[LogRecord]())
+@dataclass(frozen=True, slots=True)
+class _RecordingInvocation:
+    records: list[LogRecord]
 
-    def write(self, record: LogRecord, /) -> None:
+    async def invoke(self, record: LogRecord, /) -> None:
         self.records.append(record)
 
 
-@dataclass(frozen=True)
-class RaisingSink:
+@dataclass(frozen=True, slots=True, init=False)
+class RecordingSink(LogSinkPort):
+    records: list[LogRecord]
+
+    def __init__(self) -> None:
+        records: list[LogRecord] = []
+        object.__setattr__(self, "records", records)
+        object.__setattr__(self, "invocation", _RecordingInvocation(records))
+        object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
+
+
+@dataclass(frozen=True, slots=True)
+class _RaisingInvocation:
     error: BaseException
 
-    def write(self, _record: LogRecord, /) -> None:
+    async def invoke(self, _record: LogRecord, /) -> None:
         raise self.error
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockingInvocation:
+    event: str
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    async def invoke(self, record: LogRecord, /) -> None:
+        if record.event == self.event:
+            self.entered.set()
+            await self.release.wait()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RaisingSink(LogSinkPort):
+    error: BaseException
+
+    def __init__(self, error: BaseException) -> None:
+        object.__setattr__(self, "error", error)
+        object.__setattr__(self, "invocation", _RaisingInvocation(error))
+        object.__setattr__(self, "timeout_seconds", BEST_EFFORT_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -666,6 +701,67 @@ async def test_logging_sink_failures_do_not_replace_inner_primary_errors() -> No
     with pytest.raises(asyncio.CancelledError) as cancelled:
         await LoggedNode(RaisingSink(asyncio.CancelledError("diagnostic cancelled")))(cancel_node)("value")
     assert cancelled.value is cancellation
+
+
+@pytest.mark.asyncio
+async def test_post_outcome_log_cancellation_preserves_node_primary_error() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sink = LogSinkPort(
+        _BlockingInvocation("node.failed", entered, release),
+        timeout_seconds=1.0,
+    )
+    problem = RuntimeError("primary")
+
+    async def fail(_value: str) -> str:
+        raise problem
+
+    task = asyncio.ensure_future(LoggedNode(sink)(fail)("value"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    task.cancel()
+
+    with pytest.raises(RuntimeError) as raised:
+        await task
+    assert raised.value is problem
+
+
+@pytest.mark.asyncio
+async def test_post_outcome_log_cancellation_preserves_node_result() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sink = LogSinkPort(
+        _BlockingInvocation("node.finished", entered, release),
+        timeout_seconds=1.0,
+    )
+
+    async def echo(value: str) -> str:
+        return value
+
+    task = asyncio.ensure_future(LoggedNode(sink)(echo)("value"))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    task.cancel()
+
+    assert await task == "value"
+
+
+@pytest.mark.asyncio
+async def test_post_outcome_log_cancellation_preserves_commit_result() -> None:
+    transition = (await _capture_transitions())[0]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    sink = LogSinkPort(
+        _BlockingInvocation("commit.accepted", entered, release),
+        timeout_seconds=1.0,
+    )
+
+    async def exact(received: Graph.Transition[str], /) -> Graph.State:
+        return received.candidate_state
+
+    task = asyncio.create_task(LoggedGraphCommit(sink)(exact)(transition))
+    await asyncio.wait_for(entered.wait(), timeout=0.5)
+    task.cancel()
+
+    assert await task is transition.candidate_state
 
 
 @pytest.mark.asyncio

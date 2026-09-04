@@ -109,55 +109,83 @@ quote-style = "double"
 # docs/graph-delayed-loop-implementation-plan.zh-CN.md#143-p1-收口架构审计.
 # The 2026-09-03 ledger-admission defense adds one compiled-topology check;
 # its measured structural cost is ratcheted here rather than hidden or suppressed.
+# P3-M2 adds the topology-owned target lookup needed to retain every typed
+# feedback binding; the compiler/routing change removes the previous target-map
+# helper and is ratcheted at its measured net shape.
+# The P3-M1 review hardening distinguishes a conservative route-domain summary
+# from an exact Join proof and propagates START-plus-incoming repeatability.  Its
+# measured compiler cost is retained here after the proof model review.
+# P3-M3 replaces the definition-only Join key with one State-owned occurrence
+# identity and compiler-owned source-to-target projection.  The added identity,
+# plan, control-resolution, reducer, and recovery-admission checks are the one
+# typed path for both acyclic and cyclic Join execution; their reviewed net
+# shape is ratcheted here without merging construction and recovery defenses.
+# P3-M4 drives the parent session and active child owners concurrently under one
+# family owner.  Explicit worker lifecycle, cancellation, and unstarted-
+# coroutine cleanup preserve owner-local and distributed admission defenses;
+# their reviewed net shape is ratcheted here without adding a second scheduler.
+# The P3-M4/P3-M5 failure boundary fences every settled family owner after an
+# ordinary worker failure, while preserving commit-origin leases and the
+# original exception.  Its recursive owner cleanup is ratcheted at the
+# isolated Graph shape rather than hidden behind a compatibility path.
+# Invocation-backed Logging, Observability, and Events Ports add one shared
+# policy seam and explicit async boundaries.  The cancellation distinction in
+# best-effort delivery was reviewed as the diagnostic exception boundary.  The
+# three domain Ports remain separate owners (rather than a generic port base),
+# and the post-outcome guards remain at their primary-outcome owners; this
+# measured shape is ratcheted rather than hidden behind aliases or tasks.
+# Graph.feedback adds one deliberate method to the sole public facade and
+# removes the facade-only rejection normalizer; its canonical binding/compiler
+# path is ratcheted at the resulting measured shape.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 695
-type_definitions = 408
-dataclass_types = 234
-dataclass_fields = 657
-decision_points = 2068
+top_level_definitions = 705
+type_definitions = 413
+dataclass_types = 242
+dataclass_fields = 678
+decision_points = 2213
 logical_clone_pairs = 16
-statement_clone_pairs = 22
-near_clone_pairs = 15
-record_shape_clone_pairs = 24
+statement_clone_pairs = 25
+near_clone_pairs = 17
+record_shape_clone_pairs = 28
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
-function_definitions = 526
-method_definitions = 221
-nested_function_definitions = 20
-semantic_nodes = 38509
-cognitive_complexity = 2794
-await_points = 93
-exception_handlers = 69
-attribute_writes = 87
-task_creations = 12
-max_cyclomatic_complexity = 78
-max_cognitive_complexity = 131
+function_definitions = 546
+method_definitions = 234
+nested_function_definitions = 22
+semantic_nodes = 40767
+cognitive_complexity = 2996
+await_points = 124
+exception_handlers = 82
+attribute_writes = 89
+task_creations = 16
+max_cyclomatic_complexity = 81
+max_cognitive_complexity = 133
 max_nesting_depth = 6
-internal_call_edges = 742
+internal_call_edges = 765
 recursive_call_components = 5
-max_call_fan_out = 24
+max_call_fan_out = 23
 max_call_chain_depth = 17
-max_call_chain_cognitive = 304
-cross_module_call_edges = 801
-cross_module_call_pairs = 236
+max_call_chain_cognitive = 315
+cross_module_call_edges = 817
+cross_module_call_pairs = 245
 max_runtime_module_fan_out = 24
-internal_import_edges = 362
+internal_import_edges = 369
 import_cycle_components = 0
 max_module_fan_out = 24
 max_module_dependency_depth = 29
-ambiguous_internal_dispatches = 57
-transparent_private_definitions = 34
-thin_single_use_methods = 11
-low_usage_private_definitions = 178
-linear_private_call_chain_links = 38
+ambiguous_internal_dispatches = 59
+transparent_private_definitions = 35
+thin_single_use_methods = 12
+low_usage_private_definitions = 181
+linear_private_call_chain_links = 35
 production_unreferenced_definitions = 10
-low_cohesion_classes = 2
-max_methods_per_class = 27
+low_cohesion_classes = 3
+max_methods_per_class = 29
 max_fields_per_class = 33
-max_class_components = 2
-complexity_hotspots = 72
-stateful_async_hotspots = 6
+max_class_components = 4
+complexity_hotspots = 82
+stateful_async_hotspots = 7
 unused_private_definitions = 0
 unread_private_fields = 0
 unconsumed_internal_async_calls = 0

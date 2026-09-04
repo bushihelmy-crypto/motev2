@@ -8,8 +8,9 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.graph.topology import CompiledJoin
 from mote_kernel.execution.resource import ResourceDefinition
-from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
+from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphJoinIdentity, GraphNodeId
 
 
 async def identity(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -22,6 +23,19 @@ def node(node_id: str) -> CallableNodeDefinition[str]:
         identity,
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
+    )
+
+
+def compiled_join(
+    sources: tuple[str, ...],
+    target: str,
+    offsets: tuple[int, ...] | None = None,
+) -> CompiledJoin:
+    canonical_sources = tuple(sorted(GraphNodeId(source) for source in sources))
+    source_offsets = offsets if offsets is not None else (1,) * len(canonical_sources)
+    return CompiledJoin(
+        GraphJoinIdentity(canonical_sources, GraphNodeId(target)),
+        tuple(zip(canonical_sources, source_offsets, strict=True)),
     )
 
 

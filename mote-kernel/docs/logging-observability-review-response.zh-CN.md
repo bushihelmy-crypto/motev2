@@ -1,8 +1,13 @@
 # 对 Logging 与 Observability 实现评审的回复
 
-状态：**整改已实施；专项门禁通过；全仓无关失败已记录；未提交**
+状态：**整改已实施；Invocation Port 修订已补充；专项门禁通过；全仓无关失败已记录；未提交**
 
 回复日期：2026-09-02
+
+**2026-09-04 补充：**针对后续复核发现的调用链问题，本轮又固定了三条规则：诊断调用有默认 1 秒的有限协作式
+deadline（`timeout_seconds` 只能是有限正数）；inner 已返回或抛出后，后置诊断收到取消不得覆盖 primary outcome；
+`invoke_best_effort` 为 deadline 保留一个取消计数，额外的调用方取消仍传播；它只把 Invocation 自身错误或 deadline 视为可丢弃失败。
+适配器主动 `uncancel()` 的来源恢复暂不纳入本轮契约。
 
 对应评审：[`logging-observability-review.zh-CN.md`](./logging-observability-review.zh-CN.md)
 
@@ -21,8 +26,8 @@
 用户进一步裁决：
 
 - 业务 inner 或 Graph execution 收到的 `asyncio.CancelledError` 是停止信号：先尽力记录诊断，再原样传播同一个取消对象；
-- sink/port 是同步诊断旁路。适配器自己误抛普通异常或 `CancelledError` 时，只丢弃当前诊断，不改变业务结果、异常、取消或
-  mismatch，也不停止 inner；
+- sink/port 是基于共享 `Invocation` 的 async 诊断旁路。Port 在边界固定使用 best-effort；适配器自己误抛普通异常或
+  `CancelledError` 时，只丢弃当前诊断，不改变业务结果、异常、取消或 mismatch，也不停止 inner；
 - 观测 decorator 不负责校验 Port、factory 或 inner 是否装配正确；
 - 本轮只完成 Logging/Observability 装饰链，不依赖 Events；
 - Role/Flow assembly 不属于本轮；
@@ -73,7 +78,7 @@ run/scope/trace/parent 坐标由调用方通过闭包或自己的 context 机制
 ## 4. 取消语义：业务取消与诊断适配器失败分层
 
 用户通过 UI、控制面或上层任务发出的停止，若由业务 inner 或 Graph execution 收到，才是本轮要保持的业务取消：wrapper
-先尽力记录失败/取消诊断，再原样传播同一个 `asyncio.CancelledError` 对象。sink/port 则是同步旁路；日志或观测适配器自己
+先尽力记录失败/取消诊断，再原样传播同一个 `asyncio.CancelledError` 对象。sink/port 则是 async best-effort 旁路；日志或观测适配器自己
 误抛普通异常或 `CancelledError` 都只是当前诊断失败，必须隔离，不改变业务返回值、业务异常、业务取消或 mismatch，也不停止
 inner、不触发重试或重放。
 
@@ -101,7 +106,7 @@ ack 恢复或第二确认路径。
 - `port.record` / `sink.write` 是否存在且 callable；
 - factory 是否 callable；
 - inner 是否 callable；
-- Port 是否错误地使用 async 方法。
+- Port 是否绕过共享 Invocation 或自行选择 transport。
 
 这些判断属于 assembly owner，不属于观测 node。Decorator 应当相信自己收到的 typed capability，只负责调用窄协议和
 处理协议调用结果。否则每个使用 Port 的节点都会重复一遍装配器职责，并出现不同的探测规则和错误类型。
@@ -109,7 +114,7 @@ ack 恢复或第二确认路径。
 本轮边界因此固定为：
 
 1. Protocol 和方法级 TypeVar 表达静态契约；
-2. strict Pyright 拒绝 `None`、async Port、错误 callable 以及跨 `GraphValueT` 组合；
+2. strict Pyright 拒绝 `None`、非 Invocation capability、错误 callable 以及跨 `GraphValueT` 组合；
 3. 未来 Role/Flow assembly 决定 optional capability 是否存在；要安装 `ObservedNode` 时保证
    `port + span_factory` bundle 完整（两者都缺则不安装、只缺一个则 assembly error），但 `ObservabilityPort` 仍可独立
    服务其他 usage/timing/error 记录；
@@ -205,7 +210,7 @@ Logging/Observability 评审文档作为审计记录随目标文档集保留；E
 
 | 复审建议 | 处置 | 原因 |
 | --- | --- | --- |
-| `sink.write()` / `port.record()` 抛出的 `CancelledError` 作为适配器误抛隔离 | 接受 | 它们是同步诊断旁路；只丢弃当前诊断，不改变业务结果、异常、取消或 mismatch，也不停止 inner。 |
+| `sink.write()` / `port.record()` 抛出的 `CancelledError` 作为适配器误抛隔离 | 接受 | 它们是 async best-effort 诊断旁路；只丢弃当前诊断，不改变业务结果、异常、取消或 mismatch，也不停止 inner。 |
 | 用“业务 inner/Graph execution 才是业务取消来源”区分取消 | 接受 | 业务取消保持同一对象；诊断适配器自有错误不被提升成业务取消。 |
 | 业务取消保持原始 cancellation identity | 接受 | inner/execution 取消经尽力诊断后原样传播；诊断适配器若再误抛 `CancelledError`，只丢弃该诊断，不由 Logging 选择主异常。 |
 | required capability 一律改成 positional-only `/` | 不采用 | 新 API 已没有 `inner` 参数，旧 positional/keyword 形状由签名自然拒绝；required capability 按位置示例传入即可，额外的 positional-only 构造器会增加限制和复杂度。 |

@@ -17,6 +17,7 @@ from mote_kernel.state.graph_state.identity import (
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphInterruptId,
+    GraphJoinOccurrenceIdentity,
     GraphNodeId,
     GraphRunId,
 )
@@ -24,7 +25,6 @@ from mote_kernel.state.graph_state.model import (
     GraphAbortReason,
     GraphExecutionToken,
     GraphJoinProgress,
-    GraphJoinProgressKey,
 )
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
 from mote_kernel.state.graph_state.routing import GraphRoutingContribution
@@ -57,13 +57,13 @@ class AdvanceGraphFrontier:
     expected_revision: int
     activations: tuple[GraphFrontierActivation, ...]
     join_progress: tuple[GraphJoinProgress, ...]
-    consumed_join_progress: tuple[GraphJoinProgressKey, ...] = ()
+    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class CompleteGraphFrontier:
     expected_revision: int
-    consumed_join_progress: tuple[GraphJoinProgressKey, ...] = ()
+    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

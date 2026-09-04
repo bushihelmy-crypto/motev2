@@ -20,10 +20,13 @@ from mote_kernel.state.graph_state.frontier_model import (
 from mote_kernel.state.graph_state.identity import (
     ActivationReference,
     GraphActivationIdentity,
+    GraphJoinIdentity,
+    GraphJoinOccurrenceIdentity,
+    GraphNodeId,
     child_graph_run_id,
     is_canonical_identity,
 )
-from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
+from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
 from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution, SelectGraphRoute
 
@@ -84,47 +87,78 @@ def _validate_settled_activations(state: GraphRunState) -> None:
                 raise GraphStateTransitionError("settled activation evidence route does not match its settlement")
 
 
+def _validate_join_occurrence(
+    state: GraphRunState,
+    occurrence: GraphJoinOccurrenceIdentity,
+) -> None:
+    if type(occurrence) is not GraphJoinOccurrenceIdentity:
+        raise GraphStateTransitionError("join occurrence identity is malformed")
+    join = occurrence.join
+    if type(join) is not GraphJoinIdentity:
+        raise GraphStateTransitionError("join definition identity is malformed")
+    sources = join.sources
+    if (
+        type(sources) is not tuple
+        or len(sources) < 2
+        or any(not is_canonical_identity(source) for source in sources)
+        or sources != tuple(sorted(set(sources)))
+    ):
+        raise GraphStateTransitionError("join definition sources must be distinct and canonical")
+    if not is_canonical_identity(join.target) or join.target in sources:
+        raise GraphStateTransitionError("join definition target is invalid")
+    if occurrence.run_id != state.run_id or not is_canonical_identity(occurrence.run_id):
+        raise GraphStateTransitionError("join occurrence belongs to the wrong graph run")
+    if type(occurrence.target_superstep) is not int or occurrence.target_superstep < 1:
+        raise GraphStateTransitionError("join occurrence target superstep must be positive")
+
+
 def _validate_join_progress(state: GraphRunState) -> None:
     progress = state.join_progress
-    if progress != tuple(sorted(progress, key=lambda item: (item.sources, item.target))):
+    if type(progress) is not tuple or any(type(item) is not GraphJoinProgress for item in progress):
+        raise GraphStateTransitionError("join progress must contain typed records")
+    for item in progress:
+        _validate_join_occurrence(state, item.occurrence)
+    if progress != tuple(sorted(progress, key=lambda item: item.occurrence)):
         raise GraphStateTransitionError("join progress must use canonical order")
-    seen: set[tuple[tuple[str, ...], str]] = set()
+    seen: set[GraphJoinOccurrenceIdentity] = set()
     for join in progress:
-        if not join.sources or join.sources != tuple(sorted(set(join.sources))):
-            raise GraphStateTransitionError("join progress requires distinct canonical sources")
-        if join.target in join.sources:
-            raise GraphStateTransitionError("join target cannot be a source")
-        for source in join.sources:
-            _require_identity(source, "join source identity")
-        _require_identity(join.target, "join target identity")
+        occurrence = join.occurrence
+        sources = occurrence.join.sources
+        if occurrence.target_superstep <= state.superstep:
+            raise GraphStateTransitionError("pending join occurrence must target a future superstep")
         arrived = join.arrived
         if (
             type(arrived) is not tuple
             or not arrived
             or any(type(reference) is not ActivationReference for reference in arrived)
-            or arrived != tuple(sorted(set(arrived), key=ActivationReference.canonical_key))
         ):
             raise GraphStateTransitionError("join progress arrivals must be canonical and distinct")
+        try:
+            canonical_arrivals = tuple(sorted(set(arrived), key=ActivationReference.canonical_key))
+        except TypeError as error:
+            raise GraphStateTransitionError("join progress arrivals contain an unhashable value") from error
+        if arrived != canonical_arrivals:
+            raise GraphStateTransitionError("join progress arrivals must be canonical and distinct")
         arrived_sources = tuple(reference.activation.node_id for reference in arrived)
-        if len(arrived_sources) != len(set(arrived_sources)) or not set(arrived_sources) < set(join.sources):
+        if len(arrived_sources) != len(set(arrived_sources)) or not set(arrived_sources) < set(sources):
             raise GraphStateTransitionError("join progress must contain partial arrivals")
         for reference in arrived:
             activation = reference.activation
             if (
                 type(activation) is not GraphActivationIdentity
-                or activation.run_id != state.run_id
+                or activation.run_id != occurrence.run_id
                 or activation.superstep >= state.superstep
-                or activation.node_id not in join.sources
+                or activation.superstep >= occurrence.target_superstep
+                or activation.node_id not in sources
             ):
                 raise GraphStateTransitionError("join progress contains an invalid predecessor arrival")
             if reference.route is not None:
                 _require_identity(reference.route, "join arrival route identity")
             if reference not in state.settled_activations:
                 raise GraphStateTransitionError("join progress arrival lacks committed settlement evidence")
-        key = (join.sources, join.target)
-        if key in seen:
+        if occurrence in seen:
             raise GraphStateTransitionError("graph state repeats join progress")
-        seen.add(key)
+        seen.add(occurrence)
 
 
 def _validate_interrupt_identity(state: GraphRunState, identity: GraphNodeInterruptIdentity) -> None:
@@ -147,7 +181,11 @@ def _validate_routing(routing: GraphRoutingContribution) -> None:
             raise GraphStateTransitionError("frontier node has an unsupported routing contribution")
 
 
-def _validate_activation_cause(state: GraphRunState, cause: GraphActivationCause) -> None:
+def _validate_activation_cause(
+    state: GraphRunState,
+    node_id: GraphNodeId,
+    cause: GraphActivationCause,
+) -> None:
     if type(cause) is StartActivationCause:
         if state.superstep != 0:
             raise GraphStateTransitionError("START activation cause is valid only at superstep zero")
@@ -179,6 +217,17 @@ def _validate_activation_cause(state: GraphRunState, cause: GraphActivationCause
             raise GraphStateTransitionError("routed activation cause references a non-predecessor activation")
         if reference not in state.settled_activations:
             raise GraphStateTransitionError("routed activation cause lacks committed settlement evidence")
+    occurrence = cause.join_occurrence
+    if occurrence is None:
+        if len(references) != 1:
+            raise GraphStateTransitionError("non-Join routed cause requires exactly one reference")
+        return
+    _validate_join_occurrence(state, occurrence)
+    if occurrence.join.target != node_id or occurrence.target_superstep != state.superstep:
+        raise GraphStateTransitionError("routed Join cause does not match its target activation")
+    source_ids = tuple(reference.activation.node_id for reference in references)
+    if len(source_ids) != len(set(source_ids)) or set(source_ids) != set(occurrence.join.sources):
+        raise GraphStateTransitionError("routed Join cause must exactly cover its occurrence sources")
 
 
 def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) -> None:
@@ -190,7 +239,7 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
     needs_codec = False
     for node in frontier.nodes:
         _require_identity(node.node_id, "frontier node identity")
-        _validate_activation_cause(state, node.cause)
+        _validate_activation_cause(state, node.node_id, node.cause)
         # The wildcard also rejects malformed values reconstructed outside the
         # statically typed in-process construction path.
         match node.settlement:

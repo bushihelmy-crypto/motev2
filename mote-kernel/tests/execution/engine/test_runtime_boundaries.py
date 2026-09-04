@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 from tests.execution.driver import step_request
-from tests.execution.engine.factories import compiled_graph, running_state
+from tests.execution.engine.factories import compiled_graph, join_progress, running_state
 
 import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
@@ -120,7 +120,6 @@ from mote_kernel.state.graph_state import (
     GraphFailure,
     GraphFrontierNode,
     GraphFrontierState,
-    GraphJoinProgress,
     GraphNodeId,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
@@ -886,10 +885,11 @@ def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
             outputs=normalize_graph_output_declarations({}),
         )
     )
-    progress = GraphJoinProgress(
-        (GraphNodeId("a"), GraphNodeId("b")),
-        GraphNodeId("joined"),
+    progress = join_progress(
+        ("a", "b"),
+        "joined",
         (ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, GraphNodeId("a"))),),
+        target_superstep=1,
     )
     state = replace(
         running_state(definition_id="join.graph", frontier=("a", "b")),
@@ -920,7 +920,7 @@ def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
             ),
             status=GraphRunStatus.RUNNING,
         ),
-        join_progress=(GraphJoinProgress((GraphNodeId("a"),), GraphNodeId("joined"), ()),),
+        join_progress=(join_progress(("a", "b"), "joined", (), target_superstep=1),),
     )
     with pytest.raises(JoinProgressError):
         resolve_routing(graph, invalid, root_scope_run(state.run_id), ScopedFrameIndex())

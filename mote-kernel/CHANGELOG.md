@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `LoggedNode(sink, ...)(inner)`, `ObservedNode(port, span_factory)(inner)`, and
   `LoggedGraphCommit(sink, ...)(inner)`. The former inner-first constructors, public generic subscripts, and
   `LoggedGraphCommit(inner=None)` fallback are removed; `Graph.run(commit=None)` remains the execution-owned fallback.
+- **Breaking:** `LogSinkPort` and `ObservabilityPort` are now async, typed adapters over the shared
+  `mote_kernel.invocation.Invocation` seam. They select the best-effort policy at the Port boundary; transport and runtime
+  selection remain configuration owned by `mote-infra/invocation`, while core/Hook calls use the strict policy.
+- Events now has an invocation-backed `EventPort` for the same explicit best-effort notification policy. It receives only a
+  confirmed settlement reference after the atomic persistence commit; durable delivery remains owned by the persistence outbox
+  and its dispatcher.
 - **Breaking:** `mote_kernel.execution` now exports only the `Graph` facade; executor, session, request/result,
   topology, and state transition types remain internal owner-module contracts.
 - `Graph.run()` now rejects invalid execution limits before compilation or any authoritative transition, and

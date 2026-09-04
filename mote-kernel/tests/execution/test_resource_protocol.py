@@ -23,6 +23,7 @@ from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ClaimGraphExecution,
+    CompleteGraphFrontier,
     FenceGraphExecution,
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -429,6 +430,59 @@ async def test_conditional_frontier_admits_only_the_selected_resource_target() -
     assert calls == ["left"]
 
 
+@pytest.mark.parametrize("selected_route", ["left", "right"])
+async def test_conditional_resource_branch_waits_with_its_sibling_before_join(
+    selected_route: str,
+) -> None:
+    calls: list[str] = []
+
+    async def choose(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(Graph.values(), route=selected_route)
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("ordinary")
+        return Graph.values()
+
+    def branch(node_id: str):
+        async def run(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+            calls.append(node_id)
+            return Graph.success(Graph.values(), route="go")
+
+        return run
+
+    async def shared(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("shared")
+        return Graph.values()
+
+    async def target(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("target")
+        return Graph.values()
+
+    graph = Graph[str](f"resource.conditional-join-{selected_route}")
+    graph.add_node("choose", choose, inputs={}, outputs={})
+    graph.add_node("ordinary", ordinary, inputs={}, outputs={}, resources=("database",))
+    for node_id in ("left", "right"):
+        graph.add_node(node_id, branch(node_id), inputs={}, outputs={}, resources=("database",))
+    graph.add_node("shared", shared, inputs={}, outputs={})
+    graph.add_node("target", target, inputs={}, outputs={})
+    graph.add_edge("choose", "ordinary")
+    graph.add_conditional_edge("choose", "left", "left")
+    graph.add_conditional_edge("choose", "right", "right")
+    graph.add_conditional_edge("left", "go", "shared")
+    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_join(("ordinary", "shared"), "target")
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values(), max_parallel_tasks=2)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert calls.count("ordinary") == 1
+    assert calls.count(selected_route) == 1
+    assert calls.count("left" if selected_route == "right" else "right") == 0
+    assert calls.count("shared") == 1
+    assert calls.count("target") == 1
+
+
 async def test_missing_child_precedes_resource_admission() -> None:
     graph = nested_resource_graph()
     commits = CommitLog()
@@ -504,6 +558,299 @@ async def test_active_child_does_not_block_resource_admission(max_parallel_tasks
     assert tuple(
         transition.scope for transition in commits.transitions if isinstance(transition.command, AbortGraphRun)
     ) == (("nested",), ())
+    assert not any(task.get_name().startswith("mote-graph-family:") for task in asyncio.all_tasks() if not task.done())
+
+
+@pytest.mark.parametrize("max_parallel_tasks", [1, 64])
+async def test_active_child_and_ordinary_sibling_are_driven_by_one_frontier_owner(
+    max_parallel_tasks: int,
+) -> None:
+    """A sibling may unblock a child while both belong to the same frontier."""
+
+    child_entered = asyncio.Event()
+    sibling_finished = asyncio.Event()
+
+    async def child_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        child_entered.set()
+        await sibling_finished.wait()
+        return Graph.values()
+
+    async def sibling_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await child_entered.wait()
+        sibling_finished.set()
+        return Graph.values()
+
+    child = Graph[str]("resource.concurrent-family.child")
+    child.add_node("leaf", child_operation, inputs={}, outputs={})
+    child.set_outputs({})
+
+    parent = Graph[str]("resource.concurrent-family.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("sibling", sibling_operation, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=max_parallel_tasks),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+
+
+async def test_multiple_active_children_are_driven_without_a_serial_family_barrier() -> None:
+    left_entered = asyncio.Event()
+    right_entered = asyncio.Event()
+
+    async def left_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        left_entered.set()
+        await right_entered.wait()
+        return Graph.values()
+
+    async def right_operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+        right_entered.set()
+        await left_entered.wait()
+        return Graph.values()
+
+    left = Graph[str]("resource.concurrent-children.left")
+    left.add_node("leaf", left_operation, inputs={}, outputs={})
+    left.set_outputs({})
+    right = Graph[str]("resource.concurrent-children.right")
+    right.add_node("leaf", right_operation, inputs={}, outputs={})
+    right.set_outputs({})
+
+    parent = Graph[str]("resource.concurrent-children.parent")
+    parent.add_node("left", left, inputs={})
+    parent.add_node("right", right, inputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+
+
+@pytest.mark.parametrize("first_child", ["left", "right"])
+async def test_nested_child_boundaries_feed_one_parent_join_in_either_completion_order(
+    first_child: str,
+) -> None:
+    entered = {"left": asyncio.Event(), "right": asyncio.Event()}
+    release = {"left": asyncio.Event(), "right": asyncio.Event()}
+    first_completed = asyncio.Event()
+    child_completion_order: list[str] = []
+    target_calls = 0
+
+    def child(name: str) -> Graph[str]:
+        async def operation(_values: Graph.Values[str]) -> Graph.Values[str]:
+            entered[name].set()
+            await release[name].wait()
+            return Graph.values(value=name)
+
+        graph = Graph[str](f"resource.join-child.{name}.{first_child}")
+        graph.add_node("leaf", operation, inputs={}, outputs={"value": str})
+        graph.set_outputs({"value": Graph.node_output("leaf", "value")})
+        return graph
+
+    async def combine(values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal target_calls
+        target_calls += 1
+        return Graph.values(value=f"{values['left']}|{values['right']}")
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        if transition.scope in (("left",), ("right",)) and isinstance(
+            transition.command,
+            CompleteGraphFrontier,
+        ):
+            child_completion_order.append(transition.scope[0])
+            if transition.scope == (first_child,):
+                first_completed.set()
+        return transition.candidate_state
+
+    parent = Graph[str](f"resource.join-parent.{first_child}")
+    parent.add_node("left", child("left"), inputs={})
+    parent.add_node("right", child("right"), inputs={})
+    parent.add_node(
+        "combine",
+        combine,
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={"value": str},
+    )
+    parent.add_join(("left", "right"), "combine")
+    parent.set_outputs({"value": Graph.node_output("combine", "value")})
+
+    running = asyncio.create_task(
+        parent.run(
+            Graph.values(),
+            commit=commit,
+            max_parallel_tasks=1,
+        )
+    )
+    await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), timeout=1)
+    release[first_child].set()
+    await asyncio.wait_for(first_completed.wait(), timeout=1)
+    release["right" if first_child == "left" else "left"].set()
+
+    result = await asyncio.wait_for(running, timeout=1)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["value"] == "left|right"
+    assert target_calls == 1
+    assert tuple(child_completion_order) == (first_child, "right" if first_child == "left" else "left")
+
+
+async def test_failed_child_does_not_cancel_active_child_or_pending_sibling() -> None:
+    active_started = asyncio.Event()
+    active_finished = asyncio.Event()
+    release_active = asyncio.Event()
+    calls: list[str] = []
+
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("failed-child")
+        return Graph.failure("child failed")
+
+    async def active(_values: Graph.Values[str]) -> Graph.Values[str]:
+        calls.append("active-child")
+        active_started.set()
+        await release_active.wait()
+        active_finished.set()
+        return Graph.values()
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await active_started.wait()
+        calls.append("ordinary")
+        release_active.set()
+        return Graph.values()
+
+    failed_child = Graph[str]("resource.failed-child")
+    failed_child.add_node("leaf", fail, inputs={}, outputs={})
+    failed_child.set_outputs({})
+    active_child = Graph[str]("resource.active-child")
+    active_child.add_node("leaf", active, inputs={}, outputs={})
+    active_child.set_outputs({})
+
+    parent = Graph[str]("resource.failed-child-family")
+    parent.add_node("failed", failed_child, inputs={})
+    parent.add_node("active", active_child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.FailedResult)
+    assert calls.count("failed-child") == 1
+    assert calls.count("active-child") == 1
+    assert calls.count("ordinary") == 1
+    assert active_finished.is_set()
+    assert calls.index("active-child") < calls.index("ordinary")
+    assert tuple((failure.scope, failure.node_id) for failure in result.failures) == (
+        ((), "failed"),
+        (("failed",), "leaf"),
+    )
+
+
+async def test_awaiting_child_and_ordinary_sibling_reach_one_family_boundary() -> None:
+    ordinary_calls = 0
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.interrupt(b"child-input")
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        nonlocal ordinary_calls
+        ordinary_calls += 1
+        return Graph.values()
+
+    child = Graph[str]("resource.awaiting-child")
+    codec = Codec()
+    child.set_resume_codec("empty", 1, codec.encode, codec.decode)
+    child.add_node("leaf", interrupt, inputs={}, outputs={})
+    child.set_outputs({})
+
+    parent = Graph[str]("resource.awaiting-family")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.AwaitingResumeResult)
+    assert ordinary_calls == 1
+    assert tuple((interrupt.scope, interrupt.node_id) for interrupt in result.interrupts) == ((("child",), "leaf"),)
+
+
+async def test_failed_child_cleanup_waits_for_ordinary_sibling_before_aborting_awaiting_child() -> None:
+    failed_settled = asyncio.Event()
+    calls: list[str] = []
+    transition_order: list[Graph.Transition[str]] = []
+
+    async def fail(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("failed-child")
+        return Graph.failure("child failed")
+
+    async def interrupt(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("awaiting-child")
+        return Graph.interrupt(b"awaiting")
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        await failed_settled.wait()
+        calls.append("ordinary")
+        return Graph.values()
+
+    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
+        transition_order.append(transition)
+        if transition.scope == ("failed",) and isinstance(transition.command, SettleGraphNode):
+            failed_settled.set()
+        return transition.candidate_state
+
+    failed_child = Graph[str]("resource.failed-awaiting.failed")
+    failed_child.add_node("leaf", fail, inputs={}, outputs={})
+    failed_child.set_outputs({})
+    awaiting_child = Graph[str]("resource.failed-awaiting.awaiting")
+    awaiting_child.set_resume_codec("empty", 1, Codec().encode, Codec().decode)
+    awaiting_child.add_node("leaf", interrupt, inputs={}, outputs={})
+    awaiting_child.set_outputs({})
+
+    parent = Graph[str]("resource.failed-awaiting.parent")
+    parent.add_node("failed", failed_child, inputs={})
+    parent.add_node("awaiting", awaiting_child, inputs={})
+    parent.add_node("ordinary", ordinary, inputs={}, outputs={})
+    parent.set_outputs({})
+
+    result = await asyncio.wait_for(
+        parent.run(Graph.values(), commit=commit, max_parallel_tasks=1),
+        timeout=1,
+    )
+
+    assert isinstance(result, Graph.FailedResult)
+    assert calls.count("failed-child") == 1
+    assert calls.count("awaiting-child") == 1
+    assert calls.count("ordinary") == 1
+    assert calls.index("ordinary") > calls.index("failed-child")
+    ordinary_position = next(
+        index
+        for index, transition in enumerate(transition_order)
+        if (
+            transition.scope == ()
+            and isinstance(transition.command, SettleGraphNode)
+            and isinstance(transition.result, Graph.SuccessResult)
+            and transition.result.node_id == "ordinary"
+        )
+    )
+    awaiting_abort_position = next(
+        index
+        for index, transition in enumerate(transition_order)
+        if transition.scope == ("awaiting",) and isinstance(transition.command, AbortGraphRun)
+    )
+    assert ordinary_position < awaiting_abort_position
 
 
 async def test_resource_sibling_settles_without_waiting_for_nested_completion() -> None:

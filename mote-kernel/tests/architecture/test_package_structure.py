@@ -24,11 +24,6 @@ REQUIRED_PACKAGES = frozenset(
         "state",
         "state/graph_state",
         "think",
-        "think/commands",
-        "think/compact",
-        "think/context",
-        "think/inference",
-        "think/prompt",
     }
 )
 

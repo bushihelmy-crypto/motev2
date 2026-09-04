@@ -165,6 +165,38 @@ def feedback_compiled_graph() -> CompiledGraph[int]:
     )
 
 
+def multiple_feedback_compiled_graph() -> CompiledGraph[int]:
+    async def loop(values: Graph.Values[int]) -> Graph.Values[int]:
+        return values
+
+    left_seed = Graph.graph_input("left_seed", int)
+    right_seed = Graph.graph_input("right_seed", int)
+    node = CallableNodeDefinition(
+        GraphNodeId("loop"),
+        loop,
+        normalize_input_bindings(
+            {
+                "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
+                "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "right")),
+            }
+        ),
+        normalize_output_declarations({"left": int, "right": int}),
+    )
+    return compile_graph(
+        GraphDefinition(
+            GraphDefinitionId("feedback.multiple-materialization"),
+            GraphDefinitionVersion(1),
+            (node,),
+            (
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
+                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), GraphNodeId("__end__")),
+            ),
+            (GraphNodeId("loop"),),
+            normalize_graph_output_declarations({"value": Graph.node_output("loop", "left")}),
+        )
+    )
+
+
 def feedback_state(
     graph: CompiledGraph[int],
     *,
@@ -222,6 +254,50 @@ def feedback_state(
     return state, frames
 
 
+def multiple_feedback_state(
+    graph: CompiledGraph[int],
+) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
+    run_id = GraphRunId("multiple-run")
+    node_id = GraphNodeId("loop")
+    route = graph.transition.activation_rules.entries[0].feedback_route
+    reference = ActivationReference(
+        GraphActivationIdentity(run_id, 0, node_id),
+        route,
+    )
+    state = GraphRunState(
+        run_id,
+        GraphDefinitionId("feedback.multiple-materialization"),
+        GraphDefinitionVersion(1),
+        GraphRunStatus.RUNNING,
+        1,
+        GraphFrontierState(
+            (GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput()), RoutedActivationCause((reference,))),)
+        ),
+        settled_activations=(reference,),
+    )
+    scope_run = root_scope_run(run_id)
+    frames: ScopedFrameIndex[int] = ScopedFrameIndex()
+    frames = frames.add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            admit_graph_input(graph, Graph.values(left_seed=7, right_seed=8)),
+        )
+    )
+    descriptor = graph.transition.publications[node_id]
+    frames = frames.add_publication(
+        ConfirmedPublication(
+            PublicationAvailabilityCoordinate(
+                StableActivation(scope_run, 0, node_id),
+                descriptor.identity,
+            ),
+            _make_node_output_frame(Graph.values(left=11, right=22), descriptor.declarations),
+            1,
+            ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+        )
+    )
+    return state, frames
+
+
 def test_feedback_materialization_reads_the_exact_immediate_predecessor() -> None:
     graph = feedback_compiled_graph()
     state, frames = feedback_state(graph)
@@ -235,6 +311,21 @@ def test_feedback_materialization_reads_the_exact_immediate_predecessor() -> Non
     )
 
     assert materialized.entries == (NamedValue("value", 11),)
+
+
+def test_multiple_feedback_materialization_reads_each_fixed_publication_source() -> None:
+    graph = multiple_feedback_compiled_graph()
+    state, frames = multiple_feedback_state(graph)
+
+    materialized = materialize_node_input(
+        graph,
+        state,
+        root_scope_run(state.run_id),
+        frames,
+        GraphNodeId("loop"),
+    )
+
+    assert materialized.entries == (NamedValue("left", 11), NamedValue("right", 22))
 
 
 def test_feedback_materialization_rejects_a_non_immediate_predecessor() -> None:

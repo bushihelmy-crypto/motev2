@@ -4,6 +4,7 @@ from dataclasses import replace
 from typing import Never
 
 import pytest
+from tests.execution.engine.factories import join_progress
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.recovery import (
@@ -92,7 +93,6 @@ from mote_kernel.state.graph_state import (
     GraphFrontierState,
     GraphInterruptId,
     GraphInterruptPayload,
-    GraphJoinProgress,
     GraphNodeId,
     GraphNodeInterruptIdentity,
     GraphResumeInputCodecId,
@@ -304,10 +304,12 @@ def test_recovery_cycle_signature_keeps_each_successor_relevant_availability_fac
     )
     assert _cycle_signature(graph, state, resume) != _cycle_signature(graph, state)
 
-    progress = GraphJoinProgress(
-        (node_id, GraphNodeId("other")),
-        GraphNodeId("joined"),
+    progress = join_progress(
+        (node_id, "other"),
+        "joined",
         (ActivationReference(GraphActivationIdentity(state.run_id, 0, node_id)),),
+        target_superstep=state.superstep + 1,
+        run_id=state.run_id,
     )
     assert _cycle_signature(graph, replace(state, join_progress=(progress,))) != _cycle_signature(graph, state)
 

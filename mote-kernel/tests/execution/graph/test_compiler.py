@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 import pytest
-from tests.execution.graph.factories import graph, node
+from tests.execution.graph.factories import compiled_join, graph, node
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
@@ -46,7 +46,7 @@ def test_compile_indexes_conditional_routes_and_joins() -> None:
     assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("e"),)
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("left")] == GraphNodeId("d")
     assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("right")] == GraphNodeId("f")
-    expected_join = JoinEdge((GraphNodeId("b"), GraphNodeId("c")), GraphNodeId("g"))
+    expected_join = compiled_join(("b", "c"), "g")
     assert compiled.transition.joins_by_source[GraphNodeId("b")] == (expected_join,)
     assert compiled.transition.joins_by_source[GraphNodeId("c")] == (expected_join,)
 
@@ -59,9 +59,66 @@ def test_join_to_end_preserves_its_runtime_barrier() -> None:
 
     compiled = compile_graph(definition)
 
-    expected_join = JoinEdge((GraphNodeId("a"), GraphNodeId("b")), END)
+    expected_join = compiled_join(("a", "b"), END)
     assert compiled.transition.joins_by_source[GraphNodeId("a")] == (expected_join,)
     assert compiled.transition.joins_by_source[GraphNodeId("b")] == (expected_join,)
+
+
+def test_cyclic_join_compiles_when_every_source_shares_one_activation_cohort() -> None:
+    definition = graph(
+        nodes=(node("tick"), node("left"), node("right"), node("joined")),
+        edges=(
+            DirectEdge(GraphNodeId("tick"), GraphNodeId("left")),
+            DirectEdge(GraphNodeId("tick"), GraphNodeId("right")),
+            JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+            ConditionalEdge(GraphNodeId("joined"), GraphRouteId("again"), GraphNodeId("tick")),
+            ConditionalEdge(GraphNodeId("joined"), GraphRouteId("done"), END),
+        ),
+        entries=(GraphNodeId("tick"),),
+    )
+
+    compiled = compile_graph(definition)
+    expected = compiled_join(("left", "right"), "joined")
+
+    assert compiled.transition.joins_by_source[GraphNodeId("left")] == (expected,)
+    assert compiled.transition.joins_by_source[GraphNodeId("right")] == (expected,)
+
+
+def test_cyclic_join_rejects_sources_from_different_activation_cohorts() -> None:
+    definition = graph(
+        nodes=(node("tick"), node("left"), node("middle"), node("right"), node("joined")),
+        edges=(
+            DirectEdge(GraphNodeId("tick"), GraphNodeId("left")),
+            DirectEdge(GraphNodeId("tick"), GraphNodeId("middle")),
+            DirectEdge(GraphNodeId("middle"), GraphNodeId("right")),
+            JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+            ConditionalEdge(GraphNodeId("joined"), GraphRouteId("again"), GraphNodeId("tick")),
+            ConditionalEdge(GraphNodeId("joined"), GraphRouteId("done"), END),
+        ),
+        entries=(GraphNodeId("tick"),),
+    )
+
+    with pytest.raises(GraphValidationError, match="no provable occurrence identity"):
+        compile_graph(definition)
+
+
+def test_join_rejects_mutually_exclusive_cohorts_without_one_absolute_coordinate() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("decision", "short", "middle", "long", "left", "right", "joined")),
+        edges=(
+            ConditionalEdge(GraphNodeId("decision"), GraphRouteId("short"), GraphNodeId("short")),
+            ConditionalEdge(GraphNodeId("decision"), GraphRouteId("long"), GraphNodeId("middle")),
+            DirectEdge(GraphNodeId("middle"), GraphNodeId("long")),
+            DirectEdge(GraphNodeId("short"), GraphNodeId("left")),
+            DirectEdge(GraphNodeId("short"), GraphNodeId("right")),
+            DirectEdge(GraphNodeId("long"), GraphNodeId("left")),
+            DirectEdge(GraphNodeId("long"), GraphNodeId("right")),
+            JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+        ),
+    )
+
+    with pytest.raises(GraphValidationError, match="no unique occurrence coordinate"):
+        compile_graph(definition)
 
 
 def test_control_cycles_without_a_successful_exit_are_rejected() -> None:

@@ -391,13 +391,14 @@ def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
     assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
         "_abort",
         "_drive",
+        "_fence",
         "_release",
     }
     assert {
         node.name
         for node in handle.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
-    } == {"abort", "drive", "release"}
+    } == {"abort", "drive", "fence", "release"}
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
@@ -528,7 +529,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "entries": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
-        "joins_by_source": "FrozenMap[GraphNodeId, tuple[JoinEdge, ...]]",
+        "joins_by_source": "FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",

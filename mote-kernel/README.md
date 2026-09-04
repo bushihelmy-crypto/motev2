@@ -32,6 +32,11 @@ the sole value-source/readiness truth; direct, conditional, and join edges are t
 control edge. Graph-input-only and zero-input roots remain automatic entries, while `set_outputs()` is only a result
 projection and never activates a node. `Graph.values()` creates immutable concrete frames.
 
+`Graph.feedback(initial=..., repeat=...)` explicitly gives one callable-node input a first-activation graph input and
+an immediately-previous-activation node output. The compiler currently admits only its closed direct self-feedback
+shape: one callable root target, an explicit `START` edge, one self route, one `END` route, and a graph output from the
+target's repeat publication. This is an in-process composition contract; it does not add cross-process value recovery.
+
 `Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.

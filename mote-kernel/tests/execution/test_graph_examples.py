@@ -29,6 +29,135 @@ from mote_kernel.execution import Graph
 
 
 @pytest.mark.asyncio
+async def test_cyclic_join_runs_two_distinct_occurrences_and_reads_each_cohort() -> None:
+    tick_calls = 0
+    joined_calls = 0
+    settled: list[str] = []
+
+    async def tick(values: Graph.Values[int]) -> Graph.Values[int]:
+        nonlocal tick_calls
+        tick_calls += 1
+        return Graph.values(pulse=values["seed"] + tick_calls)
+
+    async def left(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["pulse"] + 10)
+
+    async def right(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["pulse"] + 20)
+
+    async def join_values(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        nonlocal joined_calls
+        joined_calls += 1
+        route = "again" if joined_calls == 1 else "done"
+        return Graph.success(Graph.values(total=values["left"] + values["right"]), route=route)
+
+    async def commit(transition: Graph.Transition[int], /) -> Graph.State:
+        if isinstance(transition.result, Graph.SuccessResult):
+            settled.append(transition.result.node_id)
+        return transition.candidate_state
+
+    seed = Graph.graph_input("seed", int)
+    pulse = Graph.node_output("tick", "pulse")
+    graph = Graph[int]("test.cyclic-join-occurrences")
+    graph.add_node("tick", tick, inputs={"seed": seed}, outputs={"pulse": int})
+    graph.add_node("left", left, inputs={"pulse": pulse}, outputs={"value": int})
+    graph.add_node("right", right, inputs={"pulse": pulse}, outputs={"value": int})
+    graph.add_node(
+        "joined",
+        join_values,
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={"total": int},
+    )
+    graph.add_edge(Graph.START, "tick")
+    graph.add_edge("tick", "left")
+    graph.add_edge("tick", "right")
+    graph.add_join(("left", "right"), "joined")
+    graph.add_conditional_edge("joined", "again", "tick")
+    graph.add_conditional_edge("joined", "done", Graph.END)
+    graph.set_outputs({"total": Graph.node_output("joined", "total")})
+
+    result = await graph.run(
+        Graph.values(seed=5),
+        run_id="cyclic-join-run",
+        commit=commit,
+        max_supersteps=8,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["total"] == 44
+    assert tick_calls == 2
+    assert joined_calls == 2
+    assert settled.count("tick") == settled.count("left") == settled.count("right") == settled.count("joined") == 2
+
+
+@pytest.mark.asyncio
+async def test_cyclic_join_accepts_nested_children_at_each_occurrence() -> None:
+    child_calls = 0
+    join_calls = 0
+
+    async def child_step(values: Graph.Values[int]) -> Graph.Values[int]:
+        nonlocal child_calls
+        child_calls += 1
+        return Graph.values(value=values["pulse"] + 1)
+
+    child = Graph[int]("test.cyclic-nested-child")
+    child.add_node(
+        "step",
+        child_step,
+        inputs={"pulse": Graph.graph_input("pulse", int)},
+        outputs={"value": int},
+    )
+    child.set_outputs({"value": Graph.node_output("step", "value")})
+
+    async def tick(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(pulse=values["seed"] + join_calls + 1)
+
+    async def join_values(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        nonlocal join_calls
+        join_calls += 1
+        return Graph.success(
+            Graph.values(total=values["left"] + values["right"]),
+            route="again" if join_calls == 1 else "done",
+        )
+
+    graph = Graph[int]("test.cyclic-nested-join")
+    graph.add_node(
+        "tick",
+        tick,
+        inputs={"seed": Graph.graph_input("seed", int)},
+        outputs={"pulse": int},
+    )
+    graph.add_node("left", child, inputs={"pulse": Graph.node_output("tick", "pulse")})
+    graph.add_node("right", child, inputs={"pulse": Graph.node_output("tick", "pulse")})
+    graph.add_node(
+        "joined",
+        join_values,
+        inputs={
+            "left": Graph.node_output("left", "value"),
+            "right": Graph.node_output("right", "value"),
+        },
+        outputs={"total": int},
+    )
+    graph.add_edge(Graph.START, "tick")
+    graph.add_edge("tick", "left")
+    graph.add_edge("tick", "right")
+    graph.add_join(("left", "right"), "joined")
+    graph.add_conditional_edge("joined", "again", "tick")
+    graph.add_conditional_edge("joined", "done", Graph.END)
+    graph.set_outputs({"total": Graph.node_output("joined", "total")})
+
+    result = await graph.run(Graph.values(seed=1), max_supersteps=8)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["total"] == 8
+    assert child_calls == 4
+    assert join_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_linear_treasure_hunt_completes_through_direct_edges() -> None:
     result = await build_treasure_graph().run(Graph.values(clue="倒着读：洞树老"), run_id="example-linear")
 
