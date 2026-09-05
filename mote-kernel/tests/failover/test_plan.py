@@ -27,7 +27,6 @@ from mote_kernel.failover.plan import (
     FailoverProfileOverride,
     OperationSemantics,
     PortBinding,
-    ReconcileMode,
     RetryBudget,
     RetryContext,
     RetryTiming,
@@ -143,7 +142,6 @@ def test_profile_and_override_merge_parameters_without_changing_the_default() ->
     assert merged.budget.max_wire_attempts == 2
     assert merged.timing.total_deadline_seconds == 60.0
     assert merged.semantics is profile.semantics
-    assert merged.reconcile is profile.reconcile
     assert merged.request_transform is replacement_transform
     assert profile.request_transform is default_transform
     with pytest.raises(FrozenInstanceError):
@@ -173,11 +171,6 @@ def test_profile_merge_rejects_a_non_profile_default() -> None:
         ),
         lambda: FailoverProfile[str](
             FailoverProfileId("profile"),
-            semantics=OperationSemantics.PURE,
-            reconcile=cast(ReconcileMode, "optional"),
-        ),
-        lambda: FailoverProfile[str](
-            FailoverProfileId("profile"),
             request_transform=cast(TransformRequest[str], object()),
         ),
     ),
@@ -193,7 +186,6 @@ def test_profile_rejects_invalid_values(factory: InvalidFactory) -> None:
         lambda: FailoverProfileOverride[str](budget=cast(RetryBudget, object())),
         lambda: FailoverProfileOverride[str](timing=cast(RetryTiming, object())),
         lambda: FailoverProfileOverride[str](semantics=cast(OperationSemantics, "pure")),
-        lambda: FailoverProfileOverride[str](reconcile=cast(ReconcileMode, "required")),
         lambda: FailoverProfileOverride[str](request_transform=cast(TransformRequest[str], object())),
     ),
 )
@@ -243,7 +235,7 @@ def test_snapshot_plan_and_initial_context_capture_one_revision() -> None:
     profile = _profile()
     snapshot = FailoverConfigSnapshot(FailoverConfigRevision(7), profile)
     plan = FailoverPlan(FailoverConfigRevision(7), FailoverPortId("payment"), profile)
-    context = RetryContext[object, object](
+    context = RetryContext(
         FailoverOperationId("operation-1"),
         FailoverConfigRevision(7),
     )
@@ -290,9 +282,9 @@ def test_snapshot_plan_and_resolution_reject_invalid_values(factory: InvalidFact
         factory()
 
 
-def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
+def test_retry_context_carries_only_failover_owned_usage_and_cursors() -> None:
     wait_until = datetime(2030, 1, 1, tzinfo=UTC)
-    context = RetryContext[str, str](
+    context = RetryContext(
         FailoverOperationId("operation-2"),
         FailoverConfigRevision(3),
         request_version=2,
@@ -304,8 +296,6 @@ def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
             StrategyUsage(FailureStrategy.SWITCH_ENDPOINT, 1),
         ),
         wait_until=wait_until,
-        receipt="receipt-1",
-        reconcile_handle="handle-1",
     )
 
     assert context.uses_for(FailureStrategy.WAIT) == 2
@@ -315,8 +305,6 @@ def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
     assert updated.last_strategy is FailureStrategy.WAIT
     assert context.uses_for(FailureStrategy.WAIT) == 2
     assert context.wait_until == wait_until
-    assert context.receipt == "receipt-1"
-    assert context.reconcile_handle == "handle-1"
 
     with pytest.raises(FailoverContractError, match="strategy lookup"):
         context.uses_for(cast(FailureStrategy, "wait"))
@@ -327,49 +315,39 @@ def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
 @pytest.mark.parametrize(
     "factory",
     (
-        lambda: RetryContext[object, object](FailoverOperationId(" operation"), FailoverConfigRevision(1)),
-        lambda: RetryContext[object, object](FailoverOperationId("operation"), FailoverConfigRevision(0)),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=-1
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=0
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), attempt_ordinal=-1
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), endpoint_cursor=-1
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), credential_cursor=-1
-        ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(FailoverOperationId(" operation"), FailoverConfigRevision(1)),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(0)),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=-1),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=0),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(1), attempt_ordinal=-1),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(1), endpoint_cursor=-1),
+        lambda: RetryContext(FailoverOperationId("operation"), FailoverConfigRevision(1), credential_cursor=-1),
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             strategy_usages=cast(tuple[StrategyUsage, ...], (object(),)),
         ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             strategy_usages=(StrategyUsage(FailureStrategy.WAIT, 1), StrategyUsage(FailureStrategy.WAIT, 2)),
         ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             last_failure=cast(FailureClass, "rate_limited"),
         ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             last_signal=cast(FailureSignal, object()),
         ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             last_strategy=cast(FailureStrategy, "wait"),
         ),
-        lambda: RetryContext[object, object](
+        lambda: RetryContext(
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
             wait_until=datetime(2030, 1, 1),

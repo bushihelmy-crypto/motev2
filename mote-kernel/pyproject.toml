@@ -141,59 +141,65 @@ quote-style = "double"
 # Failover keeps the status/error-hint table in its policy owner and leaves
 # profiles with parameters only; removing configurable duplicate rules and the
 # cursor's copied budget locks in the resulting smaller single-truth model.
+# The Failover Port decorator assembles four domain stages plus one terminal
+# projection directly on the canonical Graph.  Typed phase values preserve
+# durable control facts.  Provider version checks and existing-result lookups
+# remain wholly inside the wrapped Port; the Kernel has no reconciliation path.
+# Hook execution is deliberately absent from this topology.  The reviewed cost
+# is ratcheted here rather than hidden in a runner or optional-field state machine.
 # The atomic Graph commit boundary now has one complete owner in
 # execution/commit.py: typed write-set construction, exact acknowledgement,
 # and post-confirmation frame staging stay together instead of being hidden in
 # family-driver wiring.  The resulting measured shape is ratcheted as an
 # intentional ownership boundary, not reduced through aliases or wrappers.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 710
-type_definitions = 417
-dataclass_types = 246
-dataclass_fields = 677
-decision_points = 2241
+top_level_definitions = 727
+type_definitions = 432
+dataclass_types = 261
+dataclass_fields = 697
+decision_points = 2247
 logical_clone_pairs = 16
 statement_clone_pairs = 25
 near_clone_pairs = 15
 record_shape_clone_pairs = 32
 thin_single_use_helpers = 1
-single_use_private_dataclasses = 14
+single_use_private_dataclasses = 20
 test_only_private_definitions = 0
-function_definitions = 548
-method_definitions = 234
+function_definitions = 560
+method_definitions = 244
 nested_function_definitions = 23
-semantic_nodes = 41201
-cognitive_complexity = 3017
-await_points = 121
+semantic_nodes = 42018
+cognitive_complexity = 3012
+await_points = 123
 exception_handlers = 82
 attribute_writes = 87
 task_creations = 16
 max_cyclomatic_complexity = 79
 max_cognitive_complexity = 122
 max_nesting_depth = 6
-internal_call_edges = 772
+internal_call_edges = 788
 recursive_call_components = 5
 max_call_fan_out = 23
 max_call_chain_depth = 17
 max_call_chain_cognitive = 315
-cross_module_call_edges = 838
-cross_module_call_pairs = 251
+cross_module_call_edges = 861
+cross_module_call_pairs = 256
 max_runtime_module_fan_out = 24
-internal_import_edges = 379
+internal_import_edges = 386
 import_cycle_components = 0
 max_module_fan_out = 25
 max_module_dependency_depth = 29
 ambiguous_internal_dispatches = 57
 transparent_private_definitions = 33
 thin_single_use_methods = 12
-low_usage_private_definitions = 179
+low_usage_private_definitions = 187
 linear_private_call_chain_links = 36
-production_unreferenced_definitions = 10
+production_unreferenced_definitions = 7
 low_cohesion_classes = 3
 max_methods_per_class = 28
 max_fields_per_class = 35
 max_class_components = 4
-complexity_hotspots = 87
+complexity_hotspots = 89
 stateful_async_hotspots = 7
 unused_private_definitions = 0
 unread_private_fields = 0

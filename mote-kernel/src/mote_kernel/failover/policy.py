@@ -29,11 +29,7 @@ from mote_kernel.failover.contract import (
     Unknown,
     Wait,
 )
-from mote_kernel.failover.plan import (
-    FailoverPlan,
-    ReconcileMode,
-    RetryContext,
-)
+from mote_kernel.failover.plan import FailoverPlan, RetryContext
 
 TransformT = TypeVar("TransformT")
 ResultT = TypeVar("ResultT")
@@ -46,7 +42,6 @@ class ObservationRoute(StrEnum):
 
     COMPLETED = "completed"
     PREPARE = "prepare"
-    RECONCILE = "reconcile"
     RETURN_TO_MODEL = "return_to_model"
     ABORT = "abort"
 
@@ -84,11 +79,6 @@ class FailoverDecision(Generic[TransformT]):
                 raise FailoverContractError("prepare decisions require a preparation strategy")
             if self.preparation is None:
                 raise FailoverContractError("prepare decisions require a preparation action")
-        elif self.route is ObservationRoute.RECONCILE:
-            if self.strategy is not FailureStrategy.RECONCILE:
-                raise FailoverContractError("reconcile decisions require the reconcile strategy")
-            if self.preparation is not None:
-                raise FailoverContractError("reconcile decisions cannot carry preparation")
         elif self.route is ObservationRoute.ABORT:
             if self.strategy is not FailureStrategy.ABORT:
                 raise FailoverContractError("abort decisions require the abort strategy")
@@ -139,7 +129,7 @@ def _fixed_strategy(evidence: FailureEvidence) -> FailureStrategy | None:
 def route_rejected(
     evidence: FailureEvidence,
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
 ) -> FailoverDecision[TransformT]:
     """Route a definitive rejection without performing the next action."""
 
@@ -191,51 +181,10 @@ def route_rejected(
     )
 
 
-def route_uncertain(
-    evidence: FailureEvidence | None,
-    has_reconcile_handle: bool,
-    plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
-) -> FailoverDecision[TransformT]:
-    """Route an uncertain outcome.
-
-    An uncertain operation is reconciled only when the adapter supplied a
-    real handle and the profile permits reconciliation.  Without a handle the
-    only safe route is to return control to the model.
-    """
-
-    if evidence is not None and type(evidence) is not FailureEvidence:
-        raise FailoverContractError("uncertain routing requires FailureEvidence")
-    if type(has_reconcile_handle) is not bool:
-        raise FailoverContractError("has_reconcile_handle must be a bool")
-    if type(plan) is not FailoverPlan:
-        raise FailoverContractError("uncertain routing requires FailoverPlan")
-    if type(context) is not RetryContext:
-        raise FailoverContractError("uncertain routing requires RetryContext")
-    if context.plan_revision != plan.plan_revision:
-        raise FailoverContractError("uncertain routing requires the context's captured plan revision")
-    if not has_reconcile_handle:
-        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, evidence=evidence)
-    if plan.profile.reconcile is ReconcileMode.DISABLED:
-        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, evidence=evidence)
-    if context.uses_for(FailureStrategy.RECONCILE) >= plan.profile.budget.max_uses_for(FailureStrategy.RECONCILE):
-        return FailoverDecision(
-            ObservationRoute.RETURN_TO_MODEL,
-            strategy=FailureStrategy.RECONCILE,
-            evidence=evidence,
-            budget_exhausted=True,
-        )
-    return FailoverDecision(
-        ObservationRoute.RECONCILE,
-        strategy=FailureStrategy.RECONCILE,
-        evidence=evidence,
-    )
-
-
 def observe_and_route(
     outcome: PortOutcome[ResultT, ReceiptT, HandleT],
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
 ) -> FailoverDecision[TransformT]:
     """Observe one typed Port result and choose a fixed graph route."""
 
@@ -250,9 +199,9 @@ def observe_and_route(
     if isinstance(outcome, Rejected):
         return route_rejected(outcome.evidence, plan, context)
     if isinstance(outcome, InProgress):
-        return route_uncertain(None, True, plan, context)
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL)
     if type(outcome) is Unknown:
-        return route_uncertain(outcome.evidence, outcome.handle is not None, plan, context)
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, evidence=outcome.evidence)
     raise FailoverContractError("observation received an unsupported Port outcome")
 
 
@@ -260,7 +209,7 @@ def _preparation_for(
     strategy: FailureStrategy,
     evidence: FailureEvidence,
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
 ) -> PreparationAction[TransformT]:
     if strategy is FailureStrategy.WAIT:
         return Wait(_backoff_seconds(plan, context, evidence))
@@ -268,14 +217,14 @@ def _preparation_for(
         return RefreshCredential()
     if strategy is FailureStrategy.ROTATE_CREDENTIAL:
         return RotateCredential()
-    # _route_rejected_strategy has already consumed every terminal variant;
+    # route_rejected has already consumed every terminal variant;
     # SWITCH_ENDPOINT is the only admitted preparation strategy left here.
     return SwitchEndpoint()
 
 
 def _backoff_seconds(
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
     evidence: FailureEvidence,
 ) -> float:
     timing = plan.profile.timing
@@ -293,5 +242,4 @@ __all__ = [
     "ObservationRoute",
     "observe_and_route",
     "route_rejected",
-    "route_uncertain",
 ]

@@ -28,7 +28,6 @@ from mote_kernel.failover.plan import (
     FailoverPortId,
     FailoverProfile,
     FailoverProfileId,
-    ReconcileMode,
     RetryBudget,
     RetryContext,
     RetryTiming,
@@ -40,7 +39,6 @@ from mote_kernel.failover.policy import (
     ObservationRoute,
     observe_and_route,
     route_rejected,
-    route_uncertain,
 )
 
 InvalidFactory = Callable[[], object]
@@ -48,7 +46,6 @@ InvalidFactory = Callable[[], object]
 
 def _profile(
     budget: RetryBudget | None = None,
-    reconcile: ReconcileMode = ReconcileMode.OPTIONAL,
     request_transform: TransformRequest[str] | None = None,
     timing: RetryTiming | None = None,
 ) -> FailoverProfile[str]:
@@ -56,14 +53,12 @@ def _profile(
         FailoverProfileId("standard"),
         budget=budget or RetryBudget(),
         timing=timing or RetryTiming(base_backoff_seconds=1.0, max_backoff_seconds=8.0),
-        reconcile=reconcile,
         request_transform=request_transform,
     )
 
 
 def _plan(
     budget: RetryBudget | None = None,
-    reconcile: ReconcileMode = ReconcileMode.OPTIONAL,
     request_transform: TransformRequest[str] | None = None,
     timing: RetryTiming | None = None,
 ) -> FailoverPlan[str]:
@@ -72,7 +67,6 @@ def _plan(
         FailoverPortId("payment"),
         _profile(
             budget=budget,
-            reconcile=reconcile,
             request_transform=request_transform,
             timing=timing,
         ),
@@ -83,8 +77,8 @@ def _context(
     *,
     attempt_ordinal: int = 0,
     strategy_usages: tuple[StrategyUsage, ...] = (),
-) -> RetryContext[object, object]:
-    return RetryContext[object, object](
+) -> RetryContext:
+    return RetryContext(
         FailoverOperationId("operation-1"),
         FailoverConfigRevision(1),
         attempt_ordinal=attempt_ordinal,
@@ -235,41 +229,19 @@ def test_unknown_without_handle_returns_to_model_even_with_a_status_code() -> No
     assert decision.evidence is unknown.evidence
 
 
-def test_unknown_with_handle_reconciles_and_counts_reconcile_strategy() -> None:
-    unknown = Unknown("operation-receipt", _evidence(None, "no_response", FailureClass.NO_RESPONSE))
+def test_unknown_provider_context_is_returned_without_kernel_follow_up() -> None:
+    unknown = Unknown("provider-context", _evidence(None, "no_response", FailureClass.NO_RESPONSE))
     decision = observe_and_route(unknown, _plan(), _context())
 
-    assert decision.route is ObservationRoute.RECONCILE
-    assert decision.strategy is FailureStrategy.RECONCILE
+    assert decision.route is ObservationRoute.RETURN_TO_MODEL
+    assert decision.evidence is unknown.evidence
 
 
-def test_in_progress_receipt_reconciles_without_fabricating_failure_evidence() -> None:
+def test_in_progress_content_is_returned_without_kernel_polling() -> None:
     decision = observe_and_route(InProgress("receipt-1"), _plan(), _context())
 
-    assert decision.route is ObservationRoute.RECONCILE
+    assert decision.route is ObservationRoute.RETURN_TO_MODEL
     assert decision.evidence is None
-
-
-def test_reconcile_disabled_returns_uncertain_result_to_model() -> None:
-    unknown = Unknown("operation-receipt", _evidence(None, "no_response", FailureClass.NO_RESPONSE))
-    decision = observe_and_route(
-        unknown,
-        _plan(reconcile=ReconcileMode.DISABLED),
-        _context(),
-    )
-
-    assert decision.route is ObservationRoute.RETURN_TO_MODEL
-
-
-def test_reconcile_budget_exhaustion_returns_uncertain_result_to_model() -> None:
-    budget = RetryBudget(strategy_limits=(StrategyLimit(FailureStrategy.RECONCILE, 0),))
-    unknown = Unknown("operation-receipt", _evidence(None, "no_response", FailureClass.NO_RESPONSE))
-
-    decision = observe_and_route(unknown, _plan(budget=budget), _context())
-
-    assert decision.route is ObservationRoute.RETURN_TO_MODEL
-    assert decision.strategy is FailureStrategy.RECONCILE
-    assert decision.budget_exhausted is True
 
 
 def test_completed_outcome_is_terminal_success_route() -> None:
@@ -302,16 +274,10 @@ def test_fixed_terminal_and_abort_rules_are_projected() -> None:
     (
         lambda: route_rejected(cast(FailureEvidence, object()), _plan(), _context()),
         lambda: route_rejected(_evidence(429, "rate_limited"), cast(FailoverPlan[str], object()), _context()),
-        lambda: route_rejected(_evidence(429, "rate_limited"), _plan(), cast(RetryContext[object, object], object())),
-        lambda: route_uncertain(cast(FailureEvidence, object()), True, _plan(), _context()),
-        lambda: route_uncertain(_evidence(429, "rate_limited"), cast(bool, "yes"), _plan(), _context()),
-        lambda: route_uncertain(_evidence(429, "rate_limited"), True, cast(FailoverPlan[str], object()), _context()),
-        lambda: route_uncertain(
-            _evidence(429, "rate_limited"), True, _plan(), cast(RetryContext[object, object], object())
-        ),
+        lambda: route_rejected(_evidence(429, "rate_limited"), _plan(), cast(RetryContext, object())),
         lambda: observe_and_route(cast(PortOutcome[str, object, object], object()), _plan(), _context()),
         lambda: observe_and_route(Completed("ok"), cast(FailoverPlan[str], object()), _context()),
-        lambda: observe_and_route(Completed("ok"), _plan(), cast(RetryContext[object, object], object())),
+        lambda: observe_and_route(Completed("ok"), _plan(), cast(RetryContext, object())),
     ),
 )
 def test_policy_rejects_invalid_boundaries(factory: InvalidFactory) -> None:
@@ -320,15 +286,13 @@ def test_policy_rejects_invalid_boundaries(factory: InvalidFactory) -> None:
 
 
 def test_policy_rejects_a_context_from_another_plan_revision() -> None:
-    context = RetryContext[object, object](
+    context = RetryContext(
         FailoverOperationId("operation-1"),
         FailoverConfigRevision(2),
     )
 
     with pytest.raises(FailoverContractError, match="captured plan revision"):
         route_rejected(_evidence(429, "rate_limited"), _plan(), context)
-    with pytest.raises(FailoverContractError, match="captured plan revision"):
-        route_uncertain(None, True, _plan(), context)
     with pytest.raises(FailoverContractError, match="captured plan revision"):
         observe_and_route(Completed("ok"), _plan(), context)
 
@@ -350,13 +314,7 @@ def test_policy_rejects_a_context_from_another_plan_revision() -> None:
         lambda: FailoverDecision[str](ObservationRoute.PREPARE, strategy=FailureStrategy.WAIT),
         lambda: FailoverDecision[str](
             ObservationRoute.PREPARE,
-            strategy=FailureStrategy.RECONCILE,
-            preparation=Wait(1.0),
-        ),
-        lambda: FailoverDecision[str](ObservationRoute.RECONCILE, strategy=FailureStrategy.WAIT),
-        lambda: FailoverDecision[str](
-            ObservationRoute.RECONCILE,
-            strategy=FailureStrategy.RECONCILE,
+            strategy=FailureStrategy.RETURN_TO_MODEL,
             preparation=Wait(1.0),
         ),
         lambda: FailoverDecision[str](ObservationRoute.ABORT, strategy=FailureStrategy.WAIT),
