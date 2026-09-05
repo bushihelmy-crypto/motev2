@@ -243,6 +243,77 @@ def test_multiple_routes_may_share_a_target_and_identity_across_sources() -> Non
         compile_graph(definition)
 
 
+def test_sequential_conditional_branches_may_return_to_one_shared_node() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("plan", "hook", "invoke", "observe", "prepare", "reconcile")),
+        edges=(
+            DirectEdge(GraphNodeId("plan"), GraphNodeId("hook")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("invoke"), GraphNodeId("invoke")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("observe"), GraphNodeId("observe")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("prepare"), GraphNodeId("prepare")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("reconcile"), GraphNodeId("reconcile")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("done"), END),
+            DirectEdge(GraphNodeId("invoke"), GraphNodeId("hook")),
+            DirectEdge(GraphNodeId("observe"), GraphNodeId("hook")),
+            DirectEdge(GraphNodeId("prepare"), GraphNodeId("hook")),
+            DirectEdge(GraphNodeId("reconcile"), GraphNodeId("hook")),
+        ),
+    )
+
+    compiled = compile_graph(definition)
+
+    assert tuple(compiled.transition.activation_gates[GraphNodeId("hook")]) == (
+        ((GraphNodeId("invoke"), frozenset({None})),),
+        ((GraphNodeId("observe"), frozenset({None})),),
+        ((GraphNodeId("plan"), frozenset({None})),),
+        ((GraphNodeId("prepare"), frozenset({None})),),
+        ((GraphNodeId("reconcile"), frozenset({None})),),
+    )
+
+
+def test_shared_node_still_requires_join_for_an_independent_entry() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("plan", "hook", "invoke", "external")),
+        edges=(
+            DirectEdge(GraphNodeId("plan"), GraphNodeId("hook")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("invoke"), GraphNodeId("invoke")),
+            ConditionalEdge(GraphNodeId("hook"), GraphRouteId("done"), END),
+            DirectEdge(GraphNodeId("invoke"), GraphNodeId("hook")),
+            DirectEdge(GraphNodeId("external"), GraphNodeId("hook")),
+        ),
+    )
+
+    with pytest.raises(GraphValidationError, match=r"concurrent sources.*external.*plan"):
+        compile_graph(definition)
+
+
+def test_same_source_conditional_routes_may_share_one_target() -> None:
+    definition = graph(
+        nodes=(node("source"), node("shared")),
+        edges=(
+            ConditionalEdge(GraphNodeId("source"), GraphRouteId("left"), GraphNodeId("shared")),
+            ConditionalEdge(GraphNodeId("source"), GraphRouteId("right"), GraphNodeId("shared")),
+        ),
+    )
+
+    compile_graph(definition)
+
+
+def test_different_path_lengths_do_not_create_a_same_frontier_collision() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("source", "short", "long", "middle", "shared")),
+        edges=(
+            DirectEdge(GraphNodeId("source"), GraphNodeId("short")),
+            DirectEdge(GraphNodeId("source"), GraphNodeId("long")),
+            DirectEdge(GraphNodeId("short"), GraphNodeId("shared")),
+            DirectEdge(GraphNodeId("long"), GraphNodeId("middle")),
+            DirectEdge(GraphNodeId("middle"), GraphNodeId("shared")),
+        ),
+    )
+
+    compile_graph(definition)
+
+
 def test_compiling_the_same_definition_is_idempotent() -> None:
     definition = graph(
         nodes=(node("a"), node("b")),

@@ -1,6 +1,7 @@
 """Deterministic compiler for named value bindings and control topology."""
 
 from dataclasses import dataclass
+from itertools import combinations
 from typing import TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
@@ -53,6 +54,8 @@ from mote_kernel.state.graph_state import GraphJoinIdentity, GraphNodeId, GraphR
 GraphValueT = TypeVar("GraphValueT")
 RouteRequirements: TypeAlias = tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
 _RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+_ControlEvent: TypeAlias = tuple[GraphNodeId, GraphRouteId | None]
+_ControlEventPair: TypeAlias = tuple[_ControlEvent, _ControlEvent]
 
 
 def _activation_gate_sort_key(
@@ -95,6 +98,23 @@ class _RouteRequirementProof:
 
     requirements: RouteRequirements
     exact: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlFlowProof:
+    """Reachable same-frontier event pairs for ordinary control flow.
+
+    A conditional node contributes exactly one selected route, while its
+    direct successors are all emitted by that same activation.  The compiler
+    can therefore prove that two singleton gates are mutually exclusive by
+    traversing pairs of control events instead of treating every incoming
+    edge as an independent entry.  Join-produced nodes are deliberately
+    marked unknown: their pending-arrival state is owned by the runtime Join
+    machinery and is not guessed by this ordinary-flow proof.
+    """
+
+    coexisting_events: frozenset[_ControlEventPair]
+    join_affected_nodes: frozenset[GraphNodeId]
 
 
 def _all_single_source_gates(
@@ -283,6 +303,126 @@ def _can_reach(
     return False
 
 
+def _event_sort_key(event: _ControlEvent) -> tuple[GraphNodeId, bool, str]:
+    node_id, route = event
+    return node_id, route is not None, route or ""
+
+
+def _event_pair(first: _ControlEvent, second: _ControlEvent) -> _ControlEventPair | None:
+    if first[0] == second[0]:
+        return None
+    return (first, second) if _event_sort_key(first) <= _event_sort_key(second) else (second, first)
+
+
+def _event_options(
+    node_id: GraphNodeId,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    routes = tuple(sorted(conditional_targets[node_id]))
+    return tuple((node_id, route) for route in routes) or ((node_id, None),)
+
+
+def _ordinary_event_successors(
+    event: _ControlEvent,
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    """Return next events, keeping conditional choices on the target node."""
+
+    source, route = event
+    targets = set(direct_targets[source])
+    if route is not None:
+        conditional_target = conditional_targets[source][route]
+        if conditional_target != END:
+            targets.add(conditional_target)
+    return tuple(successor for target in sorted(targets) for successor in _event_options(target, conditional_targets))
+
+
+def _ordinary_reachable_events(
+    entries: tuple[GraphNodeId, ...],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+) -> frozenset[_ControlEvent]:
+    reached = {_event for entry in entries for _event in _event_options(entry, conditional_targets)}
+    pending = sorted(reached, key=_event_sort_key)
+    while pending:
+        event = pending.pop()
+        for successor in _ordinary_event_successors(event, direct_targets, conditional_targets):
+            if successor not in reached:
+                reached.add(successor)
+                pending.append(successor)
+    return frozenset(reached)
+
+
+def _join_affected_nodes(
+    node_ids: tuple[GraphNodeId, ...],
+    joins: tuple[JoinEdge, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> frozenset[GraphNodeId]:
+    affected = {join.target for join in joins if join.target != END}
+    pending = sorted(affected)
+    while pending:
+        source = pending.pop()
+        successors = set(direct_targets[source])
+        successors.update(target for target in conditional_targets[source].values() if target != END)
+        newly_affected = successors - affected
+        affected.update(newly_affected)
+        pending.extend(sorted(newly_affected))
+    return frozenset(node_id for node_id in node_ids if node_id in affected)
+
+
+def _control_flow_proof(
+    node_ids: tuple[GraphNodeId, ...],
+    entries: tuple[GraphNodeId, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    joins: tuple[JoinEdge, ...],
+) -> _ControlFlowProof:
+    """Compute ordinary-control events that may share one frontier.
+
+    The worklist tracks pairs rather than whole frontiers.  A pair can arise
+    either from two initial entries, from one activation's direct fan-out, or
+    from two already coexisting activations advancing one step.  This is the
+    exact pair projection for ordinary (non-Join) control flow and reaches a
+    finite fixed point even when the graph contains cycles.
+    """
+
+    reachable = _ordinary_reachable_events(entries, conditional_targets, direct_targets)
+    coexisting: set[_ControlEventPair] = set()
+    pending: list[_ControlEventPair] = []
+
+    def remember(first: _ControlEvent, second: _ControlEvent) -> None:
+        pair = _event_pair(first, second)
+        if pair is not None and pair not in coexisting:
+            coexisting.add(pair)
+            pending.append(pair)
+
+    for first, second in combinations(
+        sorted(reachable, key=_event_sort_key),
+        2,
+    ):
+        if first[0] in entries and second[0] in entries:
+            remember(first, second)
+    for event in sorted(reachable, key=_event_sort_key):
+        successors = _ordinary_event_successors(event, direct_targets, conditional_targets)
+        for first, second in combinations(successors, 2):
+            remember(first, second)
+
+    while pending:
+        first, second = pending.pop()
+        first_successors = _ordinary_event_successors(first, direct_targets, conditional_targets)
+        second_successors = _ordinary_event_successors(second, direct_targets, conditional_targets)
+        for first_successor in first_successors:
+            for second_successor in second_successors:
+                remember(first_successor, second_successor)
+
+    return _ControlFlowProof(
+        frozenset(coexisting),
+        _join_affected_nodes(node_ids, joins, direct_targets, conditional_targets),
+    )
+
+
 def _dominates(
     source: GraphNodeId,
     target: GraphNodeId,
@@ -399,6 +539,7 @@ def _gates_can_coexist(
     second: _RawActivationGate,
     requirements: dict[GraphNodeId, _RouteRequirementProof] | None = None,
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None = None,
+    control_proof: _ControlFlowProof | None = None,
 ) -> bool:
     """Return whether two gates can be satisfied by one frontier.
 
@@ -415,7 +556,12 @@ def _gates_can_coexist(
         second_requirement = _gate_route_requirements(second, requirements, conditional_targets)
         if first_requirement is None or second_requirement is None:
             return False
-        return _merge_route_requirements((first_requirement.requirements, second_requirement.requirements)) is not None
+        if _merge_route_requirements((first_requirement.requirements, second_requirement.requirements)) is None:
+            return False
+    if control_proof is not None and conditional_targets is not None:
+        proof = _ordinary_gates_can_coexist(first, second, conditional_targets, control_proof)
+        if proof is not None:
+            return proof
     if len(first) != 1 or len(second) != 1:
         return True
     first_source, first_route = first[0]
@@ -428,22 +574,83 @@ def _gates_can_coexist(
     )
 
 
+def _ordinary_gates_can_coexist(
+    first: _RawActivationGate,
+    second: _RawActivationGate,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    control_proof: _ControlFlowProof,
+) -> bool | None:
+    """Answer singleton-gate coexistence from the ordinary-flow proof.
+
+    ``None`` means that at least one gate is a Join gate or depends on a
+    Join-produced node; callers must retain the conservative answer instead
+    of treating the ordinary-flow proof as an exclusivity proof.
+    """
+
+    if len(first) != 1 or len(second) != 1:
+        return None
+    first_source, first_route = first[0]
+    second_source, second_route = second[0]
+    if first_source == second_source:
+        return not (first_route is not None and second_route is not None and first_route != second_route)
+    if first_source in control_proof.join_affected_nodes or second_source in control_proof.join_affected_nodes:
+        return None
+    first_events = _gate_events(first, conditional_targets)
+    second_events = _gate_events(second, conditional_targets)
+    return any(
+        _event_pair(first_event, second_event) in control_proof.coexisting_events
+        for first_event in first_events
+        for second_event in second_events
+    )
+
+
+def _gate_events(
+    gate: _RawActivationGate,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    """Expand one compiler-produced singleton gate into its route events."""
+
+    source, route = next(iter(gate))
+    options = _event_options(source, conditional_targets)
+    if route is None:
+        return options
+    return ((source, route),)
+
+
 def _reject_ambiguous_activation_gates(
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
     requirements: dict[GraphNodeId, _RouteRequirementProof],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     feedback_targets: frozenset[GraphNodeId] = frozenset(),
+    control_proof: _ControlFlowProof | None = None,
 ) -> None:
     for target, gates in activation_gates.items():
         if target in feedback_targets:
             continue
         ordered = tuple(gates)
         for position, first in enumerate(ordered):
-            if any(
-                _gates_can_coexist(first, second, requirements, conditional_targets)
-                for second in ordered[position + 1 :]
-            ):
-                raise GraphValidationError(f"target {target!r} has multiple activation gates without an explicit Join")
+            for second in ordered[position + 1 :]:
+                if not _gates_can_coexist(
+                    first,
+                    second,
+                    requirements,
+                    conditional_targets,
+                    control_proof,
+                ):
+                    continue
+                sources: tuple[GraphNodeId, ...] = tuple(
+                    sorted(
+                        {source for source, _route in (*first, *second)},
+                    )
+                )
+                if len(sources) > 1:
+                    guidance = f"concurrent sources may be {sources!r}, declare graph.add_join({sources!r}, {target!r})"
+                else:
+                    single_source = next(iter(sources))
+                    guidance = f"source {single_source!r} contributes more than one path to the same target"
+                raise GraphValidationError(
+                    f"target {target!r} has multiple activation gates without an explicit Join; {guidance}"
+                )
 
 
 def _repeatable_nodes(
@@ -680,7 +887,8 @@ def _compile_join_occurrence_plans(
             }
             if len(repeated_sources) != len(edge.sources) or len(cohort_signatures) != 1:
                 raise GraphValidationError(
-                    f"join {edge.sources!r} -> {edge.target!r} has no provable occurrence identity"
+                    f"join {edge.sources!r} -> {edge.target!r} has no provable occurrence identity; "
+                    "multiple activation gates cannot supply its sources"
                 )
             offsets = tuple((source, 1) for source in edge.sources)
         else:
@@ -692,7 +900,8 @@ def _compile_join_occurrence_plans(
                 target_level = max(absolute_levels[source] for source in edge.sources) + 1
             except KeyError as error:
                 raise GraphValidationError(
-                    f"join {edge.sources!r} -> {edge.target!r} has no unique occurrence coordinate"
+                    f"join {edge.sources!r} -> {edge.target!r} has no unique occurrence coordinate; "
+                    "multiple activation gates create repeatable source paths"
                 ) from error
             offsets = tuple((source, target_level - absolute_levels[source]) for source in edge.sources)
         compiled.append(CompiledJoin(GraphJoinIdentity(edge.sources, edge.target), offsets))
@@ -853,6 +1062,7 @@ def _feedback_gate_partition(
     requirements: dict[GraphNodeId, _RouteRequirementProof],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     absolute_levels: dict[GraphNodeId, int],
+    control_proof: _ControlFlowProof | None = None,
 ) -> tuple[tuple[ActivationGate, ...], tuple[ActivationGate, ...]]:
     """Partition every target gate into one explicit initial/repeat family.
 
@@ -893,13 +1103,19 @@ def _feedback_gate_partition(
     for gates in (initial_gates, repeat_gates):
         for position, first in enumerate(gates):
             for second in gates[position + 1 :]:
-                if _gates_can_coexist(first, second, requirements, conditional_targets):
+                if _gates_can_coexist(first, second, requirements, conditional_targets, control_proof):
                     raise GraphValidationError(
                         f"feedback target {target!r} has activation gates that can arrive together without a Join"
                     )
     for initial_gate in initial_gates:
         for repeat_gate in repeat_gates:
-            if not _gates_can_coexist(initial_gate, repeat_gate, requirements, conditional_targets):
+            if not _gates_can_coexist(
+                initial_gate,
+                repeat_gate,
+                requirements,
+                conditional_targets,
+                control_proof,
+            ):
                 continue
             if _one_shot_initial_precedes_repeat(
                 initial_gate,
@@ -942,6 +1158,7 @@ def _compile_activation_rules(
     edges: tuple[Edge, ...],
     graph_outputs: GraphOutputBindings[GraphValueT],
     absolute_levels: dict[GraphNodeId, int],
+    control_proof: _ControlFlowProof | None = None,
 ) -> CompiledActivationRules[GraphValueT]:
     declared = tuple(
         (node_id, input_name, resolution)
@@ -1011,6 +1228,7 @@ def _compile_activation_rules(
                 requirements,
                 conditional_targets,
                 absolute_levels,
+                control_proof,
             )
             partition = (initial_gates, repeat_gates)
             if expected_partition is None:
@@ -1252,11 +1470,19 @@ def _compile_graph(
         conditional_targets,
     )
     feedback_targets = frozenset(node_id for node_id, bindings in feedback_bindings_by_node.items() if bindings)
+    control_proof = _control_flow_proof(
+        node_ids,
+        entries,
+        direct_targets,
+        conditional_targets,
+        tuple(joins),
+    )
     _reject_ambiguous_activation_gates(
         activation_gates,
         route_requirements,
         conditional_targets,
         feedback_targets,
+        control_proof,
     )
 
     guarantees = _guaranteed_sets(node_ids, entries, activation_gates)
@@ -1337,6 +1563,7 @@ def _compile_graph(
         definition.edges,
         graph_outputs,
         absolute_levels,
+        control_proof,
     )
 
     materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
