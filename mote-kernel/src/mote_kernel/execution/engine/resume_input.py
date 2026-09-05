@@ -5,7 +5,7 @@ from typing import TypeVar, cast
 from mote_kernel.execution.engine.routing import (
     _graph_input_coordinate,
     _node_output_coordinate,
-    feedback_source_for_cause,
+    predecessor_source_for_cause,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -14,7 +14,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.graph.ports import (
-    CompiledActivationRule,
+    CompiledPredecessorInput,
     GraphInputPort,
     MaterializationPlan,
     NodeOutputPort,
@@ -141,18 +141,26 @@ def _source_coordinate(
     return _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
 
 
-def _feedback_source_for_state(
+def _predecessor_source_for_state(
     state: GraphRunState,
-    rule: CompiledActivationRule[GraphValueT],
-) -> tuple[GraphInputPort | NodeOutputPort, PublicationSelection | None, int]:
+    input_name: str,
+    binding: CompiledPredecessorInput,
+) -> tuple[NodeOutputPort, int]:
     try:
-        node = frontier_node(state.frontier, rule.target)
+        node = frontier_node(state.frontier, binding.target)
         if node is None:
-            raise InvalidRoutingCommandError("feedback activation is not present in the current frontier")
-        selected = feedback_source_for_cause(state, rule.target, state.superstep, node.cause, rule)
+            raise InvalidRoutingCommandError("predecessor-bound activation is not present in the current frontier")
+        selected = predecessor_source_for_cause(
+            state,
+            binding.target,
+            input_name,
+            state.superstep,
+            node.cause,
+            binding,
+        )
     except InvalidRoutingCommandError as error:
         raise SnapshotMismatchError(str(error)) from error
-    return selected.source, selected.publication, state.superstep
+    return selected.source, selected.predecessor.superstep
 
 
 def node_inputs_available(
@@ -164,23 +172,31 @@ def node_inputs_available(
     state: GraphRunState | None = None,
 ) -> bool:
     plan = _require_node_materialization(graph, node_id)
+    has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
     if state is not None:
         if state.run_id != scope_run.graph_run_id:
-            raise SnapshotMismatchError("feedback input availability scope does not match authoritative state")
-        if (
-            any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries)
-            and activation_superstep != state.superstep
-        ):
-            raise SnapshotMismatchError("feedback input availability coordinate does not match authoritative state")
+            raise SnapshotMismatchError("predecessor input availability scope does not match authoritative state")
+        if has_predecessor and activation_superstep != state.superstep:
+            raise SnapshotMismatchError("predecessor input availability coordinate does not match authoritative state")
     for binding in plan.bindings.entries:
         effective = binding.source
-        publication = binding.publication
-        anchor = activation_superstep
-        if isinstance(effective, CompiledActivationRule):
+        if isinstance(effective, CompiledPredecessorInput):
             if state is None:
-                raise SnapshotMismatchError("feedback input availability requires authoritative graph state")
-            effective, publication, anchor = _feedback_source_for_state(state, effective)
-        coordinate = _source_coordinate(graph, scope_run, anchor, effective, publication)
+                raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
+            effective, predecessor_superstep = _predecessor_source_for_state(
+                state,
+                binding.destination.local_name,
+                effective,
+            )
+            coordinate = _node_output_coordinate(graph, scope_run, effective, predecessor_superstep)
+        else:
+            coordinate = _source_coordinate(
+                graph,
+                scope_run,
+                activation_superstep,
+                effective,
+                binding.publication,
+            )
         if isinstance(coordinate, GraphInputAvailabilityCoordinate):
             if not frames.has_graph_input(coordinate):
                 return False
@@ -200,16 +216,16 @@ def pending_node_input_available(
     if node is None or not isinstance(node.settlement, PendingGraphNode):
         raise SnapshotMismatchError("input availability requires a current pending node")
     plan = _require_node_materialization(graph, node_id)
-    has_feedback = any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries)
+    has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
     if isinstance(node.settlement.input, OverrideGraphNodeInput):
-        if has_feedback:
-            raise SnapshotMismatchError("feedback activation cannot use an input override")
+        if has_predecessor:
+            raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
         return True
     coordinate = _resume_input_coordinate(
         stable_activation(scope_run, GraphActivationIdentity(state.run_id, state.superstep, node_id)),
         plan,
     )
-    if not has_feedback and frames.has_resume_input(coordinate):
+    if not has_predecessor and frames.has_resume_input(coordinate):
         return True
     return node_inputs_available(
         graph,
@@ -239,15 +255,15 @@ def materialize_node_input(
             raise SnapshotMismatchError("effective input requires a current pending node")
     activation = stable_activation(scope_run, GraphActivationIdentity(state.run_id, state.superstep, node_id))
     plan = _require_node_materialization(graph, node_id)
-    # A feedback binding must always be resolved from the state-owned cause;
+    # A predecessor binding must always be resolved from the state-owned cause;
     # neither an override nor a cached frame may replace that selection.
-    has_feedback = any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries)
+    has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
     if isinstance(effective_input, OverrideGraphNodeInput):
-        if has_feedback:
-            raise SnapshotMismatchError("feedback activation cannot use an input override")
+        if has_predecessor:
+            raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
         return decode_resume_input(graph, node_id, bytes(effective_input.payload))
     resume_coordinate = _resume_input_coordinate(activation, plan)
-    if not any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries):
+    if not has_predecessor:
         try:
             return frames.lookup(resume_coordinate).frame
         except SnapshotMismatchError:
@@ -255,11 +271,15 @@ def materialize_node_input(
     entries: list[NamedValue[GraphValueT]] = []
     for binding in plan.bindings.entries:
         source = binding.source
-        publication = binding.publication
-        anchor = state.superstep
-        if isinstance(source, CompiledActivationRule):
-            source, publication, anchor = _feedback_source_for_state(state, source)
-        coordinate = _source_coordinate(graph, scope_run, anchor, source, publication)
+        if isinstance(source, CompiledPredecessorInput):
+            source, predecessor_superstep = _predecessor_source_for_state(
+                state,
+                binding.destination.local_name,
+                source,
+            )
+            coordinate = _node_output_coordinate(graph, scope_run, source, predecessor_superstep)
+        else:
+            coordinate = _source_coordinate(graph, scope_run, state.superstep, source, binding.publication)
         if isinstance(source, GraphInputPort):
             value_name = source.name
             unavailable = f"graph input {source.name!r}"

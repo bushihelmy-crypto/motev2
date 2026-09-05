@@ -8,7 +8,6 @@ from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
-    CompiledActivationRule,
     DefinitionScope,
     FrameDescriptor,
     GraphOutputBindings,
@@ -46,31 +45,6 @@ class FrozenMap(Mapping[KeyT, ValueT_co], Generic[KeyT, ValueT_co]):
 
     def __len__(self) -> int:
         return len(self.entries)
-
-
-@dataclass(frozen=True, slots=True)
-class CompiledActivationRules(Generic[GraphValueT]):
-    """Compiler-admitted feedback rules, one immutable rule per target input."""
-
-    entries: tuple[CompiledActivationRule[GraphValueT], ...]
-
-    def for_input(
-        self,
-        node_id: GraphNodeId,
-        input_name: str,
-    ) -> CompiledActivationRule[GraphValueT] | None:
-        return next(
-            (rule for rule in self.entries if rule.target == node_id and rule.input_name == input_name),
-            None,
-        )
-
-    def for_target(
-        self,
-        node_id: GraphNodeId,
-    ) -> tuple[CompiledActivationRule[GraphValueT], ...]:
-        """Return every feedback binding admitted for one target."""
-
-        return tuple(rule for rule in self.entries if rule.target == node_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +92,6 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
     graph_outputs: GraphOutputBindings[GraphValueT]
     resource_order: tuple[ResourceId, ...]
-    activation_rules: CompiledActivationRules[GraphValueT]
     activation_gates: FrozenMap[GraphNodeId, tuple[ActivationGate, ...]]
 
 

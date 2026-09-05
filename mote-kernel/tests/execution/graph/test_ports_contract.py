@@ -6,9 +6,8 @@ import pytest
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.ports import (
-    FeedbackInputBinding,
-    GraphInputRef,
     NodeOutputRef,
+    PredecessorOutputRef,
     PublicationSelection,
     PublicationSelectionKind,
     canonical_nominal_type,
@@ -16,6 +15,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.state.graph_state import GraphNodeId
 
 
 def test_nominal_type_rejects_a_nonclass_declaration() -> None:
@@ -84,36 +84,18 @@ def test_graph_output_normalizer_rejects_type_declarations_in_source_position() 
         normalize_graph_output_declarations({"value": str})
 
 
-def test_graph_feedback_requires_exact_reference_types() -> None:
-    seed = Graph.graph_input("seed", str)
-    repeat = Graph.node_output("loop", "value")
-
-    with pytest.raises(GraphValidationError, match="feedback initial"):
-        Graph.feedback(initial=cast(GraphInputRef[str], object()), repeat=repeat)
-    assert Graph.feedback(
-        initial=Graph.node_output("previous", "value"),
-        repeat=repeat,
-    ) == FeedbackInputBinding(
-        Graph.node_output("previous", "value"),
-        repeat,
-    )
-    with pytest.raises(GraphValidationError, match="feedback repeat"):
-        Graph.feedback(initial=seed, repeat=cast(NodeOutputRef, object()))
+def test_graph_node_output_overloads_keep_fixed_and_causal_addresses_distinct() -> None:
+    assert Graph.node_output("producer", "value") == NodeOutputRef(GraphNodeId("producer"), "value")
+    assert Graph.node_output("value") == PredecessorOutputRef("value")
 
 
-def test_feedback_binding_defends_its_internal_initial_reference_boundary() -> None:
-    with pytest.raises(GraphValidationError, match="feedback initial"):
-        FeedbackInputBinding(
-            cast(GraphInputRef[str], object()),
-            Graph.node_output("loop", "value"),
-        )
+def test_predecessor_output_name_is_canonicalized_at_the_facade() -> None:
+    with pytest.raises(GraphValidationError, match="source output"):
+        Graph.node_output(" value ")
 
 
-def test_graph_feedback_constructs_the_canonical_typed_binding() -> None:
-    seed = Graph.graph_input("seed", str)
-    repeat = Graph.node_output("loop", "value")
+def test_predecessor_output_reference_is_only_valid_as_a_node_input() -> None:
+    causal = cast(NodeOutputRef, Graph.node_output("value"))
 
-    assert Graph.feedback(initial=seed, repeat=repeat) == FeedbackInputBinding(
-        seed,
-        repeat,
-    )
+    with pytest.raises(GraphValidationError, match="graph output 'value' must bind"):
+        normalize_graph_output_declarations({"value": causal})

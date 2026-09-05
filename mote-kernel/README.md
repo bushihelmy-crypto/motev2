@@ -32,10 +32,13 @@ the sole value-source/readiness truth; direct, conditional, and join edges are t
 control edge. Graph-input-only and zero-input roots remain automatic entries, while `set_outputs()` is only a result
 projection and never activates a node. `Graph.values()` creates immutable concrete frames.
 
-`Graph.feedback(initial=..., repeat=...)` explicitly gives one callable-node input a first-activation graph input and
-an immediately-previous-activation node output. The compiler currently admits only its closed direct self-feedback
-shape: one callable root target, an explicit `START` edge, one self route, one `END` route, and a graph output from the
-target's repeat publication. This is an in-process composition contract; it does not add cross-process value recovery.
+`Graph.node_output()` has two typed overloads. `Graph.node_output("producer", "name")` reads a fixed producer;
+`Graph.node_output("name")` reads the one control predecessor that actually activated the consumer. Causal-input nodes
+use an ordinary initializer for their first value and cannot be START or Join targets. The compiler derives every
+possible predecessor from the topology, requires the requested output with one exact type on all of them, and admits
+multiple incoming paths only when it can prove them mutually exclusive. Runtime selection comes only from the
+state-owned activation cause and its exact publication—never from a latest-value scan. This is currently an in-process
+value contract; the atomic commit seam is ready, but no concrete cross-process publication store is included.
 
 `Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
 

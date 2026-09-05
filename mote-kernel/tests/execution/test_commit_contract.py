@@ -10,11 +10,9 @@ from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.task import GraphTask, task_identity
 from mote_kernel.execution.errors import (
     FrameInstallationInvariantError,
-    GraphValidationError,
     NodeExecutionContractError,
     SnapshotMismatchError,
 )
-from mote_kernel.execution.graph.ports import FeedbackInputBinding, NodeOutputRef
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, root_scope_run
@@ -433,11 +431,3 @@ def test_frame_evidence_requires_exact_typed_frames_and_is_not_hashable() -> Non
     )
     with pytest.raises(TypeError, match="unhashable"):
         hash(valid_publication)
-
-
-def test_feedback_binding_rejects_a_non_node_output_repeat_reference() -> None:
-    with pytest.raises(GraphValidationError, match="feedback repeat"):
-        FeedbackInputBinding(
-            Graph.graph_input("value", str),
-            cast(NodeOutputRef, object()),
-        )

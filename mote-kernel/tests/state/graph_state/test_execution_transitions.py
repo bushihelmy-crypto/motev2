@@ -261,7 +261,7 @@ def test_advance_preserves_and_validates_the_successful_predecessor_cause() -> N
     assert advanced.frontier.nodes[0].activation == activation
 
 
-def test_each_feedback_round_persists_only_its_immediate_predecessor_cause() -> None:
+def test_each_causal_round_persists_only_its_immediate_predecessor_cause() -> None:
     first_settlement = settle(
         claim(running(A)),
         SucceededGraphNodeOutcome(A, SelectGraphRoute(GraphRouteId("continue"))),

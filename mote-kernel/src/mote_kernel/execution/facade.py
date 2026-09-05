@@ -46,11 +46,11 @@ from mote_kernel.execution.graph.outcome import (
     _success,
 )
 from mote_kernel.execution.graph.ports import (
-    FeedbackInputBinding,
     GraphInputRef,
     GraphOutputDeclarations,
     InputBindings,
     NodeOutputRef,
+    PredecessorOutputRef,
     canonical_nominal_type,
     canonical_port_name,
     normalize_graph_output_declarations,
@@ -247,25 +247,27 @@ class Graph(Generic[GraphValueT]):
         )
 
     @staticmethod
-    def node_output(node_id: str, output_name: str) -> NodeOutputRef:
-        return NodeOutputRef(
-            GraphNodeId(canonical_port_name(node_id, kind="source node")),
-            canonical_port_name(output_name, kind="source output"),
-        )
+    @overload
+    def node_output(output_name: str, /) -> PredecessorOutputRef: ...
 
     @staticmethod
-    def feedback(
-        *,
-        initial: GraphInputRef[ValueT] | NodeOutputRef,
-        repeat: NodeOutputRef,
-    ) -> FeedbackInputBinding[ValueT]:
-        """Bind two explicit activation gates to their typed publications."""
+    @overload
+    def node_output(node_id: str, output_name: str, /) -> NodeOutputRef: ...
 
-        if type(initial) not in (GraphInputRef, NodeOutputRef):
-            raise GraphValidationError("feedback initial must be a graph input or node output reference")
-        if type(repeat) is not NodeOutputRef:
-            raise GraphValidationError("feedback repeat must be a node output reference")
-        return FeedbackInputBinding(initial, repeat)
+    @staticmethod
+    def node_output(
+        node_id_or_output_name: str,
+        output_name: str | None = None,
+        /,
+    ) -> NodeOutputRef | PredecessorOutputRef:
+        """Reference either one fixed producer or the actual control predecessor."""
+
+        if output_name is None:
+            return PredecessorOutputRef(canonical_port_name(node_id_or_output_name, kind="source output"))
+        return NodeOutputRef(
+            GraphNodeId(canonical_port_name(node_id_or_output_name, kind="source node")),
+            canonical_port_name(output_name, kind="source output"),
+        )
 
     @staticmethod
     @overload
@@ -303,7 +305,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
@@ -317,7 +319,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
     ) -> Self: ...
 
@@ -328,7 +330,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
         outputs: Mapping[
             str,

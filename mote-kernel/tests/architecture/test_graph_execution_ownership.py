@@ -548,7 +548,6 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
         "graph_outputs": "GraphOutputBindings[GraphValueT]",
         "resource_order": "tuple[ResourceId, ...]",
-        "activation_rules": "CompiledActivationRules[GraphValueT]",
         "activation_gates": "FrozenMap[GraphNodeId, tuple[ActivationGate, ...]]",
     }
     compiled_graph = _top_level_definition("execution/graph/topology.py", "CompiledGraph")

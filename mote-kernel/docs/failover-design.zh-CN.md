@@ -22,7 +22,7 @@ Role config
   ├─> 默认 FailoverProfile 参数
   └─> Port binding（继承 / 覆盖 / 禁用）
         └─> 每个 operation 的 FailoverPlan 快照
-              └─> 固定五节点重试图
+              └─> 固定五个领域节点 + 一个共享 HookNode
                     └─> 一个具体 Port 的单次调用
 ```
 
@@ -104,30 +104,26 @@ SingleAttempt<RequestT, AttemptResultT>
 
 ## 5. 固定重试图
 
-### 5.1 核心图：五个节点，固定骨架
+### 5.1 核心图：五个领域节点，一个共享 Hook
 
 本节记录已经确认的核心图。核心图不按 HTTP 状态码展开，也不为每一种 Role config 生成一张新拓扑。
 Role config 只生成不可变的 `FailoverPlan`；状态码和 provider 证据交给“观察并分流”节点处理。
 
-一个单 Port 的 failover nested graph 只有五个实际节点（`START`、`END` 是 Graph 边界，不计入节点数）：
+一个单 Port 的 failover nested graph 有五个领域节点，以及一个复用的 `HookNode` 子图节点。`START`、`END`
+是 Graph 边界，不计入节点数。每个领域节点只计算自己的结果和下一目标，然后统一进入 Hook；Hook 完成后按该目标路由：
 
 ```text
-START
-  │
-  ▼
-LoadPlanOnce                 1. 读取计划
-  │
-  ▼
-InvokeOnce(single_port)      2. 调用一次
-  │
-  ▼
-ObserveAndRoute              3. 观察结果并选择路线
-  ├─ completed / rejected / in_doubt ───────────────> END
-  ├─ prepare_next ───────> PrepareNextAttempt ───────┐
-  │                                                   │
-  │                                                   └──> InvokeOnce
-  └─ reconcile ──────────> Reconcile ──> ObserveAndRoute
+START -> LoadPlanOnce ----------> Hook
+                                     ├─ invoke ----> InvokeOnce ---------> Hook
+                                     ├─ observe ---> ObserveAndRoute ----> Hook
+                                     ├─ prepare ---> PrepareNextAttempt -> Hook
+                                     ├─ reconcile -> Reconcile ----------> Hook
+                                     └─ finish --------------------------> END
 ```
+
+所有指向 Hook 的领域路径在同一轮互斥。每个领域节点产出同名的 typed `hook_request`，Hook 使用
+`Graph.node_output("hook_request")` 读取本次实际控制前驱，而不是公开 source map 或为五个节点复制五个 Hook。
+Hook 的结果携带领域节点已经决定的下一目标；Hook 后的普通 conditional router edge 只执行该路由，不重新判断重试策略。
 
 `PrepareNextAttempt` 统一承载四种“下一次调用前的准备”：等待、修改请求、刷新/更换凭证、更换服务地址。
 `Reconcile` 独立存在，因为它是在确认上一次请求的结果，不是重新提交请求。对账仍未完成时可以再次等待，
@@ -142,6 +138,7 @@ ObserveAndRoute              3. 观察结果并选择路线
 | `ObserveAndRoute` | 看调用结果，判断成功、失败、未知，并选择固定路线 | 不执行等待、切换或重新提交 |
 | `PrepareNextAttempt` | 按 typed 策略等待、改请求、换凭证或换地址 | 只准备下一步；不隐藏新的 retry loop |
 | `Reconcile` | 查询同一 `operation_id` 的外部结果 | 不是重新 submit；无 reconcile 能力时进入 `InDoubt` |
+| `Hook` | 对每个领域节点的统一 typed 结果执行 P1/P2/P3 hook 子图，再转发已决定的下一目标 | 全图只有一个；不拥有 policy、cursor 或 retry decision |
 
 图中传递的核心值是不可变类型，而不是裸字典或局部变量：
 
@@ -164,14 +161,17 @@ PreparationAction:
 
 ### 5.2 图循环与状态推进
 
-回边只传递上一轮 activation 产生的 immutable `RetryContext`，使用 Graph 的 loop publication/relative
-selection；不能把当前节点直接绑定成普通数据依赖，形成 data cycle。
+领域节点通过统一 `hook_request` 传递 immutable `RetryContext` 和下一目标。共享 Hook 使用一参数
+`Graph.node_output("hook_request")`，由 State-owned cause 精确读取本轮实际前驱 publication；不能扫描最新值，
+也不能用两参数固定 producer binding 制造普通 data cycle。
 
 一次重试的顺序固定为：
 
 ```text
 InvokeOnce
+  → Hook
   → ObserveAndRoute
+  → Hook
   → 提交 settlement、route 和下一轮 RetryContext
   → 确认 GraphRunState successor
   → 才执行 PrepareNextAttempt 或 Reconcile
@@ -469,7 +469,7 @@ src/mote_kernel/failover/
   contract.py       # FailureClass、typed outcome、PreparationAction、单次调用结构
   plan.py           # 参数化 FailoverProfile、Port binding、config snapshot、FailoverPlan、RetryContext
   policy.py         # 固定 status/error-hint 映射和纯观察/分流规则
-  assembly.py       # 五节点固定图组装，以及按 binding 绑定单一 Port
+  assembly.py       # 五个领域节点 + 一个共享 HookNode 的固定图组装，以及按 binding 绑定单一 Port
 ```
 
 同一 `FailoverProfile` 可以由多个 Port 复用；`assembly.py` 为每个 binding 生成独立的 graph activation。
@@ -501,7 +501,7 @@ src/mote_kernel/failover/
 ## 13. 实施顺序
 
 1. 先实现类型化的 failure/outcome、参数化 profile/binding、plan 和固定纯 policy，不接具体 provider；
-2. 实现固定的五节点单 Port nested Graph 组装；
+2. 实现固定的五领域节点单 Port nested Graph 组装，并让所有互斥出口复用一个 HookNode；
 3. 用一个可控的测试 Port 验证 profile 继承、覆盖、禁用、retry、budget、config snapshot 和 crash recovery；
 4. 接入 Runtime 的 receipt/reconcile Port，验证 `Unknown` 语义；
 5. 再接入真实的 Model/Service Port；

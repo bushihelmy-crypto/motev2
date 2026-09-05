@@ -9,10 +9,9 @@ from mote_kernel.execution.errors import GraphValueAdmissionError, SnapshotMisma
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    FeedbackInputBinding,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -31,14 +30,19 @@ from mote_kernel.execution.request import (
 from mote_kernel.execution.run_context import ResumeInputAvailabilityCoordinate, ScopedFrameIndex
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
+    ActivationReference,
     ClaimGraphExecution,
     GraphAbortReason,
+    GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
+    GraphFrontierNode,
+    GraphFrontierState,
     GraphInterruptId,
     GraphInterruptPayload,
     GraphNodeId,
+    GraphNodeInterrupt,
     GraphNodeInterruptIdentity,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
@@ -52,6 +56,7 @@ from mote_kernel.state.graph_state import (
     PendingGraphNode,
     ResumeGraphNodes,
     ResumeInterruptedNode,
+    RoutedActivationCause,
     SettleGraphNode,
     frontier_node,
     graph_interrupt_id,
@@ -124,32 +129,33 @@ def interruptible_graph(
     )
 
 
-def feedback_interruptible_graph() -> CompiledGraph[str]:
-    seed = Graph.graph_input("seed", str)
-    node = CallableNodeDefinition(
-        GraphNodeId("loop"),
+def predecessor_interruptible_graph() -> CompiledGraph[str]:
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
+    initialize = CallableNodeDefinition(
+        initialize_id,
         _node,
-        normalize_input_bindings(
-            {
-                "value": FeedbackInputBinding(
-                    seed,
-                    Graph.node_output("loop", "value"),
-                )
-            }
-        ),
+        normalize_input_bindings({"value": Graph.graph_input("seed", str)}),
+        normalize_output_declarations({"value": str}),
+    )
+    loop = CallableNodeDefinition(
+        loop_id,
+        _node,
+        normalize_input_bindings({"value": Graph.node_output("value")}),
         normalize_output_declarations({"value": str}),
     )
     codec = _Codec()
     return compile_graph(
         GraphDefinition(
-            GraphDefinitionId("resume.feedback"),
+            GraphDefinitionId("resume.predecessor"),
             GraphDefinitionVersion(1),
-            (node,),
+            (initialize, loop),
             (
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
+                DirectEdge(initialize_id, loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("continue"), loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("done"), END),
             ),
-            (GraphNodeId("loop"),),
+            (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
             resume_input=ResumeInputBinding(
                 GraphResumeInputCodecId("resume.input.v1"),
@@ -158,6 +164,36 @@ def feedback_interruptible_graph() -> CompiledGraph[str]:
                 codec,
             ),
         )
+    )
+
+
+def interrupted_predecessor_state(graph: CompiledGraph[str]) -> GraphRunState:
+    state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
+    predecessor = ActivationReference(
+        GraphActivationIdentity(state.run_id, 0, initialize_id),
+        None,
+    )
+    return replace(
+        state,
+        superstep=1,
+        execution_sequence=1,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    loop_id,
+                    InterruptedGraphNode(
+                        GraphNodeInterrupt(
+                            GraphNodeInterruptIdentity(state.run_id, 1, loop_id, 1),
+                            GraphInterruptPayload(b"question-loop"),
+                        )
+                    ),
+                    RoutedActivationCause((predecessor,)),
+                ),
+            )
+        ),
+        settled_activations=(predecessor,),
     )
 
 
@@ -331,12 +367,12 @@ def test_prepare_resume_requires_a_current_interrupted_node() -> None:
         )
 
 
-def test_prepare_resume_rejects_an_override_for_a_feedback_activation() -> None:
-    graph = feedback_interruptible_graph()
-    state = interrupted_state(graph)
+def test_prepare_resume_rejects_an_override_for_a_predecessor_bound_activation() -> None:
+    graph = predecessor_interruptible_graph()
+    state = interrupted_predecessor_state(graph)
     action = request_action(state, GraphNodeId("loop"), "answer")
 
-    with pytest.raises(SnapshotMismatchError, match="feedback activation cannot use an input override"):
+    with pytest.raises(SnapshotMismatchError, match="predecessor-bound activation cannot use an input override"):
         prepare_resume(
             graph,
             ResumeRequest(

@@ -18,10 +18,11 @@ import mote_kernel.execution.engine.routing as routing_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.routing import (
+    PublicationHistoryWindow,
     RequiredTarget,
-    feedback_source_for_cause,
     frontier_admission_error,
-    require_feedback_activation_cause,
+    predecessor_source_for_cause,
+    publication_history_window,
     resolve_routing,
     resolve_routing_facts,
     transition_admission_error,
@@ -38,14 +39,12 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
-    FeedbackInputBinding,
+    CompiledPredecessorInput,
     NodeOutputPort,
-    PublicationSelection,
-    PublicationSelectionKind,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -72,12 +71,10 @@ from mote_kernel.state.graph_state import (
     ContinueGraphRouting,
     FailedGraphNode,
     GraphAbortReason,
-    GraphActivationCause,
     GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
-    GraphExecutionToken,
     GraphFailure,
     GraphFrontierActivation,
     GraphFrontierNode,
@@ -381,33 +378,44 @@ def resolve_contributions(
     return resolve_routing(graph, state, scope_run, frames)
 
 
-def feedback_graph() -> CompiledGraph[int]:
+def predecessor_loop_graph() -> CompiledGraph[int]:
+    async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["seed"])
+
     async def loop(values: Graph.Values[int]) -> Graph.Values[int]:
         return values
 
-    seed = Graph.graph_input("seed", int)
-    node = CallableNodeDefinition(
-        GraphNodeId("loop"),
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
+    initialize_node = CallableNodeDefinition(
+        initialize_id,
+        initialize,
+        normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
+        normalize_output_declarations({"value": int}),
+    )
+    loop_node = CallableNodeDefinition(
+        loop_id,
         loop,
-        normalize_input_bindings({"value": FeedbackInputBinding(seed, Graph.node_output("loop", "value"))}),
+        normalize_input_bindings({"value": Graph.node_output("value")}),
         normalize_output_declarations({"value": int}),
     )
     return compile_graph(
         GraphDefinition(
-            GraphDefinitionId("feedback.routing"),
+            GraphDefinitionId("predecessor.routing"),
             GraphDefinitionVersion(1),
-            (node,),
+            (initialize_node, loop_node),
             (
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
+                DirectEdge(initialize_id, loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("continue"), loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("done"), END),
             ),
-            (GraphNodeId("loop"),),
-            normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
+            (),
+            normalize_graph_output_declarations({"value": Graph.node_output(loop_id, "value")}),
         )
     )
 
 
-def settled_feedback_graph(
+def settled_predecessor_loop(
     graph: CompiledGraph[int],
     route: str,
 ) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
@@ -419,14 +427,15 @@ def settled_feedback_graph(
         ClaimGraphExecution(state.revision, GraphExecutionAttemptId("attempt"), None),
     )
     assert state.execution is not None
+    initialize_token = state.execution.token
     state = reduce_graph_run(
         state,
         SettleGraphNode(
             state.revision,
-            state.execution.token,
+            initialize_token,
             SucceededGraphNodeOutcome(
-                GraphNodeId("loop"),
-                SelectGraphRoute(GraphRouteId(route)),
+                GraphNodeId("initialize"),
+                ContinueGraphRouting(),
             ),
         ),
     )
@@ -437,20 +446,55 @@ def settled_feedback_graph(
             admit_graph_input(graph, Graph.values(seed=3)),
         )
     )
-    output_descriptor = graph.transition.publications[GraphNodeId("loop")]
-    output = _make_node_output_frame(Graph.values(value=4), output_descriptor.declarations)
+    initialize_descriptor = graph.transition.publications[GraphNodeId("initialize")]
     frames = frames.add_publication(
         ConfirmedPublication(
             PublicationAvailabilityCoordinate(
-                StableActivation(scope_run, 0, GraphNodeId("loop")),
-                output_descriptor.identity,
+                StableActivation(scope_run, 0, GraphNodeId("initialize")),
+                initialize_descriptor.identity,
             ),
-            output,
+            _make_node_output_frame(Graph.values(value=3), initialize_descriptor.declarations),
             state.revision,
-            ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+            ExecutionPublicationProvenance(initialize_token),
+        )
+    )
+    advance = resolve_routing(graph, state, scope_run, frames)
+    assert isinstance(advance, AdvanceGraphFrontier)
+    state = reduce_graph_run(state, advance)
+    state = reduce_graph_run(
+        state,
+        ClaimGraphExecution(state.revision, GraphExecutionAttemptId("loop-attempt"), None),
+    )
+    assert state.execution is not None
+    loop_token = state.execution.token
+    state = reduce_graph_run(
+        state,
+        SettleGraphNode(
+            state.revision,
+            loop_token,
+            SucceededGraphNodeOutcome(
+                GraphNodeId("loop"),
+                SelectGraphRoute(GraphRouteId(route)),
+            ),
+        ),
+    )
+    loop_descriptor = graph.transition.publications[GraphNodeId("loop")]
+    frames = frames.add_publication(
+        ConfirmedPublication(
+            PublicationAvailabilityCoordinate(
+                StableActivation(scope_run, 1, GraphNodeId("loop")),
+                loop_descriptor.identity,
+            ),
+            _make_node_output_frame(Graph.values(value=4), loop_descriptor.declarations),
+            state.revision,
+            ExecutionPublicationProvenance(loop_token),
         )
     )
     return state, frames
+
+
+def test_causal_input_retains_exactly_one_predecessor_superstep() -> None:
+    assert publication_history_window(predecessor_loop_graph()) == PublicationHistoryWindow((), 1)
 
 
 def test_direct_conditional_and_terminal_routing_use_one_contribution_model() -> None:
@@ -532,9 +576,9 @@ def test_pending_join_progress_requires_the_compiled_occurrence_projection() -> 
         _RoutingPrivateView.pending_join_arrivals(routing_module, graph, state)
 
 
-def test_self_feedback_route_emits_one_exact_predecessor_activation() -> None:
-    graph = feedback_graph()
-    state, frames = settled_feedback_graph(graph, "continue")
+def test_causal_self_loop_route_emits_one_exact_predecessor_activation() -> None:
+    graph = predecessor_loop_graph()
+    state, frames = settled_predecessor_loop(graph, "continue")
 
     command = resolve_routing(graph, state, root_scope_run(state.run_id), frames)
 
@@ -545,7 +589,7 @@ def test_self_feedback_route_emits_one_exact_predecessor_activation() -> None:
             RoutedActivationCause(
                 (
                     ActivationReference(
-                        GraphActivationIdentity(GraphRunId("run"), 0, GraphNodeId("loop")),
+                        GraphActivationIdentity(GraphRunId("run"), 1, GraphNodeId("loop")),
                         GraphRouteId("continue"),
                     ),
                 )
@@ -554,22 +598,21 @@ def test_self_feedback_route_emits_one_exact_predecessor_activation() -> None:
     )
 
 
-def test_self_feedback_terminal_route_completes_without_a_new_activation() -> None:
-    graph = feedback_graph()
-    state, frames = settled_feedback_graph(graph, "done")
+def test_causal_self_loop_terminal_route_completes_without_a_new_activation() -> None:
+    graph = predecessor_loop_graph()
+    state, frames = settled_predecessor_loop(graph, "done")
 
     command = resolve_routing(graph, state, root_scope_run(state.run_id), frames)
 
     assert command == CompleteGraphFrontier(state.revision)
 
 
-def test_self_feedback_rejects_a_source_with_a_forged_start_cause_after_round_zero() -> None:
-    graph = feedback_graph()
-    state, frames = settled_feedback_graph(graph, "continue")
+def test_causal_self_loop_rejects_a_forged_start_cause_after_round_zero() -> None:
+    graph = predecessor_loop_graph()
+    state, frames = settled_predecessor_loop(graph, "continue")
     node = state.frontier.nodes[0]
     forged = replace(
         state,
-        superstep=1,
         frontier=GraphFrontierState(
             (
                 GraphFrontierNode(
@@ -581,26 +624,26 @@ def test_self_feedback_rejects_a_source_with_a_forged_start_cause_after_round_ze
         ),
     )
 
-    with pytest.raises(InvalidRoutingCommandError, match="predecessor activation cause"):
+    with pytest.raises(InvalidRoutingCommandError, match="cannot carry the START cause"):
         resolve_routing(graph, forged, root_scope_run(forged.run_id), frames)
 
 
 @pytest.mark.parametrize(
     ("run_id", "superstep", "route", "match"),
     [
-        ("other", 1, "continue", "immediate predecessor"),
-        ("run", 1, "other", "immediate predecessor"),
-        ("run", 2, "continue", "immediate predecessor"),
+        ("other", 1, "continue", "immediate committed settlement"),
+        ("run", 1, "other", "immediate committed settlement"),
+        ("run", 2, "continue", "immediate committed settlement"),
     ],
 )
-def test_self_feedback_rejects_a_forged_routed_predecessor(
+def test_causal_self_loop_rejects_a_forged_routed_predecessor(
     run_id: str,
     superstep: int,
     route: str,
     match: str,
 ) -> None:
-    graph = feedback_graph()
-    state, frames = settled_feedback_graph(graph, "continue")
+    graph = predecessor_loop_graph()
+    state, frames = settled_predecessor_loop(graph, "continue")
     forged = replace(
         state,
         superstep=superstep,
@@ -626,9 +669,9 @@ def test_self_feedback_rejects_a_forged_routed_predecessor(
         resolve_routing(graph, forged, root_scope_run(forged.run_id), frames)
 
 
-def test_routing_never_resolves_a_failed_feedback_frontier() -> None:
-    graph = feedback_graph()
-    state, frames = settled_feedback_graph(graph, "continue")
+def test_routing_never_resolves_a_failed_causal_loop_frontier() -> None:
+    graph = predecessor_loop_graph()
+    state, frames = settled_predecessor_loop(graph, "continue")
     failed = replace(
         state,
         status=GraphRunStatus.FAILED,
@@ -1352,171 +1395,151 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
     )
 
 
-def test_feedback_admission_requires_committed_predecessor_evidence() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    candidate = replace(
-        state,
-        superstep=1,
-        settled_activations=(),
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("loop"),
-                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("continue"))),
-                    RoutedActivationCause((reference("loop", route="continue"),)),
-                ),
-            )
-        ),
-    )
+def predecessor_binding(graph: CompiledGraph[int]) -> CompiledPredecessorInput:
+    source = graph.transition.materializations[GraphNodeId("loop")].bindings.entries[0].source
+    assert isinstance(source, CompiledPredecessorInput)
+    return source
+
+
+def test_predecessor_admission_requires_committed_predecessor_evidence() -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    candidate = replace(state, settled_activations=())
 
     assert _RoutingPrivateView.frontier_gate_error(routing_module, graph, candidate) == (
-        "feedback activation predecessor lacks committed settlement evidence"
+        "predecessor activation lacks immediate committed settlement evidence"
     )
 
 
-def test_feedback_source_resolution_rejects_a_rule_for_another_target() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    rule = graph.transition.activation_rules.entries[0]
-    mismatched = replace(rule, target=GraphNodeId("foreign"))
+@pytest.mark.parametrize(("field", "match"), [("target", "target input"), ("input", "target input")])
+def test_predecessor_source_rejects_a_binding_for_another_target_input(field: str, match: str) -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    binding = predecessor_binding(graph)
+    mismatched = (
+        replace(binding, target=GraphNodeId("foreign")) if field == "target" else replace(binding, input_name="foreign")
+    )
 
-    with pytest.raises(InvalidRoutingCommandError, match="target does not match"):
-        feedback_source_for_cause(
+    with pytest.raises(InvalidRoutingCommandError, match=match):
+        predecessor_source_for_cause(
             state,
             GraphNodeId("loop"),
-            0,
+            "value",
+            state.superstep,
             state.frontier.nodes[0].cause,
             mismatched,
         )
 
 
-def test_feedback_source_resolution_rejects_a_tampered_publication_offset() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    rule = graph.transition.activation_rules.entries[0]
-    route = next(iter(rule.repeat_gates[0][0][1]))
-    predecessor = ActivationReference(
-        GraphActivationIdentity(state.run_id, 0, GraphNodeId("loop")),
-        route,
-    )
-    cause = RoutedActivationCause((predecessor,))
-    tampered = replace(rule, repeat_selection=replace(rule.repeat_selection, superstep=2))
+def test_predecessor_source_selects_the_exact_causal_publication() -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
 
-    with pytest.raises(InvalidRoutingCommandError, match="immediate predecessor"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cause, tampered)
-
-
-def test_direct_self_feedback_requires_the_compiled_relative_one_selection() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    rule = graph.transition.activation_rules.entries[0]
-    route = next(iter(rule.repeat_gates[0][0][1]))
-    predecessor = ActivationReference(
-        GraphActivationIdentity(state.run_id, 0, GraphNodeId("loop")),
-        route,
-    )
-    cause = RoutedActivationCause((predecessor,))
-    tampered = replace(
-        rule,
-        repeat_selection=replace(rule.repeat_selection, kind=PublicationSelectionKind.ABSOLUTE),
+    selected = predecessor_source_for_cause(
+        state,
+        GraphNodeId("loop"),
+        "value",
+        state.superstep,
+        state.frontier.nodes[0].cause,
+        predecessor_binding(graph),
     )
 
-    with pytest.raises(InvalidRoutingCommandError, match="immediate predecessor"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cause, tampered)
+    assert selected.source == NodeOutputPort((), GraphNodeId("initialize"), "value")
+    assert selected.predecessor == GraphActivationIdentity(state.run_id, 0, GraphNodeId("initialize"))
 
 
-def test_feedback_source_resolution_rejects_malformed_cause_and_gate_contracts() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    rule = graph.transition.activation_rules.entries[0]
-    cause = RoutedActivationCause((reference("loop", route="continue"),))
-    other = NodeOutputPort((), GraphNodeId("other"), "value")
+def test_predecessor_source_rejects_a_non_immediate_or_uncommitted_reference() -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    cause = state.frontier.nodes[0].cause
+    binding = predecessor_binding(graph)
+
+    with pytest.raises(InvalidRoutingCommandError, match="immediate committed settlement"):
+        predecessor_source_for_cause(
+            replace(state, superstep=2),
+            GraphNodeId("loop"),
+            "value",
+            2,
+            cause,
+            binding,
+        )
+    with pytest.raises(InvalidRoutingCommandError, match="immediate committed settlement"):
+        predecessor_source_for_cause(
+            replace(state, settled_activations=()),
+            GraphNodeId("loop"),
+            "value",
+            1,
+            cause,
+            binding,
+        )
+
+
+def test_predecessor_source_rejects_malformed_causes() -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    binding = predecessor_binding(graph)
+    join_cause = routed(
+        "loop",
+        reference("initialize"),
+        reference("other"),
+    ).cause
+    assert isinstance(join_cause, RoutedActivationCause)
 
     with pytest.raises(InvalidRoutingCommandError, match="invalid target coordinate"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), -1, StartActivationCause(), rule)
-    with pytest.raises(InvalidRoutingCommandError, match="initial feedback activation"):
-        feedback_source_for_cause(
+        predecessor_source_for_cause(
             state,
             GraphNodeId("loop"),
+            "value",
             0,
             StartActivationCause(),
-            replace(rule, initial=rule.repeat),
+            binding,
         )
-    with pytest.raises(InvalidRoutingCommandError, match="predecessor activation cause"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, StartActivationCause(), rule)
-    with pytest.raises(InvalidRoutingCommandError, match="predecessor cause must be routed"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cast(GraphActivationCause, object()), rule)
+    with pytest.raises(InvalidRoutingCommandError, match="cannot carry the START cause"):
+        predecessor_source_for_cause(
+            state,
+            GraphNodeId("loop"),
+            "value",
+            1,
+            StartActivationCause(),
+            binding,
+        )
     with pytest.raises(InvalidRoutingCommandError, match="unsupported cause"):
-        feedback_source_for_cause(
+        predecessor_source_for_cause(
             state,
             GraphNodeId("loop"),
+            "value",
             1,
-            cast(GraphActivationCause, object()),
-            replace(rule, initial=rule.repeat),
+            cast(StartActivationCause | RoutedActivationCause, object()),
+            binding,
         )
-
-    no_gate_match = replace(
-        rule,
-        initial=rule.repeat,
-        repeat=other,
-        initial_gates=rule.repeat_gates,
-        repeat_gates=(),
-    )
-    with pytest.raises(InvalidRoutingCommandError, match="exactly one initial or repeat gate"):
-        feedback_source_for_cause(
+    with pytest.raises(InvalidRoutingCommandError, match="one non-Join predecessor"):
+        predecessor_source_for_cause(
             state,
             GraphNodeId("loop"),
+            "value",
             1,
-            RoutedActivationCause((reference("loop", route="other"),)),
-            no_gate_match,
+            join_cause,
+            binding,
         )
 
-    graph_input_source = replace(
-        rule,
-        repeat=other,
-        initial_gates=rule.repeat_gates,
-        repeat_gates=(),
+
+def test_predecessor_source_rejects_an_uncompiled_source() -> None:
+    graph = predecessor_loop_graph()
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    binding = replace(
+        predecessor_binding(graph),
+        sources=(NodeOutputPort((), GraphNodeId("other"), "value"),),
     )
-    with pytest.raises(InvalidRoutingCommandError, match="requires a node-output source"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cause, graph_input_source)
 
-    missing_source = replace(
-        rule,
-        initial=other,
-        repeat=other,
-        initial_gates=rule.repeat_gates,
-        repeat_gates=(),
-    )
-    with pytest.raises(InvalidRoutingCommandError, match="lacks its declared source"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cause, missing_source)
-
-    invalid_selection = replace(
-        rule,
-        initial=rule.repeat,
-        repeat=other,
-        initial_gates=rule.repeat_gates,
-        repeat_gates=(),
-        initial_selection=PublicationSelection(PublicationSelectionKind.RELATIVE, 2),
-    )
-    with pytest.raises(InvalidRoutingCommandError, match="does not select"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 1, cause, invalid_selection)
-
-    mismatched_selection = replace(
-        invalid_selection,
-        initial_selection=PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
-    )
-    with pytest.raises(InvalidRoutingCommandError, match="does not select"):
-        feedback_source_for_cause(state, GraphNodeId("loop"), 2, cause, mismatched_selection)
-
-
-def test_feedback_cause_requires_a_current_frontier_activation() -> None:
-    graph = feedback_graph()
-    state, _frames = settled_feedback_graph(graph, "continue")
-    empty = replace(state, frontier=GraphFrontierState(()))
-
-    with pytest.raises(InvalidRoutingCommandError, match="not present"):
-        require_feedback_activation_cause(empty, GraphNodeId("loop"), graph.transition.activation_rules.entries[0])
+    with pytest.raises(InvalidRoutingCommandError, match="not an allowed predecessor source"):
+        predecessor_source_for_cause(
+            state,
+            GraphNodeId("loop"),
+            "value",
+            state.superstep,
+            state.frontier.nodes[0].cause,
+            binding,
+        )
 
 
 def test_required_target_rejects_a_successor_with_a_different_target() -> None:

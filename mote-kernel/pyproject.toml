@@ -109,9 +109,9 @@ quote-style = "double"
 # docs/graph-delayed-loop-implementation-plan.zh-CN.md#143-p1-收口架构审计.
 # The 2026-09-03 ledger-admission defense adds one compiled-topology check;
 # its measured structural cost is ratcheted here rather than hidden or suppressed.
-# P3-M2 adds the topology-owned target lookup needed to retain every typed
-# feedback binding; the compiler/routing change removes the previous target-map
-# helper and is ratcheted at its measured net shape.
+# P3-M2 added topology-owned activation gates; the causal-output redesign now
+# reuses those gates to compile every possible predecessor directly into each
+# input binding, removing the feedback-specific target map and execution path.
 # The P3-M1 review hardening distinguishes a conservative route-domain summary
 # from an exact Join proof and propagates START-plus-incoming repeatability.  Its
 # measured compiler cost is retained here after the proof model review.
@@ -134,9 +134,10 @@ quote-style = "double"
 # three domain Ports remain separate owners (rather than a generic port base),
 # and the post-outcome guards remain at their primary-outcome owners; this
 # measured shape is ratcheted rather than hidden behind aliases or tasks.
-# Graph.feedback adds one deliberate method to the sole public facade and
-# removes the facade-only rejection normalizer; its canonical binding/compiler
-# path is ratcheted at the resulting measured shape.
+# Graph.node_output has one overloaded public method: two arguments select a
+# fixed producer, while one selects the activation's actual predecessor.  The
+# extra overload definition is ratcheted together with the large reduction in
+# feedback-specific compiler and runtime machinery.
 # Failover keeps the status/error-hint table in its policy owner and leaves
 # profiles with parameters only; removing configurable duplicate rules and the
 # cursor's copied budget locks in the resulting smaller single-truth model.
@@ -146,53 +147,53 @@ quote-style = "double"
 # family-driver wiring.  The resulting measured shape is ratcheted as an
 # intentional ownership boundary, not reduced through aliases or wrappers.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 708
-type_definitions = 416
-dataclass_types = 247
-dataclass_fields = 686
-decision_points = 2308
+top_level_definitions = 710
+type_definitions = 417
+dataclass_types = 246
+dataclass_fields = 677
+decision_points = 2241
 logical_clone_pairs = 16
 statement_clone_pairs = 25
 near_clone_pairs = 15
-record_shape_clone_pairs = 31
+record_shape_clone_pairs = 32
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 14
 test_only_private_definitions = 0
-function_definitions = 550
-method_definitions = 238
-nested_function_definitions = 22
-semantic_nodes = 41986
-cognitive_complexity = 3143
+function_definitions = 548
+method_definitions = 234
+nested_function_definitions = 23
+semantic_nodes = 41201
+cognitive_complexity = 3017
 await_points = 121
-exception_handlers = 83
+exception_handlers = 82
 attribute_writes = 87
 task_creations = 16
-max_cyclomatic_complexity = 83
-max_cognitive_complexity = 132
+max_cyclomatic_complexity = 79
+max_cognitive_complexity = 122
 max_nesting_depth = 6
-internal_call_edges = 771
+internal_call_edges = 772
 recursive_call_components = 5
 max_call_fan_out = 23
 max_call_chain_depth = 17
 max_call_chain_cognitive = 315
-cross_module_call_edges = 845
+cross_module_call_edges = 838
 cross_module_call_pairs = 251
 max_runtime_module_fan_out = 24
 internal_import_edges = 379
 import_cycle_components = 0
 max_module_fan_out = 25
 max_module_dependency_depth = 29
-ambiguous_internal_dispatches = 60
-transparent_private_definitions = 35
+ambiguous_internal_dispatches = 57
+transparent_private_definitions = 33
 thin_single_use_methods = 12
-low_usage_private_definitions = 175
+low_usage_private_definitions = 179
 linear_private_call_chain_links = 36
 production_unreferenced_definitions = 10
 low_cohesion_classes = 3
 max_methods_per_class = 28
 max_fields_per_class = 35
 max_class_components = 4
-complexity_hotspots = 86
+complexity_hotspots = 87
 stateful_async_hotspots = 7
 unused_private_definitions = 0
 unread_private_fields = 0

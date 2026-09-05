@@ -268,8 +268,11 @@ async def test_conditional_callable_rejects_an_unknown_declared_route_before_set
 
 
 @pytest.mark.asyncio
-async def test_public_feedback_reads_the_immediately_previous_activation_until_exit() -> None:
+async def test_public_causal_output_reads_the_immediately_previous_activation_until_exit() -> None:
     seen: list[int] = []
+
+    async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["seed"])
 
     async def increment(values: Graph.Values[int]) -> Graph.Outcome[int]:
         value = values["value"]
@@ -279,24 +282,25 @@ async def test_public_feedback_reads_the_immediately_previous_activation_until_e
             route="done" if value == 2 else "again",
         )
 
-    graph = Graph[int]("public.feedback")
+    graph = Graph[int]("public.predecessor-output")
+    graph.add_node(
+        "initialize",
+        initialize,
+        inputs={"seed": Graph.graph_input("seed", int)},
+        outputs={"value": int},
+    )
     graph.add_node(
         "loop",
         increment,
-        inputs={
-            "value": Graph.feedback(
-                initial=Graph.graph_input("seed", int),
-                repeat=Graph.node_output("loop", "value"),
-            )
-        },
+        inputs={"value": Graph.node_output("value")},
         outputs={"value": int},
     )
-    graph.add_edge(Graph.START, "loop")
+    graph.add_edge("initialize", "loop")
     graph.add_conditional_edge("loop", "again", "loop")
     graph.add_conditional_edge("loop", "done", Graph.END)
     graph.set_outputs({"value": Graph.node_output("loop", "value")})
 
-    result = await graph.run(Graph.values(seed=0), run_id="public-feedback-run")
+    result = await graph.run(Graph.values(seed=0), run_id="public-predecessor-run")
 
     assert isinstance(result, Graph.CompletedResult)
     assert seen == [0, 1, 2]

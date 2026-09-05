@@ -184,21 +184,20 @@ CASES = (
         ('"_GraphValues[str]" is not assignable to "_GraphValues[int]"',),
     ),
     NegativeTypingCase(
-        "feedback_wrong_initial.py",
-        ('parameter "initial"', '"Literal[42]"', '"NodeOutputRef"', '"GraphInputRef', "reportArgumentType"),
+        "node_output_non_string.py",
+        ('"Literal[42]"', '"str"', "reportArgumentType"),
     ),
     NegativeTypingCase(
-        "feedback_cross_universe.py",
-        ('"FeedbackInputBinding[str]"', '"FeedbackInputBinding[int]"', "is invariant", "reportArgumentType"),
-    ),
-    NegativeTypingCase(
-        "feedback_nested_node.py",
+        "node_output_causal_graph_output.py",
         (
-            'parameter "inputs"',
-            '"FeedbackInputBinding[int]"',
-            '"GraphInputRef[int] | NodeOutputRef"',
+            'parameter "outputs"',
+            '"PredecessorOutputRef" is not assignable to "NodeOutputRef"',
             "reportArgumentType",
         ),
+    ),
+    NegativeTypingCase(
+        "node_output_wrong_arity.py",
+        ("No overloads", "Argument types", "Literal['extra']", "reportCallIssue"),
     ),
 )
 
@@ -251,6 +250,19 @@ def test_logging_observability_positive_fixture_is_exact_and_contains_no_unknown
 def test_events_port_positive_fixture_is_exact_and_contains_no_unknown() -> None:
     completed = subprocess.run(
         ("pyright", "tests/typing_positive/events_port.py"),
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout
+
+
+def test_node_output_overloads_positive_fixture_is_exact_and_contains_no_unknown() -> None:
+    completed = subprocess.run(
+        ("pyright", "tests/typing_positive/node_output_overloads.py"),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,
