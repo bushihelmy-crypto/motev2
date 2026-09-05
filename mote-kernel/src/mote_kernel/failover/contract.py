@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, NewType, Protocol, TypeAlias, TypeVar
+from typing import Generic, NewType, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 
 class FailoverContractError(ValueError):
@@ -256,6 +256,7 @@ RequestT_contra = TypeVar("RequestT_contra", contravariant=True)
 AttemptResultT_co = TypeVar("AttemptResultT_co", covariant=True)
 
 
+@runtime_checkable
 class SingleAttempt(Protocol[RequestT_contra, AttemptResultT_co]):
     """A capability that performs at most one wire invocation per call."""
 
@@ -266,6 +267,7 @@ ReconcileHandleT_contra = TypeVar("ReconcileHandleT_contra", contravariant=True)
 ReconcileResultT_co = TypeVar("ReconcileResultT_co", covariant=True)
 
 
+@runtime_checkable
 class ReconcileAttempt(Protocol[ReconcileHandleT_contra, ReconcileResultT_co]):
     """A capability that checks one existing operation without resubmitting it."""
 

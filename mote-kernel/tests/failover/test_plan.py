@@ -8,17 +8,11 @@ from typing import cast
 import pytest
 
 from mote_kernel.failover.contract import (
-    ErrorHint,
     FailoverContractError,
     FailureClass,
     FailureSignal,
     FailureStrategy,
-    PreparationAction,
-    RefreshCredential,
-    RotateCredential,
-    SwitchEndpoint,
     TransformRequest,
-    Wait,
 )
 from mote_kernel.failover.plan import (
     FailoverBindingMode,
@@ -27,13 +21,10 @@ from mote_kernel.failover.plan import (
     FailoverConfigSource,
     FailoverOperationId,
     FailoverPlan,
-    FailoverPolicyId,
     FailoverPortId,
     FailoverProfile,
     FailoverProfileId,
     FailoverProfileOverride,
-    FailureRoute,
-    FailureRule,
     OperationSemantics,
     PortBinding,
     ReconcileMode,
@@ -49,70 +40,16 @@ from mote_kernel.failover.plan import (
 InvalidFactory = Callable[[], object]
 
 
-def _rule(
-    status_code: int | None = 429,
-    error_hint: str | None = "rate_limited",
-    strategy: FailureStrategy = FailureStrategy.WAIT,
+def _profile(
     *,
-    preparation: PreparationAction[str] | None = None,
-) -> FailureRule[str]:
-    return FailureRule(status_code, ErrorHint(error_hint) if error_hint is not None else None, strategy, preparation)
-
-
-def _profile(*rules: FailureRule[str], budget: RetryBudget | None = None) -> FailoverProfile[str]:
+    budget: RetryBudget | None = None,
+    request_transform: TransformRequest[str] | None = None,
+) -> FailoverProfile[str]:
     return FailoverProfile(
         FailoverProfileId("standard"),
-        FailoverPolicyId("default-v1"),
-        rules,
         budget=budget or RetryBudget(),
+        request_transform=request_transform,
     )
-
-
-def test_failure_rule_uses_a_status_and_hint_pair_and_projects_fixed_routes() -> None:
-    rules = (
-        _rule(429, "rate_limited", FailureStrategy.WAIT, preparation=Wait(1.0)),
-        _rule(400, "bad_payload", FailureStrategy.TRANSFORM_REQUEST, preparation=TransformRequest("drop-field")),
-        _rule(401, "token_expired", FailureStrategy.REFRESH_CREDENTIAL, preparation=RefreshCredential()),
-        _rule(401, "invalid_key", FailureStrategy.ROTATE_CREDENTIAL, preparation=RotateCredential()),
-        _rule(503, "busy", FailureStrategy.SWITCH_ENDPOINT, preparation=SwitchEndpoint()),
-        _rule(500, "poll", FailureStrategy.RECONCILE),
-        _rule(403, "denied", FailureStrategy.RETURN_TO_MODEL),
-        _rule(409, "conflict", FailureStrategy.ABORT),
-    )
-
-    assert rules[0].signal == FailureSignal(429, ErrorHint("rate_limited"))
-    assert rules[0].route is FailureRoute.PREPARE
-    assert rules[1].route is FailureRoute.PREPARE
-    assert rules[2].route is FailureRoute.PREPARE
-    assert rules[3].route is FailureRoute.PREPARE
-    assert rules[4].route is FailureRoute.PREPARE
-    assert rules[5].route is FailureRoute.RECONCILE
-    assert rules[6].route is FailureRoute.RETURN_TO_MODEL
-    assert rules[7].route is FailureRoute.ABORT
-
-
-@pytest.mark.parametrize(
-    ("status_code", "error_hint", "strategy", "preparation"),
-    (
-        ("429", "rate_limited", FailureStrategy.WAIT, Wait(1.0)),
-        (429, " hint", FailureStrategy.WAIT, Wait(1.0)),
-        (429, "rate_limited", "wait", Wait(1.0)),
-        (429, "rate_limited", FailureStrategy.WAIT, object()),
-        (429, "rate_limited", FailureStrategy.TRANSFORM_REQUEST, None),
-        (429, "rate_limited", FailureStrategy.REFRESH_CREDENTIAL, RotateCredential()),
-        (429, "rate_limited", FailureStrategy.ROTATE_CREDENTIAL, RefreshCredential()),
-        (429, "rate_limited", FailureStrategy.SWITCH_ENDPOINT, RefreshCredential()),
-        (429, "rate_limited", FailureStrategy.RECONCILE, Wait(1.0)),
-    ),
-)
-def test_failure_rule_rejects_invalid_shape(
-    status_code: object,
-    error_hint: object,
-    strategy: object,
-    preparation: object,
-) -> None:
-    with pytest.raises(FailoverContractError):
-        FailureRule(status_code, error_hint, strategy, preparation)  # type: ignore[arg-type]
 
 
 def test_strategy_limits_are_independent_and_budget_resolution_falls_back() -> None:
@@ -191,30 +128,26 @@ def test_retry_timing_rejects_invalid_values(kwargs: dict[str, object]) -> None:
         RetryTiming(**kwargs)  # type: ignore[arg-type]
 
 
-def test_profile_and_override_merge_matching_pairs_without_losing_defaults() -> None:
-    rate_limit = _rule(429, "rate_limited", FailureStrategy.WAIT, preparation=Wait(1.0))
-    auth = _rule(401, "token_expired", FailureStrategy.REFRESH_CREDENTIAL)
-    profile = _profile(rate_limit, auth)
-    override_rule = _rule(429, "rate_limited", FailureStrategy.WAIT, preparation=Wait(2.0))
-    extra_rule = _rule(400, "bad_payload", FailureStrategy.TRANSFORM_REQUEST, preparation=TransformRequest("shrink"))
+def test_profile_and_override_merge_parameters_without_changing_the_default() -> None:
+    default_transform = TransformRequest("drop-invalid-field")
+    replacement_transform = TransformRequest("shrink")
+    profile = _profile(request_transform=default_transform)
     override = FailoverProfileOverride(
-        policy_id=FailoverPolicyId("payment-policy"),
-        rules=(override_rule, extra_rule),
         budget=RetryBudget(max_wire_attempts=2, hard_max_wire_attempts=5),
         timing=RetryTiming(total_deadline_seconds=60.0),
+        request_transform=replacement_transform,
     )
 
     merged = merge_profile(profile, override)
     assert merged.profile_id == profile.profile_id
-    assert merged.policy_id == "payment-policy"
-    assert merged.rules == (override_rule, auth, extra_rule)
     assert merged.budget.max_wire_attempts == 2
     assert merged.timing.total_deadline_seconds == 60.0
     assert merged.semantics is profile.semantics
     assert merged.reconcile is profile.reconcile
-    assert profile.rules == (rate_limit, auth)
+    assert merged.request_transform is replacement_transform
+    assert profile.request_transform is default_transform
     with pytest.raises(FrozenInstanceError):
-        profile.policy_id = FailoverPolicyId("other")  # type: ignore[misc]
+        profile.request_transform = replacement_transform  # type: ignore[misc]
 
 
 def test_profile_merge_rejects_a_non_profile_default() -> None:
@@ -225,34 +158,27 @@ def test_profile_merge_rejects_a_non_profile_default() -> None:
 @pytest.mark.parametrize(
     "factory",
     (
-        lambda: FailoverProfile[str](FailoverProfileId(" bad"), FailoverPolicyId("policy")),
-        lambda: FailoverProfile[str](FailoverProfileId("profile"), FailoverPolicyId(" policy")),
+        lambda: FailoverProfile[str](FailoverProfileId(" bad")),
         lambda: FailoverProfile[str](
             FailoverProfileId("profile"),
-            FailoverPolicyId("policy"),
-            cast(tuple[FailureRule[str], ...], (object(),)),
-        ),
-        lambda: FailoverProfile[str](FailoverProfileId("profile"), FailoverPolicyId("policy"), (_rule(), _rule())),
-        lambda: FailoverProfile[str](
-            FailoverProfileId("profile"),
-            FailoverPolicyId("policy"),
             budget=cast(RetryBudget, object()),
         ),
         lambda: FailoverProfile[str](
             FailoverProfileId("profile"),
-            FailoverPolicyId("policy"),
             timing=cast(RetryTiming, object()),
         ),
         lambda: FailoverProfile[str](
             FailoverProfileId("profile"),
-            FailoverPolicyId("policy"),
             semantics=cast(OperationSemantics, "pure"),
         ),
         lambda: FailoverProfile[str](
             FailoverProfileId("profile"),
-            FailoverPolicyId("policy"),
             semantics=OperationSemantics.PURE,
             reconcile=cast(ReconcileMode, "optional"),
+        ),
+        lambda: FailoverProfile[str](
+            FailoverProfileId("profile"),
+            request_transform=cast(TransformRequest[str], object()),
         ),
     ),
 )
@@ -264,13 +190,11 @@ def test_profile_rejects_invalid_values(factory: InvalidFactory) -> None:
 @pytest.mark.parametrize(
     "factory",
     (
-        lambda: FailoverProfileOverride[str](policy_id=FailoverPolicyId(" bad")),
-        lambda: FailoverProfileOverride[str](rules=cast(tuple[FailureRule[str], ...], (object(),))),
-        lambda: FailoverProfileOverride[str](rules=(_rule(), _rule())),
         lambda: FailoverProfileOverride[str](budget=cast(RetryBudget, object())),
         lambda: FailoverProfileOverride[str](timing=cast(RetryTiming, object())),
         lambda: FailoverProfileOverride[str](semantics=cast(OperationSemantics, "pure")),
         lambda: FailoverProfileOverride[str](reconcile=cast(ReconcileMode, "required")),
+        lambda: FailoverProfileOverride[str](request_transform=cast(TransformRequest[str], object())),
     ),
 )
 def test_profile_override_rejects_invalid_values(factory: InvalidFactory) -> None:
@@ -279,10 +203,10 @@ def test_profile_override_rejects_invalid_values(factory: InvalidFactory) -> Non
 
 
 def test_binding_resolution_models_inherit_override_and_disabled() -> None:
-    profile = _profile(_rule())
+    profile = _profile(request_transform=TransformRequest("default-fix"))
     snapshot = FailoverConfigSnapshot(FailoverConfigRevision(7), profile)
     override = FailoverProfileOverride(
-        rules=(_rule(400, "bad_payload", FailureStrategy.TRANSFORM_REQUEST, preparation=TransformRequest("fix")),)
+        request_transform=TransformRequest("port-fix"),
     )
     inherit = PortBinding[str](FailoverBindingMode.INHERIT)
     replacement = PortBinding[str](FailoverBindingMode.OVERRIDE, override)
@@ -293,8 +217,7 @@ def test_binding_resolution_models_inherit_override_and_disabled() -> None:
     assert inherited_plan is not None
     assert inherited_plan.profile is profile
     assert replacement_plan is not None
-    assert override.rules is not None
-    assert replacement_plan.profile.rules == (*profile.rules, *override.rules)
+    assert replacement_plan.profile.request_transform == TransformRequest("port-fix")
     assert resolve_plan(snapshot, FailoverPortId("disabled"), disabled) is None
 
 
@@ -317,13 +240,12 @@ def test_port_binding_rejects_invalid_modes_and_payloads(factory: InvalidFactory
 
 
 def test_snapshot_plan_and_initial_context_capture_one_revision() -> None:
-    profile = _profile(_rule())
+    profile = _profile()
     snapshot = FailoverConfigSnapshot(FailoverConfigRevision(7), profile)
     plan = FailoverPlan(FailoverConfigRevision(7), FailoverPortId("payment"), profile)
     context = RetryContext[object, object](
         FailoverOperationId("operation-1"),
         FailoverConfigRevision(7),
-        profile.budget,
     )
 
     assert snapshot.revision == 7
@@ -332,7 +254,6 @@ def test_snapshot_plan_and_initial_context_capture_one_revision() -> None:
     assert plan.port_id == "payment"
     assert plan.profile is profile
     assert context.plan_revision == 7
-    assert context.budget is profile.budget
     assert context.request_version == 1
     assert context.attempt_ordinal == 0
 
@@ -374,7 +295,6 @@ def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
     context = RetryContext[str, str](
         FailoverOperationId("operation-2"),
         FailoverConfigRevision(3),
-        RetryBudget(),
         request_version=2,
         attempt_ordinal=1,
         endpoint_cursor=2,
@@ -407,66 +327,51 @@ def test_retry_context_carries_strategy_usage_and_external_handles() -> None:
 @pytest.mark.parametrize(
     "factory",
     (
+        lambda: RetryContext[object, object](FailoverOperationId(" operation"), FailoverConfigRevision(1)),
+        lambda: RetryContext[object, object](FailoverOperationId("operation"), FailoverConfigRevision(0)),
         lambda: RetryContext[object, object](
-            FailoverOperationId(" operation"), FailoverConfigRevision(1), RetryBudget()
+            FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=-1
         ),
         lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(0), RetryBudget()
+            FailoverOperationId("operation"), FailoverConfigRevision(1), request_version=0
         ),
         lambda: RetryContext[object, object](
-            FailoverOperationId("operation"),
-            FailoverConfigRevision(1),
-            cast(RetryBudget, object()),
+            FailoverOperationId("operation"), FailoverConfigRevision(1), attempt_ordinal=-1
         ),
         lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), RetryBudget(), request_version=-1
+            FailoverOperationId("operation"), FailoverConfigRevision(1), endpoint_cursor=-1
         ),
         lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), RetryBudget(), request_version=0
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), RetryBudget(), attempt_ordinal=-1
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), RetryBudget(), endpoint_cursor=-1
-        ),
-        lambda: RetryContext[object, object](
-            FailoverOperationId("operation"), FailoverConfigRevision(1), RetryBudget(), credential_cursor=-1
+            FailoverOperationId("operation"), FailoverConfigRevision(1), credential_cursor=-1
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             strategy_usages=cast(tuple[StrategyUsage, ...], (object(),)),
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             strategy_usages=(StrategyUsage(FailureStrategy.WAIT, 1), StrategyUsage(FailureStrategy.WAIT, 2)),
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             last_failure=cast(FailureClass, "rate_limited"),
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             last_signal=cast(FailureSignal, object()),
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             last_strategy=cast(FailureStrategy, "wait"),
         ),
         lambda: RetryContext[object, object](
             FailoverOperationId("operation"),
             FailoverConfigRevision(1),
-            RetryBudget(),
             wait_until=datetime(2030, 1, 1),
         ),
         lambda: StrategyUsage(cast(FailureStrategy, "wait"), 1),

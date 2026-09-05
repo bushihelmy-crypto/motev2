@@ -1,6 +1,6 @@
 # Mote Kernel Failover 设计
 
-状态：设计共识（Role 默认策略、Port 绑定继承、参数热加载、Graph 持久恢复）
+状态：设计共识（固定策略映射、Role 默认参数、Port 绑定继承、参数热加载、Graph 持久恢复）
 
 本文定义 Kernel 中 Failover 的边界和最小模型。它基于：
 
@@ -16,15 +16,17 @@
 Failover 是一张固定的、可持久恢复的重试图。它一次只包裹一个已经存在的 Port：
 
 ```text
+固定 policy（status_code + error_hint → strategy）
+  │
 Role config
-  ├─> 默认 FailoverProfile
+  ├─> 默认 FailoverProfile 参数
   └─> Port binding（继承 / 覆盖 / 禁用）
         └─> 每个 operation 的 FailoverPlan 快照
               └─> 固定五节点重试图
                     └─> 一个具体 Port 的单次调用
 ```
 
-同一套 `FailoverProfile` 可以被多个 Port 继承，但每个 Port 仍分别装配自己的重试图；每次 logical
+同一套 `FailoverProfile` 参数可以被多个 Port 继承，但每个 Port 仍分别装配自己的重试图；每次 logical
 operation 都有独立的配置快照、持久化 cursor/预算和 operation identity。共享的是无状态的策略模板，
 不共享包装实例、cursor 或运行状态。cursor 属于 Graph 的状态值，不属于 Port 或 decorator 实例的可变字段。
 Failover 不调用其他 Port，不编排业务流程；主业务 Graph 负责决定何时调用付款、审批或其他 Port。
@@ -147,7 +149,7 @@ ObserveAndRoute              3. 观察结果并选择路线
 RetryContext:
   operation_id / plan_revision / request_version
   attempt_ordinal / endpoint_cursor / credential_cursor
-  retry_budget / receipt_or_reconcile_handle
+  strategy_usage / receipt_or_reconcile_handle
 
 PortOutcome:
   Completed | Rejected(FailureEvidence) | InProgress(Receipt) | Unknown(Handle)
@@ -185,7 +187,8 @@ lineage，由现有 `GraphRunState`、`GraphRunCommand` 和 `reduce_graph_run()`
 
 ### 5.3 状态码和策略
 
-底层 Port/adapter 先把 provider 的原始状态码、异常和响应转换为固定的类型化失败类别，例如：
+底层 Port/adapter 先把 provider 的原始状态码、异常和响应转换为 `FailureEvidence`。其中包含用于诊断和
+计数的类型化失败类别，例如：
 
 ```text
 RateLimited
@@ -196,7 +199,13 @@ UnknownOutcome
 PolicyDenied
 ```
 
-图只认识这些类别，不直接解析 HTTP 整数或 SDK 异常。
+策略不会解析 SDK 异常或自由文本。真正的路由键是 adapter 归一化后的精确
+`(status_code, error_hint)`；`FailureClass`、`message` 和 `provider_code` 不参与策略匹配。同一个状态码可以因为
+稳定的 `error_hint` 不同而选择不同动作，没有精确规则的证据直接返回模型。
+
+`policy.py` 是这张固定映射表的唯一 owner。`FailoverProfile` 和 Port override 都不能增加、替换或删除映射；它们只提供
+预算、退避、timeout、deadline、reconcile 开关和 request transform instruction 等参数。改变状态码映射属于代码及
+Graph definition/version 变化，不属于配置热加载。
 
 固定图中的动作集合是一个互斥的 typed decision union。四种执行前准备共用一条 `prepare_next` 边，
 由 `PreparationAction` 携带具体动作：
@@ -210,7 +219,7 @@ Abort
 
 这里的 `Finish` 是“直接离图”的决策，不是额外的 Graph 节点。
 
-Role config 只提供动作所需的参数：次数、退避、timeout、deadline、每类预算和 hard cap。若要增加一个
+Role config 只提供动作所需的参数：次数、退避、timeout、deadline、每类预算、request transform instruction 和 hard cap。若要增加一个
 全新的动作类型，才需要新的 Graph definition/version；仅修改次数或等待时间不需要重建图。
 
 ### 5.4 预期结果不应直接变成 Graph failure
@@ -320,6 +329,7 @@ profile 可以被多个 Port 复用，但 plan 不能跨 operation 或跨 Port �
 | --- | --- | --- |
 | 最大次数、退避、timeout、deadline | 否 | 新 activation 读取新 plan |
 | 已有失败类别的参数 | 否 | 图分支不变 |
+| 状态码 + error hint 到策略的映射 | 是 | 固定 policy 变化，不能通过 profile 热加载 |
 | Role 默认 profile 的参数 | 否 | 只影响采用 `inherit` 的新 operation |
 | 单 Port 的 binding override | 否 | 只影响该 Port 的新 operation |
 | Port 的 failover binding 开关变化 | 是 | 组装结果增加或移除一层 failover graph |
@@ -372,6 +382,9 @@ candidate_position
 plan_revision
 waiting/reconcile handle（如有）
 ```
+
+限额只存在于本次 operation 的不可变 `FailoverPlan`；`RetryContext` 只记录每个策略已经消耗的次数和调用 cursor。
+`plan_revision` 把两者绑定起来，但 Context 不复制 budget，避免恢复时出现两份限额真相。
 
 优先把它作为重试图的 typed publication/输入沿 Graph 传递。若某种 state-only recovery 不能从现有
 publication/codec 恢复它，则由 `state` owner 把最小的 failover facts 加入现有 `GraphRunState`；不能新建
@@ -454,8 +467,8 @@ Unknown
 src/mote_kernel/failover/
   __init__.py       # 最小公共面；不提供新的 runner
   contract.py       # FailureClass、typed outcome、PreparationAction、单次调用结构
-  plan.py           # FailoverProfile、Port binding、config snapshot、FailoverPlan、RetryContext
-  policy.py         # 纯观察/分流规则
+  plan.py           # 参数化 FailoverProfile、Port binding、config snapshot、FailoverPlan、RetryContext
+  policy.py         # 固定 status/error-hint 映射和纯观察/分流规则
   assembly.py       # 五节点固定图组装，以及按 binding 绑定单一 Port
 ```
 
@@ -468,7 +481,8 @@ src/mote_kernel/failover/
 
 1. 同一 Port 的一次 operation 只读取一次 config snapshot；
 2. 参数热加载不改变 Graph definition identity/version；
-3. 同一 `FailoverProfile` 可被多个 Port 继承，但各 Port 的 `RetryContext`、budget 和 operation identity 互不共享；
+3. 同一不可变 `FailoverProfile` 参数可被多个 Port 继承，但各 operation 的 `FailoverPlan`、`RetryContext`、usage 和
+   operation identity 互不共享；
 4. `inherit`、`override`、`disabled` 只在组装期解析一次；
 5. 每次 `InvokeOnce` 最多发出一次底层调用；
 6. 每次 retry 都先提交当前 settlement/cursor，再进入下一步；
@@ -481,10 +495,12 @@ src/mote_kernel/failover/
 13. 重复装饰同一 Port 在装配期失败；
 14. state、plan、receipt 不含 secret；
 15. 策略图的每个 status 分支都有 deterministic recovery test。
+16. config/profile 不能改变固定的 status/error-hint 策略映射；
+17. budget limit 只由 `FailoverPlan` 持有，`RetryContext` 只持有 usage/cursor。
 
 ## 13. 实施顺序
 
-1. 先实现类型化的 failure/outcome、profile/binding、plan 和纯 policy，不接具体 provider；
+1. 先实现类型化的 failure/outcome、参数化 profile/binding、plan 和固定纯 policy，不接具体 provider；
 2. 实现固定的五节点单 Port nested Graph 组装；
 3. 用一个可控的测试 Port 验证 profile 继承、覆盖、禁用、retry、budget、config snapshot 和 crash recovery；
 4. 接入 Runtime 的 receipt/reconcile Port，验证 `Unknown` 语义；

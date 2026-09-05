@@ -25,11 +25,9 @@ from mote_kernel.failover.plan import (
     FailoverConfigRevision,
     FailoverOperationId,
     FailoverPlan,
-    FailoverPolicyId,
     FailoverPortId,
     FailoverProfile,
     FailoverProfileId,
-    FailureRule,
     ReconcileMode,
     RetryBudget,
     RetryContext,
@@ -40,8 +38,6 @@ from mote_kernel.failover.plan import (
 from mote_kernel.failover.policy import (
     FailoverDecision,
     ObservationRoute,
-    find_rule,
-    fixed_rules,
     observe_and_route,
     route_rejected,
     route_uncertain,
@@ -51,29 +47,35 @@ InvalidFactory = Callable[[], object]
 
 
 def _profile(
-    *rules: FailureRule[str],
     budget: RetryBudget | None = None,
     reconcile: ReconcileMode = ReconcileMode.OPTIONAL,
+    request_transform: TransformRequest[str] | None = None,
+    timing: RetryTiming | None = None,
 ) -> FailoverProfile[str]:
     return FailoverProfile(
         FailoverProfileId("standard"),
-        FailoverPolicyId("default-v1"),
-        rules,
         budget=budget or RetryBudget(),
-        timing=RetryTiming(base_backoff_seconds=1.0, max_backoff_seconds=8.0),
+        timing=timing or RetryTiming(base_backoff_seconds=1.0, max_backoff_seconds=8.0),
         reconcile=reconcile,
+        request_transform=request_transform,
     )
 
 
 def _plan(
-    *rules: FailureRule[str],
     budget: RetryBudget | None = None,
     reconcile: ReconcileMode = ReconcileMode.OPTIONAL,
+    request_transform: TransformRequest[str] | None = None,
+    timing: RetryTiming | None = None,
 ) -> FailoverPlan[str]:
     return FailoverPlan(
         FailoverConfigRevision(1),
         FailoverPortId("payment"),
-        _profile(*rules, budget=budget, reconcile=reconcile),
+        _profile(
+            budget=budget,
+            reconcile=reconcile,
+            request_transform=request_transform,
+            timing=timing,
+        ),
     )
 
 
@@ -85,7 +87,6 @@ def _context(
     return RetryContext[object, object](
         FailoverOperationId("operation-1"),
         FailoverConfigRevision(1),
-        RetryBudget(),
         attempt_ordinal=attempt_ordinal,
         strategy_usages=strategy_usages,
     )
@@ -103,21 +104,23 @@ def _evidence(
     )
 
 
-def test_fixed_rules_match_the_full_status_and_hint_pair() -> None:
-    rules = fixed_rules()
-    assert any(rule.signal == _evidence(429, "rate_limited").signal for rule in rules)
-    rate_limit = find_rule(_evidence(429, "rate_limited"), _plan())
-    assert rate_limit is not None
+def test_fixed_policy_matches_the_full_status_and_hint_pair() -> None:
+    rate_limit = route_rejected(_evidence(429, "rate_limited"), _plan(), _context())
+    different_hint = route_rejected(_evidence(429, "other"), _plan(), _context())
+    missing_status = route_rejected(_evidence(None, "rate_limited"), _plan(), _context())
+
     assert rate_limit.strategy is FailureStrategy.WAIT
-    assert find_rule(_evidence(429, "other"), _plan()) is None
-    assert find_rule(_evidence(None, "no_response"), _plan()) is None
+    assert different_hint.route is ObservationRoute.RETURN_TO_MODEL
+    assert missing_status.route is ObservationRoute.RETURN_TO_MODEL
 
 
-def test_profile_rule_search_continues_until_the_exact_signal() -> None:
-    unrelated = FailureRule[str](409, ErrorHint("conflict"), FailureStrategy.ABORT)
-    expected = FailureRule[str](429, ErrorHint("rate_limited"), FailureStrategy.WAIT)
+def test_configured_parameters_cannot_create_a_new_failure_mapping() -> None:
+    plan = _plan(request_transform=TransformRequest("drop-invalid-field"))
 
-    assert find_rule(_evidence(429, "rate_limited"), _plan(unrelated, expected)) is expected
+    decision = route_rejected(_evidence(422, "bad_payload"), plan, _context())
+
+    assert decision.route is ObservationRoute.RETURN_TO_MODEL
+    assert decision.strategy is None
 
 
 @pytest.mark.parametrize(
@@ -154,19 +157,25 @@ def test_same_status_code_can_choose_different_credential_strategies() -> None:
     assert type(rotate.preparation).__name__ == "RotateCredential"
 
 
-def test_profile_rule_supplies_a_typed_request_transform() -> None:
-    rule = FailureRule[str](
-        400,
-        ErrorHint("bad_payload"),
-        FailureStrategy.TRANSFORM_REQUEST,
-        TransformRequest("drop-invalid-field"),
+def test_profile_supplies_parameters_for_the_fixed_request_transform() -> None:
+    transform = TransformRequest("drop-invalid-field")
+    decision = route_rejected(
+        _evidence(400, "bad_payload"),
+        _plan(request_transform=transform),
+        _context(),
     )
-    decision = route_rejected(_evidence(400, "bad_payload"), _plan(rule), _context())
 
     assert decision.route is ObservationRoute.PREPARE
     assert decision.strategy is FailureStrategy.TRANSFORM_REQUEST
-    assert isinstance(decision.preparation, TransformRequest)
-    assert decision.preparation.instruction == "drop-invalid-field"
+    assert decision.preparation is transform
+
+
+def test_missing_request_transform_parameters_return_control_to_the_model() -> None:
+    decision = route_rejected(_evidence(400, "bad_payload"), _plan(), _context())
+
+    assert decision.route is ObservationRoute.RETURN_TO_MODEL
+    assert decision.strategy is FailureStrategy.TRANSFORM_REQUEST
+    assert decision.preparation is None
 
 
 def test_wait_uses_exponential_backoff_and_provider_retry_after() -> None:
@@ -180,30 +189,26 @@ def test_wait_uses_exponential_backoff_and_provider_retry_after() -> None:
     assert second.preparation.delay_seconds == 7.0
 
 
-def test_configured_wait_keeps_the_larger_provider_retry_after() -> None:
-    rule = FailureRule[str](429, ErrorHint("custom"), FailureStrategy.WAIT, preparation=Wait(2.0))
-    decision = route_rejected(_evidence(429, "custom", retry_after=4.0), _plan(rule), _context())
+def test_hot_loaded_timing_parameters_change_delay_without_changing_mapping() -> None:
+    timing = RetryTiming(base_backoff_seconds=2.0, max_backoff_seconds=10.0)
+    decision = route_rejected(
+        _evidence(429, "rate_limited", retry_after=4.0),
+        _plan(timing=timing),
+        _context(attempt_ordinal=1),
+    )
 
     assert isinstance(decision.preparation, Wait)
     assert decision.preparation.delay_seconds == 4.0
 
 
-def test_configured_non_wait_preparation_ignores_retry_after() -> None:
-    preparation = RefreshCredential()
-    rule = FailureRule[str](
-        401,
-        ErrorHint("custom_refresh"),
-        FailureStrategy.REFRESH_CREDENTIAL,
-        preparation=preparation,
-    )
-
+def test_retry_after_does_not_change_a_fixed_non_wait_strategy() -> None:
     decision = route_rejected(
-        _evidence(401, "custom_refresh", retry_after=4.0),
-        _plan(rule),
+        _evidence(401, "token_expired", retry_after=4.0),
+        _plan(),
         _context(),
     )
 
-    assert decision.preparation is preparation
+    assert isinstance(decision.preparation, RefreshCredential)
 
 
 def test_strategy_and_wire_budgets_are_checked_before_preparation() -> None:
@@ -256,6 +261,17 @@ def test_reconcile_disabled_returns_uncertain_result_to_model() -> None:
     assert decision.route is ObservationRoute.RETURN_TO_MODEL
 
 
+def test_reconcile_budget_exhaustion_returns_uncertain_result_to_model() -> None:
+    budget = RetryBudget(strategy_limits=(StrategyLimit(FailureStrategy.RECONCILE, 0),))
+    unknown = Unknown("operation-receipt", _evidence(None, "no_response", FailureClass.NO_RESPONSE))
+
+    decision = observe_and_route(unknown, _plan(budget=budget), _context())
+
+    assert decision.route is ObservationRoute.RETURN_TO_MODEL
+    assert decision.strategy is FailureStrategy.RECONCILE
+    assert decision.budget_exhausted is True
+
+
 def test_completed_outcome_is_terminal_success_route() -> None:
     decision = observe_and_route(Completed("ok"), _plan(), _context())
     assert decision == FailoverDecision(ObservationRoute.COMPLETED)
@@ -270,12 +286,9 @@ def test_observer_routes_a_definitive_rejection_through_the_exact_rule() -> None
     assert decision.strategy is FailureStrategy.WAIT
 
 
-def test_custom_terminal_and_abort_rules_are_projected() -> None:
-    model_rule = FailureRule[str](403, ErrorHint("forbidden"), FailureStrategy.RETURN_TO_MODEL)
-    abort_rule = FailureRule[str](409, ErrorHint("conflict"), FailureStrategy.ABORT)
-
-    model = route_rejected(_evidence(403, "forbidden"), _plan(model_rule), _context())
-    abort = route_rejected(_evidence(409, "conflict"), _plan(abort_rule), _context())
+def test_fixed_terminal_and_abort_rules_are_projected() -> None:
+    model = route_rejected(_evidence(403, "forbidden"), _plan(), _context())
+    abort = route_rejected(_evidence(409, "conflict"), _plan(), _context())
     unknown = route_rejected(_evidence(500, "unlisted"), _plan(), _context())
 
     assert model.route is ObservationRoute.RETURN_TO_MODEL
@@ -287,11 +300,15 @@ def test_custom_terminal_and_abort_rules_are_projected() -> None:
 @pytest.mark.parametrize(
     "factory",
     (
-        lambda: find_rule(cast(FailureEvidence, object()), _plan()),
-        lambda: find_rule(_evidence(429, "rate_limited"), cast(FailoverPlan[str], object())),
         lambda: route_rejected(cast(FailureEvidence, object()), _plan(), _context()),
+        lambda: route_rejected(_evidence(429, "rate_limited"), cast(FailoverPlan[str], object()), _context()),
+        lambda: route_rejected(_evidence(429, "rate_limited"), _plan(), cast(RetryContext[object, object], object())),
         lambda: route_uncertain(cast(FailureEvidence, object()), True, _plan(), _context()),
         lambda: route_uncertain(_evidence(429, "rate_limited"), cast(bool, "yes"), _plan(), _context()),
+        lambda: route_uncertain(_evidence(429, "rate_limited"), True, cast(FailoverPlan[str], object()), _context()),
+        lambda: route_uncertain(
+            _evidence(429, "rate_limited"), True, _plan(), cast(RetryContext[object, object], object())
+        ),
         lambda: observe_and_route(cast(PortOutcome[str, object, object], object()), _plan(), _context()),
         lambda: observe_and_route(Completed("ok"), cast(FailoverPlan[str], object()), _context()),
         lambda: observe_and_route(Completed("ok"), _plan(), cast(RetryContext[object, object], object())),
@@ -300,6 +317,20 @@ def test_custom_terminal_and_abort_rules_are_projected() -> None:
 def test_policy_rejects_invalid_boundaries(factory: InvalidFactory) -> None:
     with pytest.raises(FailoverContractError):
         factory()
+
+
+def test_policy_rejects_a_context_from_another_plan_revision() -> None:
+    context = RetryContext[object, object](
+        FailoverOperationId("operation-1"),
+        FailoverConfigRevision(2),
+    )
+
+    with pytest.raises(FailoverContractError, match="captured plan revision"):
+        route_rejected(_evidence(429, "rate_limited"), _plan(), context)
+    with pytest.raises(FailoverContractError, match="captured plan revision"):
+        route_uncertain(None, True, _plan(), context)
+    with pytest.raises(FailoverContractError, match="captured plan revision"):
+        observe_and_route(Completed("ok"), _plan(), context)
 
 
 @pytest.mark.parametrize(
