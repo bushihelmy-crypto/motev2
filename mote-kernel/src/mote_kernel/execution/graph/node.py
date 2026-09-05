@@ -14,7 +14,12 @@ GraphValueT = TypeVar("GraphValueT")
 
 
 class NodeCallable(Protocol[GraphValueT]):
-    """A graph node returns an awaitable that the execution engine owns."""
+    """Kernel-owned program for one graph node.
+
+    This is the graph execution contract, not the Runtime ``Invocation``
+    capability used behind domain Ports.  The scheduler is the only owner
+    that invokes it.
+    """
 
     def __call__(
         self,
@@ -25,6 +30,8 @@ class NodeCallable(Protocol[GraphValueT]):
 
 @dataclass(frozen=True, slots=True)
 class CallableNodeDefinition(Generic[GraphValueT]):
+    """Immutable topology entry for one already-assembled Kernel node."""
+
     node_id: GraphNodeId
     operation: NodeCallable[GraphValueT]
     inputs: InputBindings[GraphValueT]

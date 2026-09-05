@@ -26,11 +26,13 @@ ResultT_co = TypeVar("ResultT_co", covariant=True)
 
 @runtime_checkable
 class Invocation(Protocol[RequestT_contra, ResultT_co]):
-    """Strictly invoke one owner-defined typed request.
+    """Strictly invoke one owner-defined typed Port request.
 
     Implementations are expected to return the declared result or raise.  The
     protocol deliberately contains no transport, configuration, retry, or
-    fallback details.
+    fallback details.  It is a Port-to-Runtime adapter seam, not a graph-node
+    runner; Graph nodes keep the separate Kernel-owned ``NodeCallable``
+    contract.
     """
 
     async def invoke(self, request: RequestT_contra, /) -> ResultT_co: ...

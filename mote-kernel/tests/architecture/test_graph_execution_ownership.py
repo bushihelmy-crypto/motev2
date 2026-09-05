@@ -325,8 +325,25 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
     assert not {node.id for node in ast.walk(recovery) if isinstance(node, ast.Name) and node.id in forbidden}
 
 
-def test_node_invocation_belongs_to_the_single_execution_scheduler() -> None:
+def test_node_and_runtime_invocation_have_distinct_single_owners() -> None:
     assert _call_owner_modules("operation") == ("execution/engine/scheduler.py",)
+    violations: list[str] = []
+    for relative, tree in _production_modules():
+        if not relative.startswith("execution/"):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "mote_kernel.invocation":
+                violations.append(f"{relative}:{node.lineno}")
+            elif isinstance(node, ast.Import):
+                violations.extend(
+                    f"{relative}:{node.lineno}"
+                    for alias in node.names
+                    if alias.name == "mote_kernel.invocation"
+                )
+    assert not violations, (
+        "Graph execution owns NodeCallable invocation; Runtime Invocation belongs behind owner-defined Ports: "
+        f"{violations}"
+    )
 
 
 def test_resume_input_and_confirmed_values_share_the_single_scoped_frame_index() -> None:
