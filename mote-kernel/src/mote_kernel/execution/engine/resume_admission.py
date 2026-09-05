@@ -11,7 +11,7 @@ from mote_kernel.execution.engine.resume_input import (
 )
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.execution.graph.ports import CompiledActivationRule
+from mote_kernel.execution.graph.ports import CompiledPredecessorInput
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import NodeInputFrame
 from mote_kernel.execution.identity import stable_activation
@@ -88,8 +88,8 @@ def prepare_resume(
             identity.execution_generation,
         ):
             raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
-        if any(isinstance(binding.source, CompiledActivationRule) for binding in plan.bindings.entries):
-            raise SnapshotMismatchError("feedback activation cannot use an input override")
+        if any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries):
+            raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
         binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
         actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
         admitted_inputs.append(

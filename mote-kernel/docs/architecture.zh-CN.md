@@ -17,9 +17,13 @@ routing、lease、resource、恢复坐标和 revision）。以后增加节点/Ho
 
 `Graph.run()` 从显式传入的 authoritative `GraphRunState` 启动或继续运行。failure、interrupt、skip、节点结果和
 Hook 变化都通过同一个 `GraphRunCommand` 入口处理，不存在第二个状态或 resume runner。未传 commit 回调时，
-`run()` 只在进程内应用纯状态转换；传入回调时，每条 command、candidate 和可选 typed node result 都交给回调
+`run()` 只在进程内应用纯状态转换；传入回调时，每条 command、candidate 和完整 typed write-set 都交给回调
 完成统一状态的原子提交，且仅以回调精确返回的 candidate 继续执行。这是提交边界，不是具体 Store 或
 durability 承诺。
+
+提交边界的 typed `GraphTransition`、`GraphCommitWriteSet`、exact acknowledgement 和确认后的 frame staging 由
+`execution/commit.py` 作为一个完整 owner 管理；`execution/family_driver.py` 只负责 family owner 的驱动、child handoff、
+并发清理和结果投影，不复制提交规则或建立第二个 runner。两者通过窄的内部调用连接，公共入口仍只有 `Graph`。
 
 ## State 包与所有权
 

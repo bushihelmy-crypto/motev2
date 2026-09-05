@@ -13,37 +13,21 @@ import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Generic, NewType, Protocol, TypeVar
+from typing import Generic, NewType, Protocol, TypeVar, runtime_checkable
 
 from mote_kernel.failover.contract import (
-    ErrorHint,
     FailoverContractError,
     FailureClass,
     FailureSignal,
     FailureStrategy,
-    PreparationAction,
-    RefreshCredential,
-    RotateCredential,
-    SwitchEndpoint,
     TransformRequest,
-    Wait,
 )
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 FailoverProfileId = NewType("FailoverProfileId", str)
-FailoverPolicyId = NewType("FailoverPolicyId", str)
 FailoverPortId = NewType("FailoverPortId", str)
 FailoverOperationId = NewType("FailoverOperationId", str)
 FailoverConfigRevision = NewType("FailoverConfigRevision", int)
-
-
-class FailureRoute(StrEnum):
-    """The fixed graph route represented by a strategy."""
-
-    PREPARE = "prepare"
-    RECONCILE = "reconcile"
-    RETURN_TO_MODEL = "return_to_model"
-    ABORT = "abort"
 
 
 class FailoverBindingMode(StrEnum):
@@ -55,7 +39,7 @@ class FailoverBindingMode(StrEnum):
 
 
 class OperationSemantics(StrEnum):
-    """Safety declaration for repeating or reconciling one Port operation."""
+    """Safety declaration for repeating one Port operation."""
 
     PURE = "pure"
     IDEMPOTENT = "idempotent"
@@ -63,94 +47,7 @@ class OperationSemantics(StrEnum):
     NON_REPEATABLE = "non_repeatable"
 
 
-class ReconcileMode(StrEnum):
-    """Whether the bound Port can or must reconcile an uncertain operation."""
-
-    DISABLED = "disabled"
-    OPTIONAL = "optional"
-    REQUIRED = "required"
-
-
 TransformT = TypeVar("TransformT")
-
-
-def _validate_status_code(status_code: int | None, *, kind: str) -> None:
-    if status_code is not None and (type(status_code) is not int or not 100 <= status_code <= 599):
-        raise FailoverContractError(f"{kind} status_code must be an HTTP status code")
-
-
-def _validate_hint(error_hint: ErrorHint | None, *, kind: str) -> None:
-    if error_hint is not None and (
-        type(error_hint) is not str
-        or not error_hint
-        or error_hint != error_hint.strip()
-        or "\n" in error_hint
-        or "\r" in error_hint
-        or len(error_hint) > 128
-    ):
-        raise FailoverContractError(f"{kind} error_hint must be a safe, short, trimmed value")
-
-
-@dataclass(frozen=True, slots=True)
-class FailureRule(Generic[TransformT]):
-    """One fixed ``(status_code, error_hint)`` to strategy mapping.
-
-    Rules describe behavior, not mutable retry limits.  Limits live in
-    :class:`RetryBudget` and are counted by strategy, so two different error
-    signals that both mean ``WAIT`` consume the same wait budget.
-    """
-
-    status_code: int | None
-    error_hint: ErrorHint | None
-    strategy: FailureStrategy
-    preparation: PreparationAction[TransformT] | None = None
-
-    def __post_init__(self) -> None:
-        _validate_status_code(self.status_code, kind="failure rule")
-        _validate_hint(self.error_hint, kind="failure rule")
-        if type(self.strategy) is not FailureStrategy:
-            raise FailoverContractError("failure rule requires a FailureStrategy")
-        if self.strategy is FailureStrategy.WAIT:
-            if self.preparation is not None and type(self.preparation) is not Wait:
-                raise FailoverContractError("wait strategy requires a Wait preparation")
-        elif self.strategy is FailureStrategy.TRANSFORM_REQUEST:
-            if type(self.preparation) is not TransformRequest:
-                raise FailoverContractError("transform strategy requires a TransformRequest preparation")
-        elif self.strategy is FailureStrategy.REFRESH_CREDENTIAL:
-            if self.preparation is not None and type(self.preparation) is not RefreshCredential:
-                raise FailoverContractError("refresh strategy requires a RefreshCredential preparation")
-        elif self.strategy is FailureStrategy.ROTATE_CREDENTIAL:
-            if self.preparation is not None and type(self.preparation) is not RotateCredential:
-                raise FailoverContractError("rotate strategy requires a RotateCredential preparation")
-        elif self.strategy is FailureStrategy.SWITCH_ENDPOINT:
-            if self.preparation is not None and type(self.preparation) is not SwitchEndpoint:
-                raise FailoverContractError("endpoint strategy requires a SwitchEndpoint preparation")
-        elif self.preparation is not None:
-            raise FailoverContractError("terminal and reconcile strategies cannot carry preparation")
-
-    @property
-    def signal(self) -> FailureSignal:
-        """Return the exact pair used for lookup."""
-
-        return FailureSignal(self.status_code, self.error_hint)
-
-    @property
-    def route(self) -> FailureRoute:
-        """Project the strategy onto one of the fixed graph edges."""
-
-        if self.strategy in (
-            FailureStrategy.WAIT,
-            FailureStrategy.TRANSFORM_REQUEST,
-            FailureStrategy.REFRESH_CREDENTIAL,
-            FailureStrategy.ROTATE_CREDENTIAL,
-            FailureStrategy.SWITCH_ENDPOINT,
-        ):
-            return FailureRoute.PREPARE
-        if self.strategy is FailureStrategy.RECONCILE:
-            return FailureRoute.RECONCILE
-        if self.strategy is FailureStrategy.RETURN_TO_MODEL:
-            return FailureRoute.RETURN_TO_MODEL
-        return FailureRoute.ABORT
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +71,7 @@ class RetryBudget:
     ``strategy_limits`` wins first.  If a strategy has no entry, the
     ``default_max_strategy_uses`` value is used.  The built-in value is the
     final fallback when a config source omits both fields.  The wire-attempt
-    ceiling is independent from preparation/reconcile strategy counts.
+    ceiling is independent from preparation strategy counts.
     """
 
     max_wire_attempts: int = 3
@@ -241,72 +138,50 @@ class RetryTiming:
 
 @dataclass(frozen=True, slots=True)
 class FailoverProfile(Generic[TransformT]):
-    """Reusable Role-level strategy template.
+    """Reusable Role-level parameters for the fixed failover policy.
 
-    ``rules`` are the fixed policy table for this profile revision.  A normal
-    hot reload changes only the parameter fields (budget/timing/instructions),
-    while the graph topology and the status-code/error-hint behavior remain
-    unchanged.
+    The policy module exclusively owns the status/error-hint mapping.  A
+    profile can hot-reload budgets, timing, and the typed instruction used by
+    the fixed request-transformation strategy without changing that mapping.
     """
 
     profile_id: FailoverProfileId
-    policy_id: FailoverPolicyId
-    rules: tuple[FailureRule[TransformT], ...] = ()
     budget: RetryBudget = RetryBudget()
     timing: RetryTiming = RetryTiming()
     semantics: OperationSemantics = OperationSemantics.NON_REPEATABLE
-    reconcile: ReconcileMode = ReconcileMode.OPTIONAL
+    request_transform: TransformRequest[TransformT] | None = None
 
     def __post_init__(self) -> None:
         if not is_canonical_identity(self.profile_id):
             raise FailoverContractError("failover profile_id must be canonical")
-        if not is_canonical_identity(self.policy_id):
-            raise FailoverContractError("failover policy_id must be canonical")
-        if type(self.rules) is not tuple or any(type(rule) is not FailureRule for rule in self.rules):
-            raise FailoverContractError("failover profile rules must be a tuple of FailureRule values")
-        signals = tuple(rule.signal for rule in self.rules)
-        if len(signals) != len(set(signals)):
-            raise FailoverContractError("failover profile cannot define duplicate status/error-hint rules")
         if type(self.budget) is not RetryBudget:
             raise FailoverContractError("failover profile budget must be RetryBudget")
         if type(self.timing) is not RetryTiming:
             raise FailoverContractError("failover profile timing must be RetryTiming")
         if type(self.semantics) is not OperationSemantics:
             raise FailoverContractError("failover profile semantics must be OperationSemantics")
-        if type(self.reconcile) is not ReconcileMode:
-            raise FailoverContractError("failover profile reconcile must be ReconcileMode")
+        if self.request_transform is not None and type(self.request_transform) is not TransformRequest:
+            raise FailoverContractError("failover profile request_transform must be TransformRequest")
 
 
 @dataclass(frozen=True, slots=True)
 class FailoverProfileOverride(Generic[TransformT]):
     """Optional Port-level fields applied over the Role default profile."""
 
-    policy_id: FailoverPolicyId | None = None
-    rules: tuple[FailureRule[TransformT], ...] | None = None
     budget: RetryBudget | None = None
     timing: RetryTiming | None = None
     semantics: OperationSemantics | None = None
-    reconcile: ReconcileMode | None = None
+    request_transform: TransformRequest[TransformT] | None = None
 
     def __post_init__(self) -> None:
-        if self.policy_id is not None and not is_canonical_identity(self.policy_id):
-            raise FailoverContractError("failover override policy_id must be canonical")
-        if self.rules is not None and (
-            type(self.rules) is not tuple or any(type(rule) is not FailureRule for rule in self.rules)
-        ):
-            raise FailoverContractError("failover override rules must be a tuple of FailureRule values")
-        if self.rules is not None:
-            signals = tuple(rule.signal for rule in self.rules)
-            if len(signals) != len(set(signals)):
-                raise FailoverContractError("failover override cannot define duplicate status/error-hint rules")
         if self.budget is not None and type(self.budget) is not RetryBudget:
             raise FailoverContractError("failover override budget must be RetryBudget")
         if self.timing is not None and type(self.timing) is not RetryTiming:
             raise FailoverContractError("failover override timing must be RetryTiming")
         if self.semantics is not None and type(self.semantics) is not OperationSemantics:
             raise FailoverContractError("failover override semantics must be OperationSemantics")
-        if self.reconcile is not None and type(self.reconcile) is not ReconcileMode:
-            raise FailoverContractError("failover override reconcile must be ReconcileMode")
+        if self.request_transform is not None and type(self.request_transform) is not TransformRequest:
+            raise FailoverContractError("failover override request_transform must be TransformRequest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,24 +232,6 @@ class FailoverPlan(Generic[TransformT]):
             raise FailoverContractError("failover plan requires a FailoverProfile")
 
 
-def _merge_rules(
-    base: tuple[FailureRule[TransformT], ...],
-    overrides: tuple[FailureRule[TransformT], ...],
-) -> tuple[FailureRule[TransformT], ...]:
-    """Replace matching pairs while preserving deterministic rule order."""
-
-    merged: list[FailureRule[TransformT]] = []
-    remaining = list(overrides)
-    for rule in base:
-        replacement = next((candidate for candidate in remaining if candidate.signal == rule.signal), None)
-        if replacement is None:
-            merged.append(rule)
-            continue
-        merged.append(replacement)
-        remaining.remove(replacement)
-    return (*merged, *remaining)
-
-
 def merge_profile(
     default: FailoverProfile[TransformT],
     override: FailoverProfileOverride[TransformT] | None,
@@ -386,13 +243,13 @@ def merge_profile(
     if override is None:
         return default
     return FailoverProfile(
-        default.profile_id,
-        override.policy_id if override.policy_id is not None else default.policy_id,
-        _merge_rules(default.rules, override.rules or ()),
-        override.budget if override.budget is not None else default.budget,
-        override.timing if override.timing is not None else default.timing,
-        override.semantics if override.semantics is not None else default.semantics,
-        override.reconcile if override.reconcile is not None else default.reconcile,
+        profile_id=default.profile_id,
+        budget=override.budget if override.budget is not None else default.budget,
+        timing=override.timing if override.timing is not None else default.timing,
+        semantics=override.semantics if override.semantics is not None else default.semantics,
+        request_transform=(
+            override.request_transform if override.request_transform is not None else default.request_transform
+        ),
     )
 
 
@@ -415,10 +272,6 @@ def resolve_plan(
     return FailoverPlan(snapshot.revision, port_id, profile)
 
 
-ReceiptT = TypeVar("ReceiptT")
-ReconcileHandleT = TypeVar("ReconcileHandleT")
-
-
 @dataclass(frozen=True, slots=True)
 class StrategyUsage:
     """Durable count for one strategy."""
@@ -434,12 +287,11 @@ class StrategyUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class RetryContext(Generic[ReceiptT, ReconcileHandleT]):
+class RetryContext:
     """Durable cursor and per-strategy usage snapshot carried by the graph."""
 
     operation_id: FailoverOperationId
     plan_revision: FailoverConfigRevision
-    budget: RetryBudget
     request_version: int = 1
     attempt_ordinal: int = 0
     endpoint_cursor: int = 0
@@ -449,16 +301,12 @@ class RetryContext(Generic[ReceiptT, ReconcileHandleT]):
     last_signal: FailureSignal | None = None
     last_strategy: FailureStrategy | None = None
     wait_until: datetime | None = None
-    receipt: ReceiptT | None = None
-    reconcile_handle: ReconcileHandleT | None = None
 
     def __post_init__(self) -> None:
         if not is_canonical_identity(self.operation_id):
             raise FailoverContractError("retry context operation_id must be canonical")
         if type(self.plan_revision) is not int or self.plan_revision < 1:
             raise FailoverContractError("retry context plan_revision must be a positive integer")
-        if type(self.budget) is not RetryBudget:
-            raise FailoverContractError("retry context budget must be RetryBudget")
         counters = (
             self.request_version,
             self.attempt_ordinal,
@@ -495,7 +343,7 @@ class RetryContext(Generic[ReceiptT, ReconcileHandleT]):
                 return usage.used
         return 0
 
-    def with_strategy_use(self, strategy: FailureStrategy) -> RetryContext[ReceiptT, ReconcileHandleT]:
+    def with_strategy_use(self, strategy: FailureStrategy) -> RetryContext:
         """Return a new context with one strategy use recorded."""
 
         if type(strategy) is not FailureStrategy:
@@ -509,6 +357,7 @@ class RetryContext(Generic[ReceiptT, ReconcileHandleT]):
 ConfigSourceT = TypeVar("ConfigSourceT")
 
 
+@runtime_checkable
 class FailoverConfigSource(Protocol[ConfigSourceT]):
     """Read the current immutable configuration once at graph entry."""
 
@@ -522,16 +371,12 @@ __all__ = [
     "FailoverConfigSource",
     "FailoverOperationId",
     "FailoverPlan",
-    "FailoverPolicyId",
     "FailoverPortId",
     "FailoverProfile",
     "FailoverProfileId",
     "FailoverProfileOverride",
-    "FailureRoute",
-    "FailureRule",
     "OperationSemantics",
     "PortBinding",
-    "ReconcileMode",
     "RetryBudget",
     "RetryContext",
     "RetryTiming",

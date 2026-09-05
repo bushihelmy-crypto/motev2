@@ -8,6 +8,12 @@ from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
 from uuid import uuid4
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
+from mote_kernel.execution.commit import (
+    GraphCommit,
+    GraphCommitKey,
+    GraphCommitWriteSet,
+    GraphTransition,
+)
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.recovery import preflight_recovery
 from mote_kernel.execution.errors import (
@@ -21,8 +27,6 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.family_driver import (
-    GraphCommit,
-    GraphTransition,
     admit_continued_root,
     fresh_root,
     project_graph_result,
@@ -42,11 +46,11 @@ from mote_kernel.execution.graph.outcome import (
     _success,
 )
 from mote_kernel.execution.graph.ports import (
-    FeedbackInputBinding,
     GraphInputRef,
     GraphOutputDeclarations,
     InputBindings,
     NodeOutputRef,
+    PredecessorOutputRef,
     canonical_nominal_type,
     canonical_port_name,
     normalize_graph_output_declarations,
@@ -187,6 +191,8 @@ class Graph(Generic[GraphValueT]):
     Outcome = GraphOutcome
     ResumeAction = ResumeNodeRequest
     Commit = GraphCommit
+    CommitKey = GraphCommitKey
+    CommitWriteSet = GraphCommitWriteSet
     Transition = GraphTransition
     SuccessResult = _GraphSuccessResult
     FailureResult = _GraphFailureResult
@@ -241,23 +247,27 @@ class Graph(Generic[GraphValueT]):
         )
 
     @staticmethod
-    def node_output(node_id: str, output_name: str) -> NodeOutputRef:
-        return NodeOutputRef(
-            GraphNodeId(canonical_port_name(node_id, kind="source node")),
-            canonical_port_name(output_name, kind="source output"),
-        )
+    @overload
+    def node_output(output_name: str, /) -> PredecessorOutputRef: ...
 
     @staticmethod
-    def feedback(
-        *,
-        initial: GraphInputRef[ValueT],
-        repeat: NodeOutputRef,
-    ) -> FeedbackInputBinding[ValueT]:
-        """Bind a first activation to graph input and later activations to the previous output."""
+    @overload
+    def node_output(node_id: str, output_name: str, /) -> NodeOutputRef: ...
 
-        if type(initial) is not GraphInputRef:
-            raise GraphValidationError("feedback initial must be a graph input reference")
-        return FeedbackInputBinding(initial, repeat)
+    @staticmethod
+    def node_output(
+        node_id_or_output_name: str,
+        output_name: str | None = None,
+        /,
+    ) -> NodeOutputRef | PredecessorOutputRef:
+        """Reference either one fixed producer or the actual control predecessor."""
+
+        if output_name is None:
+            return PredecessorOutputRef(canonical_port_name(node_id_or_output_name, kind="source output"))
+        return NodeOutputRef(
+            GraphNodeId(canonical_port_name(node_id_or_output_name, kind="source node")),
+            canonical_port_name(output_name, kind="source output"),
+        )
 
     @staticmethod
     @overload
@@ -295,7 +305,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
@@ -309,7 +319,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
     ) -> Self: ...
 
@@ -320,7 +330,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | FeedbackInputBinding[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
         ],
         outputs: Mapping[
             str,

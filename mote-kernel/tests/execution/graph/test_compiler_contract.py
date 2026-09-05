@@ -1,32 +1,23 @@
-# pyright: reportPrivateUsage=false
-
-from collections.abc import Mapping
-from typing import TypeAlias
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Protocol, TypeAlias, TypeVar, cast
 
 import pytest
 from tests.execution.graph.factories import compiled_join
 
+import mote_kernel.execution.graph.compiler as compiler_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
     DuplicateBoundaryError,
     GraphValidationError,
     UnknownNodeError,
 )
-from mote_kernel.execution.graph.compiler import (
-    _compile_activation_rules,
-    _FeedbackResolution,
-    _gates_can_coexist,
-    _RawActivationGate,
-    _repeatable_nodes,
-    _RouteRequirementProof,
-    compile_graph,
-)
+from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    GraphInputPort,
     GraphInputRef,
     GraphOutputDeclarations,
     NodeOutputPort,
@@ -37,13 +28,79 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.topology import CompiledJoin
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphNodeId,
     GraphRouteId,
 )
+
+GraphValueT = TypeVar("GraphValueT")
+RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RouteRequirementProofView:
+    requirements: tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
+    exact: bool
+
+
+class _CompilerPrivateView(Protocol):
+    _can_reach: Callable[..., bool]
+    _gates_can_coexist: Callable[..., bool]
+    _repeatable_nodes: Callable[..., frozenset[GraphNodeId]]
+
+    @staticmethod
+    def can_reach(
+        module: object,
+        source: GraphNodeId,
+        target: GraphNodeId,
+        successors: dict[GraphNodeId, set[GraphNodeId]],
+    ) -> bool:
+        return cast(_CompilerPrivateView, module)._can_reach(source, target, successors)
+
+    @staticmethod
+    def gates_can_coexist(
+        module: object,
+        first: RawActivationGate,
+        second: RawActivationGate,
+        requirements: dict[GraphNodeId, _RouteRequirementProofView] | None = None,
+        conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None = None,
+    ) -> bool:
+        function = cast(
+            Callable[
+                [
+                    RawActivationGate,
+                    RawActivationGate,
+                    dict[GraphNodeId, _RouteRequirementProofView] | None,
+                    dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None,
+                ],
+                bool,
+            ],
+            cast(_CompilerPrivateView, module)._gates_can_coexist,
+        )
+        return function(first, second, requirements, conditional_targets)
+
+    @staticmethod
+    def repeatable_nodes(
+        module: object,
+        entries: tuple[GraphNodeId, ...],
+        activation_gates: dict[GraphNodeId, list[RawActivationGate]],
+        successors: dict[GraphNodeId, set[GraphNodeId]],
+    ) -> frozenset[GraphNodeId]:
+        function = cast(
+            Callable[
+                [
+                    tuple[GraphNodeId, ...],
+                    dict[GraphNodeId, list[RawActivationGate]],
+                    dict[GraphNodeId, set[GraphNodeId]],
+                ],
+                frozenset[GraphNodeId],
+            ],
+            cast(_CompilerPrivateView, module)._repeatable_nodes,
+        )
+        return function(entries, activation_gates, successors)
+
 
 PipelineValue: TypeAlias = str | int
 
@@ -638,6 +695,26 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
         )
 
 
+def test_join_produced_and_ordinary_sources_cannot_merge_without_an_explicit_join() -> None:
+    with pytest.raises(GraphValidationError, match="multiple activation gates"):
+        compile_graph(
+            definition(
+                tuple(
+                    node(node_id, inputs={}, outputs={})
+                    for node_id in ("source", "left", "right", "joined", "ordinary", "target")
+                ),
+                edges=(
+                    DirectEdge(GraphNodeId("source"), GraphNodeId("left")),
+                    DirectEdge(GraphNodeId("source"), GraphNodeId("right")),
+                    DirectEdge(GraphNodeId("source"), GraphNodeId("ordinary")),
+                    JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+                    DirectEdge(GraphNodeId("joined"), GraphNodeId("target")),
+                    DirectEdge(GraphNodeId("ordinary"), GraphNodeId("target")),
+                ),
+            )
+        )
+
+
 def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
     decision = node("decision", inputs={}, outputs={})
     left = node("left", inputs={}, outputs={})
@@ -664,21 +741,30 @@ def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> 
     left = GraphRouteId("left")
     right = GraphRouteId("right")
     requirements = {
-        source: _RouteRequirementProof(
+        source: _RouteRequirementProofView(
             ((source, frozenset({left})),),
             True,
         )
     }
     conditional_targets = {source: {left: GraphNodeId("left"), right: GraphNodeId("right")}}
 
-    assert not _gates_can_coexist(
+    assert not _CompilerPrivateView.gates_can_coexist(
+        compiler_module,
         ((source, right),),
         ((source, left),),
         requirements,
         conditional_targets,
     )
-    assert _gates_can_coexist((), ((source, left),))
-    assert not _gates_can_coexist(((source, left),), ((source, right),))
+    assert _CompilerPrivateView.gates_can_coexist(compiler_module, (), ((source, left),))
+    assert not _CompilerPrivateView.gates_can_coexist(compiler_module, ((source, left),), ((source, right),))
+
+
+def test_reachability_proof_fails_closed_at_boundary_shapes() -> None:
+    source = GraphNodeId("source")
+    target = GraphNodeId("target")
+
+    assert not _CompilerPrivateView.can_reach(compiler_module, source, target, {source: set()})
+    assert _CompilerPrivateView.can_reach(compiler_module, source, target, {source: {target}, target: set()})
 
 
 def test_repeatable_node_propagation_reaches_acyclic_dependents() -> None:
@@ -688,12 +774,14 @@ def test_repeatable_node_propagation_reaches_acyclic_dependents() -> None:
         source: {source},
         dependent: set(),
     }
-    activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {
+    activation_gates: dict[GraphNodeId, list[RawActivationGate]] = {
         source: [((source, None),)],
         dependent: [((source, None),)],
     }
 
-    assert _repeatable_nodes((), activation_gates, successors) == frozenset((source, dependent))
+    assert _CompilerPrivateView.repeatable_nodes(compiler_module, (), activation_gates, successors) == frozenset(
+        (source, dependent)
+    )
 
 
 def test_explicit_entry_with_an_incoming_gate_has_no_cross_cohort_join_identity() -> None:
@@ -779,86 +867,32 @@ def test_coexisting_fanout_routes_require_an_explicit_join() -> None:
         )
 
 
-def test_feedback_compiler_rejects_a_multi_node_target_before_edge_checks() -> None:
-    valid = compile_graph(
-        definition(
-            (node("loop", inputs={}, outputs={"value": int}),),
-            edges=(
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
-            ),
-            entries=("loop",),
-            outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
-        )
-    )
-    loop = GraphNodeId("loop")
-    extra = GraphNodeId("extra")
-    resolution = _FeedbackResolution(
-        GraphInputPort((), "seed"),
-        NodeOutputPort((), loop, "value"),
-        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
-    )
-
-    nodes: dict[GraphNodeId, GraphNode[PipelineValue]] = {
-        loop: valid.nodes[loop],
-        extra: valid.nodes[loop],
-    }
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {loop: set(), extra: set()}
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {
-        loop: {GraphRouteId("continue"): loop, GraphRouteId("done"): END},
-        extra: {},
-    }
-    joins_by_source: dict[GraphNodeId, list[CompiledJoin]] = {loop: [], extra: []}
-    edges: tuple[Edge, ...] = (
-        ConditionalEdge(loop, GraphRouteId("continue"), loop),
-        ConditionalEdge(loop, GraphRouteId("done"), END),
-    )
-
-    with pytest.raises(GraphValidationError, match="one callable target node"):
-        _compile_activation_rules(
-            nodes,
-            (loop, extra),
-            (),
-            {loop: (("value", resolution),), extra: ()},
-            direct_targets,
-            conditional_targets,
-            joins_by_source,
-            edges,
-            valid.transition.graph_outputs,
+def test_compiler_rejects_a_graph_without_any_entry() -> None:
+    with pytest.raises(GraphValidationError, match="requires at least one"):
+        compile_graph(
+            definition(
+                (
+                    node("a", inputs={}, outputs={}),
+                    node("b", inputs={}, outputs={}),
+                ),
+                edges=(
+                    DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
+                    DirectEdge(GraphNodeId("b"), GraphNodeId("a")),
+                ),
+            )
         )
 
 
-def test_feedback_compiler_rejects_a_repeat_source_outside_target_at_rule_boundary() -> None:
-    valid = compile_graph(
-        definition(
-            (node("loop", inputs={}, outputs={"value": int}),),
-            edges=(
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), END),
-            ),
-            entries=("loop",),
-            outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
-        )
-    )
-    loop = GraphNodeId("loop")
-    resolution = _FeedbackResolution(
-        GraphInputPort((), "seed"),
-        NodeOutputPort((), GraphNodeId("other"), "value"),
-        PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
-    )
-
-    with pytest.raises(GraphValidationError, match="feedback repeat source must be the target node output"):
-        _compile_activation_rules(
-            {loop: valid.nodes[loop]},
-            (loop,),
-            (),
-            {loop: (("value", resolution),)},
-            {loop: set()},
-            {loop: {GraphRouteId("continue"): loop, GraphRouteId("done"): END}},
-            {loop: []},
-            (
-                ConditionalEdge(loop, GraphRouteId("continue"), loop),
-                ConditionalEdge(loop, GraphRouteId("done"), END),
-            ),
-            valid.transition.graph_outputs,
+def test_compiler_rejects_nodes_unreachable_from_the_declared_entry() -> None:
+    with pytest.raises(GraphValidationError, match="unreachable nodes"):
+        compile_graph(
+            definition(
+                tuple(node(node_id, inputs={}, outputs={}) for node_id in ("a", "b", "c")),
+                edges=(
+                    DirectEdge(GraphNodeId("b"), GraphNodeId("a")),
+                    DirectEdge(GraphNodeId("b"), GraphNodeId("c")),
+                    DirectEdge(GraphNodeId("c"), GraphNodeId("b")),
+                ),
+                entries=("a",),
+            )
         )

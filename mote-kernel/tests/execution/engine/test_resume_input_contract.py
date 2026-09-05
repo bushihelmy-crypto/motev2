@@ -23,7 +23,6 @@ from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    FeedbackInputBinding,
     GraphInputRef,
     NodeOutputRef,
     ResolvedInputBindings,
@@ -139,137 +138,114 @@ def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = Fa
     )
 
 
-def feedback_compiled_graph() -> CompiledGraph[int]:
+def predecessor_compiled_graph() -> CompiledGraph[int]:
+    async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["seed"])
+
     async def loop(values: Graph.Values[int]) -> Graph.Values[int]:
         return values
 
-    seed = Graph.graph_input("seed", int)
-    node = CallableNodeDefinition(
-        GraphNodeId("loop"),
-        loop,
-        normalize_input_bindings({"value": FeedbackInputBinding(seed, Graph.node_output("loop", "value"))}),
-        normalize_output_declarations({"value": int}),
-    )
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
     return compile_graph(
         GraphDefinition(
-            GraphDefinitionId("feedback.materialization"),
+            GraphDefinitionId("predecessor.materialization"),
             GraphDefinitionVersion(1),
-            (node,),
             (
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), GraphNodeId("__end__")),
+                CallableNodeDefinition(
+                    initialize_id,
+                    initialize,
+                    normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
+                    normalize_output_declarations({"value": int}),
+                ),
+                CallableNodeDefinition(
+                    loop_id,
+                    loop,
+                    normalize_input_bindings({"value": Graph.node_output("value")}),
+                    normalize_output_declarations({"value": int}),
+                ),
             ),
-            (GraphNodeId("loop"),),
+            (
+                DirectEdge(initialize_id, loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("continue"), loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("done"), GraphNodeId("__end__")),
+            ),
+            (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
         )
     )
 
 
-def multiple_feedback_compiled_graph() -> CompiledGraph[int]:
+def multiple_predecessor_compiled_graph() -> CompiledGraph[int]:
+    async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(left=values["left_seed"], right=values["right_seed"])
+
     async def loop(values: Graph.Values[int]) -> Graph.Values[int]:
         return values
 
-    left_seed = Graph.graph_input("left_seed", int)
-    right_seed = Graph.graph_input("right_seed", int)
-    node = CallableNodeDefinition(
-        GraphNodeId("loop"),
-        loop,
-        normalize_input_bindings(
-            {
-                "left": FeedbackInputBinding(left_seed, Graph.node_output("loop", "left")),
-                "right": FeedbackInputBinding(right_seed, Graph.node_output("loop", "right")),
-            }
-        ),
-        normalize_output_declarations({"left": int, "right": int}),
-    )
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
     return compile_graph(
         GraphDefinition(
-            GraphDefinitionId("feedback.multiple-materialization"),
+            GraphDefinitionId("predecessor.multiple-materialization"),
             GraphDefinitionVersion(1),
-            (node,),
             (
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("continue"), GraphNodeId("loop")),
-                ConditionalEdge(GraphNodeId("loop"), GraphRouteId("done"), GraphNodeId("__end__")),
+                CallableNodeDefinition(
+                    initialize_id,
+                    initialize,
+                    normalize_input_bindings(
+                        {
+                            "left_seed": Graph.graph_input("left_seed", int),
+                            "right_seed": Graph.graph_input("right_seed", int),
+                        }
+                    ),
+                    normalize_output_declarations({"left": int, "right": int}),
+                ),
+                CallableNodeDefinition(
+                    loop_id,
+                    loop,
+                    normalize_input_bindings(
+                        {
+                            "left": Graph.node_output("left"),
+                            "right": Graph.node_output("right"),
+                        }
+                    ),
+                    normalize_output_declarations({"left": int, "right": int}),
+                ),
             ),
-            (GraphNodeId("loop"),),
+            (
+                DirectEdge(initialize_id, loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("continue"), loop_id),
+                ConditionalEdge(loop_id, GraphRouteId("done"), GraphNodeId("__end__")),
+            ),
+            (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "left")}),
         )
     )
 
 
-def feedback_state(
+def predecessor_state(
     graph: CompiledGraph[int],
     *,
     superstep: int = 1,
     predecessor_superstep: int = 0,
+    predecessor_id: GraphNodeId | None = None,
     include_publication: bool = True,
 ) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
+    predecessor_id = predecessor_id or GraphNodeId("initialize")
     run_id = GraphRunId("run")
     node_id = GraphNodeId("loop")
-    cause = RoutedActivationCause(
-        (
-            ActivationReference(
-                GraphActivationIdentity(run_id, predecessor_superstep, node_id),
-                graph.transition.activation_rules.entries[0].feedback_route,
-            ),
-        )
-    )
-    state = GraphRunState(
-        run_id,
-        GraphDefinitionId("feedback.materialization"),
-        GraphDefinitionVersion(1),
-        GraphRunStatus.RUNNING,
-        superstep,
-        GraphFrontierState((GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput()), cause),)),
-        settled_activations=(
-            ActivationReference(
-                GraphActivationIdentity(run_id, predecessor_superstep, node_id),
-                graph.transition.activation_rules.entries[0].feedback_route,
-            ),
-        ),
-    )
-    scope_run = root_scope_run(run_id)
-    frames: ScopedFrameIndex[int] = ScopedFrameIndex()
-    frames = frames.add_graph_input(
-        AdmittedGraphInput(
-            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
-            admit_graph_input(graph, Graph.values(seed=7)),
-        )
-    )
-    if include_publication:
-        descriptor = graph.transition.publications[node_id]
-        publication = _make_node_output_frame(Graph.values(value=11), descriptor.declarations)
-        coordinate: PublicationAvailabilityCoordinate[int] = PublicationAvailabilityCoordinate(
-            StableActivation(scope_run, predecessor_superstep, node_id),
-            descriptor.identity,
-        )
-        frames = frames.add_publication(
-            ConfirmedPublication(
-                coordinate,
-                publication,
-                1,
-                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
-            )
-        )
-    return state, frames
-
-
-def multiple_feedback_state(
-    graph: CompiledGraph[int],
-) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
-    run_id = GraphRunId("multiple-run")
-    node_id = GraphNodeId("loop")
-    route = graph.transition.activation_rules.entries[0].feedback_route
+    route = None if predecessor_id == GraphNodeId("initialize") else GraphRouteId("continue")
     reference = ActivationReference(
-        GraphActivationIdentity(run_id, 0, node_id),
+        GraphActivationIdentity(run_id, predecessor_superstep, predecessor_id),
         route,
     )
     state = GraphRunState(
         run_id,
-        GraphDefinitionId("feedback.multiple-materialization"),
+        GraphDefinitionId("predecessor.materialization"),
         GraphDefinitionVersion(1),
         GraphRunStatus.RUNNING,
-        1,
+        superstep,
         GraphFrontierState(
             (GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput()), RoutedActivationCause((reference,))),)
         ),
@@ -280,14 +256,56 @@ def multiple_feedback_state(
     frames = frames.add_graph_input(
         AdmittedGraphInput(
             GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            admit_graph_input(graph, Graph.values(seed=7)),
+        )
+    )
+    if include_publication:
+        descriptor = graph.transition.publications[predecessor_id]
+        frames = frames.add_publication(
+            ConfirmedPublication(
+                PublicationAvailabilityCoordinate(
+                    StableActivation(scope_run, predecessor_superstep, predecessor_id),
+                    descriptor.identity,
+                ),
+                _make_node_output_frame(Graph.values(value=11), descriptor.declarations),
+                1,
+                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+            )
+        )
+    return state, frames
+
+
+def multiple_predecessor_state(
+    graph: CompiledGraph[int],
+) -> tuple[GraphRunState, ScopedFrameIndex[int]]:
+    run_id = GraphRunId("multiple-run")
+    initialize_id = GraphNodeId("initialize")
+    loop_id = GraphNodeId("loop")
+    reference = ActivationReference(GraphActivationIdentity(run_id, 0, initialize_id), None)
+    state = GraphRunState(
+        run_id,
+        GraphDefinitionId("predecessor.multiple-materialization"),
+        GraphDefinitionVersion(1),
+        GraphRunStatus.RUNNING,
+        1,
+        GraphFrontierState(
+            (GraphFrontierNode(loop_id, PendingGraphNode(UseStepRequestInput()), RoutedActivationCause((reference,))),)
+        ),
+        settled_activations=(reference,),
+    )
+    scope_run = root_scope_run(run_id)
+    descriptor = graph.transition.publications[initialize_id]
+    frames: ScopedFrameIndex[int] = ScopedFrameIndex()
+    frames = frames.add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
             admit_graph_input(graph, Graph.values(left_seed=7, right_seed=8)),
         )
     )
-    descriptor = graph.transition.publications[node_id]
     frames = frames.add_publication(
         ConfirmedPublication(
             PublicationAvailabilityCoordinate(
-                StableActivation(scope_run, 0, node_id),
+                StableActivation(scope_run, 0, initialize_id),
                 descriptor.identity,
             ),
             _make_node_output_frame(Graph.values(left=11, right=22), descriptor.declarations),
@@ -298,9 +316,9 @@ def multiple_feedback_state(
     return state, frames
 
 
-def test_feedback_materialization_reads_the_exact_immediate_predecessor() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
+def test_predecessor_materialization_reads_the_exact_immediate_publication() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
 
     materialized = materialize_node_input(
         graph,
@@ -313,9 +331,33 @@ def test_feedback_materialization_reads_the_exact_immediate_predecessor() -> Non
     assert materialized.entries == (NamedValue("value", 11),)
 
 
-def test_multiple_feedback_materialization_reads_each_fixed_publication_source() -> None:
-    graph = multiple_feedback_compiled_graph()
-    state, frames = multiple_feedback_state(graph)
+def test_predecessor_input_availability_reads_the_exact_immediate_publication() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
+
+    assert node_inputs_available(
+        graph,
+        root_scope_run(state.run_id),
+        state.superstep,
+        frames,
+        GraphNodeId("loop"),
+        state,
+    )
+
+    missing_state, missing_frames = predecessor_state(graph, include_publication=False)
+    assert not node_inputs_available(
+        graph,
+        root_scope_run(missing_state.run_id),
+        missing_state.superstep,
+        missing_frames,
+        GraphNodeId("loop"),
+        missing_state,
+    )
+
+
+def test_multiple_causal_inputs_read_their_names_from_one_predecessor_frame() -> None:
+    graph = multiple_predecessor_compiled_graph()
+    state, frames = multiple_predecessor_state(graph)
 
     materialized = materialize_node_input(
         graph,
@@ -328,11 +370,11 @@ def test_multiple_feedback_materialization_reads_each_fixed_publication_source()
     assert materialized.entries == (NamedValue("left", 11), NamedValue("right", 22))
 
 
-def test_feedback_materialization_rejects_a_non_immediate_predecessor() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph, superstep=2, predecessor_superstep=0)
+def test_predecessor_materialization_rejects_a_non_immediate_cause() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph, superstep=2, predecessor_superstep=0)
 
-    with pytest.raises(SnapshotMismatchError, match="immediate predecessor"):
+    with pytest.raises(SnapshotMismatchError, match="immediate committed settlement"):
         materialize_node_input(
             graph,
             state,
@@ -342,20 +384,24 @@ def test_feedback_materialization_rejects_a_non_immediate_predecessor() -> None:
         )
 
 
-def test_feedback_materialization_uses_the_latest_cause_predecessor_not_an_older_publication() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph, superstep=2, predecessor_superstep=1)
-    descriptor = graph.transition.publications[GraphNodeId("loop")]
-    older_coordinate: PublicationAvailabilityCoordinate[int] = PublicationAvailabilityCoordinate(
-        StableActivation(root_scope_run(state.run_id), 0, GraphNodeId("loop")),
-        descriptor.identity,
+def test_predecessor_materialization_uses_the_cause_not_an_older_publication() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(
+        graph,
+        superstep=2,
+        predecessor_superstep=1,
+        predecessor_id=GraphNodeId("loop"),
     )
+    descriptor = graph.transition.publications[GraphNodeId("loop")]
     frames = frames.add_publication(
         ConfirmedPublication(
-            older_coordinate,
+            PublicationAvailabilityCoordinate(
+                StableActivation(root_scope_run(state.run_id), 0, GraphNodeId("loop")),
+                descriptor.identity,
+            ),
             _make_node_output_frame(Graph.values(value=3), descriptor.declarations),
             1,
-            ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+            ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("older"))),
         )
     )
 
@@ -370,9 +416,9 @@ def test_feedback_materialization_uses_the_latest_cause_predecessor_not_an_older
     assert materialized.entries == (NamedValue("value", 11),)
 
 
-def test_feedback_materialization_does_not_fall_back_to_the_seed_when_publication_is_missing() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph, include_publication=False)
+def test_predecessor_materialization_does_not_fall_back_when_publication_is_missing() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph, include_publication=False)
 
     with pytest.raises(GraphValueUnavailableError, match="node output"):
         materialize_node_input(
@@ -384,14 +430,11 @@ def test_feedback_materialization_does_not_fall_back_to_the_seed_when_publicatio
         )
 
 
-def test_feedback_materialization_does_not_accept_a_cached_input_frame_instead_of_the_publication() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph, include_publication=False)
+def test_predecessor_materialization_does_not_accept_a_cached_input_frame() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph, include_publication=False)
     plan = graph.transition.materializations[GraphNodeId("loop")]
-    cached = _make_node_input_frame(
-        (NamedValue("value", 999),),
-        plan.descriptor.declarations,
-    )
+    cached = _make_node_input_frame((NamedValue("value", 999),), plan.descriptor.declarations)
     frames = frames.add_resume_input(
         AdmittedResumeInput(
             ResumeInputAvailabilityCoordinate(
@@ -412,9 +455,9 @@ def test_feedback_materialization_does_not_accept_a_cached_input_frame_instead_o
         )
 
 
-def test_feedback_materialization_rejects_an_input_override() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
+def test_predecessor_materialization_rejects_an_input_override() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
     overridden = replace(
         state,
         frontier=GraphFrontierState(
@@ -428,7 +471,7 @@ def test_feedback_materialization_rejects_an_input_override() -> None:
         ),
     )
 
-    with pytest.raises(SnapshotMismatchError, match="feedback activation cannot use an input override"):
+    with pytest.raises(SnapshotMismatchError, match="predecessor-bound activation cannot use an input override"):
         materialize_node_input(
             graph,
             overridden,
@@ -438,8 +481,8 @@ def test_feedback_materialization_rejects_an_input_override() -> None:
         )
 
 
-def test_feedback_input_availability_requires_authoritative_state() -> None:
-    graph = feedback_compiled_graph()
+def test_predecessor_input_availability_requires_authoritative_state() -> None:
+    graph = predecessor_compiled_graph()
 
     with pytest.raises(SnapshotMismatchError, match="authoritative graph state"):
         node_inputs_available(
@@ -452,9 +495,9 @@ def test_feedback_input_availability_requires_authoritative_state() -> None:
 
 
 @pytest.mark.parametrize("case", ["scope", "superstep"])
-def test_feedback_input_availability_requires_the_exact_state_coordinate(case: str) -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
+def test_predecessor_input_availability_requires_the_exact_state_coordinate(case: str) -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
     scope_run = root_scope_run(GraphRunId("other")) if case == "scope" else root_scope_run(state.run_id)
     activation_superstep = state.superstep - 1 if case == "superstep" else state.superstep
 
@@ -469,9 +512,9 @@ def test_feedback_input_availability_requires_the_exact_state_coordinate(case: s
         )
 
 
-def test_feedback_input_availability_requires_its_current_state_activation() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
+def test_predecessor_input_availability_requires_its_current_state_activation() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
     missing = replace(state, frontier=GraphFrontierState(()))
 
     with pytest.raises(SnapshotMismatchError, match="not present in the current frontier"):
@@ -485,12 +528,24 @@ def test_feedback_input_availability_requires_its_current_state_activation() -> 
         )
 
 
-def test_initial_feedback_input_requires_the_start_cause() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
-    initial = replace(state, superstep=0)
+def test_predecessor_input_rejects_a_start_cause() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
+    initial = replace(
+        state,
+        superstep=0,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("loop"),
+                    PendingGraphNode(UseStepRequestInput()),
+                    StartActivationCause(),
+                ),
+            )
+        ),
+    )
 
-    with pytest.raises(SnapshotMismatchError, match="initial feedback activation"):
+    with pytest.raises(SnapshotMismatchError, match="invalid target coordinate"):
         node_inputs_available(
             graph,
             root_scope_run(state.run_id),
@@ -501,9 +556,9 @@ def test_initial_feedback_input_requires_the_start_cause() -> None:
         )
 
 
-def test_pending_feedback_availability_rejects_a_state_input_override() -> None:
-    graph = feedback_compiled_graph()
-    state, frames = feedback_state(graph)
+def test_pending_predecessor_availability_rejects_a_state_input_override() -> None:
+    graph = predecessor_compiled_graph()
+    state, frames = predecessor_state(graph)
     node = state.frontier.nodes[0]
     overridden = replace(
         state,
@@ -519,7 +574,7 @@ def test_pending_feedback_availability_rejects_a_state_input_override() -> None:
         ),
     )
 
-    with pytest.raises(SnapshotMismatchError, match="feedback activation cannot use an input override"):
+    with pytest.raises(SnapshotMismatchError, match="predecessor-bound activation cannot use an input override"):
         pending_node_input_available(
             graph,
             overridden,

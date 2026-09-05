@@ -1,17 +1,23 @@
-"""Owner-local graph-run transition, driving, and result projection."""
+"""Owner-local graph-family driving, handoff, and result projection."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
-from dataclasses import InitVar, dataclass
-from typing import Generic, Protocol, TypeAlias, TypeVar, cast, final
+from typing import Generic, TypeAlias, TypeVar, cast, final
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
+from mote_kernel.execution.commit import (
+    GraphCommit,
+    apply_commit_writes,
+    commit_transition,
+    confirm_transition,
+    prepare_transition,
+    scoped_commit,
+)
 from mote_kernel.execution.engine.admission import admit_child_graph_input, project_graph_outputs
 from mote_kernel.execution.engine.resume_input import materialize_node_input
-from mote_kernel.execution.engine.routing import transition_admission_error
 from mote_kernel.execution.engine.session import GraphExecutionSession, consume_node_origin_cancellation
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
@@ -48,31 +54,23 @@ from mote_kernel.execution.result import (
     FailedGraph,
     GraphAbortView,
     GraphBoundary,
-    GraphCommitResult,
     GraphFailureView,
     GraphInterruptView,
     GraphResult,
     MissingChild,
     ReadyToResolve,
     TaskResult,
-    TaskSuccess,
     WaitingForChildren,
     _aborted_result,
     _awaiting_result,
-    _commit_result,
     _completed_result,
     _failed_result,
     _partial_commit_error,
 )
 from mote_kernel.execution.run_context import (
-    AdmittedGraphInput,
     ChildBoundaryAvailabilityCoordinate,
     ChildStateBinding,
     ConfirmedChildBoundary,
-    ConfirmedPublication,
-    ExecutionPublicationProvenance,
-    GraphInputAvailabilityCoordinate,
-    PublicationAvailabilityCoordinate,
     ScopedFrameIndex,
     _CompiledFamilyIdentity,
     _make_continuation,
@@ -92,93 +90,9 @@ from mote_kernel.state.graph_state import (
     InterruptedGraphNode,
     graph_interrupt_id,
     pending_node_ids,
-    reduce_graph_run,
 )
 
 GraphValueT = TypeVar("GraphValueT")
-
-
-class _TransitionSeal:
-    __slots__ = ()
-
-
-_TRANSITION_SEAL = _TransitionSeal()
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class GraphTransition(Generic[GraphValueT]):
-    """One reducer candidate offered to the caller's commit port."""
-
-    scope: tuple[str, ...]
-    previous_state: GraphRunState | None
-    command: GraphRunCommand
-    candidate_state: GraphRunState
-    result: GraphCommitResult[GraphValueT] | None
-    _seal: InitVar[_TransitionSeal]
-
-    def __post_init__(self, _seal: _TransitionSeal) -> None:
-        if _seal is not _TRANSITION_SEAL:
-            raise SnapshotMismatchError("graph transitions can only be produced by the family driver")
-
-
-class GraphCommit(Protocol[GraphValueT]):
-    async def __call__(
-        self,
-        transition: GraphTransition[GraphValueT],
-        /,
-    ) -> GraphRunState: ...
-
-
-async def commit_transition(
-    scope_run: ScopeRunCoordinate,
-    previous_state: GraphRunState | None,
-    command: GraphRunCommand,
-    result: TaskResult[GraphValueT] | None,
-    commit: GraphCommit[GraphValueT],
-    *,
-    graph: CompiledGraph[GraphValueT],
-    admitted_successor: GraphRunState | None = None,
-) -> GraphRunState:
-    """Reduce, expose, and confirm one authoritative state transition."""
-
-    candidate = reduce_graph_run(previous_state, command)
-    if admission_error := transition_admission_error(graph, previous_state, command, candidate):
-        raise SnapshotMismatchError(admission_error)
-    if admitted_successor is not None and candidate != admitted_successor:
-        raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
-    admitted = _commit_result(result) if result is not None else None
-    transition = GraphTransition(
-        scope=tuple(scope_run.scope),
-        previous_state=previous_state,
-        command=command,
-        candidate_state=candidate,
-        result=admitted,
-        _seal=_TRANSITION_SEAL,
-    )
-    confirmed = await commit(transition)
-    if type(confirmed) is not GraphRunState or confirmed != candidate:
-        raise SnapshotMismatchError("commit must return the exact authoritative reducer successor")
-    return confirmed
-
-
-def scoped_commit(
-    scope_run: ScopeRunCoordinate,
-    commit: GraphCommit[GraphValueT] | None,
-) -> GraphCommit[GraphValueT]:
-    async def confirm(transition: GraphTransition[GraphValueT], /) -> GraphRunState:
-        previous = transition.previous_state
-        if (
-            transition.scope != tuple(scope_run.scope)
-            or transition.candidate_state.run_id != scope_run.graph_run_id
-            or (previous is not None and previous.run_id != scope_run.graph_run_id)
-        ):
-            raise SnapshotMismatchError("owner commit received a transition for a different scoped graph run")
-        if commit is None:
-            return transition.candidate_state
-        return await commit(transition)
-
-    return confirm
 
 
 _ChildTerminal: TypeAlias = CompletedChild[GraphValueT] | FailedChild | AbortedChild
@@ -467,13 +381,6 @@ class _GraphRun(Generic[GraphValueT]):
                 projections.append(phase)
         return tuple(projections)
 
-    def install_graph_input(self, input_frame: GraphInputFrame[GraphValueT]) -> None:
-        coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-            self._scope_run,
-            self._graph.graph_input_descriptor.identity,
-        )
-        self._frames = self._frames.add_graph_input(AdmittedGraphInput(coordinate, input_frame))
-
     async def _transition(
         self,
         command: GraphRunCommand,
@@ -483,24 +390,25 @@ class _GraphRun(Generic[GraphValueT]):
         confirmed_frames: ScopedFrameIndex[GraphValueT] | None = None,
         handoff_evidence: bool = False,
     ) -> GraphRunState:
-        commit_task = asyncio.create_task(
-            commit_transition(
-                self._scope_run,
-                self._state,
-                command,
-                result,
-                self._commit,
-                admitted_successor=admitted_successor,
-                graph=self._graph,
-            )
+        transition = prepare_transition(
+            self._scope_run,
+            self._state,
+            command,
+            result,
+            graph=self._graph,
+            admitted_successor=admitted_successor,
         )
+        if confirmed_frames is not None and (transition.writes.graph_inputs or transition.writes.publications):
+            raise FrameInstallationInvariantError("a transition cannot stage frames and an admitted frame snapshot")
+        commit_task = asyncio.create_task(confirm_transition(transition, self._commit))
         confirmed, cancellation = await wait_for_owner_task(
             commit_task,
             self._mark_commit_origin_cancellation,
         )
         self._state = confirmed
-        if confirmed_frames is not None:
-            self._frames = confirmed_frames
+        self._frames = (
+            apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
+        )
         if handoff_evidence and self._parent_activation is not None:
             self.handoff_evidence()
         if cancellation is not None:
@@ -698,23 +606,6 @@ class _GraphRun(Generic[GraphValueT]):
                 result = completed.result
                 await self._transition(completed.command, result)
                 task = result.task
-                if isinstance(result, TaskSuccess):
-                    publication = self._graph.transition.publications[task.node_id]
-                    coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                        stable_activation(
-                            self._scope_run,
-                            GraphActivationIdentity(task.run_id, task.superstep, task.node_id),
-                        ),
-                        publication.identity,
-                    )
-                    self._frames = self._frames.add_publication(
-                        ConfirmedPublication(
-                            coordinate,
-                            result.output,
-                            self._state.revision,
-                            ExecutionPublicationProvenance(completed.command.execution),
-                        )
-                    )
                 if task.node_id in self._graph.nested_graphs:
                     await self._retire_child(result)
 
@@ -1018,14 +909,22 @@ def _make_child_constructor(
         activation = stable_activation(owner_scope_run, parent)
         child_commit = scoped_commit(coordinate, commit)
         command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
-        child_state = await commit_transition(coordinate, None, command, None, child_commit, graph=child_graph)
-        child: _GraphRun[GraphValueT] | None = None
+        transition = prepare_transition(
+            coordinate,
+            None,
+            command,
+            None,
+            graph=child_graph,
+            graph_input=child_input,
+        )
+        child_state = await confirm_transition(transition, child_commit)
         try:
+            staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
             child = _GraphRun(
                 child_graph,
                 coordinate,
                 child_state,
-                ScopedFrameIndex(),
+                staged_frames,
                 limits,
                 child_commit,
                 _make_child_constructor(coordinate, limits, commit, evidence_publisher),
@@ -1033,31 +932,24 @@ def _make_child_constructor(
                 activation,
                 evidence_publisher,
             )
-            child.install_graph_input(child_input)
-            return _opaque_handle(child, parent)
         except BaseException:
 
             async def cleanup_candidate() -> None:
                 reason = GraphAbortReason("nested graph owner construction failed")
-                if child is None:
-                    await commit_transition(
-                        coordinate,
-                        child_state,
-                        AbortGraphRun(child_state.revision, reason),
-                        None,
-                        child_commit,
-                        graph=child_graph,
-                    )
-                    return
-                with suppress(BaseException):
-                    await child.abort(reason)
-                with suppress(BaseException):
-                    await child.release()
+                await commit_transition(
+                    coordinate,
+                    child_state,
+                    AbortGraphRun(child_state.revision, reason),
+                    None,
+                    child_commit,
+                    graph=child_graph,
+                )
 
             cleanup_task = asyncio.create_task(cleanup_candidate())
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
             raise
+        return _opaque_handle(child, parent)
 
     return construct
 
@@ -1359,16 +1251,22 @@ async def fresh_root(
     evidence_publisher, evidence_reader = _evidence_adapter((), ScopedFrameIndex())
     child_constructor = _make_child_constructor(scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
-    state: GraphRunState | None = None
-    root: _GraphRun[GraphValueT] | None = None
+    command = project_start_graph_command(graph, scope_run.graph_run_id)
+    transition = prepare_transition(
+        scope_run,
+        None,
+        command,
+        None,
+        graph=graph,
+        graph_input=input_frame,
+    )
+    state = await confirm_transition(transition, root_commit)
     try:
-        command = project_start_graph_command(graph, scope_run.graph_run_id)
-        state = await commit_transition(scope_run, None, command, None, root_commit, graph=graph)
         root = _GraphRun(
             graph,
             scope_run,
             state,
-            ScopedFrameIndex(),
+            apply_commit_writes(ScopedFrameIndex(), transition.writes),
             limits,
             root_commit,
             child_constructor,
@@ -1376,31 +1274,22 @@ async def fresh_root(
             None,
             evidence_publisher,
         )
-        root.install_graph_input(input_frame)
         return root, evidence_reader
     except BaseException:
-        if state is None:
-            raise
 
         async def cleanup_root() -> None:
-            if root is None:
-                with suppress(BaseException):
-                    await commit_transition(
-                        scope_run,
-                        state,
-                        AbortGraphRun(
-                            state.revision,
-                            GraphAbortReason("root graph owner construction failed"),
-                        ),
-                        None,
-                        root_commit,
-                        graph=graph,
-                    )
-                return
             with suppress(BaseException):
-                await root.abort(GraphAbortReason("root graph owner construction failed"))
-            with suppress(BaseException):
-                await root.release()
+                await commit_transition(
+                    scope_run,
+                    state,
+                    AbortGraphRun(
+                        state.revision,
+                        GraphAbortReason("root graph owner construction failed"),
+                    ),
+                    None,
+                    root_commit,
+                    graph=graph,
+                )
 
         cleanup_task = asyncio.create_task(cleanup_root())
         with suppress(BaseException):

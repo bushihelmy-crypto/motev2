@@ -73,13 +73,73 @@ if isinstance(result, Graph.CompletedResult):
     print(result.outputs["result"])
 ```
 
-`Graph.node_output()` 只声明数据依赖，不会自动激活 consumer；consumer 仍需 `add_edge`、conditional edge 或
-`add_join`。没有 incoming control edge 的 graph-input-only node 会自动成为 root。`set_outputs()` 只做结果投影，
-不会启动任何 node。
+`Graph.node_output("producer", "name")` 固定读取指定 producer；`Graph.node_output("name")` 读取本轮真正激活
+consumer 的控制前驱。两种形式都只声明值来源，不会自动激活 consumer；consumer 仍需 direct、conditional 或 Join
+control edge。没有 incoming control edge 的 graph-input-only/zero-input node 会自动成为 root。`set_outputs()` 只接受
+graph input 或两参数的固定 producer 引用，它只做结果投影，不会启动任何 node。
 
-`Graph.node_output()` declares only a data dependency; it does not activate the consumer. The consumer still needs a
-direct edge, conditional edge, or join. A node that only reads graph inputs becomes an automatic root when it has no
-incoming control edge. `set_outputs()` projects the result and never starts a node.
+`Graph.node_output("producer", "name")` reads one fixed producer, while `Graph.node_output("name")` reads the control
+predecessor that actually activated the consumer in this round. Both forms declare value sources without creating
+activation edges; the consumer still needs a direct, conditional, or Join control edge. A graph-input-only or
+zero-input node with no incoming control edge becomes an automatic root. `set_outputs()` accepts graph inputs or the
+two-argument fixed-producer form only; it projects results and never starts a node.
+
+## 因果前驱输出 / Causal predecessor output
+
+Use the one-argument overload when mutually exclusive paths share one node—for example, several failover steps entering
+one Hook—or when a loop step consumes the output of whichever node led into this activation. The first value is an
+ordinary initializer node, not a hidden seed rule:
+
+当多个互斥路径复用一个节点（例如多个 failover 步骤进入同一个 Hook），或循环节点要读取本轮实际前驱时，使用一参数
+重载。第一次值由普通初始化节点产生，不存在隐藏的 seed 规则：
+
+```python
+async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
+    return Graph.values(value=values["seed"])
+
+
+async def step(values: Graph.Values[int]) -> Graph.Outcome[int]:
+    next_value = values["value"] + 1
+    return Graph.success(
+        Graph.values(value=next_value),
+        route="done" if next_value == 3 else "again",
+    )
+
+
+loop = Graph[int]("example.causal-loop")
+loop.add_node(
+    "initialize",
+    initialize,
+    inputs={"seed": Graph.graph_input("seed", int)},
+    outputs={"value": int},
+)
+loop.add_node(
+    "step",
+    step,
+    inputs={"value": Graph.node_output("value")},
+    outputs={"value": int},
+)
+loop.add_edge("initialize", "step")
+loop.add_conditional_edge("step", "again", "step")
+loop.add_conditional_edge("step", "done", Graph.END)
+loop.set_outputs({"value": Graph.node_output("step", "value")})
+```
+
+The compiler derives every possible predecessor from the control topology. Each one must publish the requested output
+with the same exact type, and the paths must be provably mutually exclusive. At runtime the state-owned activation cause
+selects one exact predecessor publication; the engine never scans for the latest value.
+
+Compiler 会从控制拓扑推导所有可能前驱；每个前驱都必须发布同名、完全相同类型的输出，而且这些路径必须可证明互斥。
+运行时只根据 State 持有的 activation cause 读取一个精确前驱 publication，绝不会扫描“最新值”。
+
+A START activation has no predecessor, so a causal-input node cannot be a root. A Join activation has several
+predecessors, so its target must name each required fixed producer explicitly instead of using the one-argument form.
+These rules fail at compile time. Concrete publication persistence is still the responsibility of a future durable
+store; the current continuation carries that evidence only in process.
+
+START activation 没有前驱，因此 causal-input node 不能作为 root；Join activation 有多个前驱，因此目标必须用两参数
+形式显式读取各个固定 producer，不能使用一参数形式。这些错误都会在编译期拒绝。具体 publication 的持久化仍属于未来
+durable store；当前 continuation 只在进程内携带这些 evidence。
 
 ## 恢复动作 / Resume actions
 

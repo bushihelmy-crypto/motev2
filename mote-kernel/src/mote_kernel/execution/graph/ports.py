@@ -53,27 +53,14 @@ class NodeOutputRef:
 
 
 @dataclass(frozen=True, slots=True)
-class FeedbackInputBinding(Generic[GraphValueT]):
-    """An internal input declaration that crosses activation boundaries.
+class PredecessorOutputRef:
+    """An output port supplied by the activation's one actual predecessor."""
 
-    ``initial`` is used for the START activation and ``repeat`` is used only
-    when a compiled routed cause explicitly selects the feedback rule.  The
-    compiler, rather than this value object, decides whether the two sources
-    are legal for a particular target node.
-    """
-
-    initial: "GraphInputRef[GraphValueT] | NodeOutputRef"
-    repeat: NodeOutputRef
-
-    def __post_init__(self) -> None:
-        if type(self.initial) not in (GraphInputRef, NodeOutputRef):
-            raise GraphValidationError("feedback initial must be a graph input or node output reference")
-        if type(self.repeat) is not NodeOutputRef:
-            raise GraphValidationError("feedback repeat must be a node output reference")
+    output_name: str
 
 
 ValueSourceRef: TypeAlias = GraphInputRef[GraphValueT] | NodeOutputRef
-InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | FeedbackInputBinding[GraphValueT]
+InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | PredecessorOutputRef
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -103,6 +90,13 @@ class GraphOutputPort:
 
 
 ResolvedValueSource: TypeAlias = GraphInputPort | NodeOutputPort
+
+# An activation gate is a tuple of source nodes and the route domain each
+# source may contribute.  It lives with the port declarations so input
+# materialization and the topology plan share one gate shape without an import
+# cycle.
+ActivationGateSource: TypeAlias = tuple[GraphNodeId, frozenset[GraphRouteId | None]]
+ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,19 +152,15 @@ class PublicationSelection:
 
 
 @dataclass(frozen=True, slots=True)
-class CompiledActivationRule(Generic[GraphValueT]):
-    """The sole compiled value and route rule for one feedback activation."""
+class CompiledPredecessorInput:
+    """Compiler-proved output ports for one control-causal input."""
 
     target: GraphNodeId
     input_name: str
-    initial: GraphInputPort
-    repeat: NodeOutputPort
-    repeat_selection: PublicationSelection
-    feedback_route: GraphRouteId
-    terminal_route: GraphRouteId
+    sources: tuple[NodeOutputPort, ...]
 
 
-ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledActivationRule[GraphValueT]
+ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledPredecessorInput
 
 
 def require_publication_selection(
@@ -187,7 +177,7 @@ def require_publication_selection(
 @dataclass(frozen=True, slots=True)
 class ResolvedInputBinding(Generic[GraphValueT]):
     destination: NodeInputPort
-    source: ResolvedInputSource[GraphValueT]
+    source: ResolvedInputSource
     descriptor: NominalTypeDescriptor[GraphValueT]
     publication: PublicationSelection | None
 
@@ -245,8 +235,8 @@ def normalize_input_bindings(
     entries: list[InputBinding[GraphValueT]] = []
     for name, source in sorted(values.items()):
         canonical = canonical_port_name(name, kind="input")
-        if not isinstance(source, GraphInputRef | NodeOutputRef | FeedbackInputBinding):
-            raise GraphValidationError(f"input {canonical!r} must bind one graph input, node output, or feedback input")
+        if not isinstance(source, GraphInputRef | NodeOutputRef | PredecessorOutputRef):
+            raise GraphValidationError(f"input {canonical!r} must bind one graph input or node output")
         entries.append(InputBinding(canonical, source))
     return InputBindings(tuple(entries))
 

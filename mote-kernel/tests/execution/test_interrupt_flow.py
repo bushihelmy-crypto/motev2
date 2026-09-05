@@ -247,7 +247,7 @@ async def test_interrupt_completion_does_not_wait_for_a_slow_sibling() -> None:
         return values
 
     async def commit(transition: Graph.Transition[str], /) -> Graph.State:
-        if isinstance(transition.result, Graph.InterruptResult):
+        if isinstance(transition.writes.settlement, Graph.InterruptResult):
             interrupt_committed.set()
         return transition.candidate_state
 

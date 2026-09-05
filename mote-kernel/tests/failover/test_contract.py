@@ -12,7 +12,6 @@ from mote_kernel.failover.contract import (
     FailureEvidence,
     FailureSignal,
     InProgress,
-    ReconcileAttempt,
     RefreshCredential,
     Rejected,
     RotateCredential,
@@ -87,14 +86,14 @@ def test_port_outcomes_are_explicit_and_immutable() -> None:
     rejected = Rejected(evidence)
     in_progress = InProgress("receipt-1")
     unknown = Unknown(
-        "reconcile-1",
+        "provider-context",
         FailureEvidence(FailureClass.NO_RESPONSE, error_hint=ErrorHint("no_response")),
     )
 
     assert completed.response == "response"
     assert rejected.evidence is evidence
     assert in_progress.receipt == "receipt-1"
-    assert unknown.handle == "reconcile-1"
+    assert unknown.handle == "provider-context"
     assert unknown.evidence.category is FailureClass.NO_RESPONSE
     assert type(completed).__name__ == "Completed"
     assert type(rejected).__name__ == "Rejected"
@@ -139,14 +138,7 @@ class _Attempt:
         return Completed(request)
 
 
-class _Reconciler:
-    async def reconcile_once(self, handle: str) -> Unknown[str]:
-        return Unknown(handle, FailureEvidence(FailureClass.UNKNOWN_OUTCOME))
-
-
-def test_single_attempt_and_reconcile_protocols_describe_narrow_capabilities() -> None:
+def test_single_attempt_protocol_describes_one_narrow_port_call() -> None:
     attempt: SingleAttempt[str, Completed[str]] = _Attempt()
-    reconciler: ReconcileAttempt[str, Unknown[str]] = _Reconciler()
 
     assert hasattr(attempt, "invoke_once")
-    assert hasattr(reconciler, "reconcile_once")

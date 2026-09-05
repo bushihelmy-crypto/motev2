@@ -1,6 +1,7 @@
 """Deterministic compiler for named value bindings and control topology."""
 
 from dataclasses import dataclass
+from itertools import combinations
 from typing import TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
@@ -11,13 +12,13 @@ from mote_kernel.execution.errors import (
     UnreachableNodeError,
 )
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.definition import GraphDefinition, GraphNode, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
+from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
-    CompiledActivationRule,
+    ActivationGate,
+    CompiledPredecessorInput,
     DefinitionScope,
-    FeedbackInputBinding,
     FrameDescriptor,
     FrameDescriptorIdentity,
     FrameKind,
@@ -33,6 +34,7 @@ from mote_kernel.execution.graph.ports import (
     NominalTypeDescriptor,
     OutputDeclaration,
     OutputDeclarations,
+    PredecessorOutputRef,
     PublicationSelection,
     PublicationSelectionKind,
     ResolvedInputBinding,
@@ -40,8 +42,6 @@ from mote_kernel.execution.graph.ports import (
     ResolvedValueSource,
 )
 from mote_kernel.execution.graph.topology import (
-    ActivationGate,
-    CompiledActivationRules,
     CompiledGraph,
     CompiledJoin,
     FrontierTransitionPlan,
@@ -53,6 +53,8 @@ from mote_kernel.state.graph_state import GraphJoinIdentity, GraphNodeId, GraphR
 GraphValueT = TypeVar("GraphValueT")
 RouteRequirements: TypeAlias = tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
 _RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
+_ControlEvent: TypeAlias = tuple[GraphNodeId, GraphRouteId | None]
+_ControlEventPair: TypeAlias = tuple[_ControlEvent, _ControlEvent]
 
 
 def _activation_gate_sort_key(
@@ -79,13 +81,6 @@ def _compiled_activation_gate(
 
 
 @dataclass(frozen=True, slots=True)
-class _FeedbackResolution:
-    initial: GraphInputPort
-    repeat: NodeOutputPort
-    repeat_selection: PublicationSelection
-
-
-@dataclass(frozen=True, slots=True)
 class _RouteRequirementProof:
     """A rectangular over-approximation of one activation's route domain.
 
@@ -96,6 +91,23 @@ class _RouteRequirementProof:
 
     requirements: RouteRequirements
     exact: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlFlowProof:
+    """Reachable same-frontier event pairs for ordinary control flow.
+
+    A conditional node contributes exactly one selected route, while its
+    direct successors are all emitted by that same activation.  The compiler
+    can therefore prove that two singleton gates are mutually exclusive by
+    traversing pairs of control events instead of treating every incoming
+    edge as an independent entry.  Join-produced nodes are deliberately
+    marked unknown: their pending-arrival state is owned by the runtime Join
+    machinery and is not guessed by this ordinary-flow proof.
+    """
+
+    coexisting_events: frozenset[_ControlEventPair]
+    join_affected_nodes: frozenset[GraphNodeId]
 
 
 def _all_single_source_gates(
@@ -157,8 +169,6 @@ def _collect_graph_inputs(
             source = binding.source
             if isinstance(source, GraphInputRef):
                 refs.append(source)
-            elif isinstance(source, FeedbackInputBinding) and isinstance(source.initial, GraphInputRef):
-                refs.append(source.initial)
     refs.extend(output.source for output in definition.outputs.entries if isinstance(output.source, GraphInputRef))
     for ref in refs:
         existing = descriptors.get(ref.name)
@@ -212,17 +222,39 @@ def _resolve_source(
     return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
 
 
-def _resolve_feedback_repeat(
-    source: NodeOutputRef,
+def _resolve_predecessor_output(
+    source: PredecessorOutputRef,
     *,
+    target: GraphNodeId,
+    input_name: str,
     scope: DefinitionScope,
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
-) -> tuple[NodeOutputPort, NominalTypeDescriptor[GraphValueT]]:
-    outputs = node_outputs.get(source.node_id)
-    if outputs is None:
-        raise UnknownNodeError(f"feedback repeat references unknown node {source.node_id!r}")
-    declaration = _declaration(outputs, source.output_name, owner=f"node {source.node_id!r}")
-    return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
+    entries: tuple[GraphNodeId, ...],
+    gates: list[_RawActivationGate],
+) -> tuple[CompiledPredecessorInput, NominalTypeDescriptor[GraphValueT]]:
+    """Resolve one causal input against every possible activation predecessor."""
+
+    if target in entries:
+        raise GraphValidationError(f"predecessor-bound node {target!r} cannot be activated from START")
+    if any(len(gate) != 1 for gate in gates):
+        raise GraphValidationError(f"predecessor-bound node {target!r} cannot be activated by a Join")
+    source_ids = tuple(sorted({gate[0][0] for gate in gates}))
+    descriptors: list[NominalTypeDescriptor[GraphValueT]] = []
+    ports: list[NodeOutputPort] = []
+    for source_id in source_ids:
+        declaration = _declaration(
+            node_outputs[source_id],
+            source.output_name,
+            owner=f"predecessor node {source_id!r}",
+        )
+        descriptors.append(declaration.descriptor)
+        ports.append(NodeOutputPort(scope, source_id, source.output_name))
+    descriptor = descriptors[0]
+    if any(candidate.value_type is not descriptor.value_type for candidate in descriptors[1:]):
+        raise GraphValidationError(
+            f"predecessor input {input_name!r} on node {target!r} has conflicting exact output types"
+        )
+    return CompiledPredecessorInput(target, input_name, tuple(ports)), descriptor
 
 
 def _data_cycle(data_dependencies: dict[GraphNodeId, set[GraphNodeId]]) -> bool:
@@ -269,6 +301,8 @@ def _can_reach(
     target: GraphNodeId,
     successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> bool:
+    if source not in successors or target not in successors:
+        return False
     pending = [source]
     visited: set[GraphNodeId] = set()
     while pending:
@@ -280,6 +314,126 @@ def _can_reach(
         visited.add(current)
         pending.extend(sorted(successors[current], reverse=True))
     return False
+
+
+def _event_sort_key(event: _ControlEvent) -> tuple[GraphNodeId, bool, str]:
+    node_id, route = event
+    return node_id, route is not None, route or ""
+
+
+def _event_pair(first: _ControlEvent, second: _ControlEvent) -> _ControlEventPair | None:
+    if first[0] == second[0]:
+        return None
+    return (first, second) if _event_sort_key(first) <= _event_sort_key(second) else (second, first)
+
+
+def _event_options(
+    node_id: GraphNodeId,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    routes = tuple(sorted(conditional_targets[node_id]))
+    return tuple((node_id, route) for route in routes) or ((node_id, None),)
+
+
+def _ordinary_event_successors(
+    event: _ControlEvent,
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    """Return next events, keeping conditional choices on the target node."""
+
+    source, route = event
+    targets = set(direct_targets[source])
+    if route is not None:
+        conditional_target = conditional_targets[source][route]
+        if conditional_target != END:
+            targets.add(conditional_target)
+    return tuple(successor for target in sorted(targets) for successor in _event_options(target, conditional_targets))
+
+
+def _ordinary_reachable_events(
+    entries: tuple[GraphNodeId, ...],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+) -> frozenset[_ControlEvent]:
+    reached = {_event for entry in entries for _event in _event_options(entry, conditional_targets)}
+    pending = sorted(reached, key=_event_sort_key)
+    while pending:
+        event = pending.pop()
+        for successor in _ordinary_event_successors(event, direct_targets, conditional_targets):
+            if successor not in reached:
+                reached.add(successor)
+                pending.append(successor)
+    return frozenset(reached)
+
+
+def _join_affected_nodes(
+    node_ids: tuple[GraphNodeId, ...],
+    joins: tuple[JoinEdge, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> frozenset[GraphNodeId]:
+    affected = {join.target for join in joins if join.target != END}
+    pending = sorted(affected)
+    while pending:
+        source = pending.pop()
+        successors = set(direct_targets[source])
+        successors.update(target for target in conditional_targets[source].values() if target != END)
+        newly_affected = successors - affected
+        affected.update(newly_affected)
+        pending.extend(sorted(newly_affected))
+    return frozenset(node_id for node_id in node_ids if node_id in affected)
+
+
+def _control_flow_proof(
+    node_ids: tuple[GraphNodeId, ...],
+    entries: tuple[GraphNodeId, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    joins: tuple[JoinEdge, ...],
+) -> _ControlFlowProof:
+    """Compute ordinary-control events that may share one frontier.
+
+    The worklist tracks pairs rather than whole frontiers.  A pair can arise
+    either from two initial entries, from one activation's direct fan-out, or
+    from two already coexisting activations advancing one step.  This is the
+    exact pair projection for ordinary (non-Join) control flow and reaches a
+    finite fixed point even when the graph contains cycles.
+    """
+
+    reachable = _ordinary_reachable_events(entries, conditional_targets, direct_targets)
+    coexisting: set[_ControlEventPair] = set()
+    pending: list[_ControlEventPair] = []
+
+    def remember(first: _ControlEvent, second: _ControlEvent) -> None:
+        pair = _event_pair(first, second)
+        if pair is not None and pair not in coexisting:
+            coexisting.add(pair)
+            pending.append(pair)
+
+    for first, second in combinations(
+        sorted(reachable, key=_event_sort_key),
+        2,
+    ):
+        if first[0] in entries and second[0] in entries:
+            remember(first, second)
+    for event in sorted(reachable, key=_event_sort_key):
+        successors = _ordinary_event_successors(event, direct_targets, conditional_targets)
+        for first, second in combinations(successors, 2):
+            remember(first, second)
+
+    while pending:
+        first, second = pending.pop()
+        first_successors = _ordinary_event_successors(first, direct_targets, conditional_targets)
+        second_successors = _ordinary_event_successors(second, direct_targets, conditional_targets)
+        for first_successor in first_successors:
+            for second_successor in second_successors:
+                remember(first_successor, second_successor)
+
+    return _ControlFlowProof(
+        frozenset(coexisting),
+        _join_affected_nodes(node_ids, joins, direct_targets, conditional_targets),
+    )
 
 
 def _guaranteed_sets(
@@ -374,6 +528,7 @@ def _gates_can_coexist(
     second: _RawActivationGate,
     requirements: dict[GraphNodeId, _RouteRequirementProof] | None = None,
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None = None,
+    control_proof: _ControlFlowProof | None = None,
 ) -> bool:
     """Return whether two gates can be satisfied by one frontier.
 
@@ -390,7 +545,12 @@ def _gates_can_coexist(
         second_requirement = _gate_route_requirements(second, requirements, conditional_targets)
         if first_requirement is None or second_requirement is None:
             return False
-        return _merge_route_requirements((first_requirement.requirements, second_requirement.requirements)) is not None
+        if _merge_route_requirements((first_requirement.requirements, second_requirement.requirements)) is None:
+            return False
+    if control_proof is not None and conditional_targets is not None:
+        proof = _ordinary_gates_can_coexist(first, second, conditional_targets, control_proof)
+        if proof is not None:
+            return proof
     if len(first) != 1 or len(second) != 1:
         return True
     first_source, first_route = first[0]
@@ -403,19 +563,80 @@ def _gates_can_coexist(
     )
 
 
+def _ordinary_gates_can_coexist(
+    first: _RawActivationGate,
+    second: _RawActivationGate,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    control_proof: _ControlFlowProof,
+) -> bool | None:
+    """Answer singleton-gate coexistence from the ordinary-flow proof.
+
+    ``None`` means that at least one gate is a Join gate or depends on a
+    Join-produced node; callers must retain the conservative answer instead
+    of treating the ordinary-flow proof as an exclusivity proof.
+    """
+
+    if len(first) != 1 or len(second) != 1:
+        return None
+    first_source, first_route = first[0]
+    second_source, second_route = second[0]
+    if first_source == second_source:
+        return not (first_route is not None and second_route is not None and first_route != second_route)
+    if first_source in control_proof.join_affected_nodes or second_source in control_proof.join_affected_nodes:
+        return None
+    first_events = _gate_events(first, conditional_targets)
+    second_events = _gate_events(second, conditional_targets)
+    return any(
+        _event_pair(first_event, second_event) in control_proof.coexisting_events
+        for first_event in first_events
+        for second_event in second_events
+    )
+
+
+def _gate_events(
+    gate: _RawActivationGate,
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> tuple[_ControlEvent, ...]:
+    """Expand one compiler-produced singleton gate into its route events."""
+
+    source, route = next(iter(gate))
+    options = _event_options(source, conditional_targets)
+    if route is None:
+        return options
+    return ((source, route),)
+
+
 def _reject_ambiguous_activation_gates(
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
     requirements: dict[GraphNodeId, _RouteRequirementProof],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    control_proof: _ControlFlowProof | None = None,
 ) -> None:
     for target, gates in activation_gates.items():
         ordered = tuple(gates)
         for position, first in enumerate(ordered):
-            if any(
-                _gates_can_coexist(first, second, requirements, conditional_targets)
-                for second in ordered[position + 1 :]
-            ):
-                raise GraphValidationError(f"target {target!r} has multiple activation gates without an explicit Join")
+            for second in ordered[position + 1 :]:
+                if not _gates_can_coexist(
+                    first,
+                    second,
+                    requirements,
+                    conditional_targets,
+                    control_proof,
+                ):
+                    continue
+                sources: tuple[GraphNodeId, ...] = tuple(
+                    sorted(
+                        {source for source, _route in (*first, *second)},
+                    )
+                )
+                if len(sources) > 1:
+                    guidance = f"concurrent sources may be {sources!r}, declare graph.add_join({sources!r}, {target!r})"
+                else:
+                    single_source = next(iter(sources))
+                    guidance = f"source {single_source!r} contributes more than one path to the same target"
+                raise GraphValidationError(
+                    f"target {target!r} has multiple activation gates without an explicit Join; {guidance}"
+                )
 
 
 def _repeatable_nodes(
@@ -652,7 +873,8 @@ def _compile_join_occurrence_plans(
             }
             if len(repeated_sources) != len(edge.sources) or len(cohort_signatures) != 1:
                 raise GraphValidationError(
-                    f"join {edge.sources!r} -> {edge.target!r} has no provable occurrence identity"
+                    f"join {edge.sources!r} -> {edge.target!r} has no provable occurrence identity; "
+                    "multiple activation gates cannot supply its sources"
                 )
             offsets = tuple((source, 1) for source in edge.sources)
         else:
@@ -664,7 +886,8 @@ def _compile_join_occurrence_plans(
                 target_level = max(absolute_levels[source] for source in edge.sources) + 1
             except KeyError as error:
                 raise GraphValidationError(
-                    f"join {edge.sources!r} -> {edge.target!r} has no unique occurrence coordinate"
+                    f"join {edge.sources!r} -> {edge.target!r} has no unique occurrence coordinate; "
+                    "multiple activation gates create repeatable source paths"
                 ) from error
             offsets = tuple((source, target_level - absolute_levels[source]) for source in edge.sources)
         compiled.append(CompiledJoin(GraphJoinIdentity(edge.sources, edge.target), offsets))
@@ -753,64 +976,6 @@ def _output_publication_selection(
     raise GraphValidationError(f"graph output source {source.node_id!r} has no unique completion activation coordinate")
 
 
-def _compile_activation_rules(
-    nodes: dict[GraphNodeId, GraphNode[GraphValueT]],
-    node_ids: tuple[GraphNodeId, ...],
-    scope: DefinitionScope,
-    feedback_bindings: dict[GraphNodeId, tuple[tuple[str, _FeedbackResolution], ...]],
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
-    joins_by_source: dict[GraphNodeId, list[CompiledJoin]],
-    edges: tuple[Edge, ...],
-    graph_outputs: GraphOutputBindings[GraphValueT],
-) -> CompiledActivationRules[GraphValueT]:
-    declared = tuple(
-        (node_id, input_name, resolution)
-        for node_id in node_ids
-        for input_name, resolution in feedback_bindings[node_id]
-    )
-    if not declared:
-        return CompiledActivationRules(())
-    if scope:
-        raise GraphValidationError("feedback declarations are not permitted in a nested graph")
-    target = declared[0][0]
-    if len(node_ids) != 1 or not isinstance(nodes[target], CallableNodeDefinition):
-        raise GraphValidationError("feedback graph requires one callable target node")
-    if (
-        direct_targets[target]
-        or joins_by_source[target]
-        or any(not isinstance(edge, ConditionalEdge) for edge in edges)
-    ):
-        raise GraphValidationError("feedback target cannot have ordinary or join control edges")
-    routes = conditional_targets[target]
-    feedback_routes = tuple(route for route, destination in routes.items() if destination == target)
-    terminal_routes = tuple(route for route, destination in routes.items() if destination == END)
-    if len(routes) != 2 or len(feedback_routes) != 1 or len(terminal_routes) != 1:
-        raise GraphValidationError("feedback target requires exactly one self feedback route and one terminal route")
-    if len(graph_outputs.entries) != 1:
-        raise GraphValidationError("feedback target requires exactly one graph output")
-    if any(candidate.repeat.node_id != target for _declared_target, _name, candidate in declared):
-        raise GraphValidationError("feedback repeat source must be the target node output")
-    repeat_sources = frozenset(candidate.repeat for _declared_target, _name, candidate in declared)
-    output = graph_outputs.entries[0]
-    if not isinstance(output.source, NodeOutputPort) or output.source not in repeat_sources:
-        raise GraphValidationError("feedback graph output must publish the target repeat output")
-    return CompiledActivationRules(
-        tuple(
-            CompiledActivationRule(
-                declared_target,
-                declared_input,
-                declared_resolution.initial,
-                declared_resolution.repeat,
-                declared_resolution.repeat_selection,
-                feedback_routes[0],
-                terminal_routes[0],
-            )
-            for declared_target, declared_input, declared_resolution in declared
-        )
-    )
-
-
 def _compile_graph(
     definition: GraphDefinition[GraphValueT],
     scope: DefinitionScope,
@@ -846,50 +1011,24 @@ def _compile_graph(
         for node_id in node_ids
     }
     input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
-    feedback_bindings_by_node: dict[GraphNodeId, tuple[tuple[str, _FeedbackResolution], ...]] = {}
+    predecessor_bindings_by_node: dict[GraphNodeId, tuple[tuple[str, PredecessorOutputRef], ...]] = {}
     data_dependencies = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for node_id in node_ids:
         node = nodes[node_id]
         resolved: list[ResolvedInputBinding[GraphValueT]] = []
-        feedback_bindings: list[tuple[str, _FeedbackResolution]] = []
+        predecessor_bindings: list[tuple[str, PredecessorOutputRef]] = []
         for binding in node.inputs.entries:
             declared_source = binding.source
-            if isinstance(declared_source, FeedbackInputBinding):
-                if not isinstance(declared_source.initial, GraphInputRef):
-                    raise GraphValidationError(
-                        f"feedback input {binding.local_name!r} on node {node_id!r} "
-                        "must use a graph input initial source"
-                    )
-                source, descriptor = _resolve_source(
-                    declared_source.initial,
-                    scope=scope,
-                    graph_inputs=graph_inputs,
-                    node_outputs=node_outputs,
-                    consumer=node_id,
-                )
-                repeat, repeat_descriptor = _resolve_feedback_repeat(
-                    declared_source.repeat,
-                    scope=scope,
-                    node_outputs=node_outputs,
-                )
-                if descriptor.value_type is not repeat_descriptor.value_type:
-                    raise GraphValidationError(
-                        f"feedback input {binding.local_name!r} initial and repeat sources have different exact types"
-                    )
-                feedback = _FeedbackResolution(
-                    source,
-                    repeat,
-                    PublicationSelection(PublicationSelectionKind.RELATIVE, 1),
-                )
-                feedback_bindings.append((binding.local_name, feedback))
-            else:
-                source, descriptor = _resolve_source(
-                    declared_source,
-                    scope=scope,
-                    graph_inputs=graph_inputs,
-                    node_outputs=node_outputs,
-                    consumer=node_id,
-                )
+            if isinstance(declared_source, PredecessorOutputRef):
+                predecessor_bindings.append((binding.local_name, declared_source))
+                continue
+            source, descriptor = _resolve_source(
+                declared_source,
+                scope=scope,
+                graph_inputs=graph_inputs,
+                node_outputs=node_outputs,
+                consumer=node_id,
+            )
             if isinstance(source, NodeOutputPort):
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
@@ -900,17 +1039,8 @@ def _compile_graph(
                     None,
                 )
             )
-        resolved_bindings = ResolvedInputBindings(tuple(resolved))
-        feedback_bindings_by_node[node_id] = tuple(feedback_bindings)
-        if isinstance(node, NestedGraphNodeDefinition):
-            expected = nested_graphs[node_id].graph_input_descriptor.declarations.entries
-            if len(resolved_bindings.entries) != len(expected) or any(
-                binding.destination.local_name != declaration.name
-                or binding.descriptor.value_type is not declaration.descriptor.value_type
-                for binding, declaration in zip(resolved_bindings.entries, expected, strict=True)
-            ):
-                raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
-        input_bindings_by_node[node_id] = resolved_bindings
+        input_bindings_by_node[node_id] = ResolvedInputBindings(tuple(resolved))
+        predecessor_bindings_by_node[node_id] = tuple(predecessor_bindings)
     if _data_cycle(data_dependencies):
         raise GraphValidationError("ordinary node value bindings contain a data cycle")
 
@@ -958,6 +1088,40 @@ def _compile_graph(
     if not entries:
         raise MissingEntryError("graph definition requires at least one automatic or explicit entry")
 
+    for node_id in node_ids:
+        resolved = list(input_bindings_by_node[node_id].entries)
+        for input_name, declared_source in predecessor_bindings_by_node[node_id]:
+            source, descriptor = _resolve_predecessor_output(
+                declared_source,
+                target=node_id,
+                input_name=input_name,
+                scope=scope,
+                node_outputs=node_outputs,
+                entries=entries,
+                gates=activation_gates[node_id],
+            )
+            resolved.append(
+                ResolvedInputBinding(
+                    NodeInputPort(scope, node_id, input_name),
+                    source,
+                    descriptor,
+                    None,
+                )
+            )
+        resolved_bindings = ResolvedInputBindings(
+            tuple(sorted(resolved, key=lambda binding: binding.destination.local_name))
+        )
+        node = nodes[node_id]
+        if isinstance(node, NestedGraphNodeDefinition):
+            expected = nested_graphs[node_id].graph_input_descriptor.declarations.entries
+            if len(resolved_bindings.entries) != len(expected) or any(
+                binding.destination.local_name != declaration.name
+                or binding.descriptor.value_type is not declaration.descriptor.value_type
+                for binding, declaration in zip(resolved_bindings.entries, expected, strict=True)
+            ):
+                raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
+        input_bindings_by_node[node_id] = resolved_bindings
+
     successors = {node_id: set(targets) for node_id, targets in direct_targets.items()}
     for source, routes in conditional_targets.items():
         successors[source].update(target for target in routes.values() if target != END)
@@ -984,7 +1148,19 @@ def _compile_graph(
         data_dependencies,
         conditional_targets,
     )
-    _reject_ambiguous_activation_gates(activation_gates, route_requirements, conditional_targets)
+    control_proof = _control_flow_proof(
+        node_ids,
+        entries,
+        direct_targets,
+        conditional_targets,
+        tuple(joins),
+    )
+    _reject_ambiguous_activation_gates(
+        activation_gates,
+        route_requirements,
+        conditional_targets,
+        control_proof,
+    )
 
     guarantees = _guaranteed_sets(node_ids, entries, activation_gates)
     for target, sources in data_dependencies.items():
@@ -1049,24 +1225,11 @@ def _compile_graph(
         )
     graph_outputs = GraphOutputBindings(tuple(graph_output_bindings))
 
-    activation_rules = _compile_activation_rules(
-        nodes,
-        node_ids,
-        scope,
-        feedback_bindings_by_node,
-        direct_targets,
-        conditional_targets,
-        joins_by_source,
-        definition.edges,
-        graph_outputs,
-    )
-
     materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
     for ordinal, node_id in enumerate(node_ids):
         bindings = input_bindings_by_node[node_id]
         published_bindings: list[ResolvedInputBinding[GraphValueT]] = []
         for binding in bindings.entries:
-            rule = activation_rules.for_input(node_id, binding.destination.local_name)
             source = binding.source
             if isinstance(source, NodeOutputPort):
                 publication = _input_publication_selection(
@@ -1077,13 +1240,13 @@ def _compile_graph(
                     joins_by_target,
                 )
             else:
-                publication = None
+                publication = binding.publication
             published_bindings.append(
                 ResolvedInputBinding(
                     binding.destination,
-                    rule if rule is not None else source,
+                    source,
                     binding.descriptor,
-                    None if rule is not None else publication,
+                    publication,
                 )
             )
         resolved_bindings = ResolvedInputBindings(tuple(published_bindings))
@@ -1117,7 +1280,6 @@ def _compile_graph(
         frozen_map(publications),
         graph_outputs,
         resource_order,
-        activation_rules,
         frozen_map(
             {
                 node_id: tuple(

@@ -1,6 +1,6 @@
 # Graph 延迟回环 P1 当前代码评审（2026-09-03）
 
-状态：**P1 设计与代码审查通过；完整交付门禁通过**
+状态：**P1 设计与代码审查通过；本目录门禁通过，全仓 pre-commit 本轮未复测**
 
 评审对象：当前工作树中的 Graph 延迟反馈回环 P1，包括 declaration/compiler、compiled topology、
 `GraphRunState`/reducer、live routing、state-led recovery、nested family driver、公开 facade 边界、测试、示例和全部质量门禁。
@@ -54,7 +54,7 @@
 
 **状态：条件风险，暂不单独判定 P1 不通过。**
 
-复现方式（只使用当前仓库代码；脚本在 `/tmp/p1_probe.py`，未修改生产代码）：
+复现方式（只使用当前仓库代码；使用一次性临时探针，未修改生产代码）：
 
 1. 直接构造一个合法形状的 `GraphRunState`：`superstep=1`、当前 frontier 只有 `target`，其 routed cause 指向 `source@0`；
 2. 将同一个坐标复制到 `settled_activations`，但本次恢复进程从未执行 `source`；
@@ -81,10 +81,11 @@ State/publication commit。因此本轮将它记录为**必须明确的信任边
 只有当实际 persistence adapter 可以写入/恢复未由 reducer 产生的 State，或 acknowledgement-loss 重建路径确实能生成这种 ledger 时，
 它才升级为阻断；届时应在 reader/admission 统一验证 commit-linked provenance，而不是增加兼容层。
 
-另一个边界反例（同样是信任边界审计，不单独作为阻断）：历史 ledger 混入 canonical 但不属于 compiled graph 的 `ghost` activation 时，
-`frontier_admission_error()` 直接抛出原始 `KeyError('ghost')`（来自 `_post_advance_error()` 对
-`graph.transition.conditional_targets[source]` 的索引），而不是统一的 `InvalidExecutionSnapshotError`/
-`InvalidRoutingCommandError`。这既不能向调用者表达“快照拒绝”，也说明历史 ledger 的 graph-membership 校验缺口独立存在。
+修复前的另一个边界反例（HEAD^ 的历史复现，当前不再成立；同样是信任边界审计，不单独作为阻断）是：历史 ledger
+混入 canonical 但不属于 compiled graph 的 `ghost` activation 时，`frontier_admission_error()` 直接抛出原始
+`KeyError('ghost')`（来自 `_post_advance_error()` 对 `graph.transition.conditional_targets[source]` 的索引），而不是统一的
+`InvalidExecutionSnapshotError`/`InvalidRoutingCommandError`。这说明历史 ledger 的 graph-membership 校验缺口曾经独立存在，
+但不能把该修复前事实当作当前 HEAD 的行为。
 
 **P1 补防（2026-09-03）**：这一项已经在当前实现中收口。compiled-graph admission 现在会先扫描完整
 `settled_activations` ledger，拒绝不属于当前图的节点、条件节点未声明的 route，以及普通节点携带 route 的记录；
@@ -92,6 +93,20 @@ State/publication commit。因此本轮将它记录为**必须明确的信任边
 对应回归覆盖了 ledger-only ghost、非法历史 route、直接 routing 和公开 state recovery（callable 调用数为零）。
 这只解决“记录不属于图”的确定性拓扑问题；图内坐标但没有真实提交 provenance 的伪造，仍按上文约定留给 P2 的
 commit-linked durable evidence reader，不用可复制的 `verified` 标记冒充证明。
+
+**当前 HEAD 的调用链复核（2026-09-03）**：`require_snapshot_matches_graph()` 在 running 与 terminal/aborted
+状态分别经过 `frontier_admission_error()` 或 ledger admission；`resolve_routing_facts()`、`plan_tasks()`、
+`GraphExecutor.issue_session()` 和 `_GraphRun._transition()` 均不能绕过该边界再 claim/call。补丁涉及文件的根目录
+pre-commit scoped run（`pre-commit run --files ...`）通过；本轮没有在含跨项目 Cloudflare 迁移改动的工作树上重新执行
+`pre-commit run --all-files`，因此不把全仓 pre-commit 结果写成当前轮次的独立实测。
+
+**终态/中止态边界复核（2026-09-03）**：`validate_graph_run_state()` 允许 Failed/Aborted 诊断保留
+`join_progress`，而 `require_snapshot_matches_graph()` 对非 running 状态不再展开 successor/gate 推导；因此手工构造的终态
+快照仍可能带有图中不存在的 Join key，或在没有对应 ledger entry 时带有拓扑未声明的成功 route。沿公开调用链，
+`prepare_superstep()` 会先按 terminal status 返回，recovery proof 也先返回 terminal boundary；结果投影只读取 failure/
+interrupt/abort 诊断，不进入 `plan_tasks()`、routing、output materialization 或 callable。该反例不会改变可达执行结果，
+本轮记录为终态诊断快照的严格性边界，不升级为 P1，也不为它增加第二套终态 topology validator。若未来契约要求所有终态
+快照也必须完整证明 graph topology，再在同一 admission owner 中收口。
 
 ## 4. 设计与代码审查记录
 
@@ -178,8 +193,9 @@ twine check                             PASS（2 artifacts）
 ```
 
 复杂度实际值与当前配置上限相等（cognitive complexity 2794、max cyclomatic 78、max cognitive 131、hotspots 72）；这只是
-门禁事实，不是“提高 ratchet 后设计自动合格”的证明。根目录 `pre-commit run --all-files` 已实测通过；Cloudflare
-TypeScript Persistence 因迁移目录没有匹配文件按规则跳过，其余 hook 全部通过。
+门禁事实，不是“提高 ratchet 后设计自动合格”的证明。补丁涉及文件的根目录 scoped pre-commit 已通过；根目录
+`pre-commit run --all-files` 本轮未复测（工作树含跨项目 Cloudflare 迁移改动），因此不把此前文档或历史命令记录当作本轮
+全仓门禁证据。
 
 ## 7. 最终结论
 
@@ -189,5 +205,6 @@ TypeScript Persistence 因迁移目录没有匹配文件按规则跳过，其余
 提交 provenance”的条件信任边界。它依赖 P2 的 commit-linked durable evidence reader 与 State/publication 原子提交，不能用
 可复制的 State 字段替代。P2 的 retention/release、codec、跨语言 conformance 和公开 durable feedback API 不属于本次 P1 判定。
 
-完整交付门禁现为**无条件通过**：本目录 `make check` 与 monorepo 根目录 `pre-commit run --all-files` 均已实测通过。
-工作树中 Cloudflare 迁移改动仍未纳入本次 kernel 提交。
+交付结论为**代码与本目录门禁通过，全仓门禁有条件通过**：本目录 `make check` 已实测通过，补丁相关文件的 scoped
+pre-commit 已通过；monorepo 根目录 `pre-commit run --all-files` 本轮未复测。工作树中 Cloudflare 迁移改动仍未纳入本次
+kernel 提交，不能把全仓 pre-commit 写成当前轮次的无条件证据。

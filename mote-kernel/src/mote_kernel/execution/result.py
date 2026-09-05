@@ -12,7 +12,7 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _public_node_output,
 )
-from mote_kernel.execution.run_context import AdmittedResumeInput, _GraphContinuation
+from mote_kernel.execution.run_context import AdmittedResumeInput, GraphPublicationEvidence, _GraphContinuation
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
@@ -110,13 +110,19 @@ _COMMIT_RESULT_SEAL = _CommitResultSeal()
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _GraphSuccessResult(Generic[GraphValueT]):
     node_id: str
-    output: _GraphValues[GraphValueT]
+    publication: GraphPublicationEvidence[GraphValueT]
     route: str | None
     _seal: InitVar[_CommitResultSeal]
 
     def __post_init__(self, _seal: _CommitResultSeal) -> None:
         if _seal is not _COMMIT_RESULT_SEAL:
             raise NodeExecutionContractError("success commit results require settlement admission")
+
+    @property
+    def output(self) -> _GraphValues[GraphValueT]:
+        """Expose the publication values without storing a second payload."""
+
+        return _public_node_output(self.publication.frame)
 
 
 @final
@@ -146,16 +152,25 @@ class _GraphInterruptResult:
 GraphCommitResult: TypeAlias = _GraphSuccessResult[GraphValueT] | _GraphFailureResult | _GraphInterruptResult
 
 
-def _commit_result(result: TaskResult[GraphValueT]) -> GraphCommitResult[GraphValueT]:
+def _commit_result(
+    result: TaskResult[GraphValueT],
+    publication: GraphPublicationEvidence[GraphValueT] | None,
+) -> GraphCommitResult[GraphValueT]:
     if type(result) not in (TaskSuccess, TaskFailure, TaskInterrupt):
         raise NodeExecutionContractError("task result has an unsupported variant")
     if isinstance(result, TaskSuccess):
+        if publication is None:
+            raise NodeExecutionContractError("successful settlement requires publication evidence")
+        if publication.frame is not result.output:
+            raise NodeExecutionContractError("publication evidence must carry the task output frame")
         return _GraphSuccessResult(
             node_id=result.task.node_id,
-            output=_public_node_output(result.output),
+            publication=publication,
             route=result.route,
             _seal=_COMMIT_RESULT_SEAL,
         )
+    if publication is not None:
+        raise NodeExecutionContractError("failed or interrupted settlement cannot publish output evidence")
     if isinstance(result, TaskFailure):
         return _GraphFailureResult(
             node_id=result.task.node_id,

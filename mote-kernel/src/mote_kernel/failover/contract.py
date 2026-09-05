@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, NewType, Protocol, TypeAlias, TypeVar
+from typing import Generic, NewType, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 
 class FailoverContractError(ValueError):
@@ -46,7 +46,6 @@ class FailureStrategy(StrEnum):
     REFRESH_CREDENTIAL = "refresh_credential"
     ROTATE_CREDENTIAL = "rotate_credential"
     SWITCH_ENDPOINT = "switch_endpoint"
-    RECONCILE = "reconcile"
     RETURN_TO_MODEL = "return_to_model"
     ABORT = "abort"
 
@@ -143,7 +142,7 @@ class FailureEvidence:
 
 ResultT_co = TypeVar("ResultT_co", covariant=True)
 ReceiptT_co = TypeVar("ReceiptT_co", covariant=True)
-ReconcileHandleT_co = TypeVar("ReconcileHandleT_co", covariant=True)
+UnknownDetailT_co = TypeVar("UnknownDetailT_co", covariant=True)
 
 
 class _PortOutcome:
@@ -172,21 +171,24 @@ class Rejected(_PortOutcome):
 
 @dataclass(frozen=True, slots=True)
 class InProgress(_PortOutcome, Generic[ReceiptT_co]):
-    """The provider accepted the operation and returned a durable receipt."""
+    """The Port reports that the logical operation is still in progress.
+
+    Failover returns this typed content to its caller.  It never schedules a
+    provider poll; a version-aware Port owns any status lookup on a later call.
+    """
 
     receipt: ReceiptT_co
 
 
 @dataclass(frozen=True, slots=True)
-class Unknown(_PortOutcome, Generic[ReconcileHandleT_co]):
-    """The result is uncertain; an optional handle may support reconciliation.
+class Unknown(_PortOutcome, Generic[UnknownDetailT_co]):
+    """The Port cannot determine the logical operation's current result.
 
-    A missing handle is intentional.  The adapter must not invent one merely
-    to make an uncertain request retryable; the graph returns such an outcome
-    to the model for a domain-level decision.
+    ``handle`` is opaque Port-owned context returned to the caller.  Failover
+    neither interprets it nor uses it to query the provider.
     """
 
-    handle: ReconcileHandleT_co | None
+    handle: UnknownDetailT_co | None
     evidence: FailureEvidence
 
     def __post_init__(self) -> None:
@@ -194,7 +196,7 @@ class Unknown(_PortOutcome, Generic[ReconcileHandleT_co]):
             raise FailoverContractError("unknown outcome evidence must be FailureEvidence")
 
 
-PortOutcome: TypeAlias = Completed[ResultT_co] | Rejected | InProgress[ReceiptT_co] | Unknown[ReconcileHandleT_co]
+PortOutcome: TypeAlias = Completed[ResultT_co] | Rejected | InProgress[ReceiptT_co] | Unknown[UnknownDetailT_co]
 
 
 ChangeT = TypeVar("ChangeT")
@@ -252,27 +254,50 @@ class SwitchEndpoint(_PreparationAction):
 PreparationAction: TypeAlias = Wait | TransformRequest[ChangeT] | RefreshCredential | RotateCredential | SwitchEndpoint
 
 
+PreparedRequestT_co = TypeVar("PreparedRequestT_co", covariant=True)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRequest(Generic[PreparedRequestT_co]):
+    """The request produced by one completed preparation action."""
+
+    request: PreparedRequestT_co
+
+
 RequestT_contra = TypeVar("RequestT_contra", contravariant=True)
 AttemptResultT_co = TypeVar("AttemptResultT_co", covariant=True)
 
 
+@runtime_checkable
 class SingleAttempt(Protocol[RequestT_contra, AttemptResultT_co]):
     """A capability that performs at most one wire invocation per call."""
 
     async def invoke_once(self, request: RequestT_contra, /) -> AttemptResultT_co: ...
 
 
-ReconcileHandleT_contra = TypeVar("ReconcileHandleT_contra", contravariant=True)
-ReconcileResultT_co = TypeVar("ReconcileResultT_co", covariant=True)
+PreparedRequestT = TypeVar("PreparedRequestT")
+PreparationT = TypeVar("PreparationT")
 
 
-class ReconcileAttempt(Protocol[ReconcileHandleT_contra, ReconcileResultT_co]):
-    """A capability that checks one existing operation without resubmitting it."""
+@runtime_checkable
+class AttemptPreparation(Protocol[PreparedRequestT, PreparationT]):
+    """Apply one policy-selected action before the next wire attempt.
 
-    async def reconcile_once(self, handle: ReconcileHandleT_contra, /) -> ReconcileResultT_co: ...
+    The action already contains the config-owned instruction.  This capability
+    performs that instruction once and returns the resulting request; it never
+    chooses a strategy or starts a retry loop.
+    """
+
+    async def prepare_next(
+        self,
+        request: PreparedRequestT,
+        action: PreparationAction[PreparationT],
+        /,
+    ) -> PreparedRequest[PreparedRequestT]: ...
 
 
 __all__ = [
+    "AttemptPreparation",
     "Completed",
     "ErrorHint",
     "FailoverContractError",
@@ -283,7 +308,7 @@ __all__ = [
     "InProgress",
     "PortOutcome",
     "PreparationAction",
-    "ReconcileAttempt",
+    "PreparedRequest",
     "RefreshCredential",
     "Rejected",
     "RotateCredential",

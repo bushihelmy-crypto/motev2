@@ -19,7 +19,7 @@ materialization、scheduler、family driver 和结果投影。
 - 不修改 `mote-infra/persistence`，不增加 persistence/recovery adapter、Store facade 或 storage read path；
 - 不定义或实现 durable codec、RecoverySnapshot、read/reconcile、CAS/commit identity、retention/release 或跨语言协议；
 - 不承诺进程崩溃后的自动继续、跨进程 state-only value recovery、crash-safe、exactly-once 或 provider side effect 语义；
-- `Graph.feedback(...)` 只开放进程内构图声明；本文件不把它宣称为 durable API，也不为它增加内存专用执行路径。
+- `Graph.node_output("name")` 只开放进程内的因果前驱读取；本文件不把它宣称为 durable value recovery，也不为它增加内存专用执行路径。
 
 `Graph.Commit` 是现有的**调用方注入的进程内确认接缝**。省略它时，当前实现确认 reducer candidate 以便继续同一进程的调用；
 注入测试 double 时只验证调用顺序、exact candidate 和 State 不变性。两者都不是本文件的持久化实现或崩溃恢复证明。
@@ -50,13 +50,13 @@ value-unavailable/admission 错误停止。它不是从存储读取值的重启�
 | --- | --- | --- | --- |
 | 唯一公开 `Graph` facade、immutable `CompiledGraph` | 已实现 | `execution/facade.py`、`execution/graph/compiler.py` | 复用，不增加 facade/runner |
 | `GraphRunState`、typed cause、settled activation ledger、pure reducer | 已实现 | `state/graph_state/model.py`、`frontier_model.py`、`reducer.py` | 继续扩展同一 State，不建 loop State |
-| direct self-feedback 的 seed/repeat、immediate predecessor、terminal exit | 已实现（内部 typed 路径） | `FeedbackInputBinding`、compiler/routing/materialization；`test_feedback_compiler.py`、`test_feedback_runtime.py` | 只补真实缺口和组合回归 |
-| 公开 facade 接受 feedback declaration | 已开放（仅进程内） | `Graph.feedback()` 直接构造 canonical `FeedbackInputBinding`，`add_node()` 复用统一 normalizer/compiler | 不新增 wrapper 或第二执行路径；durable 能力仍关闭 |
+| causal loop 的显式 initializer、immediate predecessor、terminal exit | 已实现（内部 typed 路径） | `PredecessorOutputRef`、compiler/routing/materialization；`test_predecessor_output_compiler.py`、`test_predecessor_output_runtime.py` | 只补真实缺口和组合回归 |
+| 公开 facade 接受因果前驱声明 | 已开放（仅进程内） | `Graph.node_output("name")` 构造 canonical `PredecessorOutputRef`，`add_node()` 复用统一 normalizer/compiler | 不新增 wrapper 或第二执行路径；durable value recovery 仍关闭 |
 | 普通 direct fan-out、多消费者 | 已实现 | `DirectEdge`、scheduler/session、fan-out 示例和 routing tests | 做顺序/资源组合审计 |
 | conditional route 选择及 route/cause admission | 已实现 | `ConditionalEdge`、`SelectGraphRoute`、compiled activation gates | 复用现有 gate/cause 模型 |
 | 非循环 Join、partial progress、Join-to-END | 已实现 | `JoinEdge`、`GraphJoinProgress`、routing/reducer tests、`parallel_detectives`/`fanout_terminal` | 做组合回归，不另造 Join runner |
 | Join source occurrence identity | 已实现（可证明的循环/可重复 source） | `GraphJoinOccurrenceIdentity`、`CompiledJoin.source_target_offsets`、routing/reducer/admission tests | 复用；无法证明 occurrence 的形状继续 compile fail |
-| multiple feedback binding | 已实现（公开 facade 复用同一 typed 路径） | `CompiledActivationRules`、compiler/materialization/routing、`test_feedback_compiler.py`、`test_feedback_runtime.py` | 复用固定 repeat source；不扩展普通 data cycle 或 Graph failure retry |
+| multiple causal input binding | 已实现（公开 facade 复用同一 typed 路径） | `CompiledPredecessorInput`、compiler/materialization/routing、predecessor-output tests | 每个输入按同一 actual predecessor 读取自己的同名 output；不扩展普通 data cycle 或 Graph failure retry |
 | nested graph、child boundary、scope 隔离、family driver | 已实现（含新语义组合） | `family_driver.py`、nested/family/resource/Join tests | 复用唯一 family owner；不增加 child 专用 runner |
 | resource admission、并发 completion、failure/interrupt 优先级 | 已实现 | resource reducer、session/scheduler、frontier status tests | 做组合和顺序回归 |
 | state-led 调用的值恢复 | 仅支持调用方提供的 transient evidence | `Graph.run(state=...)` + `ScopedFrameIndex`；缺值会 fail closed | 不增加 storage reader 或隐性缓存 |
@@ -101,11 +101,12 @@ owner 不变：
 - `GraphRunState`/`GraphRunCommand`/`reduce_graph_run` 是状态事实和转换的唯一 owner；
 - routing 保留 `(target, cause)` candidate，验证唯一 gate 后才投影 activation；
 - `ScopedFrameIndex` 只保存本次进程调用可见的 typed frame，不是第二个 State 或长期缓存真相；
-- family driver 递归驱动 parent/child，但不创建 nested 专用 runner；
+- `execution/commit.py` 独占 typed transition/write-set、exact acknowledgement 和确认后的 frame staging；family driver 递归驱动
+  parent/child，但不创建 nested 专用 runner，也不复制提交规则；
 - recovery/preflight 只做无副作用 admission proof，不调用节点、不提交第二份状态，也不成为第二 runner。
 
 State 不读取 `CompiledGraph`；Execution 可以根据 compiled topology 创建 command，但不能直接修改 State。任何新事实都必须放进
-已有 `GraphRunState` 和同一 reducer/commit 边界，不能新增 `feedback_state.py`、`join_runner.py`、第二 scheduler 或 generic
+已有 `GraphRunState` 和同一 reducer/commit 边界，不能新增 `loop_state.py`、`join_runner.py`、第二 scheduler 或 generic
 `utils/common/shared/helpers` 包。
 
 ## 3. 不变量和异常边界
@@ -114,11 +115,12 @@ State 不读取 `CompiledGraph`；Execution 可以根据 compiled topology 创�
 
 1. 首轮 frontier 的每个 activation 只能带 `StartActivationCause`；后续 activation 只能带 canonical、distinct 的
    `RoutedActivationCause`。
-2. cause 中的每个 `ActivationReference` 必须引用同一 run 的已成功、已选 route 的 predecessor；direct self-feedback 还必须
-   精确指向紧邻上一轮的 target activation，不能扫描“最新 publication”、回退 seed 或比较一个宽松的 `superstep` 范围。
+2. cause 中的每个 `ActivationReference` 必须引用同一 run 的已成功、已选 route 的 predecessor；causal input 必须
+   精确指向 target 紧邻的一拍前驱 activation，不能扫描“最新 publication”、回退 initializer 或比较一个宽松的 `superstep` 范围。
 3. 一个 producer activation 只有一个 canonical publication；多个 consumer 通过同一 publication coordinate 读取，不复制 per-binding 值。
 4. 同一 target 在同一个 frontier occurrence 只能有 0 或 1 个 activation。routing 在 collapse 前必须保留所有 candidate；零条或多条都 fail closed。
-5. 普通 `NodeOutputRef` 仍表示同一 activation 内的数据依赖，普通 data cycle 继续在 compiler 拒绝。跨 activation 的回环只能由已批准的 typed declaration 表达。
+5. 两参数 `Graph.node_output("node", "name")` 仍表示固定 producer 的数据依赖，普通 data cycle 继续在 compiler 拒绝；一参数形式才表示跨 activation 的实际控制前驱。
+6. causal target 的多个 activation gate 必须先由现有 control-flow proof 证明互斥；无法证明互斥时要求显式 Join。Join cause 不允许隐式选一个前驱值，需要的值必须由固定 producer binding 分别声明。
 
 ### 3.2 Join 和 scope
 
@@ -143,15 +145,15 @@ State 不读取 `CompiledGraph`；Execution 可以根据 compiled topology 创�
 
 P2-M 不是重新实现 direct loop，而是确认当前内部路径没有真实缺口：
 
-- 首轮只读 `GraphInputRef` seed，后续只读 exact immediate predecessor publication；
-- `feedback` route 产生下一轮，`terminal` route 使用当前 publication 完成；
+- 显式 initializer 读取 `GraphInputRef` seed，后续节点只读 exact immediate predecessor publication；
+- 循环 route 产生下一轮，terminal route 使用当前 publication 完成；
 - 缺 predecessor、错 route、错 superstep、旧 publication、input override 在 callable 前失败；
-- feedback failure 是 terminal，不产生下一轮；`max_supersteps` 只做安全上限；
+- causal node failure 是 terminal，不产生下一轮；`max_supersteps` 只做安全上限；
 - commit 异常、非 exact candidate、重复确认和取消不改变已确认 State；
 - continuation 的 frame/child evidence 只在当前进程使用，state-only 无 evidence 时明确返回 unavailable/admission 错误。
 
-以上行为由当前 P1 compiler/runtime/routing/State 测试覆盖；本阶段未扩展普通 data cycle。公开
-`Graph.feedback()` 直接构造同一个 canonical `FeedbackInputBinding`，没有公开 alias/wrapper，也没有第二条执行路径。
+以上行为由当前 predecessor compiler/runtime/routing/State 测试覆盖；本阶段未扩展普通 data cycle。公开
+`Graph.node_output("name")` 直接构造 canonical `PredecessorOutputRef`，没有公开 alias/wrapper，也没有第二条执行路径。
 
 ### P3-M1：fan-out、conditional、非循环 Join 的组合收口（已完成）
 
@@ -164,16 +166,15 @@ P2-M 不是重新实现 direct loop，而是确认当前内部路径没有真实
 - completion 顺序改变时，逻辑 cause/publication 集合和结果投影保持等价，不要求 revision 历史逐项相同；
 - direct、conditional、Join candidate 可能同时成立且没有同一显式 Join 时，compile/runtime 都 fail closed，不先用 set 去重。
 
-### P3-M2：条件路由扩展和 multiple feedback（已完成）
+### P3-M2：条件路由扩展和 multiple causal input（已完成）
 
-现有 generic conditional route/route admission 继续复用；multiple feedback 已按固定 typed 声明落地：
+现有 generic conditional route/route admission 继续复用；multiple causal input 已按固定 typed 声明落地：
 
-- 一个 target 可以有多个 typed `FeedbackInputBinding`，每个 binding 仍只有一个固定 repeat source；
-- 不把“不同 route 读取不同 source”偷偷编码成 map；若需要该语义，先另行冻结 typed declaration 和异常边界；
-- feedback cause、普通 routed cause 和 Join cause 继续共享 `RoutedActivationCause`/candidate 流程；materialization 只按 cause 精确选 publication；
-- compiler 必须证明 route、input descriptor、publication selection 和 target gate 的唯一性；不能让 runtime 选择“第一条”或静默合并重复 activation；
-- 普通 data cycle、条件路由重试和 Graph failure retry 仍关闭；反馈图与额外 fan-out/control source 的组合按当前
-  单目标约束 compile fail closed，不通过 runtime 猜测或静默合并放行。
+- 一个 target 可以有多个 typed `PredecessorOutputRef`，它们从同一个 actual predecessor frame 按各自 output name 取值；
+- 不公开“route 到 source”的映射；source 集合由 compiler 从 activation gates 唯一推导，actual source 由 State cause 决定；
+- causal cause、普通 routed cause 和 Join cause 继续共享 `RoutedActivationCause`/candidate 流程；Join cause 明确拒绝隐式单值选择；
+- compiler 必须证明 route、input descriptor 和 target gate 的唯一性；不能让 runtime 选择“第一条”或静默合并重复 activation；
+- 普通 data cycle、条件路由重试和 Graph failure retry 仍关闭；额外 fan-out/control source 无法证明互斥时 compile fail closed。
 
 ### P3-M3：Join occurrence identity 和 cyclic Join（已完成）
 
@@ -207,7 +208,7 @@ source-to-target offset 的形状，无法证明的形状继续拒绝：
 对 P2-M 至 P3-M4 的实际调用链做一次组合审计，至少覆盖：
 
 - fan-out + conditional + Join；
-- multiple feedback 与 fan-out 的边界（反馈图带额外 fan-out/control source 时按单目标约束 compile fail closed）；
+- multiple causal input 与 fan-out 的边界（额外 control source 无法证明互斥时 compile fail closed）；
 - Join + resource waiting；
 - Join + nested child；
 - branch completion order permutations；
@@ -228,8 +229,8 @@ cancellation 的 lease 边界。
 
 | owner/层 | 当前位置 | 允许的内存工作 |
 | --- | --- | --- |
-| declaration / facade boundary | `execution/graph/ports.py`、`execution/facade.py` | 只增加已冻结的 typed declaration；不加 alias、wrapper、第二 public entry 或 durable API；当前 public facade 对 feedback 的拒绝保持有效 |
-| compiler/topology | `execution/graph/compiler.py`、`topology.py`、`validation.py` | gate/candidate 唯一性、multiple feedback admission、occurrence/cyclic Join admission；静态可证明的规则只生成一份 |
+| declaration / facade boundary | `execution/graph/ports.py`、`execution/facade.py` | 只增加已冻结的 typed declaration；不加 alias、wrapper、第二 public entry 或 durable API；固定与 causal output 共用 `Graph.node_output` 重载 |
+| compiler/topology | `execution/graph/compiler.py`、`topology.py`、`validation.py` | gate/candidate 唯一性、multiple causal input admission、occurrence/cyclic Join admission；静态可证明的规则只生成一份 |
 | State identity/model | `state/graph_state/identity.py`、`model.py`、`frontier_model.py` | 只在 occurrence 设计冻结后扩展同一 `GraphRunState`；不建 parallel state 或 loop counter owner |
 | command/reducer/validation | `state/graph_state/command.py`、`execution_transitions.py`、`validation.py` | partial 保留/消费、cause/occurrence 校验；保持 pure transition 和现有错误边界 |
 | materialization/routing | `execution/engine/resume_input.py`、`routing.py`、`frontier.py` | 精确 publication selection、candidate 保留、唯一 target activation；不扫描最新值、不 seed fallback、不先去重 |
@@ -237,7 +238,7 @@ cancellation 的 lease 边界。
 | result/output | `execution/result.py`、`engine/admission.py` | 只补显式 typed input/output 投影和 terminal diagnostics；不把值复制进 State |
 | persistence/infrastructure | `mote-infra/persistence` | **禁止修改；不新增 Port、adapter、codec、reader、retention 或 conformance 文件** |
 
-禁止新增或保留：`feedback_state.py`、`join_runner.py`、第二 reducer、第二 scheduler、长期内存缓存、兼容 alias/wrapper、为 legacy test
+禁止新增或保留：`loop_state.py`、`join_runner.py`、第二 reducer、第二 scheduler、长期内存缓存、兼容 alias/wrapper、为 legacy test
 保留的生产分支，以及仅用于绕过复杂度指标的薄转发 helper/宽 context。
 
 一次性迁移的删除清单必须在代码变更前冻结：旧声明路径、旧测试入口、旧示例和无价值 helper 一并删除；仍有价值的 legacy 测试只迁移语义、错误优先级和恢复边界，
@@ -247,7 +248,7 @@ cancellation 的 lease 边界。
 
 ### 6.1 当前已有的基线回归
 
-- `tests/execution/graph/test_feedback_compiler.py`、`tests/execution/test_feedback_runtime.py`：P1 direct feedback 白名单、terminal/failure、immediate predecessor、cause state；
+- `tests/execution/graph/test_predecessor_output_compiler.py`、`tests/execution/test_predecessor_output_runtime.py`：initializer、causal loop、shared Hook、terminal/failure、immediate predecessor、cause state；
 - `tests/execution/engine/test_resume_input_contract.py`：精确 publication、无 seed fallback、override 拒绝和 value unavailable；
 - `tests/execution/engine/test_routing.py`：fan-out、conditional、非循环和循环 Join、partial progress、candidate 唯一性、ghost/foreign/stale admission；
 - `tests/state/graph_state/test_execution_transitions.py`、`test_state_validation.py`：pure reducer、settlement、cause、Join 保留/消费、失败优先级；
@@ -257,14 +258,18 @@ cancellation 的 lease 边界。
 
 ### 6.2 本轮已补齐的内存组合测试
 
-- multiple feedback binding 的各自 repeat source、同一 target 的多 cause 在 collapse 前拒绝；
+- multiple causal bindings 从同一 actual predecessor frame 读取各自输出、同一 target 的多 cause 在 collapse 前拒绝；
+- 同一 source 的不同互斥 route 读取同一个 exact causal publication；nested Graph 分别作为 causal consumer 和 producer；
 - occurrence 不同的 arrival 不得互相拼接，同 occurrence 只产生一次 target activation；
-- fan-out/Join/conditional/feedback 与资源等待、并发顺序、nested child 的排列组合；
+- fan-out/Join/conditional/causal loop 与资源等待、并发顺序、nested child 的排列组合；
 - duplicate/stale/foreign occurrence、错 target/route/superstep 在 callable 前 fail closed；
 - child boundary 只结算一次，scope/run identity 串线被拒绝；
 - `max_parallel_tasks` 改变调度顺序但不改变可证明的逻辑结果；
 - live execution、transient continuation 和 admission 对同一快照采用同一 candidate/cause 语义；
 - 没有 transient frame/evidence 时明确返回 value unavailable，而不是隐式重跑、补 START 或访问“最新值”。
+
+旧 feedback 测试的逐项迁移结论、真实回补项和删除边界只在
+`graph-delayed-loop-implementation-plan.zh-CN.md` 的“测试迁移审计”维护，本文不复制第二份审计数字。
 
 其中新增的公开/组合回归包括：
 
@@ -297,7 +302,7 @@ P2-M 基线复核与组合回归（完成）
        ↓
 P3-M1 fan-out/conditional/非循环 Join 收口（完成）
        ↓
-P3-M2 multiple feedback（仅内存，完成）
+P3-M2 multiple causal input（仅内存，完成）
        ↓
 P3-M3 occurrence identity/cyclic Join（仅内存，完成）
        ↓
@@ -341,16 +346,16 @@ Graph 快照的结论，也不允许用它抬高本阶段以外的阈值。
 - durable State/result/publication/input/child evidence、原子后端事务、CAS、commit identity 或 acknowledgement-lost reconcile；
 - 跨进程/跨语言 codec、schema/version、bytes limit、secret-safe persistence error、retention/release 和 conformance；
 - 进程崩溃自动恢复、从 State 反查 concrete value、exactly-once provider side effect；
-- 公开 durable feedback API、Graph failure retry、失败后 skip/override/兼容 wrapper。
+- durable causal value recovery、Graph failure retry、失败后 skip/override/兼容 wrapper。
 
 未来若另立持久化项目，它必须在不改变本文唯一 owner、cause、Join、occurrence 和 activation 基数的前提下单独评审；本文件不为该项目修改生产代码，
 也不以其进度作为当前内存语义的完成条件。
 
 ## 10. 最终状态结论
 
-当前仓库可以把普通 Graph 的内存调用链作为唯一执行底座：P1 direct feedback 的内部 typed 语义、multiple feedback、fan-out、conditional、
-occurrence-aware cyclic Join、nested/family、资源和 failure/interrupt 边界均已有代码与组合测试支撑。反馈图仍保持单目标、固定
-repeat source 的编译边界；普通 data cycle、条件路由重试、Graph failure retry 和所有无法证明 occurrence 的形状继续关闭。
+当前仓库可以把普通 Graph 的内存调用链作为唯一执行底座：显式 initializer、causal predecessor output、multiple causal input、fan-out、conditional、
+occurrence-aware cyclic Join、nested/family、资源和 failure/interrupt 边界均已有代码与组合测试支撑。source 集合由 compiler
+从控制拓扑推导，运行时只按 State cause 选择；普通 data cycle、条件路由重试、Graph failure retry 和所有无法证明 occurrence 的形状继续关闭。
 
 本文件的完成含义只有：**范围严格限定为不持久化的内存语义，唯一 owner/调用链和防御边界保持清晰，列出的 P2-M 至 P3-M5
 内存工作在复审通过且门禁证据更新后，才可标记为完成。**它不等于任何 durable recovery 能力已经存在。

@@ -215,7 +215,9 @@ async def test_release_and_waiter_progress_are_authoritative_before_next_selecti
 
     settlements = root_settlements(commits)
     assert starts == ["a", "b"]
-    assert tuple(transition.result.node_id for transition in settlements if transition.result is not None) == (
+    assert tuple(
+        transition.writes.settlement.node_id for transition in settlements if transition.writes.settlement is not None
+    ) == (
         "a",
         "b",
     )
@@ -248,7 +250,9 @@ async def test_resource_free_and_resource_admitted_nodes_share_session_scheduler
     assert isinstance(result, Graph.CompletedResult)
     assert starts == ["a", "x", "b"]
     assert tuple(
-        transition.result.node_id for transition in root_settlements(commits) if transition.result is not None
+        transition.writes.settlement.node_id
+        for transition in root_settlements(commits)
+        if transition.writes.settlement is not None
     ) == ("a", "x", "b")
 
 
@@ -841,8 +845,8 @@ async def test_failed_child_cleanup_waits_for_ordinary_sibling_before_aborting_a
         if (
             transition.scope == ()
             and isinstance(transition.command, SettleGraphNode)
-            and isinstance(transition.result, Graph.SuccessResult)
-            and transition.result.node_id == "ordinary"
+            and isinstance(transition.writes.settlement, Graph.SuccessResult)
+            and transition.writes.settlement.node_id == "ordinary"
         )
     )
     awaiting_abort_position = next(
@@ -860,11 +864,13 @@ async def test_resource_sibling_settles_without_waiting_for_nested_completion() 
 
     assert isinstance(result, Graph.CompletedResult)
     settlements = root_settlements(commits)
-    assert tuple(transition.result.node_id for transition in settlements if transition.result is not None) == (
+    assert tuple(
+        transition.writes.settlement.node_id for transition in settlements if transition.writes.settlement is not None
+    ) == (
         "resource",
         "nested",
     )
-    assert all(isinstance(transition.result, Graph.SuccessResult) for transition in settlements)
+    assert all(isinstance(transition.writes.settlement, Graph.SuccessResult) for transition in settlements)
 
 
 async def test_compiled_resource_requirement_drift_fails_before_scheduling() -> None:

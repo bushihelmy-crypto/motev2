@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 
 from mote_kernel.failover.contract import (
     Completed,
     ErrorHint,
     FailoverContractError,
     FailureEvidence,
+    FailureSignal,
     FailureStrategy,
     InProgress,
     PortOutcome,
@@ -25,16 +26,10 @@ from mote_kernel.failover.contract import (
     Rejected,
     RotateCredential,
     SwitchEndpoint,
-    TransformRequest,
     Unknown,
     Wait,
 )
-from mote_kernel.failover.plan import (
-    FailoverPlan,
-    FailureRule,
-    ReconcileMode,
-    RetryContext,
-)
+from mote_kernel.failover.plan import FailoverPlan, RetryContext
 
 TransformT = TypeVar("TransformT")
 ResultT = TypeVar("ResultT")
@@ -47,7 +42,6 @@ class ObservationRoute(StrEnum):
 
     COMPLETED = "completed"
     PREPARE = "prepare"
-    RECONCILE = "reconcile"
     RETURN_TO_MODEL = "return_to_model"
     ABORT = "abort"
 
@@ -85,11 +79,6 @@ class FailoverDecision(Generic[TransformT]):
                 raise FailoverContractError("prepare decisions require a preparation strategy")
             if self.preparation is None:
                 raise FailoverContractError("prepare decisions require a preparation action")
-        elif self.route is ObservationRoute.RECONCILE:
-            if self.strategy is not FailureStrategy.RECONCILE:
-                raise FailoverContractError("reconcile decisions require the reconcile strategy")
-            if self.preparation is not None:
-                raise FailoverContractError("reconcile decisions cannot carry preparation")
         elif self.route is ObservationRoute.ABORT:
             if self.strategy is not FailureStrategy.ABORT:
                 raise FailoverContractError("abort decisions require the abort strategy")
@@ -100,153 +89,90 @@ class FailoverDecision(Generic[TransformT]):
                 raise FailoverContractError("terminal model decisions cannot carry preparation")
 
 
-def fixed_rules() -> tuple[FailureRule[None], ...]:
-    """Return the versioned built-in status/error-hint policy table.
+@dataclass(frozen=True, slots=True)
+class _FailureRule:
+    signal: FailureSignal
+    strategy: FailureStrategy
+
+
+_FIXED_RULES = (
+    _FailureRule(FailureSignal(429, ErrorHint("rate_limited")), FailureStrategy.WAIT),
+    _FailureRule(FailureSignal(429, ErrorHint("quota_exceeded")), FailureStrategy.WAIT),
+    _FailureRule(FailureSignal(401, ErrorHint("token_expired")), FailureStrategy.REFRESH_CREDENTIAL),
+    _FailureRule(FailureSignal(401, ErrorHint("invalid_credential")), FailureStrategy.ROTATE_CREDENTIAL),
+    _FailureRule(FailureSignal(401, ErrorHint("invalid_api_key")), FailureStrategy.ROTATE_CREDENTIAL),
+    _FailureRule(FailureSignal(503, ErrorHint("service_unavailable")), FailureStrategy.SWITCH_ENDPOINT),
+    _FailureRule(FailureSignal(503, ErrorHint("overloaded")), FailureStrategy.SWITCH_ENDPOINT),
+    _FailureRule(FailureSignal(408, ErrorHint("request_timeout")), FailureStrategy.WAIT),
+    _FailureRule(FailureSignal(504, ErrorHint("request_timeout")), FailureStrategy.WAIT),
+    _FailureRule(FailureSignal(400, ErrorHint("bad_payload")), FailureStrategy.TRANSFORM_REQUEST),
+    _FailureRule(FailureSignal(403, ErrorHint("forbidden")), FailureStrategy.RETURN_TO_MODEL),
+    _FailureRule(FailureSignal(409, ErrorHint("conflict")), FailureStrategy.ABORT),
+)
+
+
+def _fixed_strategy(evidence: FailureEvidence) -> FailureStrategy | None:
+    """Resolve the one code-owned status/error-hint policy table.
 
     A provider adapter normalizes its response into one of these stable hints.
     The table is intentionally exact: a different hint is a different signal,
-    and therefore cannot silently acquire a retry behavior.  Request
-    transformation is left to a profile rule because only Role config knows
-    the typed instruction to apply.
+    and therefore cannot silently acquire a retry behavior.  Role config owns
+    only the parameters used after this fixed choice.
     """
 
-    return (
-        FailureRule[None](429, ErrorHint("rate_limited"), FailureStrategy.WAIT),
-        FailureRule[None](429, ErrorHint("quota_exceeded"), FailureStrategy.WAIT),
-        FailureRule[None](401, ErrorHint("token_expired"), FailureStrategy.REFRESH_CREDENTIAL),
-        FailureRule[None](401, ErrorHint("invalid_credential"), FailureStrategy.ROTATE_CREDENTIAL),
-        FailureRule[None](401, ErrorHint("invalid_api_key"), FailureStrategy.ROTATE_CREDENTIAL),
-        FailureRule[None](503, ErrorHint("service_unavailable"), FailureStrategy.SWITCH_ENDPOINT),
-        FailureRule[None](503, ErrorHint("overloaded"), FailureStrategy.SWITCH_ENDPOINT),
-        FailureRule[None](408, ErrorHint("request_timeout"), FailureStrategy.WAIT),
-        FailureRule[None](504, ErrorHint("request_timeout"), FailureStrategy.WAIT),
-    )
-
-
-def find_rule(
-    evidence: FailureEvidence,
-    plan: FailoverPlan[TransformT],
-) -> FailureRule[TransformT] | None:
-    """Find an exact profile rule, then an exact built-in rule."""
-
-    if type(evidence) is not FailureEvidence:
-        raise FailoverContractError("rule lookup requires FailureEvidence")
-    if type(plan) is not FailoverPlan:
-        raise FailoverContractError("rule lookup requires FailoverPlan")
-    for rule in plan.profile.rules:
+    for rule in _FIXED_RULES:
         if rule.signal == evidence.signal:
-            return rule
-    for rule in fixed_rules():
-        if rule.signal == evidence.signal:
-            return FailureRule[TransformT](
-                rule.status_code,
-                rule.error_hint,
-                rule.strategy,
-            )
+            return rule.strategy
     return None
 
 
 def route_rejected(
     evidence: FailureEvidence,
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
 ) -> FailoverDecision[TransformT]:
     """Route a definitive rejection without performing the next action."""
 
-    rule = find_rule(evidence, plan)
-    if rule is None:
-        return _return_to_model(evidence, plan=plan)
-    return _route_rule(rule, evidence, plan, context)
-
-
-def route_uncertain(
-    evidence: FailureEvidence | None,
-    has_reconcile_handle: bool,
-    plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
-) -> FailoverDecision[TransformT]:
-    """Route an uncertain outcome.
-
-    An uncertain operation is reconciled only when the adapter supplied a
-    real handle and the profile permits reconciliation.  Without a handle the
-    only safe route is to return control to the model.
-    """
-
-    if evidence is not None and type(evidence) is not FailureEvidence:
-        raise FailoverContractError("uncertain routing requires FailureEvidence")
-    if type(has_reconcile_handle) is not bool:
-        raise FailoverContractError("has_reconcile_handle must be a bool")
-    if not has_reconcile_handle:
-        return _return_to_model(evidence, plan=plan)
-    if plan.profile.reconcile is ReconcileMode.DISABLED:
-        return _return_to_model(evidence, plan=plan)
-    return _route_strategy(FailureStrategy.RECONCILE, evidence, plan, context, None)
-
-
-def observe_and_route(
-    outcome: PortOutcome[ResultT, ReceiptT, HandleT],
-    plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
-) -> FailoverDecision[TransformT]:
-    """Observe one typed Port result and choose a fixed graph route."""
-
+    if type(evidence) is not FailureEvidence:
+        raise FailoverContractError("rejected routing requires FailureEvidence")
     if type(plan) is not FailoverPlan:
-        raise FailoverContractError("observation requires a FailoverPlan")
+        raise FailoverContractError("rejected routing requires FailoverPlan")
     if type(context) is not RetryContext:
-        raise FailoverContractError("observation requires a RetryContext")
-    if isinstance(outcome, Completed):
-        return FailoverDecision(ObservationRoute.COMPLETED)
-    if isinstance(outcome, Rejected):
-        return route_rejected(outcome.evidence, plan, context)
-    if isinstance(outcome, InProgress):
-        return route_uncertain(None, True, plan, context)
-    if type(outcome) is Unknown:
-        return route_uncertain(outcome.evidence, outcome.handle is not None, plan, context)
-    raise FailoverContractError("observation received an unsupported Port outcome")
-
-
-def _route_rule(
-    rule: FailureRule[TransformT],
-    evidence: FailureEvidence,
-    plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
-) -> FailoverDecision[TransformT]:
-    return _route_strategy(rule.strategy, evidence, plan, context, rule.preparation)
-
-
-def _route_strategy(
-    strategy: FailureStrategy,
-    evidence: FailureEvidence | None,
-    plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
-    configured_preparation: PreparationAction[TransformT] | None,
-) -> FailoverDecision[TransformT]:
+        raise FailoverContractError("rejected routing requires RetryContext")
+    if context.plan_revision != plan.plan_revision:
+        raise FailoverContractError("rejected routing requires the context's captured plan revision")
+    strategy = _fixed_strategy(evidence)
+    if strategy is None:
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, evidence=evidence)
     if strategy is FailureStrategy.RETURN_TO_MODEL:
-        return _return_to_model(evidence, plan=plan, strategy=strategy)
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, strategy=strategy, evidence=evidence)
     if strategy is FailureStrategy.ABORT:
         return FailoverDecision(
             ObservationRoute.ABORT,
             strategy=FailureStrategy.ABORT,
             evidence=evidence,
         )
-    limit = plan.profile.budget.max_uses_for(strategy)
-    if context.uses_for(strategy) >= limit:
-        return _return_to_model(evidence, plan=plan, strategy=strategy, budget_exhausted=True)
-    if strategy is not FailureStrategy.RECONCILE and _wire_budget_exhausted(plan, context):
-        return _return_to_model(evidence, plan=plan, strategy=strategy, budget_exhausted=True)
-    if strategy is FailureStrategy.RECONCILE:
+    budget = plan.profile.budget
+    if (
+        context.uses_for(strategy) >= budget.max_uses_for(strategy)
+        or context.attempt_ordinal >= budget.max_wire_attempts - 1
+    ):
         return FailoverDecision(
-            ObservationRoute.RECONCILE,
-            strategy=FailureStrategy.RECONCILE,
+            ObservationRoute.RETURN_TO_MODEL,
+            strategy=strategy,
             evidence=evidence,
+            budget_exhausted=True,
         )
-    preparation = _preparation_for(
-        strategy,
-        configured_preparation,
-        cast(FailureEvidence, evidence),
-        plan,
-        context,
-    )
+    if strategy is FailureStrategy.TRANSFORM_REQUEST:
+        preparation = plan.profile.request_transform
+        if preparation is None:
+            return FailoverDecision(
+                ObservationRoute.RETURN_TO_MODEL,
+                strategy=strategy,
+                evidence=evidence,
+            )
+    else:
+        preparation = _preparation_for(strategy, evidence, plan, context)
     return FailoverDecision(
         ObservationRoute.PREPARE,
         strategy=strategy,
@@ -255,47 +181,50 @@ def _route_strategy(
     )
 
 
-def _wire_budget_exhausted(plan: FailoverPlan[TransformT], context: RetryContext[ReceiptT, HandleT]) -> bool:
-    # ``attempt_ordinal`` is the number of wire attempts already committed;
-    # the first attempt is ordinal zero in a fresh context.  No preparation is
-    # allowed once another invocation would exceed the configured maximum.
-    return context.attempt_ordinal >= plan.profile.budget.max_wire_attempts - 1
+def observe_and_route(
+    outcome: PortOutcome[ResultT, ReceiptT, HandleT],
+    plan: FailoverPlan[TransformT],
+    context: RetryContext,
+) -> FailoverDecision[TransformT]:
+    """Observe one typed Port result and choose a fixed graph route."""
+
+    if type(plan) is not FailoverPlan:
+        raise FailoverContractError("observation requires a FailoverPlan")
+    if type(context) is not RetryContext:
+        raise FailoverContractError("observation requires a RetryContext")
+    if context.plan_revision != plan.plan_revision:
+        raise FailoverContractError("observation requires the context's captured plan revision")
+    if isinstance(outcome, Completed):
+        return FailoverDecision(ObservationRoute.COMPLETED)
+    if isinstance(outcome, Rejected):
+        return route_rejected(outcome.evidence, plan, context)
+    if isinstance(outcome, InProgress):
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL)
+    if type(outcome) is Unknown:
+        return FailoverDecision(ObservationRoute.RETURN_TO_MODEL, evidence=outcome.evidence)
+    raise FailoverContractError("observation received an unsupported Port outcome")
 
 
 def _preparation_for(
     strategy: FailureStrategy,
-    configured: PreparationAction[TransformT] | None,
     evidence: FailureEvidence,
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
 ) -> PreparationAction[TransformT]:
-    if strategy is FailureStrategy.TRANSFORM_REQUEST:
-        return cast(TransformRequest[TransformT], configured)
-    if configured is not None:
-        return _apply_retry_after(configured, evidence)
     if strategy is FailureStrategy.WAIT:
         return Wait(_backoff_seconds(plan, context, evidence))
     if strategy is FailureStrategy.REFRESH_CREDENTIAL:
         return RefreshCredential()
     if strategy is FailureStrategy.ROTATE_CREDENTIAL:
         return RotateCredential()
-    # _route_strategy has already consumed every terminal/reconcile variant;
+    # route_rejected has already consumed every terminal variant;
     # SWITCH_ENDPOINT is the only admitted preparation strategy left here.
     return SwitchEndpoint()
 
 
-def _apply_retry_after(
-    configured: PreparationAction[TransformT],
-    evidence: FailureEvidence,
-) -> PreparationAction[TransformT]:
-    if not isinstance(configured, Wait) or evidence.retry_after_seconds is None:
-        return configured
-    return Wait(max(configured.delay_seconds, evidence.retry_after_seconds))
-
-
 def _backoff_seconds(
     plan: FailoverPlan[TransformT],
-    context: RetryContext[ReceiptT, HandleT],
+    context: RetryContext,
     evidence: FailureEvidence,
 ) -> float:
     timing = plan.profile.timing
@@ -308,27 +237,9 @@ def _backoff_seconds(
     return delay
 
 
-def _return_to_model(
-    evidence: FailureEvidence | None,
-    *,
-    plan: FailoverPlan[TransformT],
-    strategy: FailureStrategy | None = None,
-    budget_exhausted: bool = False,
-) -> FailoverDecision[TransformT]:
-    return FailoverDecision[TransformT](
-        ObservationRoute.RETURN_TO_MODEL,
-        strategy=strategy,
-        evidence=evidence,
-        budget_exhausted=budget_exhausted,
-    )
-
-
 __all__ = [
     "FailoverDecision",
     "ObservationRoute",
-    "find_rule",
-    "fixed_rules",
     "observe_and_route",
     "route_rejected",
-    "route_uncertain",
 ]
