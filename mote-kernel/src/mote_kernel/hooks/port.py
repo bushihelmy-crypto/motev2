@@ -13,7 +13,7 @@ from mote_kernel.hooks.contract import (
 from mote_kernel.hooks.plan import HookPriorityPlan
 from mote_kernel.invocation import (
     Invocation,
-    InvocationBoundaryError,
+    InvocationBoundaryAdmissionError,
     InvocationTypeContract,
     invoke_typed,
 )
@@ -54,7 +54,7 @@ class HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
         contract = InvocationTypeContract(request_type, result_type)
         try:
             result = await invoke_typed(self.invocation, invocation_request, contract)
-        except InvocationBoundaryError as error:
+        except InvocationBoundaryAdmissionError as error:
             raise HookContractError(str(error)) from error
         return self.admission.admit_stage_result(result)
 

@@ -198,6 +198,19 @@ async def test_stage_port_preserves_an_invocation_admission_error() -> None:
     assert raised.value.__cause__ is cause
 
 
+@pytest.mark.asyncio
+async def test_stage_port_preserves_an_invocation_boundary_error() -> None:
+    """A source-owned boundary error must not be mistaken for our admission error."""
+
+    error = InvocationBoundaryError("runtime boundary failure")
+    port = ContextPort[str, str](_RaisingInvocation[str, str](error), _string_contract())
+
+    with pytest.raises(InvocationBoundaryError) as raised:
+        await port.load_context("request")
+
+    assert raised.value is error
+
+
 def test_ports_reject_missing_or_non_callable_invocations_at_assembly() -> None:
     with pytest.raises(ValueError, match="system_invocation"):
         PromptPort[str, str, str, str](

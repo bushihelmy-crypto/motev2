@@ -52,6 +52,16 @@ class InvocationBoundaryError(InvocationContractError):
     """Admission failure produced by the shared ``invoke_typed`` boundary."""
 
 
+class InvocationBoundaryAdmissionError(InvocationBoundaryError):
+    """Internal marker for failures raised by ``invoke_typed`` admission.
+
+    The marker keeps Port adapters from inferring error provenance from
+    ``BaseException.__cause__``.  An Invocation implementation is allowed to
+    raise the public ``InvocationBoundaryError`` itself; that exact object
+    must cross the Port unchanged.
+    """
+
+
 def _is_protocol_type(value_type: type[NominalT], /) -> bool:
     # The marker is set only on the Protocol declaration itself; a concrete
     # implementation that inherits a Protocol remains a valid nominal DTO.
@@ -196,12 +206,12 @@ async def invoke_typed(
     try:
         admitted_request = contract.admit_request(request)
     except InvocationContractError as error:
-        raise InvocationBoundaryError(str(error)) from error
+        raise InvocationBoundaryAdmissionError(str(error)) from error
     result = await invoke_strict(invocation, admitted_request)
     try:
         return contract.admit_result(result)
     except InvocationContractError as error:
-        raise InvocationBoundaryError(str(error)) from error
+        raise InvocationBoundaryAdmissionError(str(error)) from error
 
 
 async def invoke_best_effort(

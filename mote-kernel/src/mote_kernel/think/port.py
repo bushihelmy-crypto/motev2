@@ -22,7 +22,7 @@ from typing import Generic, TypeVar
 
 from mote_kernel.invocation import (
     Invocation,
-    InvocationBoundaryError,
+    InvocationBoundaryAdmissionError,
     InvocationTypeContract,
     invoke_typed,
 )
@@ -62,7 +62,7 @@ async def _invoke_typed(
 
     try:
         return await invoke_typed(invocation, request, contract)
-    except InvocationBoundaryError as error:
+    except InvocationBoundaryAdmissionError as error:
         raise ThinkContractError(str(error)) from error
 
 
