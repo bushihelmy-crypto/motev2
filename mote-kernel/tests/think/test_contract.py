@@ -26,7 +26,6 @@ from mote_kernel.think.contract import (
     ThinkCoreResult,
     ThinkFrame,
     ThinkRequest,
-    ThinkRoute,
     ThinkStep,
 )
 
@@ -193,17 +192,6 @@ def test_frame_rejects_an_arbitrary_consumer_step_even_when_it_has_the_right_bas
 
     with pytest.raises(ThinkContractError, match="known ThinkStep"):
         ThinkFrame(ConsumerStep(), REQUEST.hook_state)
-
-
-def test_think_route_is_a_closed_string_enum_for_diagnostics() -> None:
-    assert tuple(route.value for route in ThinkRoute) == (
-        "context",
-        "compact",
-        "inference",
-        "command",
-        "finish",
-    )
-    assert ThinkRoute.CONTEXT == "context"
 
 
 def test_envelopes_are_frozen_and_slot_based() -> None:

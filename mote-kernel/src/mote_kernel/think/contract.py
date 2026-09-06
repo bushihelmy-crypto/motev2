@@ -10,7 +10,6 @@ envelopes are admitted by the corresponding Port/Invocation owner.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from mote_kernel.hooks.contract import HookGraphValue, HookResult
@@ -553,22 +552,6 @@ def _admit_stage_frame(
     return frame
 
 
-class ThinkRoute(StrEnum):
-    """The fixed internal transitions of the Think stage family.
-
-    The assembled graph currently derives these transitions from the typed
-    ``ThinkStep`` value.  Keeping the closed enum in the owner module makes
-    that mapping explicit for diagnostics and for older private route probes;
-    it is not exported from the package entry point.
-    """
-
-    CONTEXT = "context"
-    COMPACT = "compact"
-    INFERENCE = "inference"
-    COMMAND = "command"
-    FINISH = "finish"
-
-
 @runtime_checkable
 class PromptPort(
     Protocol[
@@ -638,6 +621,5 @@ __all__ = [
     "ThinkCoreResult",
     "ThinkFrame",
     "ThinkRequest",
-    "ThinkRoute",
     "ThinkStep",
 ]
