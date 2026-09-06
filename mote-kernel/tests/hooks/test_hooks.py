@@ -27,7 +27,7 @@ from mote_kernel.hooks.contract import (
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage, hook_definition_id
 from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
-from mote_kernel.invocation import Invocation
+from mote_kernel.invocation import Invocation, InvocationAdmissionError, InvocationTypeError
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 
@@ -196,6 +196,21 @@ class CancellingRuntime:
         request = invocation_request.request
         self.calls.append(InvocationCall(config, request))
         raise asyncio.CancelledError("invocation cancelled")
+
+
+class RaisingAdmissionErrorRuntime:
+    def __init__(self) -> None:
+        self.calls: list[InvocationCall] = []
+        self.cause = InvocationTypeError("inner type failure")
+        self.error = InvocationAdmissionError("runtime admission failure")
+
+    async def invoke(
+        self,
+        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        /,
+    ) -> HookStageResult[str, Increment]:
+        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
+        raise self.error from self.cause
 
 
 class InvalidResultRuntime:
@@ -464,6 +479,17 @@ async def test_invocation_cancellation_propagates_without_running_later_prioriti
     with pytest.raises(asyncio.CancelledError, match="invocation cancelled"):
         await _node(ConfigSource(_config()), PlanLoader(), runtime).run(Graph.values(request=_request()))
 
+    assert tuple(call.config.rank for call in runtime.calls) == (1,)
+
+
+@pytest.mark.asyncio
+async def test_hook_port_does_not_translate_an_invocation_admission_error() -> None:
+    runtime = RaisingAdmissionErrorRuntime()
+
+    with pytest.raises(InvocationAdmissionError) as raised:
+        await _node(ConfigSource(_config()), PlanLoader(), runtime).run(Graph.values(request=_request()))
+
+    assert raised.value is runtime.error
     assert tuple(call.config.rank for call in runtime.calls) == (1,)
 
 
