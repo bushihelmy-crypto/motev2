@@ -10,7 +10,7 @@ from mote_kernel.execution.graph.ports import (
     TypedInputBinding,
 )
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 from mote_kernel.think.command import CommandNode
@@ -98,6 +98,7 @@ class ThinkNode(
         | None,
         command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]] | None,
         model_binding: ModelBinding,
+        hook_state_type: type[HookStateT],
         hook: HookNode[
             ConfigT,
             PriorityConfigT,
@@ -112,6 +113,10 @@ class ThinkNode(
         # parent builder so a failed assembly leaves no partial definition.
         if type(hook) is not HookNode:
             raise ThinkContractError("ThinkNode requires one shared HookNode")
+        if not issubclass(hook_state_type, HookGraphValue):
+            raise ThinkContractError("ThinkNode hook_state_type must be a concrete HookGraphValue class")
+        if hook_state_type is HookGraphValue:
+            raise ThinkContractError("ThinkNode hook_state_type must be a concrete HookGraphValue class")
         hook_slot = hook.slot
         if type(hook_slot) is not HookSlotId:
             raise ThinkContractError("ThinkNode shared hook must expose a HookSlotId")
@@ -122,6 +127,11 @@ class ThinkNode(
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ThinkContractError("ThinkNode shared HookSlotId does not match its definition")
+        hook_admission = hook.payload_admission
+        if type(hook_admission) is not HookPayloadAdmission:
+            raise ThinkContractError("ThinkNode shared Hook must expose a HookPayloadAdmission")
+        if hook_admission.state_type is not hook_state_type:
+            raise ThinkContractError("ThinkNode shared Hook state type does not match Think admission")
 
         # Constructing stage callables performs all capability/model checks;
         # no Graph.add_node call happens until every one has succeeded.

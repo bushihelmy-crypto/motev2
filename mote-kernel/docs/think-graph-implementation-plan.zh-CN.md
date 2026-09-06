@@ -30,6 +30,12 @@ Think 固定包含五个业务节点：
 这些职责由对应 owner 统一提供。Think 只接收已经装配好的 capability，并按固定 DTO/Graph
 边界传递。
 
+Think 的共享 Hook 状态与 Act/Observe 对齐：组装时显式传入 concrete
+`hook_state_type`，并要求它是 `HookGraphValue` 的具体子类，同时与共享
+`HookNode.payload_admission.state_type` 完全相同。这样状态类型在组图阶段就被锁定，而不是
+等到首次 Hook activation 才发现不匹配；运行期间仍由同一 `ThinkRequest.hook_state` 对象贯穿
+全部五次 Hook 激活。
+
 ## 2. 实际拓扑
 
 Think 使用一个共享 Hook，而不是为五个业务阶段各创建一个 Hook：

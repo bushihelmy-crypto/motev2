@@ -353,6 +353,7 @@ def make_think(runtime: HookRuntime, ports: Ports) -> ThinkNode[Config, Priority
         inference_port=ports,
         command_port=ports,
         model_binding=ModelBinding("provider", "model", 1),
+        hook_state_type=State,
         hook=hook,
     )
 
@@ -487,7 +488,13 @@ async def test_port_exception_stops_the_graph_before_later_stages() -> None:
     assert len(runtime.calls) == 3
 
 
-def _think_with_hook(hook: object, *, definition_id: str = "think.test", version: int = 1) -> object:
+def _think_with_hook(
+    hook: object,
+    *,
+    definition_id: str = "think.test",
+    version: int = 1,
+    hook_state_type: type[State] = State,
+) -> object:
     ports = Ports()
     return cast(
         object,
@@ -500,6 +507,7 @@ def _think_with_hook(hook: object, *, definition_id: str = "think.test", version
             inference_port=ports,
             command_port=ports,
             model_binding=ModelBinding("provider", "model", 1),
+            hook_state_type=hook_state_type,
             hook=cast(Never, hook),
         ),
     )
@@ -559,6 +567,14 @@ def test_think_exposes_the_same_shared_hook() -> None:
     ports = Ports()
     think = make_think(runtime, ports)
     assert think.hook is think.hook
+
+
+def test_think_rejects_a_shared_hook_with_a_mismatched_state_type() -> None:
+    class OtherState(HookGraphValue):
+        __slots__ = ()
+
+    with pytest.raises(ThinkContractError, match="state type"):
+        _think_with_hook(make_hook(HookRuntime()), hook_state_type=OtherState)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -877,6 +893,7 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
         inference_port=inference_port,
         command_port=command_port,
         model_binding=ModelBinding("provider", "typed-model", 1),
+        hook_state_type=State,
         hook=make_hook(runtime, definition_id="think.typed"),
     )
 
