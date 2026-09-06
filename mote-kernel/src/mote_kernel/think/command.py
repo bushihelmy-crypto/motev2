@@ -7,6 +7,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     CommandPort,
     CommandStep,
@@ -77,6 +78,8 @@ class CommandNode(
         raw_step = frame.step
         if type(raw_step) is not InferenceStep:
             raise ThinkContractError("command requires an InferenceStep")
+        if hook_result.node_id is not None and hook_result.node_id != GraphNodeId("inference"):
+            raise ThinkContractError("command requires a HookResult produced by inference")
         step = cast(
             InferenceStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT, ModelOutputT],
             raw_step,
@@ -90,7 +93,7 @@ class CommandNode(
             CommandStep(step.prompt, step.compacted, step.inference, core),
             frame.hook_state,
         )
-        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state))
+        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state, GraphNodeId("command")))
 
 
 __all__ = ["CommandNode"]

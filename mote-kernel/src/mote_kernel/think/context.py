@@ -7,6 +7,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     ContextFrame,
     ContextPort,
@@ -82,6 +83,12 @@ class ContextNode(
         raw_step = frame.step
         if type(raw_step) is not PromptStep:
             raise ThinkContractError("context requires a PromptStep")
+        # Standalone stage tests and generic callers may omit the optional
+        # provenance field on HookResult.  Family graph execution supplies it
+        # and is checked whenever present; omitting it must not weaken the
+        # structural frame/step/state checks above.
+        if hook_result.node_id is not None and hook_result.node_id != GraphNodeId("prompt"):
+            raise ThinkContractError("context requires a HookResult produced by prompt")
         step = cast(PromptStep[SystemPromptT, PlaceholderT, UserPromptT], raw_step)
         prompt = step.prompt
         context_request = ContextRequest(request, prompt)
@@ -98,7 +105,7 @@ class ContextNode(
             raise ThinkContractError("ContextPort.load_context must return a ContextFrame")
         context = context_value
         next_frame = ThinkFrame(ContextStep(prompt, context), frame.hook_state)
-        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state))
+        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state, GraphNodeId("context")))
 
 
 __all__ = ["ContextNode"]

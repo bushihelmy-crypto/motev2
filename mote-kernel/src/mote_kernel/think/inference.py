@@ -7,6 +7,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     CompactStep,
     InferencePort,
@@ -85,6 +86,8 @@ class InferenceNode(
         raw_step = frame.step
         if type(raw_step) is not CompactStep:
             raise ThinkContractError("inference requires a CompactStep")
+        if hook_result.node_id is not None and hook_result.node_id != GraphNodeId("compact"):
+            raise ThinkContractError("inference requires a HookResult produced by compact")
         step = cast(
             CompactStep[SystemPromptT, PlaceholderT, UserPromptT, HookGraphValue, CompactedSnapshotT],
             raw_step,
@@ -105,7 +108,7 @@ class InferenceNode(
             raise ThinkContractError("InferencePort.infer must return an InferenceResult")
         result = result_value
         next_frame = ThinkFrame(InferenceStep(prompt, compacted, result), frame.hook_state)
-        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state))
+        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state, GraphNodeId("inference")))
 
 
 __all__ = ["InferenceNode"]

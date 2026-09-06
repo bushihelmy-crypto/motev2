@@ -7,6 +7,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     PromptFrame,
     PromptPort,
@@ -68,7 +69,7 @@ class PromptNode(
 
         prompt = PromptFrame[SystemPromptT, PlaceholderT, UserPromptT](system, placeholder, user)
         frame = ThinkFrame(PromptStep(prompt), request.hook_state)
-        return Graph.values(hook_request=HookRequest(frame, request.hook_state))
+        return Graph.values(hook_request=HookRequest(frame, request.hook_state, GraphNodeId("prompt")))
 
 
 __all__ = ["PromptNode"]

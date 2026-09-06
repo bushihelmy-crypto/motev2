@@ -73,7 +73,7 @@ class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         self,
         values: Graph.Values[HookGraphValue],
         /,
-    ) -> Graph.Values[HookGraphValue]:
+    ) -> Graph.Values[HookGraphValue] | Graph.Outcome[HookGraphValue]:
         progress = cast(
             _HookProgress[PriorityConfigT, ValueT, StateT, CommandT],
             values["progress"],
@@ -87,10 +87,16 @@ class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         result = await self.port.execute(priority_plan, progress.request)
         ordered_commands = progress.commands + result.commands
         if self.priority is HookPriority.P3:
-            return Graph.values(result=self.port.admission.admit_result(HookResult(result.value, ordered_commands)))
+            hook_result = self.port.admission.admit_result(
+                HookResult(result.value, ordered_commands, progress.request.node_id)
+            )
+            # Hook never owns its containing graph's control flow.  Its
+            # result is an ordinary value; a parent graph may attach a
+            # compile-time result selector when it needs conditional routing.
+            return Graph.values(result=hook_result)
         return Graph.values(
             progress=_HookProgress(
-                HookRequest(result.value, progress.request.state),
+                HookRequest(result.value, progress.request.state, progress.request.node_id),
                 progress.plan,
                 ordered_commands,
             )

@@ -313,7 +313,13 @@ class ThinkFrame(HookGraphValue, Generic[ThinkStepT, HookStateT]):
 
 
 class ThinkRoute(StrEnum):
-    """The fixed conditional edges emitted by the route node."""
+    """The fixed internal transitions of the Think stage family.
+
+    The assembled graph currently derives these transitions from the typed
+    ``ThinkStep`` value.  Keeping the closed enum in the owner module makes
+    that mapping explicit for diagnostics and for older private route probes;
+    it is not exported from the package entry point.
+    """
 
     CONTEXT = "context"
     COMPACT = "compact"
