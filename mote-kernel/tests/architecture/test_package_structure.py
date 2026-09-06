@@ -17,7 +17,6 @@ REQUIRED_PACKAGES = frozenset(
         "loop/react",
         "observability",
         "observe",
-        "operations",
         "execution/resource",
         "role",
         "role/restore",

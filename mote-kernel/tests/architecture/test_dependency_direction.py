@@ -15,7 +15,6 @@ CORE_FLOW_PACKAGES = frozenset(
         "loop",
         "observability",
         "observe",
-        "operations",
         "role",
         "think",
     }
