@@ -28,7 +28,14 @@ from mote_kernel.hooks.contract import (
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage, hook_definition_id
 from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
-from mote_kernel.invocation import Invocation, InvocationAdmissionError, InvocationBoundaryError, InvocationTypeError
+from mote_kernel.hooks.port import HookPort
+from mote_kernel.invocation import (
+    Invocation,
+    InvocationAdmissionError,
+    InvocationBoundaryAdmissionError,
+    InvocationBoundaryError,
+    InvocationTypeError,
+)
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 
@@ -350,6 +357,77 @@ class NonCallablePlanLoader:
 
 class NonCallableInvocation:
     invoke = None
+
+
+class SnapshotSubclass(HookConfigSnapshot[Config]):
+    pass
+
+
+class PlanSubclass(HookPlan[PriorityConfig]):
+    pass
+
+
+class PriorityPlanSubclass(HookPriorityPlan[PriorityConfig]):
+    pass
+
+
+class RequestSubclass(HookRequest[str, Counter]):
+    pass
+
+
+class InvocationRequestSubclass(HookInvocationRequest[PriorityConfig, str, Counter]):
+    pass
+
+
+class StageResultSubclass(HookStageResult[str, Increment]):
+    pass
+
+
+class ResultSubclass(HookResult[str, Increment]):
+    pass
+
+
+class RaisingSnapshotSource:
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+        self.calls = 0
+
+    def snapshot(self) -> HookConfigSnapshot[Config]:
+        self.calls += 1
+        raise self.failure
+
+
+class RaisingPlanLoader:
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+        self.calls = 0
+
+    def load(self, _snapshot: HookConfigSnapshot[Config], /) -> HookPlan[PriorityConfig]:
+        self.calls += 1
+        raise self.failure
+
+
+class SyncRuntime:
+    def __init__(self) -> None:
+        self.calls: list[InvocationCall] = []
+
+    def invoke(
+        self,
+        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        /,
+    ) -> HookStageResult[str, Increment]:
+        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
+        return HookStageResult(invocation_request.request.value)
+
+
+class YieldingRuntime(SerialRuntime):
+    async def invoke(
+        self,
+        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        /,
+    ) -> HookStageResult[str, Increment]:
+        await asyncio.sleep(0)
+        return await super().invoke(invocation_request)
 
 
 def _slot(node_id: str = "observe") -> HookSlotId:
@@ -1135,3 +1213,357 @@ def test_hook_node_slot_is_read_only() -> None:
         node.slot = _slot("replacement")  # type: ignore[misc]
 
     assert node.slot is original
+
+
+def test_payload_admission_admits_only_the_exact_snapshot_and_plan_wrappers() -> None:
+    admission = _admission()
+    snapshot = HookConfigSnapshot(_config())
+    priority = HookPriorityPlan(PriorityConfig(1, ("one",)))
+    plan = HookPlan(priority, priority, priority)
+
+    assert admission.admit_snapshot(snapshot) is snapshot
+    assert admission.admit_plan(plan) is plan
+
+    with pytest.raises(HookContractError, match="HookConfigSnapshot"):
+        admission.admit_snapshot(cast(HookConfigSnapshot[Config], object()))
+    with pytest.raises(HookContractError, match="HookConfigSnapshot"):
+        admission.admit_snapshot(SnapshotSubclass(_config()))
+    with pytest.raises(HookContractError, match="config has an unexpected"):
+        admission.admit_snapshot(HookConfigSnapshot(cast(Config, object())))
+    with pytest.raises(HookContractError, match="HookPlan"):
+        admission.admit_plan(cast(HookPlan[PriorityConfig], object()))
+    with pytest.raises(HookContractError, match="HookPlan"):
+        admission.admit_plan(PlanSubclass(priority, priority, priority))
+
+
+@pytest.mark.parametrize("priority_name", ["P1", "P2", "P3"])
+def test_payload_admission_checks_each_priority_wrapper_and_config(
+    priority_name: str,
+) -> None:
+    admission = _admission()
+    priority = HookPriorityPlan(PriorityConfig(1, ()))
+    priorities: list[HookPriorityPlan[PriorityConfig] | object] = [priority, priority, priority]
+    priorities[int(priority_name[1]) - 1] = object()
+    malformed = cast(HookPlan[PriorityConfig], object.__new__(HookPlan))
+    object.__setattr__(malformed, "p1", priorities[0])
+    object.__setattr__(malformed, "p2", priorities[1])
+    object.__setattr__(malformed, "p3", priorities[2])
+
+    with pytest.raises(HookContractError, match=f"hook plan {priority_name} must be a HookPriorityPlan"):
+        admission.admit_plan(malformed)
+
+    priorities = [priority, priority, priority]
+    priorities[int(priority_name[1]) - 1] = HookPriorityPlan(cast(PriorityConfig, object()))
+    invalid_config_plan = HookPlan(
+        cast(HookPriorityPlan[PriorityConfig], priorities[0]),
+        cast(HookPriorityPlan[PriorityConfig], priorities[1]),
+        cast(HookPriorityPlan[PriorityConfig], priorities[2]),
+    )
+    with pytest.raises(HookContractError, match=f"hook {priority_name} config has an unexpected"):
+        admission.admit_plan(invalid_config_plan)
+
+
+def test_payload_admission_checks_exact_request_and_invocation_request_boundaries() -> None:
+    admission = _admission()
+    request = _request()
+    invocation_request = HookInvocationRequest(PriorityConfig(1, ()), request)
+
+    assert admission.admit_request(request) is request
+    assert admission.admit_invocation_request(invocation_request) is invocation_request
+
+    with pytest.raises(HookContractError, match="HookRequest"):
+        admission.admit_request(cast(HookRequest[str, Counter], object()))
+    with pytest.raises(HookContractError, match="HookRequest"):
+        admission.admit_request(RequestSubclass("x", Counter(1)))
+    with pytest.raises(HookContractError, match="hook value has an unexpected"):
+        admission.admit_request(HookRequest(cast(str, object()), Counter(1)))
+    with pytest.raises(HookContractError, match="hook state has an unexpected"):
+        admission.admit_request(HookRequest("x", cast(Counter, object())))
+    with pytest.raises(HookContractError, match="HookInvocationRequest"):
+        admission.admit_invocation_request(cast(HookInvocationRequest[PriorityConfig, str, Counter], object()))
+    with pytest.raises(HookContractError, match="HookInvocationRequest"):
+        admission.admit_invocation_request(InvocationRequestSubclass(PriorityConfig(1, ()), request))
+    with pytest.raises(HookContractError, match="priority config has an unexpected"):
+        admission.admit_invocation_request(HookInvocationRequest(cast(PriorityConfig, object()), request))
+    with pytest.raises(HookContractError, match="hook value has an unexpected"):
+        admission.admit_invocation_request(
+            HookInvocationRequest(PriorityConfig(1, ()), HookRequest(cast(str, object()), Counter(1)))
+        )
+
+
+@pytest.mark.parametrize("command_index", [0, 1, 2])
+def test_payload_admission_checks_every_stage_command_element(command_index: int) -> None:
+    admission = _admission()
+    commands: list[Increment | object] = [Increment(1), Increment(2), Increment(3)]
+    commands[command_index] = object()
+    malformed = HookStageResult("value", cast(tuple[Increment, ...], tuple(commands)))
+
+    with pytest.raises(HookContractError, match="hook command has an unexpected"):
+        admission.admit_stage_result(malformed)
+
+
+def test_payload_admission_checks_exact_stage_and_final_result_wrappers() -> None:
+    admission = _admission()
+    stage = HookStageResult("value", (Increment(1),))
+    result = HookResult("value", (Increment(2),), GraphNodeId("origin"))
+
+    assert admission.admit_stage_result(stage) is stage
+    assert admission.admit_result(result) is result
+
+    with pytest.raises(HookContractError, match="HookStageResult"):
+        admission.admit_stage_result(cast(HookStageResult[str, Increment], object()))
+    with pytest.raises(HookContractError, match="HookStageResult"):
+        admission.admit_stage_result(StageResultSubclass("value"))
+    with pytest.raises(HookContractError, match="hook value has an unexpected"):
+        admission.admit_stage_result(HookStageResult(cast(str, object())))
+    with pytest.raises(HookContractError, match="HookResult"):
+        admission.admit_result(cast(HookResult[str, Increment], object()))
+    with pytest.raises(HookContractError, match="HookResult"):
+        admission.admit_result(ResultSubclass("value"))
+    with pytest.raises(HookContractError, match="hook value has an unexpected"):
+        admission.admit_result(HookResult(cast(str, object())))
+    with pytest.raises(HookContractError, match="hook result commands must be a tuple"):
+        malformed = cast(HookResult[str, Increment], object.__new__(HookResult))
+        object.__setattr__(malformed, "value", "value")
+        object.__setattr__(malformed, "commands", [])
+        object.__setattr__(malformed, "node_id", None)
+        admission.admit_result(malformed)
+
+
+def test_optional_transition_admission_is_a_noop_or_forwards_exact_objects() -> None:
+    request = _request()
+    stage = HookStageResult("next", (Increment(1),))
+
+    _admission().admit_transition(request, stage)
+
+    transition = RecordingTransitionAdmission()
+    _admission(transition).admit_transition(request, stage)
+    assert len(transition.calls) == 1
+    assert transition.calls[0].request is request
+    assert transition.calls[0].result is stage
+
+
+def test_transition_admission_preserves_its_exception_instance() -> None:
+    transition = RecordingTransitionAdmission(reject_rank=1)
+    request = _request()
+    stage = HookStageResult("next")
+
+    with pytest.raises(RuntimeError) as raised:
+        _admission(transition).admit_transition(request, stage)
+
+    assert raised.value is transition.failure
+
+
+@pytest.mark.asyncio
+async def test_hook_port_forwards_exact_plan_request_and_transition_objects() -> None:
+    transition = RecordingTransitionAdmission()
+    runtime = SerialRuntime()
+    request = _request("port-")
+    plan = HookPlan(
+        HookPriorityPlan(PriorityConfig(1, ("one",))),
+        HookPriorityPlan(PriorityConfig(2, ())),
+        HookPriorityPlan(PriorityConfig(3, ())),
+    )
+    port = HookPort(_admission(transition), runtime)
+
+    result = await port.execute(plan.p1, request)
+
+    assert result is not None
+    assert runtime.calls[0].config is plan.p1.config
+    assert runtime.calls[0].request is request
+    assert transition.calls[0].request is request
+    assert transition.calls[0].result is result
+
+
+@pytest.mark.asyncio
+async def test_hook_port_rejects_invalid_plan_or_request_before_invocation() -> None:
+    runtime = SerialRuntime()
+    port = HookPort(_admission(), runtime)
+    valid_request = _request()
+
+    with pytest.raises(HookContractError, match="priority config has an unexpected"):
+        await port.execute(HookPriorityPlan(cast(PriorityConfig, object())), valid_request)
+    with pytest.raises(HookContractError, match="hook value has an unexpected"):
+        await port.execute(HookPriorityPlan(PriorityConfig(1, ())), HookRequest(cast(str, object()), Counter(1)))
+
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_hook_port_marks_invocation_result_admission_failures_without_retry() -> None:
+    runtime = InvalidResultRuntime(1)
+    port = HookPort(_admission(), runtime)
+
+    with pytest.raises(HookContractError, match="HookStageResult") as raised:
+        await port.execute(HookPriorityPlan(PriorityConfig(1, ())), _request())
+
+    assert isinstance(raised.value.__cause__, InvocationBoundaryAdmissionError)
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_and_plan_failures_stop_before_later_hook_work() -> None:
+    snapshot_failure = RuntimeError("snapshot failure")
+    source = RaisingSnapshotSource(snapshot_failure)
+    loader = PlanLoader()
+    runtime = SerialRuntime()
+    with pytest.raises(RuntimeError) as raised:
+        await _node(source, loader, runtime).run(Graph.values(request=_request()))
+    assert raised.value is snapshot_failure
+    assert source.calls == 1
+    assert loader.snapshots == []
+    assert runtime.calls == []
+
+    plan_failure = RuntimeError("plan failure")
+    source = ConfigSource(_config())
+    loader_failure = RaisingPlanLoader(plan_failure)
+    with pytest.raises(RuntimeError) as raised:
+        await _node(source, loader_failure, runtime).run(Graph.values(request=_request()))
+    assert raised.value is plan_failure
+    assert source.calls == 1
+    assert loader_failure.calls == 1
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_and_plan_cancellation_propagate_without_invocation() -> None:
+    snapshot_cancel = asyncio.CancelledError("snapshot cancelled")
+    source = RaisingSnapshotSource(snapshot_cancel)
+    runtime = SerialRuntime()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await _node(source, PlanLoader(), runtime).run(Graph.values(request=_request()))
+    assert raised.value is snapshot_cancel
+    assert runtime.calls == []
+
+    plan_cancel = asyncio.CancelledError("plan cancelled")
+    loader = RaisingPlanLoader(plan_cancel)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await _node(ConfigSource(_config()), loader, runtime).run(Graph.values(request=_request()))
+    assert raised.value is plan_cancel
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sync_invocation_capability_fails_at_the_async_boundary() -> None:
+    runtime = SyncRuntime()
+    invocation = cast(
+        Invocation[
+            HookInvocationRequest[PriorityConfig, str, Counter],
+            HookStageResult[str, Increment],
+        ],
+        runtime,
+    )
+
+    with pytest.raises(TypeError, match="await"):
+        await _node(ConfigSource(_config()), PlanLoader(), invocation).run(Graph.values(request=_request()))
+
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_hook_runs_keep_progress_and_state_isolated() -> None:
+    runtime = YieldingRuntime()
+    node = _node(ConfigSource(_config()), PlanLoader(), runtime)
+    first_request = HookRequest("first", Counter(1), GraphNodeId("first"))
+    second_request = HookRequest("second", Counter(2), GraphNodeId("second"))
+
+    first_result, second_result = await asyncio.gather(
+        node.run(Graph.values(request=first_request)),
+        node.run(Graph.values(request=second_request)),
+    )
+
+    first = _completion(first_result)
+    second = _completion(second_result)
+    assert first == HookResult("first1a2b3c", (Increment(1), Increment(2), Increment(3)), GraphNodeId("first"))
+    assert second == HookResult("second1a2b3c", (Increment(1), Increment(2), Increment(3)), GraphNodeId("second"))
+    assert all(call.request.state is first_request.state for call in runtime.calls if call.request.node_id == "first")
+    assert all(call.request.state is second_request.state for call in runtime.calls if call.request.node_id == "second")
+
+
+@pytest.mark.asyncio
+async def test_hook_without_origin_node_id_completes_without_an_exported_route() -> None:
+    node = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+
+    result = await node.run(Graph.values(request=_request()))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert _completion(result).node_id is None
+    assert result.state.completion_route is None
+
+
+@pytest.mark.asyncio
+async def test_hook_nested_completion_route_selects_the_parent_declared_branch() -> None:
+    hook = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+    parent = Graph[HookGraphValue]("hook.route.conditional")
+    request_type = cast(type[HookGraphValue], HookRequest)
+    parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
+    visited: list[str] = []
+
+    async def left(_values: Graph.Values[HookGraphValue]) -> Graph.Values[HookGraphValue]:
+        visited.append("left")
+        return Graph.values()
+
+    async def right(_values: Graph.Values[HookGraphValue]) -> Graph.Values[HookGraphValue]:
+        visited.append("right")
+        return Graph.values()
+
+    parent.add_node("left", left, inputs={}, outputs={})
+    parent.add_node("right", right, inputs={}, outputs={})
+    parent.add_edge("hook", "left", "left")
+    parent.add_edge("hook", "right", "right")
+    parent.add_edge("left", Graph.END)
+    parent.add_edge("right", Graph.END)
+    parent.set_outputs({"result": parent.output_ref("hook", "result")})
+
+    result = await parent.run(Graph.values(request=HookRequest("x", Counter(1), GraphNodeId("right"))))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert visited == ["right"]
+    assert result.state.completion_route is None
+
+
+@pytest.mark.asyncio
+async def test_hook_nested_completion_rejects_an_undeclared_route() -> None:
+    hook = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+    parent = Graph[HookGraphValue]("hook.route.unknown")
+    request_type = cast(type[HookGraphValue], HookRequest)
+    parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
+    parent.add_edge("hook", "known", Graph.END)
+    parent.set_outputs({"result": parent.output_ref("hook", "result")})
+
+    with pytest.raises(Graph.RoutingError, match="unknown conditional route"):
+        await parent.run(Graph.values(request=HookRequest("x", Counter(1), GraphNodeId("unknown"))))
+
+
+def test_graph_owns_hook_output_descriptor_after_the_p3_migration() -> None:
+    hook = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+
+    assert not hasattr(hook, "result_output")
+    output = hook.output_ref("p3", "result")
+    assert output.node_id == GraphNodeId("p3")
+    assert output.output_name == "result"
+    assert output.descriptor is not None
+    with pytest.raises(GraphValidationError, match="source node"):
+        hook.output_ref(" p3 ", "result")
+    with pytest.raises(GraphValidationError, match="source output"):
+        hook.output_ref("p3", " result ")
+
+
+@pytest.mark.asyncio
+async def test_hook_graph_rejects_all_builder_mutations_after_successful_compile() -> None:
+    hook = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+    await hook.run(Graph.values(request=_request()))
+
+    async def late(_values: Graph.Values[HookGraphValue]) -> Graph.Values[HookGraphValue]:
+        return Graph.values()
+
+    with pytest.raises(GraphValidationError, match="immutable"):
+        hook.add_node("late", late, inputs={}, outputs={})
+    with pytest.raises(GraphValidationError, match="immutable"):
+        hook.add_edge("p3", Graph.END)
+    with pytest.raises(GraphValidationError, match="immutable"):
+        hook.add_join(("p1", "p2"), Graph.END)
+    with pytest.raises(GraphValidationError, match="immutable"):
+        hook.set_outputs({"result": Graph.node_output("p3", "result")})
+    with pytest.raises(GraphValidationError, match="immutable"):
+        hook.set_resume_codec("hook.test", 1, lambda values: b"", lambda payload: Graph.values())

@@ -1,10 +1,18 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
+from typing import cast
 
 import pytest
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.ports import NodeOutputRef, canonical_nominal_type
+from mote_kernel.execution.graph.ports import (
+    GraphInputRef,
+    NodeOutputRef,
+    NominalTypeDescriptor,
+    canonical_nominal_type,
+)
+from mote_kernel.state.graph_state import GraphNodeId
 
 
 async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -209,3 +217,125 @@ def test_output_ref_is_available_after_compile_and_keeps_identity() -> None:
     second = graph.output_ref("leaf", "value")
 
     assert second.descriptor is first.descriptor
+
+
+def test_node_output_typed_predecessor_requires_a_typed_reference_and_no_extra_name() -> None:
+    untyped = Graph.node_output("producer", "value")
+    with pytest.raises(Graph.ValidationError, match="typed predecessor output"):
+        Graph.node_output(untyped)
+
+    typed = NodeOutputRef(GraphNodeId("producer"), "value", canonical_nominal_type(str))
+    with pytest.raises(Graph.ValidationError, match="typed predecessor output"):
+        Graph.node_output(cast(str, typed), "other")
+
+    predecessor = Graph.node_output(typed)
+    assert predecessor.output_name == "value"
+    assert predecessor.descriptor is typed.descriptor
+
+
+def test_typed_bind_rejects_a_non_port_object_before_reading_its_descriptor() -> None:
+    with pytest.raises(Graph.ValidationError, match="typed input must bind"):
+        Graph.bind("value", cast(GraphInputRef[str], object()))
+
+
+def test_output_ref_rejects_a_non_concrete_nested_boundary_descriptor() -> None:
+    child = Graph[str]("output-ref.non-concrete-child")
+    child.add_node("leaf", echo, inputs={}, outputs={"value": str})
+    source = Graph.node_output("leaf", "value")
+    object.__setattr__(source, "descriptor", NominalTypeDescriptor(object))
+    child.set_outputs({"value": source})
+    parent = Graph[str]("output-ref.non-concrete-parent")
+    parent.add_node("child", child, inputs={})
+
+    with pytest.raises(Graph.ValidationError, match="non-concrete nominal descriptor"):
+        parent.output_ref("child", "value")
+
+
+def test_output_ref_graph_input_resolution_skips_unrelated_node_and_boundary_inputs() -> None:
+    child = Graph[str]("output-ref.input-skips")
+    target = Graph.graph_input("target", str)
+    unrelated = Graph.graph_input("unrelated", str)
+    child.add_node("leaf", echo, inputs={"unrelated": unrelated}, outputs={"value": str})
+    child.set_outputs({"unrelated": unrelated, "value": target})
+    parent = Graph[str]("output-ref.input-skips-parent")
+    parent.add_node("child", child, inputs={})
+
+    output = parent.output_ref("child", "value")
+
+    assert output.descriptor is target.descriptor
+
+
+def test_graph_input_descriptor_rejects_missing_name_when_outputs_are_not_declared() -> None:
+    graph = Graph[str]("output-ref.missing-input")
+
+    with pytest.raises(Graph.ValidationError, match="is not declared"):
+        graph._graph_input_descriptor("missing")  # pyright: ignore[reportPrivateUsage]
+
+
+def test_graph_input_descriptor_rejects_conflicting_boundary_declarations() -> None:
+    graph = Graph[str | int]("output-ref.conflicting-boundaries")
+    graph.set_outputs(
+        {
+            "first": Graph.graph_input("shared", str),
+            "second": Graph.graph_input("shared", int),
+        }
+    )
+
+    with pytest.raises(Graph.ValidationError, match="conflicting exact type"):
+        graph._graph_input_descriptor("shared")  # pyright: ignore[reportPrivateUsage]
+
+
+def test_boundary_descriptor_rejects_a_predecessor_reference() -> None:
+    graph = Graph[str]("output-ref.invalid-boundary-source")
+    predecessor = cast(GraphInputRef[str] | NodeOutputRef[str], Graph.node_output("value"))
+
+    with pytest.raises(Graph.ValidationError, match="graph input or node output"):
+        graph._resolve_boundary_source_descriptor(predecessor, {graph})  # pyright: ignore[reportPrivateUsage]
+
+
+def test_add_node_rejects_partial_typed_declarations_before_assembly() -> None:
+    graph = Graph[str]("output-ref.partial-typed")
+
+    async def operation(value: str) -> str:
+        return value
+
+    binding = Graph.bind("value", Graph.graph_input("value", str))
+    add_node = cast(Callable[..., object], graph.add_node)
+    with pytest.raises(Graph.ValidationError, match="require input, materializer"):
+        add_node("node", operation, inputs=(binding,), input_type=str)
+
+
+def test_add_node_rejects_typed_nodes_with_ordinary_output_or_input_shapes() -> None:
+    graph = Graph[str]("output-ref.typed-shape")
+
+    async def operation(value: str) -> str:
+        return value
+
+    binding = Graph.bind("value", Graph.graph_input("value", str))
+
+    def materialize(values: Graph.Inputs[str]) -> str:
+        return values.get(binding)
+
+    add_node = cast(Callable[..., object], graph.add_node)
+
+    with pytest.raises(Graph.ValidationError, match="typed bindings and one typed output"):
+        add_node(
+            "with-outputs",
+            operation,
+            inputs=(binding,),
+            outputs={},
+            input_type=str,
+            materialize=materialize,
+            output_name="result",
+            output_type=str,
+        )
+    with pytest.raises(Graph.ValidationError, match="typed bindings and one typed output"):
+        add_node(
+            "with-mapping",
+            operation,
+            inputs=cast(tuple[Graph.InputBinding[str], ...], {}),
+            input_type=str,
+            materialize=materialize,
+            output_name="result",
+            output_type=str,
+        )
