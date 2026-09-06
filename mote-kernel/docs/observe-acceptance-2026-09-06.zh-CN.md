@@ -8,10 +8,10 @@
 业务状态节点和一个共享 Hook；负责取得 observation、将 observation 写入对应 capability、返回
 当前观察类型及结算证据，不负责 ReAct 的顶层路由和结束判断。
 
-**仓库级最终门禁尚不能签为全绿。** 当前 `execution/node_adapter.py` 导入了
-`execution/graph/values.py` 中不存在的 `_ExactValueAdmission` 和 `_admit_exact`，导致 Observe
-测试在 collection 阶段即被 execution 导入链阻断。该错误不在 Observe 包内，本次没有越界修复。
-Graph 侧同步完成后，需要重跑第 7 节列出的门禁，才能补上当前精确工作树的最终验证记录。
+复审指出的 Observe 包内问题已经闭合：两个业务节点已迁移到 Graph typed-node contract，
+共享 Hook 的 concrete binding 与有界 rewrite 规则在 assembly/admission 处固定，Hook P3 结果则
+统一通过 Graph 的 output descriptor 绑定。当前精确工作树的 Observe 范围全量测试、分支覆盖率、
+lint、format 和严格类型检查均已通过；仓库级门禁中的非 Observe 问题只记录，不在本次越界修复。
 
 本结论只验收 Observe 自己的契约和实现，不代替以下系统集成验收：
 
@@ -88,6 +88,10 @@ Config 覆盖只发生在 Config 自己的语义内，不删除、不降级、�
 - 同边界后台任务快照
 - 完整 settlement/ACK receipt
 
+Graph 层只发布共享 Hook 第二次激活的 `HookResult`；其
+`WriteObservationStageValue.result` 是上述唯一领域结果。该 P3 publication descriptor 由 Graph
+统一绑定，Observe 不另设平行输出路径。
+
 ### 3.3 FIFO、identity 与不可变证据
 
 新增并收紧了以下 typed identity/value：
@@ -130,26 +134,37 @@ task 或隐藏可变状态。
 
 - concrete Hook state class；
 - concrete Hook command class；
-- Config/Tool/User/Assistant 各自的 concrete immutable payload class。
+- Config/Tool/User/Assistant 各自的 exact concrete payload class。
 
 不存在默认未绑定模式。Queue、Hook、settlement、result 和 ACK 边界都复用同一 admission，并对从
 provider/deserializer 回来的值重跑构造不变量。实现没有使用 `Any`、裸字典、字符串 discriminator
 或反射来猜测类型。
 
-节点输出及 Graph assembly 使用精确泛型：
+exact nominal class 约束不等于自动证明 payload 对象的深不可变性；字段及其内部对象是否不可变，
+由各 concrete payload owner 在 composition root 绑定时保证。Observe 不用运行时反射猜测任意对象的
+深不可变性，也不以 `object`、裸容器或宽 union 规避 nominal binding。
 
-- `GetObservationNode` 返回 `Graph.Values[HookRequest[ObserveHookEnvelope, HookStateT]]`；
-- `WriteObservationNode` 返回同一精确类型；
-- `admit_request`、`admit_hook_request` 保留 concrete Hook state 泛型；
-- Graph input/output descriptor 保留 request 与 Hook request 的具体类型。
+两个业务节点已经直接使用 Graph typed-node contract：
 
-这使用了 Graph 最新的 `Values` 泛型贯穿能力，没有在 Observe 中增加兼容 cast facade 或平行 value
-容器。
+- `GetObservationNode` 的 operation 是
+  `ObserveRequest[HookStateT] -> HookRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome`；
+- `WriteObservationNode` 的 operation 是
+  `HookResult[ObserveHookEnvelope, HookCommandT] -> HookRequest[ObserveHookEnvelope, HookStateT]`；
+- assembly 使用 `Graph.bind`、`input_type`、`materialize`、`output_type` 绑定输入和唯一输出；
+- 共享 Hook 的 P3 `result` publication 由 Graph 的 `output_ref("hook", "result")` 统一解析，
+  Observe 不调用 Hook 私有 P3/result API，也不自行制造第二份 result descriptor。
+
+因此 `Graph.Values` 只留在 Graph input/resume 的统一容器边界，不再是两个 Observe 业务 operation
+自行拆装的 legacy mapping API；request、Hook request/result 和 concrete Hook 泛型可以沿 typed
+descriptor 贯穿。
 
 ### 3.6 一个共享 Hook 与路由身份
 
-两个业务节点都进入同一个注入的 `HookNode`。Observe 验证 Hook 是 exact `HookNode`，且 slot 的
-definition id、version、node id=`hook`、stage=`AFTER_NODE` 与 Observe definition 一致。
+两个业务节点都进入同一个注入的 `HookNode`。Observe 在第一次 `Graph.add_node()` 前验证 Hook 是
+exact `HookNode`，slot 的 definition id、version、node id=`hook`、stage=`AFTER_NODE` 与 Observe
+definition 一致，并检查 Hook admission 的 value/state/command concrete class 与 Observe admission
+完全相同，`transition_admission` 还是同一个 Observe admission 实例。错误 binding 在 assembly
+fail-closed，不留下半成品 Graph。
 
 业务节点构造 `HookRequest` 时写入自己的 `GraphNodeId`：
 
@@ -160,10 +175,11 @@ Hook 的 P1/P2/P3 脚本只能返回 `HookStageResult.value` 与 commands；最�
 `HookNode` 使用原始 request 的 `node_id` 构造，脚本没有修改该身份的入口。Observe 用这个不可由
 脚本替换的前驱身份选择自己已经声明好的两条内部边，因此 Hook 不会绕过 Graph 流程。
 
-`HookStageResult.value` 的改写能力被保留。Observe 不再要求 Hook 返回的 envelope/value 与进入 Hook
-前逐字段相等；只对返回值的 exact class、closed stage/payload 组合、业务 node identity 以及内部
-DTO 不变量做 admission。原因是 Hook 的正式语义本来就允许 P1/P2/P3 改写 value，强制等值会把合法
-Hook 退化成只允许 pass-through。
+`HookStageResult.value` 的改写能力被保留，但不是无边界替换。每次 Hook activation 都由同一个
+`ObservePayloadAdmission.admit_transition` 固定以下规则：payload 可以改写，并作为下游业务事实；
+business stage 不可改变；只读 Hook state 不可改变；commands 必须是绑定的 exact concrete class。
+`node_id` 不在脚本可写的 `HookStageResult` 中，继续由 `HookNode` 从原 request 原样构造，因此也不可
+被脚本替换。这样既保留正式 rewrite 语义，也不会把 stage/state/父图路由权交给 Hook。
 
 ### 3.7 空队列、interrupt 与恢复
 
@@ -189,7 +205,8 @@ metadata 双读窗口。
 - revision 前进时，每个相应 receipt 都必须带匹配新 revision 的 task snapshot；
 - 多个 snapshot 不得互相冲突；
 - `ObserveResult.current_state` 必须能从 settlement receipt 唯一推导；
-- delivery、cursor、snapshot 和 ACK reference 必须与完整 receipt 一致。
+- delivery、cursor、完整 task snapshot（包括 `blocking_tasks`）和 ACK reference 必须与完整 receipt
+  一致。
 
 ACK 保持显式的提交后动作：
 
@@ -208,19 +225,20 @@ run/commit 状态表。
 
 ## 4. 针对代码评审项的处理结果
 
-`docs/observe-code-review-2026-09-06.zh-CN.md` 是当时工作树的评审快照。本次没有篡改历史评审，
-而是在这里记录最终处理结论。
-
+`docs/observe-code-review-2026-09-06.zh-CN.md` 与
+`docs/observe-acceptance-rereview-2026-09-06.zh-CN.md` 是各自当时工作树的评审快照。本次没有
+篡改历史评审，而是在这里记录最终处理结论。
 | 原评审项 | 处理 | 理由 |
 | --- | --- | --- |
-| P0-1：Hook 可替换 frame/result | **撤回该缺陷判定** | `HookStageResult.value` 可改写是正式 Hook 语义；保护的是 Hook 外部的 `node_id` 与 typed/stage 边界，不是强制 value 等值 |
+| P0-1：Hook rewrite provenance | **按有界 rewrite 规则关闭** | payload 可改写；stage、只读 state 和 `node_id` 不可改。每次 transition 复用 Observe admission，完整 result snapshot 也与 settlement evidence 一致；不采用会破坏正式 Hook 语义的全量 pass-through |
 | P0-2：Port effect 与 Graph commit 的跨系统闭包 | **未在 Observe 内实现事务协调器** | provider 幂等/事务及 Graph pending-reconcile 属于 Port/commit owner；Observe 只产生并校验 typed receipt，私建 runner/store 会形成第二状态 owner |
-| P1-1：concrete Hook binding | **收紧 Observe admission 与静态泛型边界** | concrete payload/state/command 必须绑定；Hook 自身 admission 负责 Hook 内边界。Observe 不读取 Hook 私有字段或反射泛型 |
+| P1-1：concrete Hook binding | **已在 assembly fail-closed** | 比较 Hook admission 的 exact value/state/command class，并要求同一个 Observe transition admission；在第一次 `Graph.add_node()` 前完成 |
 | P1-2：Port async/arity/return | **Protocol + assembly callable check + 返回值 admission** | strict typing 证明签名，运行时验证 capability 形状及 exact result；不使用函数签名反射，也不把 provider invocation engine 复制进 Observe |
 | P1-3：ACK commit evidence | **明确移交父 commit owner；保留 result/reference admission** | nested Observe 无法以自己的 completion 代表父图 durable commit；pending ACK 必须进入唯一 commit owner，而不是 Observe 私有状态 |
 | P1-4：resume state/codec provenance | **Observe 只校验自己的 interrupt/wait 边界** | durable continuation 和 Hook state 来源属于父 Graph/recovery owner；Observe 不创建第二份恢复状态 |
-| P1-5：payload 可为宽/可变对象 | **已修复** | 四类 payload 必须是 admission 绑定的 exact concrete `ObservationPayload` subclass |
-| P1-6：successor snapshot 可由另一 receipt 补齐 | **已修复** | 每个推进 revision 的 receipt 独立要求 snapshot；组合时还要求 boundary/snapshot 一致 |
+| P1-5：payload 可为宽/可变对象 | **收紧并修正文档保证** | 四类 payload 必须是 admission 绑定的 exact concrete `ObservationPayload` subclass；其深不可变性由 concrete payload owner 保证，generic Observe 不用反射伪造证明 |
+| 旧 P1-6：successor snapshot 可由另一 receipt 补齐 | **已修复** | 每个推进 revision 的 receipt 独立要求 snapshot；组合时还要求 boundary/snapshot 一致 |
+| 复审 P1-6：业务节点仍使用 legacy `Graph.Values` | **已修复** | 两个 operation 已迁移到 `Graph.bind` + typed materializer/output contract，删除节点内部 mapping 拆装路径 |
 | P1-7：未使用的 `check_fence` | **已删除** | Observe 不执行 ReAct 的最终 commit fence；保留一个从不消费的 Port 方法会制造虚假保证 |
 | P2-1：batch 镜像 projection | **已修复** | 只存 authoritative `deliveries`，family batch 全部按需派生 |
 | P2-2：task tuple 非 canonical | **已修复** | snapshot 构造时稳定排序并拒绝重复 incarnation |
@@ -234,7 +252,7 @@ run/commit 状态表。
 - Graph 是唯一 execution/state/commit owner，Observe 不创建或修改执行器、session、reducer、
   `GraphRunState` 或编译器语义。
 - Hook 是独立 nested Graph owner。Observe 只注入一个真实 Hook 并消费其公开契约，不修改
-  `HookNode` 的节点名或 P1/P2/P3 pipeline。
+  `HookNode` 的节点名或 P1/P2/P3 pipeline；P3 publication 通过 Graph 统一 `output_ref` 绑定。
 - ReAct 是顶层图 owner。Observe 不认识 Think/Act 节点名，也不生成父图 jump plan。
 - Think/Act 的结果由外部 adapter 映射为四类 observation 之一；Observe 不读取它们的私有 frame。
 
@@ -264,7 +282,8 @@ snapshot/revision evidence。
 
 曾尝试在 Observe 中回读原 publication 并要求 Hook 返回 envelope 与原值相等，该方案已完整撤回。
 它既违反 `HookStageResult` 的改写语义，也会要求 Graph 为这条额外读取路径提供不必要的 producer
-激活证明。最终只锁定不可由 Hook 脚本修改的 `node_id` 路由身份和 typed contract。
+激活证明。最终锁定的是有界 rewrite：payload 可改，stage、只读 state、`node_id` 不可改，并始终
+执行 exact typed/stage/DTO admission。
 
 ### 5.6 没有让 ACK 接受 Observe 自己的 `CompletedResult`
 
@@ -286,8 +305,8 @@ Observe 会拒绝真实集成路径。Observe 接受已经结算的 `ObserveResu
 | `test_contract.py` | 四类 observation、FIFO、conflict、receipt、snapshot、result 不变量 |
 | `test_admission.py` | exact type、forged DTO、payload binding、数量/长度边界 |
 | `test_port.py` | 六个 required Port、缺失/非 callable capability、codec metadata |
-| `test_nodes.py` | 两业务节点、共享 Hook、写入策略、interrupt/resume、ACK、取消 |
-| `test_graph.py` | 三节点 topology、nested parent、terminal route、并发隔离及失败停止 |
+| `test_nodes.py` | 两业务节点、共享 Hook concrete/transition binding、写入策略、interrupt/resume、ACK、取消 |
+| `test_graph.py` | 三节点 topology、typed materializer、bounded Hook rewrite、nested parent、terminal route、并发隔离及失败停止 |
 
 关键确定性场景包括：
 
@@ -299,6 +318,10 @@ Observe 会拒绝真实集成路径。Observe 接受已经结算的 `ObserveResu
 - 空队列 wait registration、interrupt、resume 重新读取；
 - malformed/oversized/non-canonical durable wait payload；
 - 两次共享 Hook activation、最终 route 及父 nested Graph 消费；
+- 合法 payload rewrite 贯穿完整 Graph，stage/state/command rewrite 越界及伪造 transition 被拒绝；
+- 错误 Hook value/state/command/transition binding 在 assembly fail-closed；
+- typed materializer 缺少输入时在调用任何 capability 前失败；
+- 同 revision 但 settlement task facts 不同的结果被拒绝；
 - 并发 run 的 frame/hook state 隔离；
 - Port/Hook 失败和 cancellation 不继续进入后续阶段；
 - ACK 显式调用及 provider 返回错误 reference。
@@ -306,32 +329,24 @@ Observe 会拒绝真实集成路径。Observe 接受已经结算的 `ObserveResu
 为错误 `CompletedResult` ACK 设计增加的两个测试已删除，因为它们锁定的是无法用于 nested Graph 的错误
 所有权模型，而不是应保留的业务不变量。
 
-## 7. 门禁记录与待补动作
+## 7. 门禁记录
 
-### 7.1 已有历史完整结果
-
-在当前 execution 导入链失配出现前，Observe 全量测试曾达到：
-
-- `237 passed`
-- Observe branch coverage `100%`
-- Pyright `0 errors`
-
-该记录证明当时版本的主体实现，但不能替代当前 ACK API 回退后的精确工作树复验。
-
-### 7.2 当前精确工作树结果
+### 7.1 当前精确工作树结果
 
 | 检查 | 结果 | 说明 |
 | --- | --- | --- |
 | `python -B -m ruff check src/mote_kernel/observe tests/observe` | 通过 | Observe 源码与测试 lint 通过 |
 | `python -B -m ruff format --check src/mote_kernel/observe tests/observe` | 通过 | 13 files already formatted |
-| Observe pytest + branch coverage | 阻塞 | collection 导入 `execution/node_adapter.py` 时找不到 `_ExactValueAdmission` / `_admit_exact` |
-| `make typecheck` | 阻塞 | 当前报告 8 个非 Observe 错误，来自 `execution/node_adapter.py` 与 `hooks/contract.py` |
-| `make check` | 未继续 | pytest/typecheck 的已知外部阻断尚未消除，继续运行不能形成有效验收证据 |
-| monorepo pre-commit | 未继续 | 同上，且当前 worktree 有大量非 Observe 并行改动，不能归因到 Observe |
+| Observe pytest + branch coverage | 通过 | 244 passed；1301 statements、482 branches，均 100.00% |
+| `pyright src/mote_kernel/observe tests/observe` | 通过 | 0 errors、0 warnings、0 informations |
+| `make typecheck` | 最终复跑失败（非 Observe） | 本轮初次运行曾为 0 errors；随后出现并行的 `tests/hooks/test_hooks.py` 改动，最终复跑报其中 2 个未使用导入，本轮不修改该文件 |
+| `git diff --check`（Observe 源码、测试及两份文档） | 通过 | 本轮范围无 whitespace error |
+| `make check` | 失败（非 Observe） | 在上述并行改动出现前运行：lint、format、typecheck 通过；仓库 `complexity-ratchet` 失败后停止。失败包含 Graph/Think/Act 等全仓指标，本轮不调整基线或其他包 |
+| monorepo `pre-commit run --all-files` | 失败（非 Observe） | 除 `kernel-complexity` 外全部通过；该 Hook 复现同一个全仓 complexity-ratchet 失败 |
 
 本次没有为了让门禁表面变绿而修改 execution、Graph、Hook、ReAct 或无关 CI。
 
-### 7.3 Graph 侧同步完成后必须执行
+### 7.2 最终交付命令
 
 ```bash
 python -B -m pytest tests/observe -q \
@@ -352,8 +367,8 @@ lint、测试、构建或 pre-commit 回归。
 ## 8. 最终边界判定
 
 当前不再有需要通过增加 Observe 节点、状态、route、runner、store 或公共 API 解决的已知包内事项。
-尚未闭合的内容均依赖其真实 owner：Graph/Hook 当前工作树同步、父 ReAct 路由与结束 gate、真实 Port
-provider 事务性以及父 commit 后 ACK 编排。
+尚未闭合的系统集成内容均依赖其真实 owner：父 ReAct 路由与结束 gate、真实 Port provider 事务性、
+Graph/commit 的 durable continuation 与父 commit 后 ACK 编排。
 
 若后续为了这些集成项必须修改 Observe 之外的包，应先由对应 owner 确认设计，不在 Observe 内用
 兼容层、影子状态或重复执行路径绕过。
