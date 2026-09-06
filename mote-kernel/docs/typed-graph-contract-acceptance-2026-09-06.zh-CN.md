@@ -127,7 +127,7 @@ adapter 不写 `GraphRunState`、不启动额外 task、不重试、不 apply co
 
 | 文件 | 已落地职责 | review 要点 |
 | --- | --- | --- |
-| `src/mote_kernel/execution/facade.py` | `Graph.bind`、`Graph.output_ref`、typed `add_node` overload、`Graph.Inputs/InputBinding/OutputRef`、统一 `add_edge` | typed 和 legacy mapping 都进入同一个 Graph facade；`output_ref` 递归解析 nested boundary 并复用 child descriptor，没有旁路 runner |
+| `src/mote_kernel/execution/facade.py` | `Graph.bind`、`Graph.output_ref`、typed `add_node` overload、`Graph.Inputs/InputBinding/OutputRef`、统一 `add_edge` | typed DTO 与 mapping declaration 都进入同一个 Graph facade 和 IR；nested `output_ref` 读取 compiler 已解析的 child boundary descriptor，没有第二套边界解析或旁路 runner |
 | `src/mote_kernel/execution/graph/ports.py` | `NominalTypeDescriptor[T]`、typed refs/slot/binding、concrete nominal 门禁 | source/destination 共享 descriptor；拒绝 top type、Protocol、abstract class、可变容器 |
 | `src/mote_kernel/execution/graph/node.py` | `NodeInputs`、`NodeContract`、`TypedNodeAssembly`、`TypedNodeInvoker`、assembly factory | binding 以对象 identity 约束；contract/slot/ref/publisher 原子生成 |
 | `src/mote_kernel/execution/graph/values.py` | `admit_exact`、`_frame_value_typed`、frame/value admission | `_admit_entries` 和端口读取共用同一 exact-class 原语 |
@@ -246,8 +246,8 @@ typed contract 只负责 node input/output 的 DTO 边界，不偷偷改变拓�
 - Join 的 source/target 坐标和 publication selection；
 - nested child completion route 被 parent 消费；
 - `Graph.output_ref(node_id, output_name)` 对普通 callable、单层/多层 nested child 和
-  Graph-input boundary 返回 child 声明的 exact descriptor；descriptor-less legacy boundary
-  可被补全，foreign descriptor、未知 boundary、重复 node 和递归 composition fail closed；
+  Graph-input boundary 返回 compiler 选定的 exact descriptor；address-only boundary source
+  由同一 compiler 解析，foreign descriptor、未知 boundary、重复 node 和递归 composition fail closed；
 - resource waiter、interrupt、failure、普通异常、取消和 Graph settlement/commit；
 - compile 后 mutation guard、foreign/stale publication、错误 descriptor、并发 run 隔离；
 - typed output 的错误 input/output、duplicate slot、publisher 错误和 outcome 透传。
@@ -273,7 +273,7 @@ typed contract 只负责 node input/output 的 DTO 边界，不偷偷改变拓�
 
 - `tests/execution/test_typed_node_contract.py`：DTO materialize/publish、输入/输出 exact
 - `tests/execution/test_nested_output_ref.py`：普通/nested/deep boundary、Graph-input、descriptor
-  identity、legacy source、非法 composition 和 compile 后 handle；
+  identity、address-only source、非法 composition 和 compile 后 handle；
 - `tests/execution/engine/test_recovery_identity.py`：`completion_route_known` false/true projection；
   admission、descriptor identity、duplicate/foreign binding、publisher/outcome/异常、
   conditional predecessor 和 nested route；

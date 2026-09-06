@@ -701,6 +701,7 @@ def test_completed_lifecycle_rejects_execution_lease() -> None:
         "running-empty-frontier",
         "running-abort",
         "running-failed-frontier",
+        "running-completion-route",
         "completed-frontier",
         "completed-abort",
         "failed-pending-frontier",
@@ -722,6 +723,7 @@ def test_lifecycle_invariants_fail_closed(case: str) -> None:
                 (GraphFrontierNode(A, FailedGraphNode(GraphFailure("failed")), StartActivationCause()),)
             ),
         ),
+        "running-completion-route": replace(base, completion_route=GraphRouteId("done")),
         "completed-frontier": replace(completed, frontier=base.frontier),
         "completed-abort": replace(completed, abort=GraphAbort(GraphAbortReason("abort"))),
         "failed-pending-frontier": replace(base, status=GraphRunStatus.FAILED),

@@ -513,12 +513,6 @@ def _think_with_hook(
     )
 
 
-def _malformed_hook_with_slot(slot: object) -> HookNode[Config, Priority, ThinkFrame[ThinkStep, State], State, Command]:
-    hook = cast(HookNode[Config, Priority, ThinkFrame[ThinkStep, State], State, Command], object.__new__(HookNode))
-    object.__setattr__(hook, "_slot", slot)
-    return hook
-
-
 def test_think_rejects_non_hook_children_before_graph_assembly() -> None:
     with pytest.raises(ThinkContractError, match="shared HookNode"):
         _think_with_hook(None)
@@ -531,12 +525,6 @@ def test_think_rejects_non_hook_children_before_graph_assembly() -> None:
 
     with pytest.raises(ThinkContractError, match="shared HookNode"):
         _think_with_hook(not_a_hook)
-
-
-def test_think_rejects_a_hook_with_a_non_slot_property() -> None:
-    malformed = _malformed_hook_with_slot(cast(Never, object()))
-    with pytest.raises(ThinkContractError, match="HookSlotId"):
-        _think_with_hook(malformed)
 
 
 @pytest.mark.parametrize(
@@ -575,6 +563,15 @@ def test_think_rejects_a_shared_hook_with_a_mismatched_state_type() -> None:
 
     with pytest.raises(ThinkContractError, match="state type"):
         _think_with_hook(make_hook(HookRuntime()), hook_state_type=OtherState)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("state_type", (HookGraphValue, str))
+def test_think_requires_a_concrete_hook_graph_value_state_type(state_type: type[object]) -> None:
+    with pytest.raises(ThinkContractError, match="concrete HookGraphValue"):
+        _think_with_hook(
+            make_hook(HookRuntime()),
+            hook_state_type=cast(type[State], state_type),
+        )
 
 
 @pytest.mark.asyncio

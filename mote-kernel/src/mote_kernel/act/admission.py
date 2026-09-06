@@ -19,7 +19,6 @@ from mote_kernel.act.contract import (
     AuthorizationRequestRef,
     AuthorizedInvocation,
     AuthorizeStageValue,
-    CanonicalArguments,
     Deny,
     ExecutePortResult,
     ExecuteStageValue,
@@ -36,11 +35,10 @@ from mote_kernel.act.contract import (
     SettleStageValue,
     ToolExchangeWriteRequest,
     ToolExchangeWriteResult,
-    ToolExecutionIdentity,
     ToolExecutionResult,
     admit_authorization_interrupt_payload,
 )
-from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason, ToolPairingIdentity
+from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult, HookStageResult
 from mote_kernel.state.graph_state import GraphNodeId
 
@@ -65,14 +63,6 @@ def _stage_node_id(stage: ActHookStage, /) -> GraphNodeId:
     return GraphNodeId(stage.value)
 
 
-def _is_concrete_hook_state_type(value_type: type[HookGraphValue], /) -> bool:
-    return value_type is not HookStateProjection and issubclass(value_type, HookStateProjection)
-
-
-def _is_concrete_hook_command_type(value_type: type[HookGraphValue], /) -> bool:
-    return value_type is not ActHookCommand and issubclass(value_type, ActHookCommand)
-
-
 @dataclass(frozen=True, slots=True)
 class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
     """The single fixed outer admission contract used by Act nodes.
@@ -87,8 +77,14 @@ class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
 
     def __post_init__(self) -> None:
         try:
-            state_valid = _is_concrete_hook_state_type(self.hook_state_type)
-            command_valid = _is_concrete_hook_command_type(self.hook_command_type)
+            state_valid = self.hook_state_type is not HookStateProjection and issubclass(
+                cast(type[object], self.hook_state_type),
+                HookStateProjection,
+            )
+            command_valid = self.hook_command_type is not ActHookCommand and issubclass(
+                cast(type[object], self.hook_command_type),
+                ActHookCommand,
+            )
         except TypeError as error:
             raise ActContractError("Act Hook state and command types must be concrete classes") from error
         if not state_valid:
@@ -98,14 +94,6 @@ class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
 
     def admit_act_slot(self, value: ActSlotId, /) -> ActSlotId:
         _exact(value, ActSlotId, "Act slot")
-        return value
-
-    def admit_tool_pairing_identity(self, value: ToolPairingIdentity, /) -> ToolPairingIdentity:
-        _exact(value, ToolPairingIdentity, "tool pairing identity")
-        return value
-
-    def admit_tool_execution_identity(self, value: ToolExecutionIdentity, /) -> ToolExecutionIdentity:
-        _exact(value, ToolExecutionIdentity, "tool execution identity")
         return value
 
     def admit_graph_failure_reason(self, value: OpaqueGraphFailureReason, /) -> OpaqueGraphFailureReason:
@@ -120,10 +108,6 @@ class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
         if type(value) is not self.hook_state_type:
             raise ActContractError("Act Hook state has an unexpected concrete type")
         return cast(HookStateT, value)
-
-    def admit_canonical_arguments(self, value: CanonicalArguments, /) -> CanonicalArguments:
-        _exact(value, CanonicalArguments, "canonical arguments")
-        return value
 
     def admit_resolved_invocation(self, value: ResolvedInvocation, /) -> ResolvedInvocation:
         _exact(value, ResolvedInvocation, "resolved invocation")

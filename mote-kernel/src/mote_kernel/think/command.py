@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -27,15 +28,6 @@ ModelOutputT = TypeVar("ModelOutputT")
 CommandT = TypeVar("CommandT")
 
 
-MethodT = TypeVar("MethodT")
-
-
-def _require_port_method(method: MethodT, name: str, /) -> MethodT:
-    if not callable(method):
-        raise ThinkContractError(f"CommandPort.{name} must be callable")
-    return method
-
-
 @dataclass(frozen=True, slots=True)
 class CommandNode(
     Generic[
@@ -50,16 +42,17 @@ class CommandNode(
 ):
     """Structure the normalized inference result without executing it."""
 
-    command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]] | None
+    command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]]
 
     def __post_init__(self) -> None:
-        if self.command_port is None:
+        if operator.is_(self.command_port, None):
             raise ThinkContractError("command requires a CommandPort")
         try:
             method = self.command_port.build_command
         except AttributeError as error:
             raise ThinkContractError("command requires a CommandPort") from error
-        _require_port_method(method, "build_command")
+        if not callable(method):
+            raise ThinkContractError("CommandPort.build_command must be callable")
 
     async def __call__(
         self,
@@ -89,10 +82,7 @@ class CommandNode(
     ]:
         frame = admit_inference_frame(value.hook_result)
         step = frame.step
-        port = self.command_port
-        if port is None:
-            raise ThinkContractError("command requires a CommandPort")
-        core_value = await port.build_command(step.inference)
+        core_value = await self.command_port.build_command(step.inference)
         if type(core_value) is not ThinkCoreResult:
             raise ThinkContractError("CommandPort.build_command must return a ThinkCoreResult")
         core = core_value

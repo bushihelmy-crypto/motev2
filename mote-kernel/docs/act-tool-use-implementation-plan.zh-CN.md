@@ -435,8 +435,6 @@ ActPayloadAdmission                         # frozen/slots；无可变运行时�
   FAILURE_REASON_MAX_BYTES = 512
 
 admit_act_slot(ActSlotId) -> ActSlotId
-admit_tool_pairing_identity(ToolPairingIdentity) -> ToolPairingIdentity
-admit_tool_execution_identity(ToolExecutionIdentity) -> ToolExecutionIdentity
 admit_graph_failure_reason(OpaqueGraphFailureReason) -> OpaqueGraphFailureReason
 admit_request(ActRequest) -> ActRequest
 admit_resolved_invocation(ResolvedInvocation) -> ResolvedInvocation

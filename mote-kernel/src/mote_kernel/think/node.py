@@ -10,8 +10,8 @@ from mote_kernel.execution.graph.ports import (
     TypedInputBinding,
 )
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
-from mote_kernel.hooks.identity import HookSlotId, HookStage
+from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.identity import HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
@@ -80,23 +80,20 @@ class ThinkNode(
         definition_id: str,
         *,
         version: int = 1,
-        prompt_port: PromptPort[PayloadT, SystemPromptT, PlaceholderT, UserPromptT] | None,
+        prompt_port: PromptPort[PayloadT, SystemPromptT, PlaceholderT, UserPromptT],
         context_port: ContextPort[
             ContextRequest[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT],
             ContextFrame[ContextSnapshotT],
-        ]
-        | None,
+        ],
         compact_port: CompactPort[
             CompactRequest[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
             CompactedContext[CompactedSnapshotT],
-        ]
-        | None,
+        ],
         inference_port: InferencePort[
             InferenceRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
             InferenceResult[ModelOutputT],
-        ]
-        | None,
-        command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]] | None,
+        ],
+        command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]],
         model_binding: ModelBinding,
         hook_state_type: type[HookStateT],
         hook: HookNode[
@@ -105,8 +102,7 @@ class ThinkNode(
             ThinkFrame[ThinkStep, HookStateT],
             HookStateT,
             HookCommandT,
-        ]
-        | None,
+        ],
     ) -> None:
         # The shared child is a real HookNode, not a Graph/callable with a
         # matching output shell.  Perform this check before touching the
@@ -118,8 +114,6 @@ class ThinkNode(
         if hook_state_type is HookGraphValue:
             raise ThinkContractError("ThinkNode hook_state_type must be a concrete HookGraphValue class")
         hook_slot = hook.slot
-        if type(hook_slot) is not HookSlotId:
-            raise ThinkContractError("ThinkNode shared hook must expose a HookSlotId")
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
@@ -128,8 +122,6 @@ class ThinkNode(
         ):
             raise ThinkContractError("ThinkNode shared HookSlotId does not match its definition")
         hook_admission = hook.payload_admission
-        if type(hook_admission) is not HookPayloadAdmission:
-            raise ThinkContractError("ThinkNode shared Hook must expose a HookPayloadAdmission")
         if hook_admission.state_type is not hook_state_type:
             raise ThinkContractError("ThinkNode shared Hook state type does not match Think admission")
 

@@ -1395,6 +1395,61 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         == "graph completion consumed the wrong Join occurrences"
     )
 
+    empty_previous = replace(previous, frontier=GraphFrontierState(()), settled_activations=())
+    assert (
+        transition_admission_error(
+            topology("a"),
+            empty_previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "a terminal frontier has no settled routing contribution"
+    )
+
+    conflicting_graph = topology(
+        "a",
+        "b",
+        edges=(conditional("a", "left", END), conditional("b", "right", END)),
+        entries=("a", "b"),
+    )
+    conflicting_previous = replace(
+        running_state(frontier=("a", "b")),
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("a"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("left"))),
+                    StartActivationCause(),
+                ),
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("right"))),
+                    StartActivationCause(),
+                ),
+            )
+        ),
+        settled_activations=(reference("a", route="left"), reference("b", route="right")),
+    )
+    assert (
+        transition_admission_error(
+            conflicting_graph,
+            conflicting_previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "terminal frontier exposes conflicting completion routes"
+    )
+
+    assert (
+        transition_admission_error(
+            topology("a"),
+            previous,
+            CompleteGraphFrontier(0, completion_route=GraphRouteId("unexpected")),
+            completed,
+        )
+        == "graph completion route does not match the terminal frontier"
+    )
+
 
 def predecessor_binding(graph: CompiledGraph[int]) -> CompiledPredecessorInput:
     source = graph.transition.materializations[GraphNodeId("loop")].bindings.entries[0].source

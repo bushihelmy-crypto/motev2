@@ -462,9 +462,9 @@ compatibility shim，必须在同一迁移窗口删除并迁移测试，不能�
 
 ### 7.2 不能用宽泛 mapping 逃避类型
 
-当前 Graph 的字符串 input/output mapping 是历史声明形状。迁移后的 canonical IR 应将每个
-slot 的 descriptor 固化到 immutable binding 中；如果保留 mapping 作为 facade 的语法糖，它必须
-在进入 compiler 时立即转换成 typed binding tuple，并且只保留这一份 IR。禁止：
+Graph 的 mapping declaration 与 typed DTO declaration 都只存在于 facade 装配期。前者由
+`normalize_input_bindings()` 转成 `InputBindings`，后者由 typed-node assembly 直接 lower 到同一个
+`InputBindings` canonical IR；mapping normalizer 不接受 typed tuple，也不保留第二份绑定。禁止：
 
 - 在 node callable 内继续以 `values["name"]` 推断业务 DTO；
 - 用 `dict[str, object]`、`dict[str, Any]` 或字符串 type tag 作为内部 contract；

@@ -18,9 +18,7 @@ transport mechanics remain owned by the infrastructure implementation.
 
 import asyncio
 import math
-from collections.abc import MutableMapping, MutableSequence, MutableSet
 from dataclasses import dataclass
-from inspect import isabstract
 from typing import Final, Generic, Protocol, TypeVar, runtime_checkable
 
 from mote_kernel.execution.errors import GraphValidationError
@@ -33,7 +31,6 @@ ResultT_co = TypeVar("ResultT_co", covariant=True)
 RequestT = TypeVar("RequestT")
 ResultT = TypeVar("ResultT")
 ValueT = TypeVar("ValueT")
-NominalT = TypeVar("NominalT")
 
 
 class InvocationContractError(ValueError):
@@ -42,10 +39,6 @@ class InvocationContractError(ValueError):
 
 class InvocationTypeError(InvocationContractError):
     """Raised when a request/result fails an exact DTO type admission."""
-
-
-class InvocationAdmissionError(InvocationTypeError):
-    """An admission error raised by an Invocation implementation itself."""
 
 
 class InvocationBoundaryError(InvocationContractError):
@@ -62,39 +55,13 @@ class InvocationBoundaryAdmissionError(InvocationBoundaryError):
     """
 
 
-def _is_protocol_type(value_type: type[NominalT], /) -> bool:
-    # The marker is set only on the Protocol declaration itself; a concrete
-    # implementation that inherits a Protocol remains a valid nominal DTO.
-    # The metaclass guard keeps an ordinary class from being rejected merely
-    # because it happens to define a similarly named attribute.
-    return isinstance(value_type, type(Protocol)) and value_type.__dict__.get("_is_protocol") is True
-
-
-def _is_mutable_container_type(value_type: type[NominalT], /) -> bool:
-    return (
-        value_type is memoryview
-        or MutableMapping.__subclasscheck__(value_type)
-        or MutableSequence.__subclasscheck__(value_type)
-        or MutableSet.__subclasscheck__(value_type)
-    )
-
-
-def _validate_nominal_type(value_type: type[NominalT], field: str, /) -> None:
+def _validate_nominal_type(value_type: type[ValueT], field: str, /) -> None:
     """Require one concrete, non-container runtime class for an envelope."""
 
-    # The Graph helper supplies only the shared runtime-class/object/Any
-    # admission.  Invocation owns the stricter wire-DTO boundary below; a
-    # Graph descriptor alone is not evidence that a type is concrete here.
     try:
         canonical_nominal_type(value_type)
     except GraphValidationError as error:
         raise InvocationContractError(f"invocation {field} type must be one concrete nominal class") from error
-    if _is_protocol_type(value_type):
-        raise InvocationContractError(f"invocation {field} type must be one concrete nominal class")
-    if isabstract(value_type):
-        raise InvocationContractError(f"invocation {field} type must be one concrete nominal class")
-    if _is_mutable_container_type(value_type):
-        raise InvocationContractError(f"invocation {field} type must be one concrete nominal class")
 
 
 def _admit_exact(value: ValueT, expected: type[ValueT], field: str, /) -> ValueT:

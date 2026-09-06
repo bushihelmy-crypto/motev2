@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -28,15 +29,6 @@ ContextSnapshotT = TypeVar("ContextSnapshotT")
 ModelOutputT = TypeVar("ModelOutputT")
 
 
-MethodT = TypeVar("MethodT")
-
-
-def _require_port_method(method: MethodT, name: str, /) -> MethodT:
-    if not callable(method):
-        raise ThinkContractError(f"InferencePort.{name} must be callable")
-    return method
-
-
 @dataclass(frozen=True, slots=True)
 class InferenceNode(
     Generic[
@@ -50,23 +42,21 @@ class InferenceNode(
 ):
     """Assemble the final model request and invoke the injected model Port."""
 
-    inference_port: (
-        InferencePort[
-            InferenceRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
-            InferenceResult[ModelOutputT],
-        ]
-        | None
-    )
+    inference_port: InferencePort[
+        InferenceRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
+        InferenceResult[ModelOutputT],
+    ]
     model_binding: ModelBinding
 
     def __post_init__(self) -> None:
-        if self.inference_port is None:
+        if operator.is_(self.inference_port, None):
             raise ThinkContractError("inference requires an InferencePort")
         try:
             method = self.inference_port.infer
         except AttributeError as error:
             raise ThinkContractError("inference requires an InferencePort") from error
-        _require_port_method(method, "infer")
+        if not callable(method):
+            raise ThinkContractError("InferencePort.infer must be callable")
         if type(self.model_binding) is not ModelBinding:
             raise ThinkContractError("inference requires an exact ModelBinding")
 
@@ -95,10 +85,7 @@ class InferenceNode(
         prompt = step.prompt
         request = InferenceRequest(prompt, compacted, self.model_binding)
 
-        port = self.inference_port
-        if port is None:
-            raise ThinkContractError("inference requires an InferencePort")
-        result_value = await port.infer(request)
+        result_value = await self.inference_port.infer(request)
         if type(result_value) is not InferenceResult:
             raise ThinkContractError("InferencePort.infer must return an InferenceResult")
         result = result_value

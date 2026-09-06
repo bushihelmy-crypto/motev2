@@ -9,7 +9,6 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
     NodeOutputRef,
-    NominalTypeDescriptor,
     canonical_nominal_type,
 )
 from mote_kernel.state.graph_state import GraphNodeId
@@ -48,6 +47,8 @@ async def test_output_ref_resolves_a_nested_child_boundary_and_runs() -> None:
     parent.add_node("child", child, inputs={"value": Graph.graph_input("value", str)})
 
     output = parent.output_ref("child", "value")
+    with pytest.raises(Graph.ValidationError, match="immutable"):
+        child.set_outputs({"value": Graph.node_output("leaf", "value")})
     parent.set_outputs({"value": output})
 
     result = await parent.run(Graph.values(value="nested"))
@@ -87,9 +88,9 @@ def test_output_ref_resolves_through_multiple_nested_boundaries() -> None:
     assert output.descriptor is middle_output.descriptor
 
 
-def test_output_ref_repairs_a_descriptorless_legacy_boundary_reference() -> None:
-    child = child_with_node_output("output-ref.legacy")
-    parent = Graph[str]("output-ref.legacy-parent")
+def test_output_ref_resolves_an_address_only_boundary_reference() -> None:
+    child = child_with_node_output("output-ref.address-only")
+    parent = Graph[str]("output-ref.address-only-parent")
     parent.add_node("child", child, inputs={"value": Graph.graph_input("value", str)})
 
     output = parent.output_ref("child", "value")
@@ -134,13 +135,15 @@ def test_output_ref_rejects_a_foreign_nested_descriptor() -> None:
     parent = Graph[str]("output-ref.foreign-parent")
     parent.add_node("child", child, inputs={"value": Graph.graph_input("value", str)})
 
-    with pytest.raises(Graph.ValidationError, match="foreign descriptor"):
+    with pytest.raises(Graph.ValidationError, match="does not match its declared exact type/descriptor"):
         parent.output_ref("child", "value")
 
 
 def test_output_ref_rejects_recursive_nested_composition() -> None:
     graph = Graph[str]("output-ref.recursive")
     graph.add_node("self", graph, inputs={})
+    graph.set_outputs({"value": Graph.graph_input("value", str)})
+
     with pytest.raises(Graph.ValidationError, match="recursively"):
         graph.output_ref("self", "value")
 
@@ -196,19 +199,6 @@ def test_output_ref_preserves_the_compiler_selected_graph_input_descriptor() -> 
     assert output.descriptor is not first.descriptor
 
 
-def test_output_ref_requires_a_concrete_boundary_descriptor() -> None:
-    child = Graph[str]("output-ref.bad-descriptor-child")
-    child.add_node("leaf", echo, inputs={}, outputs={"value": str})
-    source = Graph.node_output("leaf", "value")
-    object.__setattr__(source, "descriptor", object())
-    child.set_outputs({"value": source})
-    parent = Graph[str]("output-ref.bad-descriptor-parent")
-    parent.add_node("child", child, inputs={})
-
-    with pytest.raises(Graph.ValidationError, match="malformed nominal descriptor"):
-        parent.output_ref("child", "value")
-
-
 def test_output_ref_is_available_after_compile_and_keeps_identity() -> None:
     graph = child_with_node_output("output-ref.after-compile")
     first = graph.output_ref("leaf", "value")
@@ -238,19 +228,6 @@ def test_typed_bind_rejects_a_non_port_object_before_reading_its_descriptor() ->
         Graph.bind("value", cast(GraphInputRef[str], object()))
 
 
-def test_output_ref_rejects_a_non_concrete_nested_boundary_descriptor() -> None:
-    child = Graph[str]("output-ref.non-concrete-child")
-    child.add_node("leaf", echo, inputs={}, outputs={"value": str})
-    source = Graph.node_output("leaf", "value")
-    object.__setattr__(source, "descriptor", NominalTypeDescriptor(object))
-    child.set_outputs({"value": source})
-    parent = Graph[str]("output-ref.non-concrete-parent")
-    parent.add_node("child", child, inputs={})
-
-    with pytest.raises(Graph.ValidationError, match="non-concrete nominal descriptor"):
-        parent.output_ref("child", "value")
-
-
 def test_output_ref_graph_input_resolution_skips_unrelated_node_and_boundary_inputs() -> None:
     child = Graph[str]("output-ref.input-skips")
     target = Graph.graph_input("target", str)
@@ -265,32 +242,19 @@ def test_output_ref_graph_input_resolution_skips_unrelated_node_and_boundary_inp
     assert output.descriptor is target.descriptor
 
 
-def test_graph_input_descriptor_rejects_missing_name_when_outputs_are_not_declared() -> None:
-    graph = Graph[str]("output-ref.missing-input")
-
-    with pytest.raises(Graph.ValidationError, match="is not declared"):
-        graph._graph_input_descriptor("missing")  # pyright: ignore[reportPrivateUsage]
-
-
-def test_graph_input_descriptor_rejects_conflicting_boundary_declarations() -> None:
-    graph = Graph[str | int]("output-ref.conflicting-boundaries")
-    graph.set_outputs(
+def test_output_ref_rejects_conflicting_graph_input_boundary_declarations() -> None:
+    child = Graph[str | int]("output-ref.conflicting-boundaries")
+    child.set_outputs(
         {
             "first": Graph.graph_input("shared", str),
             "second": Graph.graph_input("shared", int),
         }
     )
+    parent = Graph[str | int]("output-ref.conflicting-boundaries-parent")
+    parent.add_node("child", child, inputs={})
 
     with pytest.raises(Graph.ValidationError, match="conflicting exact type"):
-        graph._graph_input_descriptor("shared")  # pyright: ignore[reportPrivateUsage]
-
-
-def test_boundary_descriptor_rejects_a_predecessor_reference() -> None:
-    graph = Graph[str]("output-ref.invalid-boundary-source")
-    predecessor = cast(GraphInputRef[str] | NodeOutputRef[str], Graph.node_output("value"))
-
-    with pytest.raises(Graph.ValidationError, match="graph input or node output"):
-        graph._resolve_boundary_source_descriptor(predecessor, {graph})  # pyright: ignore[reportPrivateUsage]
+        parent.output_ref("child", "first")
 
 
 def test_add_node_rejects_partial_typed_declarations_before_assembly() -> None:

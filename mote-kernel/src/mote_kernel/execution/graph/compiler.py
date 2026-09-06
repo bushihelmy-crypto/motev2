@@ -1023,30 +1023,17 @@ def _compile_graph(
     input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
     predecessor_bindings_by_node: dict[
         GraphNodeId,
-        tuple[
-            tuple[
-                str,
-                PredecessorOutputRef[GraphValueT],
-                NominalTypeDescriptor[GraphValueT] | None,
-            ],
-            ...,
-        ],
+        tuple[tuple[str, PredecessorOutputRef[GraphValueT]], ...],
     ] = {}
     data_dependencies = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for node_id in node_ids:
         node = nodes[node_id]
         resolved: list[ResolvedInputBinding[GraphValueT]] = []
-        predecessor_bindings: list[
-            tuple[
-                str,
-                PredecessorOutputRef[GraphValueT],
-                NominalTypeDescriptor[GraphValueT] | None,
-            ]
-        ] = []
+        predecessor_bindings: list[tuple[str, PredecessorOutputRef[GraphValueT]]] = []
         for binding in node.inputs.entries:
             declared_source = binding.source
             if isinstance(declared_source, PredecessorOutputRef):
-                predecessor_bindings.append((binding.local_name, declared_source, binding.expected))
+                predecessor_bindings.append((binding.local_name, declared_source))
                 continue
             source, descriptor = _resolve_source(
                 declared_source,
@@ -1055,10 +1042,6 @@ def _compile_graph(
                 node_outputs=node_outputs,
                 consumer=node_id,
             )
-            if binding.expected is not None and binding.expected.value_type is not descriptor.value_type:
-                raise GraphValidationError(
-                    f"typed input {binding.local_name!r} on node {node_id!r} does not match its source exact type"
-                )
             if isinstance(source, NodeOutputPort):
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
@@ -1121,7 +1104,7 @@ def _compile_graph(
 
     for node_id in node_ids:
         resolved = list(input_bindings_by_node[node_id].entries)
-        for input_name, declared_source, expected_descriptor in predecessor_bindings_by_node[node_id]:
+        for input_name, declared_source in predecessor_bindings_by_node[node_id]:
             source, descriptor = _resolve_predecessor_output(
                 declared_source,
                 target=node_id,
@@ -1131,10 +1114,6 @@ def _compile_graph(
                 entries=entries,
                 gates=activation_gates[node_id],
             )
-            if expected_descriptor is not None and expected_descriptor.value_type is not descriptor.value_type:
-                raise GraphValidationError(
-                    f"typed input {input_name!r} on node {node_id!r} does not match its predecessor exact type"
-                )
             resolved.append(
                 ResolvedInputBinding(
                     NodeInputPort(scope, node_id, input_name),

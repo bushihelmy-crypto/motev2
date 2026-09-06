@@ -31,7 +31,6 @@ from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPla
 from mote_kernel.hooks.port import HookPort
 from mote_kernel.invocation import (
     Invocation,
-    InvocationAdmissionError,
     InvocationBoundaryAdmissionError,
     InvocationBoundaryError,
     InvocationTypeError,
@@ -233,11 +232,11 @@ class CancellingRuntime:
         raise asyncio.CancelledError("invocation cancelled")
 
 
-class RaisingAdmissionErrorRuntime:
+class RaisingTypeErrorRuntime:
     def __init__(self) -> None:
         self.calls: list[InvocationCall] = []
         self.cause = InvocationTypeError("inner type failure")
-        self.error = InvocationAdmissionError("runtime admission failure")
+        self.error = InvocationTypeError("runtime type failure")
 
     async def invoke(
         self,
@@ -665,10 +664,10 @@ async def test_invocation_cancellation_propagates_without_running_later_prioriti
 
 
 @pytest.mark.asyncio
-async def test_hook_port_does_not_translate_an_invocation_admission_error() -> None:
-    runtime = RaisingAdmissionErrorRuntime()
+async def test_hook_port_does_not_translate_an_invocation_type_error() -> None:
+    runtime = RaisingTypeErrorRuntime()
 
-    with pytest.raises(InvocationAdmissionError) as raised:
+    with pytest.raises(InvocationTypeError) as raised:
         await _node(ConfigSource(_config()), PlanLoader(), runtime).run(Graph.values(request=_request()))
 
     assert raised.value is runtime.error

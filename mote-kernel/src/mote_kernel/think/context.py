@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -26,37 +27,26 @@ UserPromptT = TypeVar("UserPromptT")
 ContextSnapshotT = TypeVar("ContextSnapshotT")
 
 
-MethodT = TypeVar("MethodT")
-
-
-def _require_port_method(method: MethodT, name: str, /) -> MethodT:
-    if not callable(method):
-        raise ThinkContractError(f"ContextPort.{name} must be callable")
-    return method
-
-
 @dataclass(frozen=True, slots=True)
 class ContextNode(
     Generic[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
 ):
     """Load one context snapshot after the Prompt Hook activation."""
 
-    context_port: (
-        ContextPort[
-            ContextRequest[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT],
-            ContextFrame[ContextSnapshotT],
-        ]
-        | None
-    )
+    context_port: ContextPort[
+        ContextRequest[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT],
+        ContextFrame[ContextSnapshotT],
+    ]
 
     def __post_init__(self) -> None:
-        if self.context_port is None:
+        if operator.is_(self.context_port, None):
             raise ThinkContractError("context requires a ContextPort")
         try:
             method = self.context_port.load_context
         except AttributeError as error:
             raise ThinkContractError("context requires a ContextPort") from error
-        _require_port_method(method, "load_context")
+        if not callable(method):
+            raise ThinkContractError("ContextPort.load_context must be callable")
 
     async def __call__(
         self,
@@ -78,10 +68,7 @@ class ContextNode(
         prompt = frame.step.prompt
         context_request = ContextRequest(request, prompt)
 
-        port = self.context_port
-        if port is None:
-            raise ThinkContractError("context requires a ContextPort")
-        context_value = await port.load_context(context_request)
+        context_value = await self.context_port.load_context(context_request)
         if type(context_value) is not ContextFrame:
             raise ThinkContractError("ContextPort.load_context must return a ContextFrame")
         context = context_value

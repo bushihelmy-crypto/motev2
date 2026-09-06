@@ -188,18 +188,6 @@ def test_prompt_rejects_a_port_with_a_missing_method_at_assembly() -> None:
         PromptNode(cast(Never, MissingPlaceholderPort()))
 
 
-@pytest.mark.asyncio
-async def test_prompt_rejects_a_forged_missing_port_before_operations() -> None:
-    node = cast(
-        PromptNode[Payload, HookState, str, str, str],
-        object.__new__(PromptNode),
-    )
-    object.__setattr__(node, "prompt_port", None)
-
-    with pytest.raises(ThinkContractError, match="PromptPort"):
-        await node(ThinkRequest(Payload("text"), HookState(1)))
-
-
 @pytest.mark.parametrize(
     "field",
     ("system", "placeholder", "user"),

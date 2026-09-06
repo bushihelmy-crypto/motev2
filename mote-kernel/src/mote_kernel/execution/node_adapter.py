@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
-from mote_kernel.execution.errors import GraphValueAdmissionError, NodeExecutionContractError
+from mote_kernel.execution.errors import GraphValueAdmissionError
 from mote_kernel.execution.graph.node import (
     CallableNodeDefinition,
+    NodeCallable,
     NodeContract,
     TypedNodeInvoker,
     _make_node_inputs,
@@ -75,9 +76,7 @@ async def invoke_node(
     typed = definition.typed_invoker
     if typed is not None:
         return await typed(frame)
-    operation = definition.operation
-    if operation is None:
-        raise NodeExecutionContractError("callable node lacks its compiled execution contract")
+    operation = cast(NodeCallable[GraphValueT], definition.operation)
     return await operation(_public_node_input(frame))
 
 

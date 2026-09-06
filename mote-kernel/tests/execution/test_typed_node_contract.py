@@ -1,13 +1,20 @@
 from dataclasses import dataclass, replace
-from typing import TypeAlias, cast
+from typing import Never, TypeAlias, cast
 
 import pytest
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.node import make_typed_node_assembly
+from mote_kernel.execution.graph.node import CallableNodeDefinition, make_typed_node_assembly
 from mote_kernel.execution.graph.ports import (
+    GraphInputRef,
+    InputBindings,
+    NodeInputSlot,
+    NodeOutputRef,
     NominalTypeDescriptor,
+    OutputDeclarations,
+    TypedInputBinding,
     canonical_nominal_type,
+    normalize_input_bindings,
     normalize_output_declarations,
 )
 from mote_kernel.execution.graph.values import NamedValue, _GraphValues, _make_node_input_frame
@@ -140,9 +147,9 @@ async def test_typed_node_rejects_wrong_operation_output_before_publication() ->
         await graph.run(Graph.values(source=Left("value")))
 
 
-def test_typed_binding_rejects_a_string_only_legacy_output_reference() -> None:
+def test_typed_binding_rejects_an_address_only_output_reference() -> None:
     with pytest.raises(Graph.ValidationError, match="typed Graph handle"):
-        Graph.bind("value", Graph.node_output("legacy", "value"))
+        Graph.bind("value", Graph.node_output("source", "value"))
 
 
 def test_typed_node_rejects_duplicate_binding_slots_during_assembly() -> None:
@@ -185,7 +192,106 @@ def test_typed_assembly_reuses_one_descriptor_across_contract_and_output_handles
     assert assembly.outputs.entries[0].descriptor is descriptor
     assert assembly.output_ref.descriptor is descriptor
     assert assembly.contract.bindings[0] is binding
-    assert assembly.inputs.entries[0].expected is binding.destination.descriptor
+    assert assembly.inputs.entries[0].source is binding.source
+
+
+def test_typed_assembly_rejects_malformed_bindings_and_materializer_at_its_boundary() -> None:
+    valid = Graph.bind("source", Graph.graph_input("source", Left))
+    wrong_descriptor = cast(NominalTypeDescriptor[Left], canonical_nominal_type(Right))
+    non_concrete_descriptor = cast(NominalTypeDescriptor[Left], NominalTypeDescriptor(object))
+    malformed = (
+        (
+            TypedInputBinding(cast(NodeInputSlot[Left], object()), valid.source),
+            "malformed input slot",
+        ),
+        (
+            TypedInputBinding(
+                NodeInputSlot("source", cast(NominalTypeDescriptor[Left], object())),
+                valid.source,
+            ),
+            "malformed descriptor",
+        ),
+        (
+            TypedInputBinding(
+                NodeInputSlot("source", non_concrete_descriptor),
+                GraphInputRef("source", non_concrete_descriptor),
+            ),
+            "non-concrete descriptor",
+        ),
+        (
+            TypedInputBinding(valid.destination, cast(GraphInputRef[Left], object())),
+            "malformed input source",
+        ),
+        (
+            TypedInputBinding(NodeInputSlot("source", wrong_descriptor), valid.source),
+            "descriptor mismatch",
+        ),
+        (
+            TypedInputBinding(
+                valid.destination,
+                NodeOutputRef(GraphNodeId("source"), "value"),
+            ),
+            "descriptor mismatch",
+        ),
+    )
+
+    async def operation(value: Left) -> Combined:
+        return Combined(value.value)
+
+    for binding, match in malformed:
+        with pytest.raises(Graph.ValidationError, match=match):
+            make_typed_node_assembly(
+                GraphNodeId("node"),
+                operation,
+                (cast(TypedInputBinding[PipelineValue], binding),),
+                Left,
+                lambda values: values.get(valid),
+                "result",
+                Combined,
+            )
+
+    graph = Graph[PipelineValue]("typed.bad-assembly")
+    with pytest.raises(Graph.ValidationError, match=r"Graph\.bind"):
+        graph.add_node(
+            "node",
+            operation,
+            inputs=(cast(TypedInputBinding[PipelineValue], object()),),
+            input_type=Left,
+            materialize=lambda values: values.get(valid),
+            output_name="result",
+            output_type=Combined,
+        )
+    with pytest.raises(Graph.ValidationError, match="callable materializer"):
+        graph.add_node(
+            "node",
+            operation,
+            inputs=(cast(TypedInputBinding[PipelineValue], valid),),
+            input_type=Left,
+            materialize=cast(Never, object()),
+            output_name="result",
+            output_type=Combined,
+        )
+
+
+def test_typed_input_view_and_callable_definition_enforce_their_owner_seals() -> None:
+    frame = _make_node_input_frame(
+        (NamedValue("source", Left("value")),),
+        normalize_output_declarations({"source": Left}),
+    )
+    with pytest.raises(Graph.ValueAdmissionError, match="execution owner"):
+        Graph.Inputs(
+            _frame=frame,
+            _bindings=(),
+            _seal=cast(Never, object()),
+        )
+
+    with pytest.raises(Graph.ValidationError, match="exactly one execution contract"):
+        CallableNodeDefinition(
+            GraphNodeId("node"),
+            None,
+            cast(InputBindings[PipelineValue], normalize_input_bindings({})),
+            cast(OutputDeclarations[PipelineValue], normalize_output_declarations({})),
+        )
 
 
 @pytest.mark.asyncio
@@ -446,6 +552,48 @@ async def test_typed_predecessor_binding_reads_the_selected_branch_publication()
 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["result"] == Combined("1")
+
+
+@pytest.mark.asyncio
+async def test_compiler_rejects_a_typed_predecessor_handle_with_the_wrong_descriptor() -> None:
+    graph = Graph[PipelineValue]("typed.predecessor-descriptor")
+
+    async def produce(_value: EmptyInput) -> Right:
+        return Right(1)
+
+    produced = graph.add_node(
+        "produce",
+        produce,
+        inputs=(),
+        input_type=EmptyInput,
+        materialize=lambda _values: EmptyInput(),
+        output_name="value",
+        output_type=Right,
+    )
+    forged = cast(
+        NodeOutputRef[Combined],
+        replace(produced, descriptor=canonical_nominal_type(Combined)),
+    )
+    predecessor = Graph.bind("previous", Graph.node_output(forged))
+
+    async def consume(value: Combined) -> Combined:
+        return value
+
+    output = graph.add_node(
+        "consume",
+        consume,
+        inputs=(predecessor,),
+        input_type=Combined,
+        materialize=lambda values: values.get(predecessor),
+        output_name="result",
+        output_type=Combined,
+    )
+    graph.add_edge("produce", "consume")
+    graph.add_edge("consume", Graph.END)
+    graph.set_outputs({"result": output})
+
+    with pytest.raises(Graph.ValidationError, match="typed predecessor input"):
+        await graph.run(Graph.values())
 
 
 @pytest.mark.asyncio

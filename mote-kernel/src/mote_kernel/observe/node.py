@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
@@ -59,30 +58,6 @@ ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
 HookCommandT = TypeVar("HookCommandT", bound=ObserveHookCommand)
-CallableResultT = TypeVar("CallableResultT")
-
-
-def _is_queue_port(value: ObservationQueuePort | None, /) -> bool:
-    """Keep the runtime Protocol check visible without erasing a field type."""
-
-    return isinstance(value, ObservationQueuePort)
-
-
-def _is_background_task_port(value: BackgroundTaskPort | None, /) -> bool:
-    return isinstance(value, BackgroundTaskPort)
-
-
-def _is_config_port(value: ConfigObservationPort | None, /) -> bool:
-    return isinstance(value, ConfigObservationPort)
-
-
-def _is_context_port(value: ContextObservationPort | None, /) -> bool:
-    return isinstance(value, ContextObservationPort)
-
-
-def _require_callable(value: Callable[..., CallableResultT] | None, field_name: str, /) -> None:
-    if not callable(value):
-        raise ObserveContractError(f"{field_name} must be callable")
 
 
 def _conflict_reason(conflict: Conflict, /) -> str:
@@ -97,17 +72,6 @@ class GetObservationNode(Generic[HookStateT]):
     queue_port: ObservationQueuePort
     background_task_port: BackgroundTaskPort
     admission: ObservePayloadAdmission
-
-    def __post_init__(self) -> None:
-        if not _is_queue_port(self.queue_port):
-            raise ObserveContractError("get_observation requires an ObservationQueuePort")
-        _require_callable(self.queue_port.read_after, "ObservationQueuePort.read_after")
-        _require_callable(self.queue_port.register_wait, "ObservationQueuePort.register_wait")
-        if not _is_background_task_port(self.background_task_port):
-            raise ObserveContractError("get_observation requires a BackgroundTaskPort")
-        _require_callable(self.background_task_port.snapshot, "BackgroundTaskPort.snapshot")
-        if type(self.admission) is not ObservePayloadAdmission:
-            raise ObserveContractError("get_observation requires an ObservePayloadAdmission")
 
     async def __call__(
         self,
@@ -185,16 +149,6 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
     config_port: ConfigObservationPort
     context_port: ContextObservationPort
     admission: ObservePayloadAdmission
-
-    def __post_init__(self) -> None:
-        if not _is_config_port(self.config_port):
-            raise ObserveContractError("write_observation requires a ConfigObservationPort")
-        _require_callable(self.config_port.apply, "ConfigObservationPort.apply")
-        if not _is_context_port(self.context_port):
-            raise ObserveContractError("write_observation requires a ContextObservationPort")
-        _require_callable(self.context_port.append, "ContextObservationPort.append")
-        if type(self.admission) is not ObservePayloadAdmission:
-            raise ObserveContractError("write_observation requires an ObservePayloadAdmission")
 
     async def __call__(
         self,

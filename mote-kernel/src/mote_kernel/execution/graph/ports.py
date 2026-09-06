@@ -6,7 +6,7 @@ from collections.abc import Mapping, MutableMapping, MutableSequence, MutableSet
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from inspect import isabstract
-from typing import Generic, Never, Protocol, TypeAlias, TypeVar, overload
+from typing import Generic, Protocol, TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import ExecutionError, GraphValidationError
 from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
@@ -150,7 +150,6 @@ ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 class InputBinding(Generic[GraphValueT]):
     local_name: str
     source: InputBindingSource[GraphValueT]
-    expected: NominalTypeDescriptor[GraphValueT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,44 +274,11 @@ class MaterializationPlan(Generic[GraphValueT]):
     descriptor: FrameDescriptor[GraphValueT]
 
 
-@overload
 def normalize_input_bindings(
-    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]],
-) -> InputBindings[GraphValueT]: ...
-
-
-@overload
-def normalize_input_bindings(
-    values: tuple[TypedInputBinding[GraphValueT], ...],
-) -> InputBindings[GraphValueT]: ...
-
-
-@overload
-def normalize_input_bindings(values: None) -> Never: ...
-
-
-def normalize_input_bindings(
-    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]]
-    | tuple[TypedInputBinding[GraphValueT], ...]
-    | None,
+    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]] | None,
 ) -> InputBindings[GraphValueT]:
-    if type(values) is tuple:
-        if any(type(binding) is not TypedInputBinding for binding in values):
-            raise GraphValidationError("typed inputs must contain only Graph.bind() results")
-        typed_entries = tuple(
-            sorted(
-                (
-                    InputBinding(binding.destination.name, binding.source, binding.destination.descriptor)
-                    for binding in values
-                ),
-                key=lambda binding: binding.local_name,
-            )
-        )
-        if len(typed_entries) != len({entry.local_name for entry in typed_entries}):
-            raise GraphValidationError("typed inputs require unique canonical destination slots")
-        return InputBindings(typed_entries)
     if not isinstance(values, Mapping):
-        raise GraphValidationError("inputs must be a mapping or typed binding tuple")
+        raise GraphValidationError("inputs must be a mapping")
     entries: list[InputBinding[GraphValueT]] = []
     for name, source in sorted(values.items()):
         canonical = canonical_port_name(name, kind="input")

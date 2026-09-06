@@ -69,7 +69,6 @@ from mote_kernel.observe.identity import (
     WaitRegistration,
 )
 from mote_kernel.observe.node import GetObservationNode, WriteObservationNode
-from mote_kernel.observe.port import ConfigObservationPort, ObservationQueuePort
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 
@@ -815,36 +814,6 @@ def _after_get_result(available: Available) -> HookResult[ObserveHookEnvelope, _
         _State(),
     )
     return HookResult(envelope, (), GraphNodeId("get_observation"))
-
-
-def test_business_nodes_fail_closed_for_wrong_capability_or_admission_objects() -> None:
-    ports = _Ports()
-    with pytest.raises(ObserveContractError, match="ObservationQueuePort"):
-        GetObservationNode(cast(Never, object()), ports, _admission())
-    with pytest.raises(ObserveContractError, match="BackgroundTaskPort"):
-        GetObservationNode(ports, cast(Never, object()), _admission())
-    with pytest.raises(ObserveContractError, match="ObservePayloadAdmission"):
-        GetObservationNode(ports, ports, cast(Never, object()))
-    with pytest.raises(ObserveContractError, match="ConfigObservationPort"):
-        WriteObservationNode(cast(Never, object()), ports, _admission())
-    with pytest.raises(ObserveContractError, match="ContextObservationPort"):
-        WriteObservationNode(ports, cast(Never, object()), _admission())
-    with pytest.raises(ObserveContractError, match="ObservePayloadAdmission"):
-        WriteObservationNode(ports, ports, cast(Never, object()))
-
-
-def test_business_nodes_reject_structural_capabilities_with_noncallable_operations() -> None:
-    class NonCallableQueue(ObservationQueuePort):
-        read_after = None  # type: ignore[assignment]
-        register_wait = None  # type: ignore[assignment]
-
-    class NonCallableConfig(ConfigObservationPort):
-        apply = None  # type: ignore[assignment]
-
-    with pytest.raises(ObserveContractError, match="read_after must be callable"):
-        GetObservationNode(cast(Never, NonCallableQueue()), _Ports(), _admission())
-    with pytest.raises(ObserveContractError, match="apply must be callable"):
-        WriteObservationNode(cast(Never, NonCallableConfig()), _Ports(), _admission())
 
 
 @pytest.mark.asyncio

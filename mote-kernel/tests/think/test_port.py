@@ -10,7 +10,6 @@ from typing import Generic, Never, TypeVar, cast
 import pytest
 
 from mote_kernel.invocation import (
-    InvocationAdmissionError,
     InvocationBoundaryError,
     InvocationTypeContract,
     InvocationTypeError,
@@ -187,12 +186,12 @@ async def test_stage_port_maps_typed_boundary_errors_to_think_contract_errors() 
 
 
 @pytest.mark.asyncio
-async def test_stage_port_preserves_an_invocation_admission_error() -> None:
-    error = InvocationAdmissionError("runtime admission failure")
-    cause = InvocationTypeError("inner type failure")
+async def test_stage_port_preserves_an_invocation_type_error() -> None:
+    error = InvocationTypeError("runtime type failure")
+    cause = ValueError("inner type failure")
     port = ContextPort[str, str](_RaisingInvocation[str, str](error, cause), _string_contract())
 
-    with pytest.raises(InvocationAdmissionError) as raised:
+    with pytest.raises(InvocationTypeError) as raised:
         await port.load_context("request")
     assert raised.value is error
     assert raised.value.__cause__ is cause

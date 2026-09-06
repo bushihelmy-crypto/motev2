@@ -47,31 +47,6 @@ OutputT_co = TypeVar("OutputT_co", covariant=True)
 SlotValueT = TypeVar("SlotValueT")
 
 
-def _validate_typed_binding(binding: TypedInputBinding[GraphValueT]) -> None:
-    """Validate one facade binding before any field is used for ordering."""
-
-    destination = binding.destination
-    if type(destination) is not NodeInputSlot:
-        raise GraphValidationError("typed node contract contains a malformed input slot")
-    canonical_port_name(destination.name, kind="input")
-    if type(destination.descriptor) is not NominalTypeDescriptor:
-        raise GraphValidationError("typed node contract input slot has a malformed descriptor")
-    try:
-        canonical_nominal_type(destination.descriptor.value_type)
-    except GraphValidationError as error:
-        raise GraphValidationError("typed node contract input slot has a non-concrete descriptor") from error
-    source = binding.source
-    if type(source) not in (GraphInputRef, NodeOutputRef, PredecessorOutputRef):
-        raise GraphValidationError("typed node contract contains a malformed input source")
-    source_descriptor = source.descriptor
-    if source_descriptor is None or source_descriptor is not destination.descriptor:
-        raise GraphValidationError("typed node contract input binding has a descriptor mismatch")
-    try:
-        canonical_nominal_type(source_descriptor.value_type)
-    except GraphValidationError as error:
-        raise GraphValidationError("typed node contract input source has a non-concrete descriptor") from error
-
-
 class NodeCallable(Protocol[GraphValueT]):
     """Kernel-owned program for one graph node.
 
@@ -162,34 +137,6 @@ class NodeContract(Generic[GraphValueT, InputT, OutputT]):
 
         return self.output.descriptor
 
-    def __post_init__(self) -> None:
-        if type(self.bindings) is not tuple:
-            raise GraphValidationError("typed node contract contains malformed input bindings")
-        for binding in self.bindings:
-            if type(binding) is not TypedInputBinding:
-                raise GraphValidationError("typed node contract contains malformed input bindings")
-            _validate_typed_binding(binding)
-        names = tuple(binding.destination.name for binding in self.bindings)
-        if names != tuple(sorted(set(names))):
-            raise GraphValidationError("typed node contract input bindings must be canonical and unique")
-        if type(self.input_descriptor) is not NominalTypeDescriptor:
-            raise GraphValidationError("typed node contract requires one concrete input descriptor")
-        try:
-            canonical_nominal_type(self.input_descriptor.value_type)
-        except GraphValidationError as error:
-            raise GraphValidationError("typed node contract requires one concrete input descriptor") from error
-        if type(self.output) is not NodeOutputSlot:
-            raise GraphValidationError("typed node contract requires one output slot")
-        if type(self.output.descriptor) is not NominalTypeDescriptor:
-            raise GraphValidationError("typed node contract requires one concrete output descriptor")
-        try:
-            canonical_nominal_type(self.output.descriptor.value_type)
-        except GraphValidationError as error:
-            raise GraphValidationError("typed node contract requires one concrete output descriptor") from error
-        canonical_port_name(self.output.name, kind="output")
-        if not callable(self.operation) or not callable(self.input_materializer) or not callable(self.output_publisher):
-            raise GraphValidationError("typed node contract requires callable materializer, publisher, and operation")
-
 
 @dataclass(frozen=True, slots=True)
 class TypedNodeAssembly(Generic[GraphValueT, InputT, OutputT]):
@@ -213,12 +160,27 @@ def make_typed_node_assembly(
     """Create the contract, lowered bindings, and typed output handle together."""
 
     canonical_port_name(str(node_id), kind="node")
-    if type(bindings) is not tuple:
-        raise GraphValidationError("typed node inputs must be a tuple of Graph.bind() results")
     for binding in bindings:
         if type(binding) is not TypedInputBinding:
             raise GraphValidationError("typed node inputs must be a tuple of Graph.bind() results")
-        _validate_typed_binding(binding)
+        destination = binding.destination
+        if type(destination) is not NodeInputSlot:
+            raise GraphValidationError("typed node contract contains a malformed input slot")
+        canonical_port_name(destination.name, kind="input")
+        if type(destination.descriptor) is not NominalTypeDescriptor:
+            raise GraphValidationError("typed node contract input slot has a malformed descriptor")
+        try:
+            canonical_nominal_type(destination.descriptor.value_type)
+        except GraphValidationError as error:
+            raise GraphValidationError("typed node contract input slot has a non-concrete descriptor") from error
+        source = binding.source
+        if type(source) not in (GraphInputRef, NodeOutputRef, PredecessorOutputRef):
+            raise GraphValidationError("typed node contract contains a malformed input source")
+        source_descriptor = source.descriptor
+        if source_descriptor is None or source_descriptor is not destination.descriptor:
+            raise GraphValidationError("typed node contract input binding has a descriptor mismatch")
+    if not callable(materialize):
+        raise GraphValidationError("typed node contract requires a callable materializer")
     ordered = tuple(sorted(bindings, key=lambda binding: binding.destination.name))
     if len(ordered) != len({binding.destination.name for binding in ordered}):
         raise GraphValidationError("typed inputs require unique canonical destination slots")
@@ -237,12 +199,7 @@ def make_typed_node_assembly(
         input_materializer=materialize,
         output_publisher=publish,
     )
-    lowered_inputs = InputBindings(
-        tuple(
-            InputBinding(binding.destination.name, binding.source, binding.destination.descriptor)
-            for binding in ordered
-        )
-    )
+    lowered_inputs = InputBindings(tuple(InputBinding(binding.destination.name, binding.source) for binding in ordered))
     declarations = cast(
         OutputDeclarations[GraphValueT],
         OutputDeclarations((OutputDeclaration(output_slot.name, output_slot.descriptor),)),

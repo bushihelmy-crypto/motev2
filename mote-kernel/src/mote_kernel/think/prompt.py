@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -29,11 +30,11 @@ class PromptNode(
 ):
     """Call one PromptPort's three operations and hand the frame to shared Hook."""
 
-    prompt_port: PromptPort[PayloadT, SystemPromptT, PlaceholderT, UserPromptT] | None
+    prompt_port: PromptPort[PayloadT, SystemPromptT, PlaceholderT, UserPromptT]
 
     def __post_init__(self) -> None:
         port = self.prompt_port
-        if port is None:
+        if operator.is_(port, None):
             raise ThinkContractError("prompt requires a PromptPort")
         try:
             load_system_prompt = port.load_system_prompt
@@ -57,11 +58,6 @@ class PromptNode(
         HookStateT,
     ]:
         port = self.prompt_port
-        if port is None:
-            # The constructor admits this capability.  Keep the guard local
-            # so a forged instance cannot turn a missing port into an
-            # attribute error at the execution boundary.
-            raise ThinkContractError("prompt requires a PromptPort")
         system = await port.load_system_prompt(request.payload)
         placeholder = await port.load_placeholder(request.payload)
         user = await port.load_user_prompt(request.payload)

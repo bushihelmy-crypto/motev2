@@ -536,8 +536,6 @@ def _admit_stage_frame(
     recover a type from a ``Graph.Values`` mapping.
     """
 
-    if type(result) is not HookResult:
-        raise ThinkContractError(f"{stage} input must be a HookResult")
     raw_frame = result.value
     if type(raw_frame) is not ThinkFrame:
         raise ThinkContractError(f"{stage} HookResult must contain a ThinkFrame")

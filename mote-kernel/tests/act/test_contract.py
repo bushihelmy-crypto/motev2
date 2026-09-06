@@ -390,11 +390,8 @@ def test_admission_accepts_valid_values_and_checks_identity_relationships() -> N
     )
 
     assert admission.admit_act_slot(ActSlotId("definition", 1, "resolve"))
-    assert admission.admit_tool_pairing_identity(pairing) is pairing
-    assert admission.admit_tool_execution_identity(identity) is identity
     assert admission.admit_graph_failure_reason(OpaqueGraphFailureReason("failure"))
     assert admission.admit_request(request) is request
-    assert admission.admit_canonical_arguments(resolved.arguments) is resolved.arguments
     assert admission.admit_resolved_invocation(resolved) is resolved
     assert admission.admit_authorization_request_ref(request_ref) is request_ref
     assert admission.admit_interrupt_view(AuthorizationInterruptView((), "authorize", "id", b""))
