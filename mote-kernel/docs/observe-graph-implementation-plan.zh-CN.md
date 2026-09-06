@@ -54,13 +54,15 @@ hook -- END --> ObserveGraph.END
 
 `get_observation` 内部的 receive、family validation 和 frame construction，以及
 `write_observation` 内部的 Config/Context settlement、enum wrapping，都是各自节点内的
-有序纯/Port 子步骤，不再拆成更多节点。两个业务节点都直接进入同一个共享 Hook；Hook
-根据自己的 stage 选择固定的写入边或结束边，没有隐式 Join、截断或额外 route 节点。Observe 最终只返回 `ObserveResult`，顶层
-ReAct 根据结果决定下一条边。
+有序纯/Port 子步骤，不再拆成更多节点。两个业务节点都直接进入同一个共享 Hook；Graph 根据
+`HookResult.node_id` 选择编译期固定的写入边或结束边，Hook 脚本本身不选择边。这里没有隐式
+Join、截断或额外 route 节点。Observe 的唯一领域结果是 `ObserveResult`；Graph 层的唯一 nested
+output 是共享 Hook 第二次激活产生的 `HookResult`，其中
+`WriteObservationStageValue.result == ObserveResult`。顶层 ReAct 解包并校验该结果后决定下一条边。
 
 如果未来某个子步骤变成长时、可独立恢复、需要独立重试/取消/审计，它才可以提升为新的
-状态节点；提升后必须拥有对应的 Hook，并保持“业务节点 -> 自己的 Hook”的单前驱形状，
-不能预先为每个纯步骤建节点。
+状态节点；提升后必须定义自己的 stage 并接入现有共享 Hook，保持“业务节点 -> 共享 Hook”的
+前驱绑定形状，不能预先为每个纯步骤建节点，也不能复制 Hook。
 
 ### 0.3 Observe 只返回当前状态，ReAct 定制跳转计划
 
@@ -92,7 +94,7 @@ ReActPolicy(ObserveResult)
 nested activation；它不产生顶层 `Graph.END`，不读取或修改 ReAct 的顶层边，也不解释
 Think/Act 的内部阶段。
 
-本文把“跳转计划”严格限定为包含父图节点/边 token 的控制决定。Observe 可以原样携带
+本文把“跳转计划”严格限定为包含父图节点/边 token 的控制决定。Observe 可以携带
 observation 中的完成标记或任务事实，但不能把它们改写成绑定 Think/Act 的
 Observe-owned 跳转计划类型。
 
@@ -110,8 +112,8 @@ Observe-owned 跳转计划类型。
 3. 快照中仍有 blocking task 时，ReAct 不得跳转顶层 END，也不得保存一个可恢复的
    “待结束决定”。
 4. ReAct 进入可恢复等待，通过 `ObservationQueuePort` 等待当前 cursor 之后的新 delivery。
-5. 唤醒后旧 `CompletionCandidate` 永久作废；必须重新进入 Observe，读取并原样返回新
-   observation，再由 ReActPolicy 重新决定。
+5. 唤醒后旧 `CompletionCandidate` 永久作废；必须重新进入 Observe，读取新 observation 并
+   生成新的 `ObserveResult`，再由 ReActPolicy 重新决定。
 6. 只有无 blocking task 且 revision fence 通过时，ReAct 才能把**这一次**正常候选转成
    顶层 END。
 
@@ -224,9 +226,9 @@ ingress：一次执行取得完整 FIFO batch、delivery evidence 和同 revisio
 不截断。`write_observation` 是对 Config/Context capability Port 的唯一写入 ingress：它
 按 batch 一次完成 Config 应用或 Context 追加，再生成四值 `ObservationKind`。Config 的
 覆盖只作用于 Config batch 内的旧 config；Tool/User/Assistant batch 不被 Config 删除、跳过
-或标记为 superseded。Observe 不改变任何 payload，也不把它翻译成另一种业务状态；ReAct
-只消费最终 Observe nested output 中的 enum、receipt 和 snapshot，不重新拼接 queue/task
-事实。
+或标记为 superseded。Observe 两个业务节点和 settlement Port 默认不解释或改写 payload；共享
+Hook 可以按第 6 节的有界规则改写当前 stage payload。ReAct 只消费最终 Observe nested output
+中的 enum、receipt 和 snapshot，不重新拼接 queue/task 事实。
 
 各 Port provider 的事实更新、delivery ack 和 Graph settlement 的原子关系由 composition
 root 与统一 commit assembly 提供。Observe 不直接改 `GraphRunState`，也不直接修改任何
@@ -243,14 +245,14 @@ hook -- AFTER_WRITE_OBSERVATION --> ObserveGraph.END
 ```
 
 `get_observation` 的成功 output 是 stage 为 `AFTER_GET_OBSERVATION` 的 `HookRequest`，
-送入唯一共享 `hook`；共享 Hook 第一次激活后沿该
-route 边把 immutable
-frame 交给 `write_observation`。`write_observation` 的成功 output 是 stage 为
+送入唯一共享 `hook`；共享 Hook 第一次激活后，Graph 将通过 transition admission 的
+after-get envelope 交给 `write_observation`。`write_observation` 的成功 output 是 stage 为
 `AFTER_WRITE_OBSERVATION` 的 `HookRequest`，再次送入同一个 `hook`；共享
 Hook 第二次激活后沿该 route 边结束 Observe。共享 Hook 的最终 `HookResult` 是 Observe 的
 唯一父图 output。
 两个业务节点共用一个 Hook 实例，但每次激活的 predecessor 由
-`Graph.node_output("hook_request")` 精确绑定，不读取错误的前驱值。
+Graph 的 typed predecessor handle 精确绑定，不读取错误的前驱值；Hook P3 的 `result`
+publication 由 Graph 的 `output_ref("hook", "result")` 统一解析。
 
 空消息或读取 `Conflict` 都不产生成功 output：`get_observation` 分别返回统一
 interrupt/wait 或 fail-closed failure 边界，或按 ReAct assembly 约定直接交给顶层
@@ -265,33 +267,44 @@ Observe activation 中被激活两次。
 
 ~~~python
 observe = Graph[HookGraphValue](definition_id, version=version)
-request = Graph.graph_input("request", ObserveRequest)
-hook_request_type = HookRequest
-hook_result_type = HookResult
+request_ref = Graph.graph_input("request", ObserveRequest)
+request_binding = Graph.bind("request", request_ref)
 
-observe.add_node(
+get_output = observe.add_node(
     "get_observation",
     get_observation,
-    inputs={"request": request},
-    outputs={"hook_request": hook_request_type},
+    inputs=(request_binding,),
+    input_type=ObserveRequest,
+    materialize=lambda values: values.get(request_binding),
+    output_name="hook_request",
+    output_type=HookRequest,
 )
 observe.add_node(
     "hook",
     hook,
-    inputs={"request": Graph.node_output("hook_request")},
-    outputs={"result": hook_result_type},
+    inputs={"request": Graph.node_output(get_output)},
+)
+
+# Hook 的 P3 result descriptor 由 Graph 统一解析；Observe 不读取 Hook 私有 P3 API。
+hook_result_ref = observe.output_ref("hook", "result")
+hook_result_binding = Graph.bind(
+    "hook_result",
+    Graph.node_output(hook_result_ref),
 )
 observe.add_node(
     "write_observation",
     write_observation,
-    inputs={"hook_result": Graph.node_output("hook", "result")},
-    outputs={"hook_request": hook_request_type},
+    inputs=(hook_result_binding,),
+    input_type=HookResult,
+    materialize=lambda values: values.get(hook_result_binding),
+    output_name="hook_request",
+    output_type=HookRequest,
 )
 observe.add_edge("get_observation", "hook")
 observe.add_edge("hook", "get_observation", "write_observation")
 observe.add_edge("write_observation", "hook")
 observe.add_edge("hook", "write_observation", Graph.END)
-observe.set_outputs({"result": Graph.node_output("hook", "result")})
+observe.set_outputs({"result": hook_result_ref})
 ~~~
 
 这里没有额外的 `route` 节点：共享 Hook 原样传递业务前驱的 `HookRequest.node_id`，Hook
@@ -337,8 +350,9 @@ Observation
 `AssistantObservation`。Observe 不导入 Think/Act，不解析 wire message，也不增加第五类。
 
 每个 Observe definition/version 在 assembly 时绑定四个 exact observation payload class；
-不得用 `object`、union、裸字典或 `Any` 把不同类别偷偷拼在同一边界里。四类 payload 均为
-不可变 nominal DTO，Observe 的返回值必须保留其 concrete class 和原始字段。
+不得用 `object`、union、裸字典或 `Any` 把不同类别偷偷拼在同一边界里。Observe admission
+证明的是 exact nominal class，而不是通过运行时反射自动证明任意对象的深不可变性；每个
+concrete payload 的字段及内部对象不可变性由该 payload owner 在 composition root 保证。
 
 每条 delivery 都有不可变 identity：
 
@@ -468,13 +482,15 @@ DeliveryAckReference
 incarnation；detached/daemon task 不进入 blocking 集合。`ObservationWait` 只描述恢复
 坐标和唤醒条件，不保存 Python `Event`、future 或 task。
 
-### 4.4 原样处理、观察 enum 和父图 result
+### 4.4 默认观察处理、观察 enum 和父图 result
 
 `get_observation` 不解释 observation，也不截断 queue 返回的完整 batch；它只把原始
 concrete payload 放入内部 `ObserveFrame`。随后
 `write_observation` 按 frame 调用对应的 Config/Context Port：Config batch 按 FIFO 应用，
 非 Config batch 按 FIFO 一次写入 Context，并在写入结算后计算四值 `ObservationKind`。任何
-Port 都不得替换 payload。
+Port 都不得替换 payload。共享 Hook 是唯一允许改写 stage payload 的扩展边界；其改写必须通过
+第 6 节的 same-stage/read-only-state/exact-type admission，改写后的 payload 才成为下一业务节点
+消费的事实。
 
 Observe 对父 ReAct 暴露的当前观察值只有 enum：
 
@@ -536,7 +552,7 @@ ObservationBatchReceipt
 | current-state enum | `write_observation` | `ObservationKind` | 否 |
 | jump routing / completion gate | ReAct | `ReActJumpPlan` 或 END/WAIT | 是 |
 
-v1 固定为“完整 FIFO 批量、观察到什么就返回什么”策略。这里的优先级是：只要完整 batch
+v1 的默认业务策略固定为“完整 FIFO 批量、观察到什么就返回什么”。这里的优先级是：只要完整 batch
 存在 `ToolObservation`、`UserObservation` 或 `AssistantObservation`，就把对应 enum 作为
 `current_state` 返回；只有 batch 完全没有非 Config delivery 时，才返回 `CONFIG`。Config 的
 覆盖只发生在 Config 自己内部（后来的 config 覆盖较早的 config），不会覆盖或淘汰其他类型。
@@ -561,8 +577,9 @@ v1 固定为“完整 FIFO 批量、观察到什么就返回什么”策略。�
    frame/Port receipt 中保留。
 5. **同类一起操作。** 一个 batch 内的同类 payload 保持原顺序，Context Port 一次提交完整
    tuple；不取最后一条、不合并字段、不改变 concrete class。Config batch 同理按 FIFO 应用。
-6. **原样处理。** Observe 不解析 payload、不改变字段、不按来源改名；操作 Port 只产生
-   幂等 receipt，不能替换观察内容。
+6. **默认原样处理。** 两个 Observe 业务节点不解析 payload、不改变字段、不按来源改名；操作
+   Port 只产生幂等 receipt，不能替换观察内容。若共享 Hook 显式返回合法的 same-stage payload
+   rewrite，则后继节点使用已通过 transition admission 的改写值。
 7. **空读转为可恢复等待。** 没有有效 observation 时只返回 `ObservationWait`（或由父图
    承接同一 wait coordinate），不生成 enum、不提交 cursor，也不创建常驻 `Queue.get()`
    task。wait registration 必须和一次原子 recheck 配对，避免“检查后、注册前”丢唤醒。
@@ -672,9 +689,10 @@ hook.result: HookResult[ObserveHookEnvelope, ObserveHookCommand]
         └── payload: 对应的 ObserveStageValue
 ```
 
-Hook command 对 Observe 不透明；共享 Hook 的两次激活都不得改变 observation batch 的 concrete
-class/字段、delivery、cursor、boundary、`BackgroundTaskSnapshot` 或 `ObservationKind`，也不能
-取得顶层路由权。
+Hook command 对 Observe 不透明且不会被 Observe 隐式 apply。共享 Hook 的两次激活都允许
+`HookStageResult.value` 在当前 business stage 内改写 payload；改写值必须通过完整 Observe DTO
+admission。Hook 不得改变 business stage、只读 `hook_state` 或由原 request 固定的 `node_id`，
+也不能取得顶层路由权。
 
 ## 5. 两个业务节点的内部流程
 
@@ -700,10 +718,10 @@ ObserveRequest.cursor
 
 ### 5.2 共享 `hook` 第一次激活：取得观察后的 Hook
 
-共享 `hook` 第一次激活时只执行 Hooks owner 的固定 `Plan -> P1 -> P2 -> P3`，校验并
-原样传递 `ObserveHookEnvelope(stage=AFTER_GET_OBSERVATION)`，然后
-由 `HookResult.node_id == "get_observation"` 沿 Observe 声明的 conditional edge 把 frame
-交给 `write_observation`。Hook 不写 Port、不改 payload、不生成顶层父图路由计划。
+共享 `hook` 第一次激活时只执行 Hooks owner 的固定 `Plan -> P1 -> P2 -> P3`。P1/P2/P3 可以
+返回同 stage 的合法 payload rewrite；Observe transition admission 拒绝 stage 或只读 state
+变化。随后由 `HookResult.node_id == "get_observation"` 沿 Observe 声明的 conditional edge
+把 admitted frame 交给 `write_observation`。Hook 不写 Port，也不生成顶层父图路由计划。
 
 ### 5.3 `write_observation`：观察值写入
 
@@ -717,7 +735,7 @@ ObserveRequest.cursor
    的 enum；
 4. 生成 `ObservationBatchReceipt`，若 settlement 推进 revision，receipt 一并携带 successor
    boundary 和匹配的 successor `BackgroundTaskSnapshot`；
-5. 原样保留 frame 中的 delivery/boundary/payload，构造阶段为
+5. 保留当前 admitted frame 中的 delivery/boundary/payload，构造阶段为
    `AFTER_WRITE_OBSERVATION` 的 `HookRequest`；HookResult 携带
    `node_id == "write_observation"`，Observe 的 conditional edge 将该结果送到 `END`。
 
@@ -735,10 +753,10 @@ Config 与 Context Port 是两个独立调用，但属于同一个 `write_observ
 
 ### 5.4 共享 `hook` 第二次激活：观察值写入后的 Hook
 
-共享 `hook` 第二次激活时只执行同一固定 Hook pipeline，并原样传递
-`ObserveHookEnvelope(stage=AFTER_WRITE_OBSERVATION)`、`ObservationKind`、receipt
-和 task snapshot，输出最终 `ObserveResult`；它不解释 enum、不等待消息、不检查后台任务、不取得
-顶层路由权。第二次激活成功后 Observe child 沿固定结束边结束。
+共享 `hook` 第二次激活时执行同一固定 Hook pipeline，并可在
+`AFTER_WRITE_OBSERVATION` stage 内返回合法 payload rewrite；改写后的 `ObserveResult` 必须重新
+通过 delivery/cursor/完整 task snapshot/receipt 的 DTO admission。它不等待消息、不检查后台
+任务，也不取得顶层路由权。第二次激活成功后 Observe child 沿固定结束边结束。
 
 ## 6. 共享 Hook 契约
 
@@ -759,6 +777,11 @@ stage              == HookStage.AFTER_NODE
 或为纯子步骤复制 Hook。共享 Hook 的 predecessor-bound request 必须来自
 `get_observation` 或 `write_observation` 的当前激活，不能固定绑定某一个前驱。
 
+Observe 还必须在 assembly 比较共享 Hook 的公开 `payload_admission`：value type 必须是 exact
+`ObserveHookEnvelope`，state/command type 必须与 Observe admission 的 concrete binding 相同，
+`transition_admission` 必须就是同一个 `ObservePayloadAdmission` 实例。任一项不匹配都必须在
+Graph builder 被修改前 fail-closed。
+
 ### 6.2 Stage/identity 不变量
 
 Observe v1 只允许：
@@ -773,21 +796,30 @@ Hook admission 必须拒绝：
 
 - 缺少或替换对应 Hook envelope 的 outer class；
 - `stage` 与 payload concrete class 不匹配，或 `HookResult.node_id` 不是对应业务前驱身份；
-- 改变 observation batch 的 concrete class/字段、delivery 顺序、cursor、stream 或
-  `BackgroundTaskSnapshot`；
-- 把 envelope 的固定后继阶段改成顶层 Graph route；
-- 改变 `hook_state` 的 exact class/value；
+- 把当前 business stage 改成另一 stage，或让 payload class 与当前 stage 不匹配；
+- 改变只读 `hook_state` 的 concrete class/value；
+- 返回未通过对应 frame/result、delivery、cursor、boundary、task snapshot 和 receipt 不变量的
+  payload；
+- 把 envelope 的 stage 或 payload 伪装成顶层 Graph route；
+- 返回非绑定 exact concrete class 的 Hook command；
 - 让 Hook command 变成 Observe 的隐式状态更新。
+
+Hook admission 明确允许：在 stage 不变、只读 state 不变且所有 DTO 不变量成立时，
+`HookStageResult.value` 用同 stage 的另一个合法 payload 替换当前 payload。该改写值是后继业务节点
+或最终父图实际消费的值，不要求与进入 Hook 前逐字段相等。`node_id` 不属于脚本返回的
+`HookStageResult`；`HookNode` 必须从原 request 原样构造最终 `HookResult.node_id`，所以 payload
+rewrite 不能改变 Observe 已声明的边。
 
 如果未来新增独立状态节点，必须定义新的 stage/payload 并接入这个共享 Hook，保持“业务
 节点 -> 共享 Hook”的 predecessor-bound 形状；不得复制 Hook 或另建第二个共享 Hook。
 
 ### 6.3 Hook 的职责边界
 
-共享 Hook 的两次激活都只按 Hooks owner 的固定 `Plan -> P1 -> P2 -> P3` 执行；它不解释
-Observe observation、不生成或改写 `ObservationKind`、不检查后台任务、不等待消息，也不
-越过 ReActRoute。Hook 完成后只能由 Observe 编译期声明的 node-id conditional edge 沿固定
-后继继续，不能自行选择或改写父图节点。
+共享 Hook 的两次激活都只按 Hooks owner 的固定 `Plan -> P1 -> P2 -> P3` 执行；它可以按正式
+Hook 契约有界改写当前 stage payload，但不检查后台任务、不等待消息，也不越过 ReActRoute。
+Hook 完成后只能由 Observe 编译期声明的 node-id conditional edge 沿固定后继继续，不能自行选择
+或改写父图节点。Hook P3 最终 publication 的 descriptor 由 Graph 统一拥有并通过 `output_ref`
+解析，Observe 不调用 Hook 私有阶段 API。
 
 ## 7. 消息池、投递和四类 observation
 
@@ -899,7 +931,7 @@ ReActRoute -> WAIT
     -> producer 通过 ObservationQueuePort provider 追加新 delivery
     -> host 精确 resume
     -> Observe.get_observation 调用 ObservationQueuePort.read_after(after_cursor)
-    -> selection -> pass-through（get_observation 内部）
+    -> validation -> frame construction（get_observation 内部）
     -> hook（第一次激活）
     -> write_observation -> hook（第二次激活）
     -> 全新的 ObserveResult.current_state
@@ -963,7 +995,6 @@ ObservationQueuePort
 
 BackgroundTaskPort
   snapshot(boundary: ObservationBoundary) -> BackgroundTaskSnapshot
-  check_fence(snapshot: BackgroundTaskSnapshot) -> RevisionFence  # 由 commit/lifecycle owner 调用
 
 ConfigObservationPort
   apply(batch: ConfigBatch) -> ConfigSettlementReceipt
@@ -997,8 +1028,9 @@ batch 和 Context batch 的 delivery_ids 都必须从 queue 返回的 batch 导�
 自己重建、跳过或改序。
 
 缺少任一 Queue/Task/Config/Context/Ack/Resume Port、Hook 或 admission 时 assembly
-fail-closed，不在运行时吞掉消息或跳到 END。所有 Port 的 async/sync、取消、receipt 和
-revision 约定必须在 assembly 时固定。
+fail-closed，不在运行时吞掉消息或跳到 END。Port 的 async/arity/return contract 由 strict
+Protocol 在静态类型边界固定；assembly 做 capability/callability 校验，异步返回后再由 Observe
+admission 校验 exact nominal result。Observe 不通过运行时签名反射复制一套 invocation owner。
 
 ## 11. 包结构
 
@@ -1035,8 +1067,10 @@ reducer、公共执行入口或隐藏 mutable cache。
 2. 安装一个真实共享 Hook，拓扑固定为
    `get_observation -> hook -> write_observation -> hook -> ObserveGraph.END`，由 HookResult
    的前驱 `node_id` 选择 Observe 已声明的 `write_observation` 或 `END` edge；
-3. 验证两次 Hook request 的 predecessor binding、stage transition 和唯一 nested output；
-4. 验证没有 route、Join、缓存或第二 runner，首次 compile 后 topology freeze。
+3. 两个业务 operation 通过 `Graph.bind`、typed materializer 和 typed output descriptor 装配；
+4. 通过 Graph `output_ref` 绑定 Hook P3 result，验证两次 Hook request 的 predecessor binding、
+   stage transition 和唯一 nested output；
+5. 验证没有 route、Join、缓存或第二 runner，首次 compile 后 topology freeze。
 
 ### Phase 2：Observation queue/task ingress
 
@@ -1073,9 +1107,14 @@ reducer、公共执行入口或隐藏 mutable cache。
 - `hook` 必须是一个真实、共享的 `HookNode`，slot 精确匹配 definition/version、`hook` 和
   `AFTER_NODE`；不能传普通 Graph/callable，也不能安装第二个 Hook；
 - 两个业务节点都输出同一 exact outer `HookRequest[ObserveHookEnvelope, HookStateProjection]`，
-  只通过 predecessor-bound `Graph.node_output("hook_request")` 送入共享 Hook；Hook 输出
+  只通过 `Graph.node_output(get_output_descriptor)` 形式的 predecessor-bound source 送入共享 Hook；Hook 输出
   同一 exact `HookResult`，并原样携带前驱 `node_id`，由 Observe 自己声明的 node-id route
   edge 选择写入边或结束边；stage 与 node-id/边域不匹配时必须 fail-closed；
+- 两个业务节点必须使用 `Graph.bind`、`input_type`、typed `materialize`、`output_type` 的统一
+  typed-node contract；缺失 materializer 输入在 capability 调用前失败，不保留节点内部
+  `Graph.Values` mapping 执行路径；
+- Hook P3 `result` 只能通过 Graph `output_ref("hook", "result")` 的统一 descriptor 绑定，
+  Observe 不读取 Hook 私有 P3/result API，也不制造平行 output descriptor；
 - Observe nested output 只有共享 Hook 第二次激活的最终 HookResult，父 ReAct 只看到一个
   node publication；
 - compile 后不能增加节点、边、Hook、codec 或纯步骤 publication。
@@ -1085,6 +1124,8 @@ reducer、公共执行入口或隐藏 mutable cache。
 - `hook` 的两个 incoming edge（来自 `get_observation`、`write_observation`）都声明同一个
   exact `HookRequest` descriptor；任一前驱改成不同 outer type、不同 output name 或固定
   非 predecessor source，compile 必须失败；
+- wrong Hook value/state/command concrete binding 或不同 transition admission 必须在第一次
+  `Graph.add_node()` 前 fail-closed；
 - `write_observation` 只能消费其直接前驱本次 Hook 激活的 `result`；不能回读第一次 Hook
   的绝对 publication，也不能让 `via`/额外 direct edge 形成两个可同时满足的 activation gate；
 - `hook` 的 conditional route 集合必须恰好是 `get_observation`、`write_observation`，并与
@@ -1108,15 +1149,17 @@ reducer、公共执行入口或隐藏 mutable cache。
   `current_state` 返回非 Config；
 - 同一非 Config 类别的多条 delivery 必须按 FIFO 一次组成一个 batch 并一次写入 Context，
   不能拆成逐条调用、静默丢弃或重复确认；Tool/User/Assistant 不得被合并到同一 batch；
-- Observe 返回的 observation concrete class/字段与 `ObservationQueuePort` 选定内容完全一致，
-  不做解释或改写；
+- 默认业务路径返回的 observation concrete class/字段与 `ObservationQueuePort` 选定内容完全
+  一致；只有共享 Hook 可以按 same-stage/read-only-state/exact-DTO 规则显式改写 payload；
 - queue/task/settlement Port 缺失时 assembly fail-closed；每个必需 Port 每次 activation 至多
   调用一次；
 - duplicate delivery settlement 幂等，旧 cursor/旧 task incarnation 不覆盖新事实；
 - settlement 推进 revision 时 receipt 必须携带 successor boundary 和匹配的
   `BackgroundTaskSnapshot`；混用旧 frame 在 admission 处失败；
-- Hook 不改变 observation concrete class/字段、delivery、cursor、boundary、
-  `BackgroundTaskSnapshot` 或 current state，不 apply commands；
+- Hook 的合法 same-stage payload rewrite 必须贯穿到后继业务节点或最终 nested output；改变
+  stage、只读 state、`node_id`、command concrete class，或构造内部不一致的 frame/result 必须
+  fail-closed；同 revision 但 `blocking_tasks` 不同的 settlement/result 也必须拒绝；
+- Observe 不解释或 apply Hook commands；
 - Observe 只返回四值 `ObservationKind`，不携带 Think/Act 节点名或顶层 route；ReAct 自己生成跳转计划。
 
 多条 delivery 的确定性例子（应作为 `ObservationQueuePort` contract 的逐例测试，而不是靠
@@ -1182,6 +1225,8 @@ reducer、公共执行入口或隐藏 mutable cache。
 - [x] Observe 业务状态节点恰好两个：`get_observation`、`write_observation`；直接 Graph 节点恰好三个，另含一个共享 `hook`；
 - [x] `get_observation` 内只做取得观察，`write_observation` 内只做观察值写入；两个节点执行后都进入同一个共享 Hook；
 - [x] 成功拓扑固定为 `get_observation -> hook -> write_observation -> hook -> ObserveGraph.END`，由 HookResult 前驱 `node_id` 选择两条固定 conditional edge，没有额外 Observe route/wait 节点；
+- [x] 两个业务节点使用 Graph typed-node contract；Hook P3 `result` 通过 Graph 统一 `output_ref` 绑定，没有 Observe 私有 P3/result 路径；
+- [x] 共享 Hook 的 exact value/state/command/transition binding 在 assembly fail-closed；payload 可有界改写，stage、只读 state 和 `node_id` 不可改；
 - [x] Observe 只返回 typed `ObserveResult.current_state: ObservationKind`，ReAct 自己定制 Think、Act、Wait、Observe 或顶层 END；
 - [x] Queue/Task/Config/Context/Ack/Resume Port provider 持有各自事实，Role/Control 只负责装配，Observe 只经窄 Port 读取/操作/确认；
 - [x] `ObserveResult.background_task_snapshot` 与 queue boundary 处于同一 observation revision，ReActPolicy 不重复 live-query task provider；
@@ -1189,4 +1234,4 @@ reducer、公共执行入口或隐藏 mutable cache。
 - [ ] 唤醒后旧完成状态/父图计划必然作废，完整重新 Observe 并重新生成状态；
 - [ ] revision fence 失配不能绕过等待或恢复旧 candidate；
 - [x] 没有 ObserveState、ObserveRunner、ObserveStore、队列副本或第二执行路径；
-- [ ] 实现阶段运行 `pytest`、`ruff`、`pyright`、`make check` 和 monorepo pre-commit，并记录失败原因。
+- [x] 已运行 `pytest`、`ruff`、`pyright`、`make check` 和 monorepo pre-commit；Observe 精确门禁全绿，后两项只因既有全仓 complexity-ratchet 失败，原因记录于验收文档。
