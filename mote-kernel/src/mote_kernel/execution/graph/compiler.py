@@ -339,6 +339,25 @@ def _event_options(
     return tuple((node_id, route) for route in routes) or ((node_id, None),)
 
 
+def _static_successors(
+    node_ids: tuple[GraphNodeId, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> dict[GraphNodeId, set[GraphNodeId]]:
+    """Build the route-independent control successor relation once.
+
+    A conditional edge contributes its target to static reachability for every
+    declared route; route-sensitive proofs use ``_ordinary_event_successors``
+    below and therefore retain the selected route separately.
+    """
+
+    return {
+        node_id: set(direct_targets[node_id])
+        | {target for target in conditional_targets[node_id].values() if target != END}
+        for node_id in node_ids
+    }
+
+
 def _ordinary_event_successors(
     event: _ControlEvent,
     direct_targets: dict[GraphNodeId, set[GraphNodeId]],
@@ -374,16 +393,13 @@ def _ordinary_reachable_events(
 def _join_affected_nodes(
     node_ids: tuple[GraphNodeId, ...],
     joins: tuple[JoinEdge, ...],
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> frozenset[GraphNodeId]:
     affected = {join.target for join in joins if join.target != END}
     pending = sorted(affected)
     while pending:
         source = pending.pop()
-        successors = set(direct_targets[source])
-        successors.update(target for target in conditional_targets[source].values() if target != END)
-        newly_affected = successors - affected
+        newly_affected = successors[source] - affected
         affected.update(newly_affected)
         pending.extend(sorted(newly_affected))
     return frozenset(node_id for node_id in node_ids if node_id in affected)
@@ -395,6 +411,7 @@ def _control_flow_proof(
     direct_targets: dict[GraphNodeId, set[GraphNodeId]],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     joins: tuple[JoinEdge, ...],
+    static_successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> _ControlFlowProof:
     """Compute ordinary-control events that may share one frontier.
 
@@ -436,7 +453,7 @@ def _control_flow_proof(
 
     return _ControlFlowProof(
         frozenset(coexisting),
-        _join_affected_nodes(node_ids, joins, direct_targets, conditional_targets),
+        _join_affected_nodes(node_ids, joins, static_successors),
     )
 
 
@@ -1124,9 +1141,7 @@ def _compile_definition(
                 raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
         input_bindings_by_node[node_id] = resolved_bindings
 
-    successors = {node_id: set(targets) for node_id, targets in direct_targets.items()}
-    for source, routes in conditional_targets.items():
-        successors[source].update(target for target in routes.values() if target != END)
+    successors = _static_successors(node_ids, direct_targets, conditional_targets)
     reachability_successors = {node_id: set(targets) for node_id, targets in successors.items()}
     for join in joins:
         if join.target != END:
@@ -1156,6 +1171,7 @@ def _compile_definition(
         direct_targets,
         conditional_targets,
         tuple(joins),
+        successors,
     )
     _reject_ambiguous_activation_gates(
         activation_gates,

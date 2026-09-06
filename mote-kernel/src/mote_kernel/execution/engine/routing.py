@@ -238,6 +238,33 @@ def _success_routes(
     return routes or (None,)
 
 
+def _successor_targets_for_reference(
+    graph: CompiledGraph[GraphValueT],
+    reference: ActivationReference,
+) -> tuple[GraphNodeId, ...]:
+    """Resolve one settled activation's compiled control successors.
+
+    Live routing and recovery admission use the same successor rule.  The
+    callers deliberately retain their own error boundaries: live routing lets
+    ``InvalidRoutingCommandError`` escape, while recovery turns it into a
+    deterministic snapshot diagnostic.
+    """
+
+    source = reference.activation.node_id
+    routes = graph.transition.conditional_targets[source]
+    if routes and reference.route is None:
+        raise InvalidRoutingCommandError("conditional predecessor settlement lacks its selected route")
+    if reference.route is not None and routes and reference.route not in routes:
+        raise InvalidRoutingCommandError("predecessor settlement selected an unknown route")
+
+    targets = list(graph.transition.direct_targets[source])
+    if reference.route is not None and routes:
+        target = routes[reference.route]
+        if target != END:
+            targets.append(target)
+    return tuple(targets)
+
+
 def _gate_matches_cause(
     gate: ActivationGate,
     cause: RoutedActivationCause,
@@ -456,17 +483,12 @@ def _post_advance_error(
             # owner-level diagnostic or a malformed snapshot bypassing the
             # outer admission function.
             return f"settled activation references unknown node {source!r}"
-        routes = graph.transition.conditional_targets[source]
-        if routes and reference.route is None:
-            return "conditional predecessor settlement lacks its selected route"
-        if reference.route is not None and routes and reference.route not in routes:
-            return "predecessor settlement selected an unknown route"
-        for target in graph.transition.direct_targets[source]:
+        try:
+            targets = _successor_targets_for_reference(graph, reference)
+        except InvalidRoutingCommandError as error:
+            return str(error)
+        for target in targets:
             _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if reference.route is not None and routes:
-            target = routes[reference.route]
-            if target != END:
-                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
 
     actual = {
         node.node_id: node.cause for node in state.frontier.nodes if isinstance(node.cause, RoutedActivationCause)
@@ -610,14 +632,9 @@ def _resolve_control(
         selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
         source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)
         reference = ActivationReference(source_activation, selected_route)
-        for target in graph.transition.direct_targets[node_id]:
+        for target in _successor_targets_for_reference(graph, reference):
             direct_control_targets.add(target)
             _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if isinstance(contribution, SelectGraphRoute) and graph.transition.conditional_targets[node_id]:
-            target = graph.transition.conditional_targets[node_id][contribution.route]
-            if target != END:
-                direct_control_targets.add(target)
-                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
         for plan in graph.transition.joins_by_source[node_id]:
             occurrence = plan.occurrence_for(source_activation)
             join_arrivals = arrivals.setdefault(occurrence, [])
