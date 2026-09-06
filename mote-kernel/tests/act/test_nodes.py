@@ -739,8 +739,7 @@ def test_all_act_business_nodes_use_typed_graph_contracts() -> None:
     assert len(candidates) == 4
     for candidate in candidates:
         assert isinstance(candidate, CallableNodeDefinition)
-        assert candidate.operation is None
-        assert candidate.typed_invoker is not None
+        assert callable(candidate.invoker)
         assert tuple(output.name for output in candidate.outputs.entries) == ("hook_request",)
         assert candidate.outputs.entries[0].descriptor.value_type is HookRequest
 

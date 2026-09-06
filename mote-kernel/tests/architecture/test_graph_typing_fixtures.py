@@ -102,7 +102,7 @@ CASES = (
     ),
     NegativeTypingCase(
         "constructor_values.py",
-        ("Arguments missing for parameters", "_construction", "_seal", "reportCallIssue"),
+        ("Arguments missing for parameters", "_entries", "_seal", "reportCallIssue"),
     ),
     NegativeTypingCase(
         "constructor_success_outcome.py",

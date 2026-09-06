@@ -12,7 +12,7 @@ from mote_kernel.execution.errors import (
     GraphValidationError,
     UnknownNodeError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
@@ -28,6 +28,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -117,7 +118,7 @@ def node(
 ) -> CallableNodeDefinition[PipelineValue]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        identity,
+        make_node_invoker(identity),
         normalize_input_bindings(inputs),
         normalize_output_declarations(outputs),
     )
@@ -156,12 +157,12 @@ def test_compiler_resolves_a_later_named_output_declaration() -> None:
         outputs={},
     )
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (source, consumer),
             edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),),
         )
-    )
+    ).compile()
 
     binding = compiled.transition.materializations[GraphNodeId("consumer")].bindings.entries[0]
     assert isinstance(binding.source, NodeOutputPort)
@@ -181,7 +182,7 @@ def test_compiler_rejects_an_unknown_output_port() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="unknown output port"):
-        compile_graph(definition((source, consumer)))
+        GraphCompiler(definition((source, consumer))).compile()
 
 
 def test_compiler_rejects_conflicting_graph_input_exact_types() -> None:
@@ -197,7 +198,7 @@ def test_compiler_rejects_conflicting_graph_input_exact_types() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="conflicting exact type"):
-        compile_graph(definition((string_node, integer_node)))
+        GraphCompiler(definition((string_node, integer_node))).compile()
 
 
 def test_compiler_rejects_a_node_binding_its_own_output() -> None:
@@ -208,7 +209,7 @@ def test_compiler_rejects_a_node_binding_its_own_output() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="cannot bind its own output"):
-        compile_graph(definition((recursive,)))
+        GraphCompiler(definition((recursive,))).compile()
 
 
 def test_compiler_rejects_a_value_source_from_an_unknown_node() -> None:
@@ -219,7 +220,7 @@ def test_compiler_rejects_a_value_source_from_an_unknown_node() -> None:
     )
 
     with pytest.raises(UnknownNodeError, match="value source"):
-        compile_graph(definition((consumer,)))
+        GraphCompiler(definition((consumer,))).compile()
 
 
 def test_compiler_rejects_an_ordinary_data_cycle() -> None:
@@ -235,7 +236,7 @@ def test_compiler_rejects_an_ordinary_data_cycle() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="data cycle"):
-        compile_graph(definition((left, right)))
+        GraphCompiler(definition((left, right))).compile()
 
 
 def test_compiler_requires_explicit_control_for_node_output_consumers() -> None:
@@ -255,7 +256,7 @@ def test_compiler_requires_explicit_control_for_node_output_consumers() -> None:
         GraphValidationError,
         match=r"node 'consumer' consumes node outputs from \('alpha', 'zeta'\) but has no incoming control edge",
     ):
-        compile_graph(definition((zeta, consumer, alpha)))
+        GraphCompiler(definition((zeta, consumer, alpha))).compile()
 
 
 def test_compiler_accepts_data_binding_and_direct_control_for_the_same_pair() -> None:
@@ -270,23 +271,23 @@ def test_compiler_accepts_data_binding_and_direct_control_for_the_same_pair() ->
         outputs={},
     )
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (source, target),
             edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
         )
-    )
+    ).compile()
 
     assert compiled.transition.direct_targets[GraphNodeId("source")] == (GraphNodeId("target"),)
     binding = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0]
-    assert binding.source == NodeOutputPort((), GraphNodeId("source"), "value")
+    assert binding.source == NodeOutputPort(GraphNodeId("source"), "value")
 
 
 def test_compiler_rejects_explicit_start_that_duplicates_automatic_entry() -> None:
     entry = node("entry", inputs={}, outputs={})
 
     with pytest.raises(DuplicateBoundaryError, match="automatic entry"):
-        compile_graph(definition((entry,), entries=("entry",)))
+        GraphCompiler(definition((entry,), entries=("entry",))).compile()
 
 
 def test_compiler_rejects_explicit_start_target_requiring_node_output() -> None:
@@ -298,7 +299,7 @@ def test_compiler_rejects_explicit_start_target_requiring_node_output() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="explicit START target"):
-        compile_graph(definition((source, target), entries=("target",)))
+        GraphCompiler(definition((source, target), entries=("target",))).compile()
 
 
 def test_compiler_rejects_control_path_that_can_reach_its_required_producer() -> None:
@@ -315,7 +316,7 @@ def test_compiler_rejects_control_path_that_can_reach_its_required_producer() ->
     )
 
     with pytest.raises(GraphValidationError, match="not guaranteed before controlled"):
-        compile_graph(definition((controller, source, target), edges=edges))
+        GraphCompiler(definition((controller, source, target), edges=edges)).compile()
 
 
 def test_compiler_rejects_control_gate_without_required_producer_guarantee() -> None:
@@ -328,12 +329,12 @@ def test_compiler_rejects_control_gate_without_required_producer_guarantee() -> 
     )
 
     with pytest.raises(GraphValidationError, match="can activate before required producers"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (controller, source, target),
                 edges=(DirectEdge(GraphNodeId("controller"), GraphNodeId("target")),),
             )
-        )
+        ).compile()
 
 
 def test_compiler_accepts_a_coordinator_gate_after_the_required_producer() -> None:
@@ -345,7 +346,7 @@ def test_compiler_accepts_a_coordinator_gate_after_the_required_producer() -> No
         outputs={},
     )
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (target, coordinator, source),
             edges=(
@@ -353,7 +354,7 @@ def test_compiler_accepts_a_coordinator_gate_after_the_required_producer() -> No
                 DirectEdge(GraphNodeId("coordinator"), GraphNodeId("target")),
             ),
         )
-    )
+    ).compile()
 
     assert compiled.transition.direct_targets[GraphNodeId("coordinator")] == (GraphNodeId("target"),)
 
@@ -371,7 +372,7 @@ def test_compiler_accepts_a_join_gate_for_all_required_producers() -> None:
     )
     edge = JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("target"))
 
-    compiled = compile_graph(definition((target, right, left), edges=(edge,)))
+    compiled = GraphCompiler(definition((target, right, left), edges=(edge,))).compile()
 
     assert compiled.transition.joins_by_source[GraphNodeId("left")] == (compiled_join(("left", "right"), "target"),)
     assert len(compiled.transition.materializations[GraphNodeId("target")].bindings.entries) == 2
@@ -389,7 +390,7 @@ def test_cyclic_join_inputs_use_the_compiled_occurrence_offsets() -> None:
         },
         outputs={},
     )
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (tick, left, right, joined),
             edges=(
@@ -401,7 +402,7 @@ def test_cyclic_join_inputs_use_the_compiled_occurrence_offsets() -> None:
             ),
             entries=("tick",),
         )
-    )
+    ).compile()
 
     bindings = compiled.transition.materializations[GraphNodeId("joined")].bindings.entries
     assert tuple(binding.publication for binding in bindings) == (
@@ -424,7 +425,7 @@ def test_compiler_requires_nested_inputs_to_match_child_boundary_exactly() -> No
     )
 
     with pytest.raises(GraphValidationError, match="exactly match child boundary"):
-        compile_graph(definition((nested,)))
+        GraphCompiler(definition((nested,))).compile()
 
 
 def test_compiler_uses_relative_selection_for_loop_producer_with_direct_activation() -> None:
@@ -438,7 +439,7 @@ def test_compiler_uses_relative_selection_for_loop_producer_with_direct_activati
         inputs={"value": Graph.node_output("source", "value")},
         outputs={},
     )
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (source, target),
             edges=(
@@ -447,7 +448,7 @@ def test_compiler_uses_relative_selection_for_loop_producer_with_direct_activati
             ),
             entries=("source",),
         )
-    )
+    ).compile()
 
     selection = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0].publication
     assert selection is not None
@@ -466,7 +467,7 @@ def test_compiler_uses_relative_selection_for_same_source_conditional_routes() -
         inputs={"value": Graph.node_output("source", "value")},
         outputs={},
     )
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (source, target),
             edges=(
@@ -476,7 +477,7 @@ def test_compiler_uses_relative_selection_for_same_source_conditional_routes() -
             ),
             entries=("source",),
         )
-    )
+    ).compile()
 
     selection = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0].publication
     assert selection is not None
@@ -498,12 +499,12 @@ def test_compiler_rejects_a_repeatable_join_source_before_publication_selection(
     )
 
     with pytest.raises(GraphValidationError, match="occurrence identity"):
-        compile_graph(definition((source, gate, target), edges=edges, entries=("source",)))
+        GraphCompiler(definition((source, gate, target), edges=edges, entries=("source",))).compile()
 
 
 def test_compiler_uses_relative_selection_for_loop_graph_output() -> None:
     source = node("source", inputs={}, outputs={"value": str})
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (source,),
             edges=(
@@ -513,7 +514,7 @@ def test_compiler_uses_relative_selection_for_loop_graph_output() -> None:
             entries=("source",),
             outputs=normalize_graph_output_declarations({"value": Graph.node_output("source", "value")}),
         )
-    )
+    ).compile()
 
     selection = compiled.transition.graph_outputs.entries[0].publication
     assert selection is not None
@@ -531,14 +532,14 @@ def test_compiler_rejects_repeatable_terminal_join_sources_before_output_selecti
     )
 
     with pytest.raises(GraphValidationError, match="occurrence identity"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (source, gate),
                 edges=edges,
                 entries=("source", "gate"),
                 outputs=normalize_graph_output_declarations({"value": Graph.node_output("source", "value")}),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_data_publication_without_one_activation_coordinate() -> None:
@@ -551,7 +552,7 @@ def test_compiler_rejects_a_data_publication_without_one_activation_coordinate()
     )
 
     with pytest.raises(GraphValidationError, match="no unique activation coordinate"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (loop, coordinator, target),
                 edges=(
@@ -565,7 +566,7 @@ def test_compiler_rejects_a_data_publication_without_one_activation_coordinate()
                 ),
                 entries=("loop",),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_graph_output_without_one_completion_coordinate() -> None:
@@ -573,7 +574,7 @@ def test_compiler_rejects_a_graph_output_without_one_completion_coordinate() -> 
     finish = node("finish", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="no unique completion activation coordinate"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (loop, finish),
                 edges=(
@@ -583,7 +584,7 @@ def test_compiler_rejects_a_graph_output_without_one_completion_coordinate() -> 
                 entries=("loop",),
                 outputs=normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_output_not_guaranteed_on_every_terminal_branch() -> None:
@@ -596,28 +597,28 @@ def test_compiler_rejects_output_not_guaranteed_on_every_terminal_branch() -> No
     )
 
     with pytest.raises(GraphValidationError, match="not guaranteed before every successful completion"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, left, right),
                 edges=edges,
                 outputs=normalize_graph_output_declarations({"value": Graph.node_output("left", "value")}),
             )
-        )
+        ).compile()
 
 
 def test_join_to_end_is_one_terminal_gate_for_output_guarantees() -> None:
     left = node("left", inputs={}, outputs={"value": str})
     right = node("right", inputs={}, outputs={})
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             (left, right),
             edges=(JoinEdge((GraphNodeId("left"), GraphNodeId("right")), END),),
             outputs=normalize_graph_output_declarations({"value": Graph.node_output("left", "value")}),
         )
-    )
+    ).compile()
 
-    assert compiled.transition.graph_outputs.entries[0].source == NodeOutputPort((), GraphNodeId("left"), "value")
+    assert compiled.transition.graph_outputs.entries[0].source == NodeOutputPort(GraphNodeId("left"), "value")
 
 
 def test_compiler_rejects_a_join_between_mutually_exclusive_routes() -> None:
@@ -627,7 +628,7 @@ def test_compiler_rejects_a_join_between_mutually_exclusive_routes() -> None:
     joined = node("joined", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="jointly satisfiable"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, left, right, joined),
                 edges=(
@@ -636,7 +637,7 @@ def test_compiler_rejects_a_join_between_mutually_exclusive_routes() -> None:
                     JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_terminal_join_between_mutually_exclusive_routes() -> None:
@@ -645,7 +646,7 @@ def test_compiler_rejects_a_terminal_join_between_mutually_exclusive_routes() ->
     right = node("right", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="mutually exclusive activation sources"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, left, right),
                 edges=(
@@ -654,7 +655,7 @@ def test_compiler_rejects_a_terminal_join_between_mutually_exclusive_routes() ->
                     JoinEdge((GraphNodeId("left"), GraphNodeId("right")), END),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route() -> None:
@@ -662,7 +663,7 @@ def test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route() -
     selected = node("selected", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="partial source set"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, selected),
                 edges=(
@@ -671,7 +672,7 @@ def test_compiler_rejects_a_join_that_can_receive_only_one_source_on_a_route() -
                     JoinEdge((GraphNodeId("decision"), GraphNodeId("selected")), END),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selected_route() -> None:
@@ -681,7 +682,7 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
     right = node("right", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, always, left, right),
                 edges=(
@@ -692,12 +693,12 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
                     JoinEdge((GraphNodeId("always"), GraphNodeId("right")), END),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_join_produced_and_ordinary_sources_cannot_merge_without_an_explicit_join() -> None:
     with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 tuple(
                     node(node_id, inputs={}, outputs={})
@@ -712,7 +713,7 @@ def test_join_produced_and_ordinary_sources_cannot_merge_without_an_explicit_joi
                     DirectEdge(GraphNodeId("ordinary"), GraphNodeId("target")),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
@@ -721,7 +722,7 @@ def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
     right = node("right", inputs={}, outputs={})
 
     with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (decision, left, right),
                 edges=(
@@ -733,7 +734,7 @@ def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
                 ),
                 entries=("decision",),
             )
-        )
+        ).compile()
 
 
 def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> None:
@@ -786,7 +787,7 @@ def test_repeatable_node_propagation_reaches_acyclic_dependents() -> None:
 
 def test_explicit_entry_with_an_incoming_gate_has_no_cross_cohort_join_identity() -> None:
     with pytest.raises(GraphValidationError, match="no provable occurrence identity"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 tuple(node(node_id, inputs={}, outputs={}) for node_id in ("a", "dependent", "other", "s", "target")),
                 edges=(
@@ -796,11 +797,11 @@ def test_explicit_entry_with_an_incoming_gate_has_no_cross_cohort_join_identity(
                 ),
                 entries=("s",),
             )
-        )
+        ).compile()
 
 
 def test_mutually_exclusive_incoming_routes_do_not_make_a_join_source_repeatable() -> None:
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         definition(
             tuple(
                 node(node_id, inputs={}, outputs={})
@@ -822,7 +823,7 @@ def test_mutually_exclusive_incoming_routes_do_not_make_a_join_source_repeatable
                 JoinEdge((GraphNodeId("other"), GraphNodeId("shared")), GraphNodeId("target")),
             ),
         )
-    )
+    ).compile()
 
     assert compiled.transition.activation_gates[GraphNodeId("shared")] == (
         ((GraphNodeId("left"), frozenset({GraphRouteId("go")})),),
@@ -832,7 +833,7 @@ def test_mutually_exclusive_incoming_routes_do_not_make_a_join_source_repeatable
 
 def test_branch_local_exit_cannot_leave_a_partial_join() -> None:
     with pytest.raises(GraphValidationError, match="partial source set"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 tuple(
                     node(node_id, inputs={}, outputs={})
@@ -849,12 +850,12 @@ def test_branch_local_exit_cannot_leave_a_partial_join() -> None:
                     JoinEdge((GraphNodeId("ordinary"), GraphNodeId("shared")), GraphNodeId("target")),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_coexisting_fanout_routes_require_an_explicit_join() -> None:
     with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 tuple(node(node_id, inputs={}, outputs={}) for node_id in ("source", "left", "right", "target")),
                 edges=(
@@ -864,12 +865,12 @@ def test_coexisting_fanout_routes_require_an_explicit_join() -> None:
                     DirectEdge(GraphNodeId("right"), GraphNodeId("target")),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_a_graph_without_any_entry() -> None:
     with pytest.raises(GraphValidationError, match="requires at least one"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 (
                     node("a", inputs={}, outputs={}),
@@ -880,12 +881,12 @@ def test_compiler_rejects_a_graph_without_any_entry() -> None:
                     DirectEdge(GraphNodeId("b"), GraphNodeId("a")),
                 ),
             )
-        )
+        ).compile()
 
 
 def test_compiler_rejects_nodes_unreachable_from_the_declared_entry() -> None:
     with pytest.raises(GraphValidationError, match="unreachable nodes"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 tuple(node(node_id, inputs={}, outputs={}) for node_id in ("a", "b", "c")),
                 edges=(
@@ -895,4 +896,4 @@ def test_compiler_rejects_nodes_unreachable_from_the_declared_entry() -> None:
                 ),
                 entries=("a",),
             )
-        )
+        ).compile()

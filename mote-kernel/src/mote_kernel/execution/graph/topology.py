@@ -8,7 +8,6 @@ from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
-    DefinitionScope,
     FrameDescriptor,
     GraphOutputBindings,
     MaterializationPlan,
@@ -99,7 +98,6 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
 class CompiledGraph(Generic[GraphValueT]):
     definition_id: GraphDefinitionId
     version: GraphDefinitionVersion
-    definition_scope: DefinitionScope
     nodes: FrozenMap[GraphNodeId, GraphNode[GraphValueT]]
     nested_graphs: FrozenMap[GraphNodeId, "CompiledGraph[GraphValueT]"]
     graph_input_descriptor: FrameDescriptor[GraphValueT]
@@ -111,7 +109,7 @@ class CompiledGraph(Generic[GraphValueT]):
 
 def _compiled_graph_at_scope(
     root: CompiledGraph[GraphValueT],
-    scope: DefinitionScope,
+    scope: tuple[GraphNodeId, ...],
 ) -> CompiledGraph[GraphValueT]:
     current = root
     for segment in scope:

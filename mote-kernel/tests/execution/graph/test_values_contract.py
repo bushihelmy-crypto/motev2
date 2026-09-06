@@ -36,9 +36,9 @@ def test_values_factory_copies_and_canonically_orders_keyword_values() -> None:
         values["missing"]
 
 
-def test_values_construction_rejects_a_forged_owner_seal() -> None:
+def test_values_reject_a_forged_owner_seal() -> None:
     with pytest.raises(GraphValueAdmissionError, match="canonical owner"):
-        eval("_ValuesConstruction(entries=(), _seal=None)", dict(vars(values_owner)))
+        eval("_GraphValues(_entries=(), _seal=None)", dict(vars(values_owner)))
 
 
 def test_frame_admission_requires_exact_not_subclass_types() -> None:

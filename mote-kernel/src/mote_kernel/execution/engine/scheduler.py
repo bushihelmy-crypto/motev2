@@ -19,7 +19,6 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _make_node_output_frame,
 )
-from mote_kernel.execution.node_adapter import invoke_node
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
 from mote_kernel.state.graph_state import ContinueGraphRouting, GraphRouteId, SelectGraphRoute
 
@@ -77,7 +76,7 @@ async def _execute_task(
         definition = graph.nodes[executable.task.node_id]
         if isinstance(definition, NestedGraphNodeDefinition):
             raise NodeExecutionContractError("nested task must be projected to a precomputed terminal outcome")
-        outcome = await invoke_node(definition, executable.effective_input)
+        outcome = await definition.invoker(executable.effective_input)
         return _project_outcome(graph, executable, outcome)
     except asyncio.CancelledError as error:
         if error.args and error.args[0] is _SCHEDULER_CLOSE_CANCEL:

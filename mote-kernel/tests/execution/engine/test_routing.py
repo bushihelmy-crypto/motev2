@@ -36,7 +36,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
     UnknownRouteError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
@@ -53,6 +53,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph, CompiledJoin, fr
 from mote_kernel.execution.graph.values import _make_node_output_frame
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     ConfirmedPublication,
@@ -392,17 +393,17 @@ def predecessor_loop_graph() -> CompiledGraph[int]:
     loop_id = GraphNodeId("loop")
     initialize_node = CallableNodeDefinition(
         initialize_id,
-        initialize,
+        make_node_invoker(initialize),
         normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
         normalize_output_declarations({"value": int}),
     )
     loop_node = CallableNodeDefinition(
         loop_id,
-        loop,
+        make_node_invoker(loop),
         normalize_input_bindings({"value": Graph.node_output("value")}),
         normalize_output_declarations({"value": int}),
     )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("predecessor.routing"),
             GraphDefinitionVersion(1),
@@ -415,7 +416,7 @@ def predecessor_loop_graph() -> CompiledGraph[int]:
             (),
             normalize_graph_output_declarations({"value": Graph.node_output(loop_id, "value")}),
         )
-    )
+    ).compile()
 
 
 def settled_predecessor_loop(
@@ -1500,7 +1501,7 @@ def test_predecessor_source_selects_the_exact_causal_publication() -> None:
         predecessor_binding(graph),
     )
 
-    assert selected.source == NodeOutputPort((), GraphNodeId("initialize"), "value")
+    assert selected.source == NodeOutputPort(GraphNodeId("initialize"), "value")
     assert selected.predecessor == GraphActivationIdentity(state.run_id, 0, GraphNodeId("initialize"))
 
 
@@ -1584,7 +1585,7 @@ def test_predecessor_source_rejects_an_uncompiled_source() -> None:
     state, _frames = settled_predecessor_loop(graph, "continue")
     binding = replace(
         predecessor_binding(graph),
-        sources=(NodeOutputPort((), GraphNodeId("other"), "value"),),
+        sources=(NodeOutputPort(GraphNodeId("other"), "value"),),
     )
 
     with pytest.raises(InvalidRoutingCommandError, match="not an allowed predecessor source"):

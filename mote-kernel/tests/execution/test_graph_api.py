@@ -171,6 +171,33 @@ def _require_partial_commit(error: Graph.Error) -> Graph.PartialCommitError[str]
     return cast(Graph.PartialCommitError[str], error)
 
 
+@pytest.mark.asyncio
+async def test_family_compile_installs_one_shared_scope_independent_child_plan() -> None:
+    async def leaf(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    child = Graph[str]("public.compiled-family.child")
+    child.add_node("leaf", leaf, inputs={}, outputs={})
+    child.set_outputs({})
+    child_result = await child.run(Graph.values())
+    assert isinstance(child_result, Graph.CompletedResult)
+    precompiled_child = _require_compiled_owner(child).graph
+
+    parent = Graph[str]("public.compiled-family.parent")
+    parent.add_node("left", child, inputs={})
+    parent.add_node("right", child, inputs={})
+    parent.set_outputs({})
+
+    result = await parent.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    compiled_parent = _require_compiled_owner(parent).graph
+    compiled_child = compiled_parent.nested_graphs[GraphNodeId("left")]
+    assert compiled_child is precompiled_child
+    assert compiled_parent.nested_graphs[GraphNodeId("right")] is compiled_child
+    assert _require_compiled_owner(child).graph is compiled_child
+
+
 def encode_text(value: Graph.Values[str]) -> bytes:
     return value["value"].encode()
 
@@ -350,7 +377,7 @@ async def test_graph_is_the_single_public_execution_facade_and_runs_plain_node_o
     with pytest.raises(KeyError, match="missing"):
         empty["missing"]
     with pytest.raises(Graph.ValueAdmissionError, match="canonical owner construction"):
-        replace(empty, _construction=1, _seal=1)
+        replace(empty, _entries=(), _seal=1)
 
     with pytest.raises(Graph.Error, match=r"Graph\.success"):
         replace(Graph.success(empty), _seal=1)

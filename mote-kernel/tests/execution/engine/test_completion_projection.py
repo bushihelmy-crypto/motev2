@@ -17,7 +17,7 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.task import GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
@@ -84,7 +84,7 @@ def test_interrupt_result_projects_a_structured_identity() -> None:
             return Graph.values(value=payload.decode())
 
     codec = Codec()
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
@@ -92,9 +92,9 @@ def test_interrupt_result_projects_a_structured_identity() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
+            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
-    )
+    ).compile()
     state = running_state(definition_id="graph")
     state = replace(
         state,
@@ -291,7 +291,7 @@ def test_interrupt_projection_uses_the_current_execution_generation() -> None:
             return Graph.values(value=payload.decode())
 
     codec = Codec()
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
@@ -299,9 +299,9 @@ def test_interrupt_projection_uses_the_current_execution_generation() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
+            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
-    )
+    ).compile()
     state = replace(
         running_state(definition_id="graph"),
         execution_sequence=6,

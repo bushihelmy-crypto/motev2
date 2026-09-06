@@ -22,7 +22,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import fresh_root
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
@@ -49,6 +49,7 @@ from mote_kernel.execution.identity import (
     root_scope_run,
 )
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import (
@@ -128,7 +129,7 @@ def node(
     bindings = {"value": Graph.graph_input("value", str)} if inputs is None else inputs
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        operation,
+        make_node_invoker(operation),
         normalize_input_bindings(bindings),
         normalize_output_declarations({"value": str}),
         resources,
@@ -143,7 +144,7 @@ def graph_with_nodes(
     definition_id: str = "test.graph",
     resume_input: ResumeInputBinding[str] | None = None,
 ) -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId(definition_id),
             version=GraphDefinitionVersion(1),
@@ -154,7 +155,7 @@ def graph_with_nodes(
             resources=resources,
             resume_input=resume_input,
         )
-    )
+    ).compile()
 
 
 def request_with_values(
@@ -413,7 +414,7 @@ async def test_prepare_rejects_wrong_scope_or_graph_run_identity() -> None:
     wrong_scope = ScopeRunCoordinate((GraphNodeId("nested"),), state.run_id)
     wrong_run = root_scope_run(GraphRunId("other-run"))
 
-    with pytest.raises(SnapshotMismatchError, match="scope-run coordinate"):
+    with pytest.raises(SnapshotMismatchError, match="runtime scope"):
         executor.prepare(string_request(graph, state, "input", scope_run=wrong_scope))
     with pytest.raises(SnapshotMismatchError, match="scope-run coordinate"):
         executor.prepare(string_request(graph, state, "input", scope_run=wrong_run))
@@ -521,7 +522,7 @@ async def test_claim_rejects_a_committed_state_with_a_different_pending_input() 
     codec = _Codec()
     graph = graph_with_nodes(
         node("a"),
-        resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec, codec),
+        resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
     )
     executor = GraphExecutor(graph)
     initial = started(graph)
@@ -853,7 +854,7 @@ async def test_executor_rejects_graph_ownership_and_parent_shape_mismatches() ->
         entries=(),
         outputs=normalize_graph_output_declarations({}),
     )
-    GraphExecutor(compile_graph(shared_parent))
+    GraphExecutor(GraphCompiler(shared_parent).compile())
 
 
 async def test_prepare_rejects_an_empty_resource_admission_projection(
@@ -987,12 +988,12 @@ async def test_parallel_context_mutations_are_isolated_and_request_input_is_froz
 
         return CallableNodeDefinition(
             GraphNodeId(name),
-            operation,
+            make_node_invoker(operation),
             normalize_input_bindings({"value": Graph.graph_input("value", InputSnapshot)}),
             normalize_output_declarations({"value": InputSnapshot}),
         )
 
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("context.graph"),
             version=GraphDefinitionVersion(1),
@@ -1001,7 +1002,7 @@ async def test_parallel_context_mutations_are_isolated_and_request_input_is_froz
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     executor = GraphExecutor(graph)
     initial = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("context-run")))
     node_input = InputSnapshot("input")
@@ -1068,7 +1069,7 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
         entries=(),
         outputs=normalize_graph_output_declarations({"value": Graph.node_output("child", "value")}),
     )
-    root = compile_graph(
+    root = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("grandchild.root"),
             version=GraphDefinitionVersion(1),
@@ -1077,7 +1078,7 @@ async def test_nested_graph_can_prepare_a_grandchild_with_exact_parent_coordinat
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     root_executor = GraphExecutor(root)
     root_state = reduce_graph_run(None, project_start_graph_command(root, GraphRunId("nested-run")))
     root_scope = root_scope_run(root_state.run_id)
@@ -1129,7 +1130,7 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
         entries=(),
         outputs=normalize_graph_output_declarations({}),
     )
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("entries.parent"),
             version=GraphDefinitionVersion(1),
@@ -1138,7 +1139,7 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("entry-run")))
     activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("nested"))
@@ -1159,7 +1160,7 @@ async def test_nested_child_start_preserves_all_canonical_entry_nodes() -> None:
 
 async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None:
     child = child_definition("join.child")
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("join.parent"),
             version=GraphDefinitionVersion(1),
@@ -1171,7 +1172,7 @@ async def test_nested_completion_contributes_to_a_cross_superstep_join() -> None
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     executor = GraphExecutor(graph)
     parent = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("join-run")))
     activation = GraphActivationIdentity(parent.run_id, 0, GraphNodeId("a"))

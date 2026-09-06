@@ -18,7 +18,7 @@ from mote_kernel.execution.errors import (
     GraphValueUnavailableError,
     SnapshotMismatchError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
@@ -34,6 +34,7 @@ from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph, frozen_map
 from mote_kernel.execution.graph.values import NamedValue, _make_node_input_frame, _make_node_output_frame
 from mote_kernel.execution.identity import StableActivation, root_scope_run
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
@@ -110,7 +111,7 @@ def callable_node(
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        echo,
+        make_node_invoker(echo),
         normalize_input_bindings(inputs),
         normalize_output_declarations({"value": str}),
     )
@@ -124,8 +125,10 @@ def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = Fa
         consumer = callable_node("consumer", {"value": Graph.node_output("source", "value")})
         nodes = (source, consumer)
         edges = (DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),)
-    resume_input = None if codec is None else ResumeInputBinding(GraphResumeInputCodecId("text.v1"), 1, codec, codec)
-    return compile_graph(
+    resume_input = (
+        None if codec is None else ResumeInputBinding(GraphResumeInputCodecId("text.v1"), 1, codec.encode, codec.decode)
+    )
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("test.graph"),
             GraphDefinitionVersion(1),
@@ -135,7 +138,7 @@ def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = Fa
             normalize_graph_output_declarations({}),
             resume_input=resume_input,
         )
-    )
+    ).compile()
 
 
 def predecessor_compiled_graph() -> CompiledGraph[int]:
@@ -147,20 +150,20 @@ def predecessor_compiled_graph() -> CompiledGraph[int]:
 
     initialize_id = GraphNodeId("initialize")
     loop_id = GraphNodeId("loop")
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("predecessor.materialization"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     initialize_id,
-                    initialize,
+                    make_node_invoker(initialize),
                     normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
                     normalize_output_declarations({"value": int}),
                 ),
                 CallableNodeDefinition(
                     loop_id,
-                    loop,
+                    make_node_invoker(loop),
                     normalize_input_bindings({"value": Graph.node_output("value")}),
                     normalize_output_declarations({"value": int}),
                 ),
@@ -173,7 +176,7 @@ def predecessor_compiled_graph() -> CompiledGraph[int]:
             (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
         )
-    )
+    ).compile()
 
 
 def multiple_predecessor_compiled_graph() -> CompiledGraph[int]:
@@ -185,14 +188,14 @@ def multiple_predecessor_compiled_graph() -> CompiledGraph[int]:
 
     initialize_id = GraphNodeId("initialize")
     loop_id = GraphNodeId("loop")
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("predecessor.multiple-materialization"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     initialize_id,
-                    initialize,
+                    make_node_invoker(initialize),
                     normalize_input_bindings(
                         {
                             "left_seed": Graph.graph_input("left_seed", int),
@@ -203,7 +206,7 @@ def multiple_predecessor_compiled_graph() -> CompiledGraph[int]:
                 ),
                 CallableNodeDefinition(
                     loop_id,
-                    loop,
+                    make_node_invoker(loop),
                     normalize_input_bindings(
                         {
                             "left": Graph.node_output("left"),
@@ -221,7 +224,7 @@ def multiple_predecessor_compiled_graph() -> CompiledGraph[int]:
             (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "left")}),
         )
-    )
+    ).compile()
 
 
 def predecessor_state(
@@ -624,7 +627,7 @@ def test_resume_decoder_exception_is_normalized_before_state_mutation() -> None:
 def test_resume_decoder_must_return_graph_values() -> None:
     graph = compiled_graph(codec=TextCodec())
     assert graph.resume_input is not None
-    malformed_binding = replace(graph.resume_input, decoder=BytesDecoder())
+    malformed_binding = replace(graph.resume_input, decoder=BytesDecoder().decode)
     malformed = replace(graph, resume_input=malformed_binding)
 
     with pytest.raises(GraphValueAdmissionError, match=r"must return Graph\.Values"):

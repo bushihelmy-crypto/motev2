@@ -23,7 +23,7 @@ from mote_kernel.execution.engine.recovery import (
 from mote_kernel.execution.engine.routing import PublicationHistoryWindow, resolve_routing
 from mote_kernel.execution.engine.settlement import require_settlement_execution_token
 from mote_kernel.execution.errors import GraphValueUnavailableError, SnapshotMismatchError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
@@ -52,6 +52,7 @@ from mote_kernel.execution.identity import (
     root_scope_run,
 )
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
@@ -249,14 +250,14 @@ class EmptyResumeCodec:
 
 
 def empty_graph() -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.identity"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     GraphNodeId("node"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -265,7 +266,7 @@ def empty_graph() -> CompiledGraph[str]:
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def interruptible_graph() -> CompiledGraph[str]:
@@ -273,17 +274,17 @@ def interruptible_graph() -> CompiledGraph[str]:
     resume_input: ResumeInputBinding[str] = ResumeInputBinding(
         GraphResumeInputCodecId("recovery.empty"),
         1,
-        codec,
-        codec,
+        codec.encode,
+        codec.decode,
     )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.interrupt-identity"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     GraphNodeId("node"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -293,7 +294,7 @@ def interruptible_graph() -> CompiledGraph[str]:
             normalize_graph_output_declarations({}),
             resume_input=resume_input,
         )
-    )
+    ).compile()
 
 
 def baseline_transfer() -> RecoveryTransferState[str]:
@@ -696,14 +697,14 @@ async def consume_hostile(_values: Graph.Values[HostileValue]) -> Graph.Values[H
 
 
 def test_recovery_preflight_never_hashes_orders_or_renders_concrete_frame_values() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.hostile-value"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     GraphNodeId("node"),
-                    consume_hostile,
+                    make_node_invoker(consume_hostile),
                     normalize_input_bindings({"value": Graph.graph_input("value", HostileValue)}),
                     normalize_output_declarations({}),
                 ),
@@ -712,7 +713,7 @@ def test_recovery_preflight_never_hashes_orders_or_renders_concrete_frame_values
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("hostile-run")))
     scope_run = root_scope_run(state.run_id)
     frame = _make_graph_input_frame(
@@ -989,7 +990,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
         *(
             CallableNodeDefinition(
                 node_id,
-                empty_node,
+                make_node_invoker(empty_node),
                 normalize_input_bindings({}),
                 normalize_output_declarations({}),
             )
@@ -997,7 +998,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
         ),
         CallableNodeDefinition(
             terminal,
-            empty_node,
+            make_node_invoker(empty_node),
             normalize_input_bindings({}),
             normalize_output_declarations({}),
         ),
@@ -1011,7 +1012,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
         for index, node_id in enumerate(node_ids)
         for route in ("left", "right")
     )
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.bounded-proof"),
             GraphDefinitionVersion(1),
@@ -1020,7 +1021,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("bounded-proof-run")))
 
     with pytest.raises(Graph.ExecutionLimitError, match="bounded transfer-state budget"):
@@ -1037,14 +1038,14 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
 
 def test_recovery_preflight_closes_a_conditional_cycle_at_its_availability_fixpoint() -> None:
     node_id = GraphNodeId("decision")
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.cycle-fixpoint"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     node_id,
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -1056,7 +1057,7 @@ def test_recovery_preflight_closes_a_conditional_cycle_at_its_availability_fixpo
             (node_id,),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("cycle-fixpoint-run")))
 
     boundaries = preflight_recovery(
@@ -1079,13 +1080,13 @@ def test_recovery_preflight_uses_one_canonical_completion_order_for_plain_nodes(
     nodes = tuple(
         CallableNodeDefinition(
             GraphNodeId(f"node-{index:02d}"),
-            empty_node,
+            make_node_invoker(empty_node),
             normalize_input_bindings({}),
             normalize_output_declarations({}),
         )
         for index in range(32)
     )
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.canonical-completions"),
             GraphDefinitionVersion(1),
@@ -1094,7 +1095,7 @@ def test_recovery_preflight_uses_one_canonical_completion_order_for_plain_nodes(
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("canonical-completions-run")))
 
     boundaries = preflight_recovery(
@@ -1112,26 +1113,26 @@ def test_recovery_preflight_uses_one_canonical_completion_order_for_plain_nodes(
 
 
 def test_recovery_preflight_deduplicates_routes_with_the_same_successor_state() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.converging-routes"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     GraphNodeId("decision"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
                 CallableNodeDefinition(
                     GraphNodeId("target"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
                 CallableNodeDefinition(
                     GraphNodeId("final"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -1152,7 +1153,7 @@ def test_recovery_preflight_deduplicates_routes_with_the_same_successor_state() 
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("converging-routes-run")))
 
     boundaries = preflight_recovery(
@@ -1218,7 +1219,7 @@ def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) 
         (
             CallableNodeDefinition(
                 GraphNodeId("leaf"),
-                empty_node,
+                make_node_invoker(empty_node),
                 normalize_input_bindings({}),
                 normalize_output_declarations({"value": str} if child_output else {}),
             ),
@@ -1229,15 +1230,15 @@ def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) 
         resume_input=ResumeInputBinding(
             GraphResumeInputCodecId("recovery.child-input"),
             1,
-            EmptyResumeCodec(),
-            EmptyResumeCodec(),
+            EmptyResumeCodec().encode,
+            EmptyResumeCodec().decode,
         ),
     )
     ordinary_nodes = (
         (
             CallableNodeDefinition(
                 GraphNodeId("ordinary"),
-                empty_node,
+                make_node_invoker(empty_node),
                 normalize_input_bindings({}),
                 normalize_output_declarations({}),
             ),
@@ -1245,7 +1246,7 @@ def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) 
         if ordinary_sibling
         else ()
     )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.identity.parent"),
             GraphDefinitionVersion(1),
@@ -1261,7 +1262,7 @@ def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) 
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def test_recovery_cycle_signature_keeps_a_current_child_boundary() -> None:
@@ -1424,7 +1425,7 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
             (
                 CallableNodeDefinition(
                     GraphNodeId("leaf"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -1435,12 +1436,12 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
             resume_input=ResumeInputBinding(
                 GraphResumeInputCodecId("recovery.child-priority"),
                 1,
-                codec,
-                codec,
+                codec.encode,
+                codec.decode,
             ),
         )
 
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.child-priority.parent"),
             GraphDefinitionVersion(1),
@@ -1457,13 +1458,13 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
                 ),
                 CallableNodeDefinition(
                     GraphNodeId("ordinary"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
                 CallableNodeDefinition(
                     GraphNodeId("resource"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                     (ResourceId("file"),),
@@ -1474,7 +1475,7 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
             normalize_graph_output_declarations({}),
             resources=(ResourceDefinition(ResourceId("file")),),
         )
-    )
+    ).compile()
     root_state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("child-priority-parent")))
     root_scope = root_scope_run(root_state.run_id)
     child_bindings: list[RecoveryStateBinding] = []
@@ -1713,7 +1714,7 @@ async def publish_node(_values: Graph.Values[str]) -> Graph.Values[str]:
 def _publication_node(node_id: str) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        publish_node,
+        make_node_invoker(publish_node),
         normalize_input_bindings({}),
         normalize_output_declarations({"value": str}),
     )
@@ -1781,7 +1782,7 @@ def _partial_history_frames(
 
 
 def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.target-history-scan"),
             GraphDefinitionVersion(1),
@@ -1790,13 +1791,13 @@ def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap()
                 _publication_node("missing"),
                 CallableNodeDefinition(
                     GraphNodeId("decision"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
                 CallableNodeDefinition(
                     GraphNodeId("consumer"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings(
                         {
                             "a_input": Graph.graph_input("input", str),
@@ -1821,7 +1822,7 @@ def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap()
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("target-history-run")))
     scope_run = root_scope_run(state.run_id)
     frames = _partial_history_frames(graph, scope_run)
@@ -1842,7 +1843,7 @@ def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap()
 
 
 def test_recovery_historical_output_scan_retains_present_outputs_before_the_gap() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.output-history-scan"),
             GraphDefinitionVersion(1),
@@ -1851,7 +1852,7 @@ def test_recovery_historical_output_scan_retains_present_outputs_before_the_gap(
                 _publication_node("missing"),
                 CallableNodeDefinition(
                     GraphNodeId("final"),
-                    empty_node,
+                    make_node_invoker(empty_node),
                     normalize_input_bindings({}),
                     normalize_output_declarations({}),
                 ),
@@ -1871,7 +1872,7 @@ def test_recovery_historical_output_scan_retains_present_outputs_before_the_gap(
                 }
             ),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("output-history-run")))
     scope_run = root_scope_run(state.run_id)
     frames = _partial_history_frames(graph, scope_run)

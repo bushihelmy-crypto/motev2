@@ -9,13 +9,14 @@ from mote_kernel.execution.engine.session import GraphExecutionSession
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.errors import ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.result import ReadyToResolve, TaskSuccess
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
@@ -39,7 +40,7 @@ def graph(
 ) -> CompiledGraph[str]:
     selected = tuple(nodes) if entries is None else entries
     incoming = {edge.target for edge in edges if edge.target != END}
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.graph"),
             GraphDefinitionVersion(1),
@@ -48,7 +49,7 @@ def graph(
             tuple(GraphNodeId(node) for node in selected if GraphNodeId(node) in incoming),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def claim(
@@ -160,19 +161,19 @@ async def test_ordinary_error_after_applied_sibling_settlement_preserves_that_si
         del values
         raise RuntimeError("later failure")
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("recovery.error"),
             GraphDefinitionVersion(1),
             (
-                replace(callable_node("a"), operation=good),
-                replace(callable_node("b"), operation=bad),
+                replace(callable_node("a"), invoker=make_node_invoker(good)),
+                replace(callable_node("b"), invoker=make_node_invoker(bad)),
             ),
             (DirectEdge(GraphNodeId("a"), END), DirectEdge(GraphNodeId("b"), END)),
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     executor = GraphExecutor(compiled)
     initial = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     request = step_request(compiled, initial, "input").execution_request()

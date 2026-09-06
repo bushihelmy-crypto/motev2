@@ -5,7 +5,7 @@ from mote_kernel.execution.commit import GraphTransition
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.errors import GraphValueUnavailableError
 from mote_kernel.execution.family_driver import admit_continued_root, fresh_root, project_graph_result
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
@@ -17,6 +17,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.run_context import ScopedFrameIndex, _CompiledFamilyIdentity
 from mote_kernel.state.graph_state import (
     ActivationReference,
@@ -65,20 +66,20 @@ async def initialize(values: Graph.Values[int]) -> Graph.Values[int]:
 def compiled_loop(operation: NodeCallable[int]):
     initialize_id = GraphNodeId("initialize")
     loop_id = GraphNodeId("loop")
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("predecessor.runtime"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     initialize_id,
-                    initialize,
+                    make_node_invoker(initialize),
                     normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
                     normalize_output_declarations({"value": int}),
                 ),
                 CallableNodeDefinition(
                     loop_id,
-                    operation,
+                    make_node_invoker(operation),
                     normalize_input_bindings({"value": Graph.node_output("value")}),
                     normalize_output_declarations({"value": int}),
                 ),
@@ -91,7 +92,7 @@ def compiled_loop(operation: NodeCallable[int]):
             (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
         )
-    )
+    ).compile()
 
 
 async def run_loop(

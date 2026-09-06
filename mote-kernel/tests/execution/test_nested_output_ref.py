@@ -181,7 +181,8 @@ def test_output_ref_can_be_used_as_a_typed_binding_source() -> None:
     binding = Graph.bind("value", child_output)
 
     assert binding.source is child_output
-    assert binding.destination.descriptor is child_output.descriptor
+    assert binding.name == "value"
+    assert binding.source.descriptor is child_output.descriptor
 
 
 def test_output_ref_preserves_the_compiler_selected_graph_input_descriptor() -> None:

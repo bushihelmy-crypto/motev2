@@ -5,7 +5,7 @@ import pytest
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
@@ -19,6 +19,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId, GraphRouteId
 
 Value: TypeAlias = str | int
@@ -37,7 +38,7 @@ def node(
 ) -> CallableNodeDefinition[Value]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        identity,
+        make_node_invoker(identity),
         normalize_input_bindings({} if inputs is None else inputs),
         normalize_output_declarations({} if outputs is None else outputs),
     )
@@ -70,7 +71,7 @@ def branch_definition(
 
 
 def test_compiler_resolves_every_mutually_exclusive_predecessor_without_a_public_source_map() -> None:
-    compiled = compile_graph(branch_definition())
+    compiled = GraphCompiler(branch_definition()).compile()
 
     binding = compiled.transition.materializations[GraphNodeId("hook")].bindings.entries[0]
     assert binding.destination.local_name == "request"
@@ -106,7 +107,7 @@ def test_compiler_accepts_an_explicit_initializer_for_a_self_loop() -> None:
         normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
     )
 
-    compiled = compile_graph(definition)
+    compiled = GraphCompiler(definition).compile()
 
     binding = compiled.transition.materializations[GraphNodeId("loop")].bindings.entries[0]
     assert isinstance(binding.source, CompiledPredecessorInput)
@@ -130,7 +131,7 @@ def test_compiler_rejects_a_predecessor_bound_start_target() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="cannot be activated from START"):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_compiler_rejects_a_join_as_an_implicit_predecessor() -> None:
@@ -151,17 +152,17 @@ def test_compiler_rejects_a_join_as_an_implicit_predecessor() -> None:
     )
 
     with pytest.raises(GraphValidationError, match="cannot be activated by a Join"):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_compiler_rejects_a_missing_output_on_any_possible_predecessor() -> None:
     with pytest.raises(GraphValidationError, match="unknown output port 'hook_request'"):
-        compile_graph(branch_definition(right_outputs={}))
+        GraphCompiler(branch_definition(right_outputs={})).compile()
 
 
 def test_compiler_rejects_conflicting_exact_predecessor_output_types() -> None:
     with pytest.raises(GraphValidationError, match="conflicting exact output types"):
-        compile_graph(branch_definition(right_outputs={"hook_request": int}))
+        GraphCompiler(branch_definition(right_outputs={"hook_request": int})).compile()
 
 
 def test_independent_predecessors_still_require_an_explicit_join_before_input_resolution() -> None:
@@ -183,7 +184,7 @@ def test_independent_predecessors_still_require_an_explicit_join_before_input_re
     )
 
     with pytest.raises(GraphValidationError, match="multiple activation gates without an explicit Join"):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_same_predecessor_routes_share_one_causal_output_source() -> None:
@@ -214,7 +215,7 @@ def test_same_predecessor_routes_share_one_causal_output_source() -> None:
         normalize_graph_output_declarations({"value": Graph.node_output("branch", "value")}),
     )
 
-    compiled = compile_graph(definition)
+    compiled = GraphCompiler(definition).compile()
 
     binding = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0]
     assert isinstance(binding.source, CompiledPredecessorInput)
@@ -254,7 +255,7 @@ def test_nested_graph_input_can_bind_the_actual_parent_predecessor() -> None:
         parent.outputs,
     )
 
-    compiled = compile_graph(definition)
+    compiled = GraphCompiler(definition).compile()
 
     binding = compiled.transition.materializations[GraphNodeId("hook")].bindings.entries[0]
     assert isinstance(binding.source, CompiledPredecessorInput)

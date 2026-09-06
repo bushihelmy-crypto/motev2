@@ -142,9 +142,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "apply_commit_writes",
             }
         ),
-        "execution/graph/resume_input.py": frozenset(
-            {"ResumeInputEncoder", "ResumeInputDecoder", "ResumeInputBinding"}
-        ),
+        "execution/graph/resume_input.py": frozenset({"ResumeInputBinding"}),
         "execution/engine/resume_input.py": frozenset(
             {
                 "require_resume_input_binding",
@@ -157,7 +155,6 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
             {
                 "NamedValue",
                 "_ValuesSeal",
-                "_ValuesConstruction",
                 "_GraphValues",
                 "GraphInputFrame",
                 "NodeInputFrame",
@@ -291,15 +288,12 @@ def test_resume_codec_is_invoked_only_by_its_node_input_materializer() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            receiver = node.func.value
-            if (node.func.attr == "encode" and isinstance(receiver, ast.Attribute) and receiver.attr == "encoder") or (
-                node.func.attr == "decode" and isinstance(receiver, ast.Attribute) and receiver.attr == "decoder"
-            ):
+            if node.func.attr in {"encoder", "decoder"}:
                 invocation_owners.append((relative, node.func.attr))
 
     assert sorted(invocation_owners) == [
-        ("execution/engine/resume_input.py", "decode"),
-        ("execution/engine/resume_input.py", "encode"),
+        ("execution/engine/resume_input.py", "decoder"),
+        ("execution/engine/resume_input.py", "encoder"),
     ]
 
 
@@ -412,10 +406,10 @@ def test_executor_does_not_apply_state_or_own_persistence() -> None:
     )
 
 
-def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
-    handle = _top_level_definition("execution/family_driver.py", "_ChildHandle")
+def test_child_call_is_the_explicit_nested_lifecycle_owner() -> None:
+    handle = _top_level_definition("execution/family_driver.py", "_ChildCall")
     if not isinstance(handle, ast.ClassDef):
-        raise AssertionError("_ChildHandle must remain a nominal private type")
+        raise AssertionError("_ChildCall must remain a nominal private type")
     slots = next(
         node.value
         for node in handle.body
@@ -424,16 +418,18 @@ def test_child_handle_exposes_only_named_invocation_capabilities() -> None:
     )
     assert isinstance(slots, ast.Tuple)
     assert {element.value for element in slots.elts if isinstance(element, ast.Constant)} == {
-        "_abort",
-        "_drive",
-        "_fence",
-        "_release",
+        "_owner",
+        "parent",
+        "phase",
+        "position",
     }
     assert {
         node.name
         for node in handle.body
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith("_")
-    } == {"abort", "drive", "fence", "release"}
+    } == {"abort", "drive", "fence", "live", "release"}
+    family_driver = _module("execution/family_driver.py")
+    assert not {"_ChildHandle", "_opaque_handle", "_replace_child"} & _defined_names(family_driver)
 
 
 def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_path() -> None:
@@ -560,6 +556,9 @@ def test_graph_run_lifecycle_has_one_running_and_three_terminal_states() -> None
 
 
 def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() -> None:
+    compiler = _module("execution/graph/compiler.py")
+    assert "GraphCompiler" in _defined_names(compiler)
+    assert "compile_graph" not in _defined_names(compiler)
     assert _class_fields("execution/graph/topology.py", "FrontierTransitionPlan") == {
         "entries": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
@@ -576,7 +575,6 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
     assert _class_fields("execution/graph/topology.py", "CompiledGraph") == {
         "definition_id": "GraphDefinitionId",
         "version": "GraphDefinitionVersion",
-        "definition_scope": "DefinitionScope",
         "nodes": "FrozenMap[GraphNodeId, GraphNode[GraphValueT]]",
         "nested_graphs": "FrozenMap[GraphNodeId, 'CompiledGraph[GraphValueT]']",
         "graph_input_descriptor": "FrameDescriptor[GraphValueT]",

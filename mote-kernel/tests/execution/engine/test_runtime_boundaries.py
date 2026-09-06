@@ -40,7 +40,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
@@ -77,6 +77,7 @@ from mote_kernel.execution.invocation import (
     plan_fences,
 )
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.execution.result import (
@@ -182,7 +183,7 @@ def string_node(
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        operation,
+        make_node_invoker(operation),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
         resources,
@@ -250,7 +251,7 @@ def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
         nodes.append(
             CallableNodeDefinition(
                 GraphNodeId("consumer"),
-                echo,
+                make_node_invoker(echo),
                 normalize_input_bindings({"value": Graph.node_output("nested", "value")}),
                 normalize_output_declarations({"value": str}),
             )
@@ -258,12 +259,12 @@ def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
         nodes.append(
             CallableNodeDefinition(
                 GraphNodeId("controller"),
-                echo,
+                make_node_invoker(echo),
                 normalize_input_bindings({}),
                 normalize_output_declarations({}),
             )
         )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("boundary.parent"),
             version=GraphDefinitionVersion(1),
@@ -279,7 +280,7 @@ def nested_graph(*, with_consumer: bool = False) -> CompiledGraph[str]:
             entries=(GraphNodeId("nested"),) if with_consumer else (),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def parallel_nested_graph() -> CompiledGraph[str]:
@@ -292,7 +293,7 @@ def parallel_nested_graph() -> CompiledGraph[str]:
         outputs=normalize_graph_output_declarations({"value": Graph.node_output("child", "value")}),
     )
     nested_inputs = normalize_input_bindings({"value": Graph.graph_input("value", str)})
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("boundary.parallel-parent"),
             version=GraphDefinitionVersion(1),
@@ -304,7 +305,7 @@ def parallel_nested_graph() -> CompiledGraph[str]:
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def started_nested_child(
@@ -439,7 +440,7 @@ def test_resume_input_narrow_guards() -> None:
         )
 
     codec = TextCodec()
-    resumable = compile_graph(
+    resumable = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
@@ -450,11 +451,11 @@ def test_resume_input_narrow_guards() -> None:
             resume_input=ResumeInputBinding(
                 GraphResumeInputCodecId("compiled.v1"),
                 1,
-                codec,
-                codec,
+                codec.encode,
+                codec.decode,
             ),
         )
-    )
+    ).compile()
     mismatched = replace(
         state,
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("durable.v1"), 1),
@@ -760,7 +761,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
     async def terminal(values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.success(values, route="exported")
 
-    terminal_graph = compile_graph(
+    terminal_graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("terminal.route"),
             version=GraphDefinitionVersion(1),
@@ -769,7 +770,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     terminal_state = reduce_graph_run(
         None,
         project_start_graph_command(terminal_graph, GraphRunId("run")),
@@ -796,7 +797,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
     async def invalid_nonterminal(values: Graph.Values[str]) -> Graph.Outcome[str]:
         return Graph.success(values, route="unexpected")
 
-    invalid_graph = compile_graph(
+    invalid_graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("invalid.nonterminal-route"),
             version=GraphDefinitionVersion(1),
@@ -805,7 +806,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     invalid_state = reduce_graph_run(None, project_start_graph_command(invalid_graph, GraphRunId("run")))
     invalid_scheduler = TaskScheduler(invalid_graph)
     invalid_scheduler.submit(
@@ -854,16 +855,16 @@ async def test_scheduler_rejects_an_unsupported_callable_return_without_settleme
     async def unsupported(_values: Graph.Values[str]) -> bytes:
         return b"unsupported"
 
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("unsupported.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=(replace(string_node("a"), operation=unsupported),),
+            nodes=(replace(string_node("a"), invoker=make_node_invoker(cast(NodeCallable[str], unsupported))),),
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     scheduler = TaskScheduler(graph)
     scheduler.submit(
@@ -908,7 +909,7 @@ async def test_scheduler_yields_each_canonically_buffered_completion() -> None:
 
 
 def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("join.graph"),
             version=GraphDefinitionVersion(1),
@@ -917,7 +918,7 @@ def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     progress = join_progress(
         ("a", "b"),
         "joined",
@@ -960,7 +961,7 @@ def test_routing_rejects_invalid_progress_and_partial_join_deadlock() -> None:
 
 
 def test_conditional_route_to_end_returns_standalone_completion_command() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("conditional.end"),
             version=GraphDefinitionVersion(1),
@@ -969,7 +970,7 @@ def test_conditional_route_to_end_returns_standalone_completion_command() -> Non
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = replace(
         running_state(revision=7, definition_id="conditional.end"),
         frontier=GraphFrontierState(
@@ -992,7 +993,7 @@ def test_conditional_route_to_end_returns_standalone_completion_command() -> Non
 def test_snapshot_guard_rejects_unknown_and_mismatched_resource_participants() -> None:
     resource = ResourceId("file")
     database = ResourceId("database")
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("resource.graph"),
             version=GraphDefinitionVersion(1),
@@ -1002,7 +1003,7 @@ def test_snapshot_guard_rejects_unknown_and_mismatched_resource_participants() -
             outputs=normalize_graph_output_declarations({}),
             resources=(ResourceDefinition(resource), ResourceDefinition(database)),
         )
-    )
+    ).compile()
     state = running_state(definition_id="resource.graph")
     token = GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))
     active = replace(state, execution_sequence=1, execution=GraphExecutionLease(token))
@@ -1314,7 +1315,7 @@ def test_snapshot_guard_rejects_a_start_activation_outside_compiled_entries() ->
 
 
 def test_compiler_emits_canonical_activation_gates_for_join_and_conditional_routes() -> None:
-    first = compile_graph(
+    first = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("gate.graph"),
             GraphDefinitionVersion(1),
@@ -1326,8 +1327,8 @@ def test_compiler_emits_canonical_activation_gates_for_join_and_conditional_rout
             (),
             normalize_graph_output_declarations({}),
         )
-    )
-    second = compile_graph(
+    ).compile()
+    second = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("gate.graph"),
             GraphDefinitionVersion(1),
@@ -1339,7 +1340,7 @@ def test_compiler_emits_canonical_activation_gates_for_join_and_conditional_rout
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
     assert dict(first.transition.activation_gates) == dict(second.transition.activation_gates)
     assert first.transition.activation_gates[GraphNodeId("c")] == (
@@ -1350,7 +1351,7 @@ def test_compiler_emits_canonical_activation_gates_for_join_and_conditional_rout
     )
 
 
-def test_scoped_snapshot_guard_rejects_a_parent_activation_outside_the_compiled_scope() -> None:
+def test_scoped_snapshot_guard_rejects_a_parent_activation_outside_the_runtime_scope() -> None:
     parent = GraphActivationIdentity(GraphRunId("parent"), 0, GraphNodeId("other"))
     child = replace(
         running_state(definition_id="boundary.child", frontier=("child",)),
@@ -1358,11 +1359,11 @@ def test_scoped_snapshot_guard_rejects_a_parent_activation_outside_the_compiled_
         parent=parent,
     )
     compiled_child = nested_graph().nested_graphs[GraphNodeId("nested")]
-    with pytest.raises(SnapshotMismatchError, match="compiled definition scope"):
+    with pytest.raises(SnapshotMismatchError, match="runtime scope"):
         require_scoped_snapshot_matches_graph(
             compiled_child,
             child,
-            ScopeRunCoordinate(compiled_child.definition_scope, child.run_id),
+            ScopeRunCoordinate((GraphNodeId("nested"),), child.run_id),
         )
 
 

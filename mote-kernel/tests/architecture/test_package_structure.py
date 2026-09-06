@@ -13,7 +13,6 @@ REQUIRED_PACKAGES = frozenset(
         "hooks",
         "logging",
         "loop",
-        "loop/react",
         "observability",
         "observe",
         "execution/resource",
@@ -51,6 +50,10 @@ def test_kernel_invocation_is_one_module() -> None:
     assert (PACKAGE_ROOT / "invocation.py").is_file()
     assert not (PACKAGE_ROOT / "invocation" / "__init__.py").exists()
     assert not (PACKAGE_ROOT / "invocation" / "contract.py").exists()
+
+
+def test_loop_has_no_private_react_package() -> None:
+    assert not (PACKAGE_ROOT / "loop" / "react").exists()
 
 
 def test_generic_ownerless_packages_are_forbidden() -> None:

@@ -31,7 +31,7 @@ from mote_kernel.execution.family_driver import (
     fresh_root,
     project_graph_result,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
@@ -41,8 +41,6 @@ from mote_kernel.execution.graph.node import (
     NodeInputMaterializer,
     NodeInputs,
     NodeOperation,
-    TypedNodeAssembly,
-    make_typed_node_assembly,
 )
 from mote_kernel.execution.graph.outcome import (
     GraphOutcome,
@@ -57,7 +55,6 @@ from mote_kernel.execution.graph.ports import (
     GraphInputRef,
     GraphOutputDeclarations,
     InputBindings,
-    NodeInputSlot,
     NodeOutputRef,
     PredecessorOutputRef,
     TypedInputBinding,
@@ -88,7 +85,7 @@ from mote_kernel.execution.invocation import (
     validate_context,
 )
 from mote_kernel.execution.limits import ExecutionLimits
-from mote_kernel.execution.node_adapter import make_typed_node_invoker
+from mote_kernel.execution.node_adapter import TypedNodeAssembly, make_node_invoker, make_typed_node_assembly
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -172,18 +169,6 @@ class _GraphBuilderState(Generic[GraphValueT]):
     outputs: GraphOutputDeclarations[GraphValueT] | None = None
     resources: tuple[ResourceDefinition, ...] = ()
     resume_input: ResumeInputBinding[GraphValueT] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _ResumeCodec(Generic[GraphValueT]):
-    encoder: Callable[[_GraphValues[GraphValueT]], bytes]
-    decoder: Callable[[bytes], _GraphValues[GraphValueT]]
-
-    def encode(self, value: _GraphValues[GraphValueT]) -> bytes:
-        return self.encoder(value)
-
-    def decode(self, payload: bytes) -> _GraphValues[GraphValueT]:
-        return self.decoder(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,8 +294,7 @@ class Graph(Generic[GraphValueT]):
         descriptor = source.descriptor
         if descriptor is None:
             raise GraphValidationError("typed input source must come from a typed Graph handle")
-        destination = NodeInputSlot(canonical_port_name(name, kind="input"), descriptor)
-        return TypedInputBinding(destination, source)
+        return TypedInputBinding(canonical_port_name(name, kind="input"), source)
 
     def output_ref(
         self,
@@ -453,7 +437,7 @@ class Graph(Generic[GraphValueT]):
         if any(typed_fields) and not all(typed_fields):
             raise GraphValidationError("typed graph nodes require input, materializer, and output declarations")
         typed = all(typed_fields)
-        typed_assembly: TypedNodeAssembly[GraphValueT, InputT, OutputT] | None = None
+        typed_assembly: TypedNodeAssembly[GraphValueT, OutputT] | None = None
         if isinstance(operation, Graph):
             if typed or outputs is not None or resources or not isinstance(inputs, Mapping):
                 raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")
@@ -479,15 +463,9 @@ class Graph(Generic[GraphValueT]):
                     cast(NodeInputMaterializer[GraphValueT, InputT], materialize),
                     cast(str, output_name),
                     cast(type[OutputT], output_type),
-                )
-                candidate = CallableNodeDefinition(
-                    canonical_id,
-                    None,
-                    typed_assembly.inputs,
-                    typed_assembly.outputs,
                     resource_ids,
-                    make_typed_node_invoker(typed_assembly.contract),
                 )
+                candidate = typed_assembly.definition
             else:
                 if not isinstance(inputs, Mapping) or outputs is None:
                     raise GraphValidationError("callable graph nodes require explicit outputs and input mappings")
@@ -495,7 +473,7 @@ class Graph(Generic[GraphValueT]):
                 declarations = normalize_output_declarations(outputs)
                 candidate = CallableNodeDefinition(
                     canonical_id,
-                    cast(NodeCallable[GraphValueT], operation),
+                    make_node_invoker(cast(NodeCallable[GraphValueT], operation)),
                     bindings,
                     declarations,
                     resource_ids,
@@ -609,8 +587,7 @@ class Graph(Generic[GraphValueT]):
         canonical_id = GraphResumeInputCodecId(canonical_port_name(codec_id, kind="resume codec"))
         if type(version) is not int or version < 1:
             raise GraphValidationError("resume codec version must be an exact positive integer")
-        codec = _ResumeCodec(encoder, decoder)
-        binding = ResumeInputBinding(canonical_id, version, codec, codec)
+        binding = ResumeInputBinding(canonical_id, version, encoder, decoder)
         replacement = replace(state, resume_input=binding)
         self._commit_builder(state, replacement)
         return self
@@ -676,10 +653,15 @@ class Graph(Generic[GraphValueT]):
         if existing is not None:
             return existing
         definitions: dict[Graph[GraphValueT], GraphDefinition[GraphValueT]] = {}
-        self._definition(definitions, set())
-        compiled: dict[Graph[GraphValueT], CompiledGraph[GraphValueT]] = {
-            owner: compile_graph(definition) for owner, definition in definitions.items()
-        }
+        root_definition = self._definition(definitions, set())
+        retained = tuple(
+            (definition, compiled_owner.graph)
+            for owner, definition in definitions.items()
+            if (compiled_owner := owner._compiled_owner) is not None
+        )
+        compiler = GraphCompiler(root_definition, retained)
+        compiler.compile()
+        compiled = {owner: compiler.plan_for(definition) for owner, definition in definitions.items()}
         installations = {
             owner: _CompiledOwner(graph, _CompiledFamilyIdentity())
             for owner, graph in compiled.items()

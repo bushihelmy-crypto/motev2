@@ -88,7 +88,7 @@ def encode_resume_input(
     if binding is None:
         raise SnapshotMismatchError("graph does not define a resume input codec")
     try:
-        payload = binding.encoder.encode(values)
+        payload = binding.encoder(values)
     except Exception as error:
         raise GraphValueAdmissionError("resume input encoder rejected the value frame") from error
     if type(payload) is not bytes:
@@ -117,7 +117,7 @@ def decode_resume_input(
     if binding is None:
         raise SnapshotMismatchError("input override is missing its compiled graph decoder")
     try:
-        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder.decode(payload))
+        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder(payload))
     except Exception as error:
         raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
     if not isinstance(candidate, _GraphValues):

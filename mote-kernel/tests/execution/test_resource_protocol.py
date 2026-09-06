@@ -9,7 +9,7 @@ from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
 from mote_kernel.execution.graph.ports import (
@@ -19,6 +19,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -137,7 +138,7 @@ def internal_node(
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        echo,
+        make_node_invoker(echo),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
         resources,
@@ -149,7 +150,7 @@ def internal_resource_graph(
     resource_order: tuple[ResourceId, ...],
     requirement: tuple[ResourceId, ...],
 ) -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("resource.snapshot"),
             version=GraphDefinitionVersion(1),
@@ -159,7 +160,7 @@ def internal_resource_graph(
             outputs=normalize_graph_output_declarations({}),
             resources=tuple(ResourceDefinition(resource_id) for resource_id in resource_order),
         )
-    )
+    ).compile()
 
 
 def claimed_internal_state(

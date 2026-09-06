@@ -13,7 +13,7 @@ from mote_kernel.execution.errors import (
     RecursiveGraphDefinitionError,
     UnknownNodeError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.ports import (
@@ -54,7 +54,7 @@ def test_nested_graph_definition_is_preserved_and_validated() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
 
-    compiled = compile_graph(parent)
+    compiled = GraphCompiler(parent).compile()
 
     assert compiled.nodes[GraphNodeId("nested")] is child_node
     assert child_node.graph.definition_id == GraphDefinitionId("child.graph")
@@ -80,7 +80,7 @@ def test_invalid_nested_graph_fails_parent_compilation() -> None:
     )
 
     with pytest.raises(MissingEntryError):
-        compile_graph(parent)
+        GraphCompiler(parent).compile()
 
 
 def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
@@ -110,7 +110,7 @@ def test_invalid_deeply_nested_graph_fails_root_compilation() -> None:
     )
 
     with pytest.raises(MissingEntryError):
-        compile_graph(root)
+        GraphCompiler(root).compile()
 
 
 def test_nested_compilation_preserves_definition_order_error_priority() -> None:
@@ -158,7 +158,7 @@ def test_nested_compilation_preserves_definition_order_error_priority() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
     with pytest.raises(UnknownNodeError, match="value source references unknown node"):
-        compile_graph(first_parent)
+        GraphCompiler(first_parent).compile()
 
     second_parent = GraphDefinition(
         definition_id=GraphDefinitionId("second-parent.graph"),
@@ -169,7 +169,7 @@ def test_nested_compilation_preserves_definition_order_error_priority() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
     with pytest.raises(GraphValidationError, match="cannot bind its own output"):
-        compile_graph(second_parent)
+        GraphCompiler(second_parent).compile()
 
 
 def test_nested_validation_preserves_definition_order_error_priority() -> None:
@@ -202,7 +202,7 @@ def test_nested_validation_preserves_definition_order_error_priority() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
     with pytest.raises(InvalidGraphIdentityError, match="route identity"):
-        compile_graph(route_first)
+        GraphCompiler(route_first).compile()
 
     edge_first = GraphDefinition(
         definition_id=GraphDefinitionId("edge-first.graph"),
@@ -213,7 +213,7 @@ def test_nested_validation_preserves_definition_order_error_priority() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
     with pytest.raises(DuplicateEdgeError, match="duplicate direct edge"):
-        compile_graph(edge_first)
+        GraphCompiler(edge_first).compile()
 
 
 def test_nested_graph_with_duplicate_route_fails_parent_compilation() -> None:
@@ -238,7 +238,7 @@ def test_nested_graph_with_duplicate_route_fails_parent_compilation() -> None:
     )
 
     with pytest.raises(DuplicateEdgeError):
-        compile_graph(parent)
+        GraphCompiler(parent).compile()
 
 
 def test_valid_graphs_nest_with_local_node_id_reuse() -> None:
@@ -260,7 +260,7 @@ def test_valid_graphs_nest_with_local_node_id_reuse() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
 
-    root_node = compile_graph(root).nodes[GraphNodeId("step")]
+    root_node = GraphCompiler(root).compile().nodes[GraphNodeId("step")]
 
     assert isinstance(root_node, NestedGraphNodeDefinition)
     middle_node = root_node.graph.nodes[0]
@@ -279,7 +279,7 @@ def test_same_nested_graph_definition_may_be_reused_by_sibling_nodes() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
 
-    compiled = compile_graph(parent)
+    compiled = GraphCompiler(parent).compile()
 
     assert tuple(compiled.nodes) == (GraphNodeId("first"), GraphNodeId("second"))
     first = compiled.nodes[GraphNodeId("first")]
@@ -288,6 +288,7 @@ def test_same_nested_graph_definition_may_be_reused_by_sibling_nodes() -> None:
     assert isinstance(second, NestedGraphNodeDefinition)
     assert first.graph is child
     assert second.graph is child
+    assert compiled.nested_graphs[GraphNodeId("first")] is compiled.nested_graphs[GraphNodeId("second")]
 
 
 def test_distinct_nested_graphs_cannot_share_identity_and_version() -> None:
@@ -303,7 +304,7 @@ def test_distinct_nested_graphs_cannot_share_identity_and_version() -> None:
     )
 
     with pytest.raises(DuplicateGraphDefinitionError):
-        compile_graph(parent)
+        GraphCompiler(parent).compile()
 
 
 def test_nested_graphs_may_share_definition_id_across_versions() -> None:
@@ -318,7 +319,7 @@ def test_nested_graphs_may_share_definition_id_across_versions() -> None:
         outputs=normalize_graph_output_declarations({}),
     )
 
-    assert tuple(compile_graph(parent).nodes) == (GraphNodeId("first"), GraphNodeId("second"))
+    assert tuple(GraphCompiler(parent).compile().nodes) == (GraphNodeId("first"), GraphNodeId("second"))
 
 
 def test_direct_recursive_nested_graph_fails_with_typed_error() -> None:
@@ -327,7 +328,7 @@ def test_direct_recursive_nested_graph_fails_with_typed_error() -> None:
     object.__setattr__(root, "entries", ())
 
     with pytest.raises(RecursiveGraphDefinitionError):
-        compile_graph(root)
+        GraphCompiler(root).compile()
 
 
 def test_indirect_recursive_nested_graph_fails_with_typed_error() -> None:
@@ -344,4 +345,4 @@ def test_indirect_recursive_nested_graph_fails_with_typed_error() -> None:
     object.__setattr__(root, "entries", ())
 
     with pytest.raises(RecursiveGraphDefinitionError):
-        compile_graph(root)
+        GraphCompiler(root).compile()

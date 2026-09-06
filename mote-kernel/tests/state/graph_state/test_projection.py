@@ -3,7 +3,7 @@ from tests.execution.engine.factories import callable_node
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import SnapshotMismatchError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
@@ -35,7 +35,7 @@ class StringCodec:
 
 def compiled(*, with_codec: bool = True):
     codec = StringCodec()
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(5),
@@ -44,10 +44,12 @@ def compiled(*, with_codec: bool = True):
             (),
             normalize_graph_output_declarations({}),
             resume_input=(
-                ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 2, codec, codec) if with_codec else None
+                ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 2, codec.encode, codec.decode)
+                if with_codec
+                else None
             ),
         )
-    )
+    ).compile()
 
 
 def test_compiled_graph_projects_root_start_with_fixed_resume_codec() -> None:

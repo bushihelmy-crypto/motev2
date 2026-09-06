@@ -161,55 +161,65 @@ quote-style = "double"
 # Port, and domain exception owners remain distinct; no compatibility path or
 # metric-only forwarding abstraction was added.  The one thin continuation
 # predicate deliberately shields the facade from a private snapshot variant.
+# The same review then collapsed callable and typed nodes into one compiled
+# invoker IR, made family compilation one memoized compiler session, removed
+# definition-scope mirrors from immutable plans, and replaced nested child
+# tuples plus closure handles with one explicit _ChildCall lifecycle owner.
+# The resulting six extra attribute writes and three stateful async methods are
+# the visible child phase/owner transitions that had previously been hidden in
+# closure cells plus the compiler session's root/cache ownership; the two import
+# edges keep compilation and node adaptation in their existing narrow owner
+# modules.  They are retained as reviewed ownership cost while every measured
+# reduction below is ratcheted immediately.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 969
-type_definitions = 610
-dataclass_types = 384
-dataclass_fields = 975
-decision_points = 2895
+top_level_definitions = 955
+type_definitions = 601
+dataclass_types = 380
+dataclass_fields = 957
+decision_points = 2893
 logical_clone_pairs = 39
 statement_clone_pairs = 44
 near_clone_pairs = 30
-record_shape_clone_pairs = 45
+record_shape_clone_pairs = 36
 thin_single_use_helpers = 1
 single_use_private_dataclasses = 22
 test_only_private_definitions = 0
-function_definitions = 855
-method_definitions = 474
-nested_function_definitions = 24
-semantic_nodes = 57294
-cognitive_complexity = 3728
-await_points = 153
+function_definitions = 845
+method_definitions = 475
+nested_function_definitions = 18
+semantic_nodes = 56967
+cognitive_complexity = 3724
+await_points = 148
 exception_handlers = 111
-attribute_writes = 95
+attribute_writes = 101
 task_creations = 16
-max_cyclomatic_complexity = 79
-max_cognitive_complexity = 122
+max_cyclomatic_complexity = 77
+max_cognitive_complexity = 119
 max_nesting_depth = 6
-internal_call_edges = 1189
+internal_call_edges = 1180
 recursive_call_components = 5
-max_call_fan_out = 23
+max_call_fan_out = 22
 max_call_chain_depth = 17
 max_call_chain_cognitive = 325
-cross_module_call_edges = 1162
-cross_module_call_pairs = 335
+cross_module_call_edges = 1157
+cross_module_call_pairs = 334
 max_runtime_module_fan_out = 25
-internal_import_edges = 505
+internal_import_edges = 507
 import_cycle_components = 0
 max_module_fan_out = 26
 max_module_dependency_depth = 30
-ambiguous_internal_dispatches = 67
-transparent_private_definitions = 36
-thin_single_use_methods = 12
-low_usage_private_definitions = 207
+ambiguous_internal_dispatches = 62
+transparent_private_definitions = 31
+thin_single_use_methods = 4
+low_usage_private_definitions = 201
 linear_private_call_chain_links = 37
 production_unreferenced_definitions = 9
-low_cohesion_classes = 5
+low_cohesion_classes = 4
 max_methods_per_class = 33
 max_fields_per_class = 38
 max_class_components = 18
-complexity_hotspots = 110
-stateful_async_hotspots = 7
+complexity_hotspots = 109
+stateful_async_hotspots = 10
 unused_private_definitions = 0
 unread_private_fields = 0
 unconsumed_internal_async_calls = 0

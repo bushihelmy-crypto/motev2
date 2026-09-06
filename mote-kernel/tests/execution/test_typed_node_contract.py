@@ -4,21 +4,17 @@ from typing import Never, TypeAlias, cast
 import pytest
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.node import CallableNodeDefinition, make_typed_node_assembly
+from mote_kernel.execution.graph.node import _make_node_inputs
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
-    InputBindings,
-    NodeInputSlot,
     NodeOutputRef,
     NominalTypeDescriptor,
-    OutputDeclarations,
     TypedInputBinding,
     canonical_nominal_type,
-    normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.values import NamedValue, _GraphValues, _make_node_input_frame
-from mote_kernel.execution.node_adapter import make_typed_node_invoker
+from mote_kernel.execution.graph.values import NamedValue, _make_node_input_frame
+from mote_kernel.execution.node_adapter import make_typed_node_assembly
 from mote_kernel.state.graph_state import GraphNodeId
 
 
@@ -171,7 +167,7 @@ def test_typed_node_rejects_duplicate_binding_slots_during_assembly() -> None:
         )
 
 
-def test_typed_assembly_reuses_one_descriptor_across_contract_and_output_handles() -> None:
+def test_typed_assembly_reuses_one_descriptor_across_definition_and_output_handle() -> None:
     binding = Graph.bind("source", Graph.graph_input("source", Left))
 
     async def operation(value: Left) -> Combined:
@@ -185,53 +181,43 @@ def test_typed_assembly_reuses_one_descriptor_across_contract_and_output_handles
         lambda values: values.get(binding),
         "result",
         Combined,
+        (),
     )
 
-    descriptor = assembly.contract.output.descriptor
-    assert assembly.contract.output_descriptor is descriptor
-    assert assembly.outputs.entries[0].descriptor is descriptor
+    definition = assembly.definition
+    descriptor = definition.outputs.entries[0].descriptor
     assert assembly.output_ref.descriptor is descriptor
-    assert assembly.contract.bindings[0] is binding
-    assert assembly.inputs.entries[0].source is binding.source
+    assert definition.inputs.entries[0].source is binding.source
 
 
 def test_typed_assembly_rejects_malformed_bindings_and_materializer_at_its_boundary() -> None:
     valid = Graph.bind("source", Graph.graph_input("source", Left))
-    wrong_descriptor = cast(NominalTypeDescriptor[Left], canonical_nominal_type(Right))
     non_concrete_descriptor = cast(NominalTypeDescriptor[Left], NominalTypeDescriptor(object))
-    malformed = (
+    malformed: tuple[tuple[TypedInputBinding[PipelineValue], str], ...] = (
         (
-            TypedInputBinding(cast(NodeInputSlot[Left], object()), valid.source),
-            "malformed input slot",
+            TypedInputBinding(cast(str, object()), valid.source),
+            "input name",
         ),
         (
             TypedInputBinding(
-                NodeInputSlot("source", cast(NominalTypeDescriptor[Left], object())),
-                valid.source,
+                "source",
+                cast(GraphInputRef[Left], object()),
             ),
-            "malformed descriptor",
+            "malformed input source",
         ),
         (
             TypedInputBinding(
-                NodeInputSlot("source", non_concrete_descriptor),
+                "source",
                 GraphInputRef("source", non_concrete_descriptor),
             ),
             "non-concrete descriptor",
         ),
         (
-            TypedInputBinding(valid.destination, cast(GraphInputRef[Left], object())),
-            "malformed input source",
-        ),
-        (
-            TypedInputBinding(NodeInputSlot("source", wrong_descriptor), valid.source),
-            "descriptor mismatch",
-        ),
-        (
             TypedInputBinding(
-                valid.destination,
-                NodeOutputRef(GraphNodeId("source"), "value"),
+                "source",
+                NodeOutputRef[Left](GraphNodeId("source"), "value"),
             ),
-            "descriptor mismatch",
+            "lacks one concrete descriptor",
         ),
     )
 
@@ -248,7 +234,20 @@ def test_typed_assembly_rejects_malformed_bindings_and_materializer_at_its_bound
                 lambda values: values.get(valid),
                 "result",
                 Combined,
+                (),
             )
+
+    with pytest.raises(Graph.ValidationError, match="must be a tuple"):
+        make_typed_node_assembly(
+            GraphNodeId("node"),
+            operation,
+            cast(tuple[TypedInputBinding[PipelineValue], ...], [valid]),
+            Left,
+            lambda values: values.get(valid),
+            "result",
+            Combined,
+            (),
+        )
 
     graph = Graph[PipelineValue]("typed.bad-assembly")
     with pytest.raises(Graph.ValidationError, match=r"Graph\.bind"):
@@ -273,7 +272,7 @@ def test_typed_assembly_rejects_malformed_bindings_and_materializer_at_its_bound
         )
 
 
-def test_typed_input_view_and_callable_definition_enforce_their_owner_seals() -> None:
+def test_typed_input_view_enforces_its_owner_seal() -> None:
     frame = _make_node_input_frame(
         (NamedValue("source", Left("value")),),
         normalize_output_declarations({"source": Left}),
@@ -285,13 +284,20 @@ def test_typed_input_view_and_callable_definition_enforce_their_owner_seals() ->
             _seal=cast(Never, object()),
         )
 
-    with pytest.raises(Graph.ValidationError, match="exactly one execution contract"):
-        CallableNodeDefinition(
-            GraphNodeId("node"),
-            None,
-            cast(InputBindings[PipelineValue], normalize_input_bindings({})),
-            cast(OutputDeclarations[PipelineValue], normalize_output_declarations({})),
-        )
+
+def test_typed_input_view_rejects_a_declared_source_without_a_descriptor() -> None:
+    frame = _make_node_input_frame(
+        (NamedValue("source", Left("value")),),
+        normalize_output_declarations({"source": Left}),
+    )
+    binding = TypedInputBinding[PipelineValue](
+        "source",
+        NodeOutputRef(GraphNodeId("producer"), "source"),
+    )
+    inputs = _make_node_inputs(frame, (binding,))
+
+    with pytest.raises(Graph.ValueAdmissionError, match="lacks its nominal descriptor"):
+        inputs.get(binding)
 
 
 @pytest.mark.asyncio
@@ -322,36 +328,6 @@ async def test_typed_materializer_rejects_an_equal_but_foreign_binding() -> None
 
 
 @pytest.mark.asyncio
-async def test_typed_adapter_rejects_a_publisher_that_does_not_return_graph_values() -> None:
-    binding = Graph.bind("source", Graph.graph_input("source", Left))
-
-    async def operation(value: Left) -> Combined:
-        return Combined(value.value)
-
-    assembly = make_typed_node_assembly(
-        GraphNodeId("node"),
-        operation,
-        (binding,),
-        Left,
-        lambda values: values.get(binding),
-        "result",
-        Combined,
-    )
-
-    def bad_publisher(_value: Combined) -> _GraphValues[Combined]:
-        return cast(_GraphValues[Combined], object())
-
-    adapter = make_typed_node_invoker(replace(assembly.contract, output_publisher=bad_publisher))
-    frame = _make_node_input_frame(
-        (NamedValue("source", Left("value")),),
-        normalize_output_declarations({"source": Left}),
-    )
-
-    with pytest.raises(Graph.ValueAdmissionError, match=r"publisher must return Graph.Values"):
-        await adapter(frame)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome",
     (Graph.failure("typed failure"), Graph.interrupt(b"typed interrupt")),
@@ -375,13 +351,14 @@ async def test_typed_adapter_passes_existing_graph_outcomes_through_unchanged(
         lambda values: values.get(binding),
         "result",
         Combined,
+        (),
     )
     frame = _make_node_input_frame(
         (NamedValue("source", Left("value")),),
         normalize_output_declarations({"source": Left}),
     )
 
-    assert await make_typed_node_invoker(assembly.contract)(frame) is outcome
+    assert await assembly.definition.invoker(frame) is outcome
 
 
 @pytest.mark.asyncio

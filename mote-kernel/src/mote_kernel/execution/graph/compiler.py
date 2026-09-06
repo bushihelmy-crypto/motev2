@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from itertools import combinations
-from typing import TypeAlias, TypeVar, overload
+from typing import Generic, TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
     DuplicateBoundaryError,
@@ -18,7 +18,6 @@ from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
     CompiledPredecessorInput,
-    DefinitionScope,
     FrameDescriptor,
     FrameDescriptorIdentity,
     FrameKind,
@@ -184,7 +183,6 @@ def _collect_graph_inputs(
 def _resolve_source(
     source: GraphInputRef[GraphValueT],
     *,
-    scope: DefinitionScope,
     graph_inputs: OutputDeclarations[GraphValueT],
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
     consumer: GraphNodeId | None,
@@ -195,7 +193,6 @@ def _resolve_source(
 def _resolve_source(
     source: NodeOutputRef[GraphValueT],
     *,
-    scope: DefinitionScope,
     graph_inputs: OutputDeclarations[GraphValueT],
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
     consumer: GraphNodeId | None,
@@ -205,14 +202,13 @@ def _resolve_source(
 def _resolve_source(
     source: GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT],
     *,
-    scope: DefinitionScope,
     graph_inputs: OutputDeclarations[GraphValueT],
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
     consumer: GraphNodeId | None,
 ) -> tuple[ResolvedValueSource, NominalTypeDescriptor[GraphValueT]]:
     if isinstance(source, GraphInputRef):
         declaration = _declaration(graph_inputs, source.name, owner="graph input binding")
-        return GraphInputPort(scope, source.name), declaration.descriptor
+        return GraphInputPort(source.name), declaration.descriptor
     if consumer is not None and source.node_id == consumer:
         raise GraphValidationError(f"node {consumer!r} cannot bind its own output")
     outputs = node_outputs.get(source.node_id)
@@ -224,7 +220,7 @@ def _resolve_source(
             f"typed node output {source.node_id!r}.{source.output_name!r} does not match "
             "its declared exact type/descriptor"
         )
-    return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
+    return NodeOutputPort(source.node_id, source.output_name), declaration.descriptor
 
 
 def _resolve_predecessor_output(
@@ -232,7 +228,6 @@ def _resolve_predecessor_output(
     *,
     target: GraphNodeId,
     input_name: str,
-    scope: DefinitionScope,
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
     entries: tuple[GraphNodeId, ...],
     gates: list[_RawActivationGate],
@@ -253,7 +248,7 @@ def _resolve_predecessor_output(
             owner=f"predecessor node {source_id!r}",
         )
         descriptors.append(declaration.descriptor)
-        ports.append(NodeOutputPort(scope, source_id, source.output_name))
+        ports.append(NodeOutputPort(source_id, source.output_name))
     descriptor = descriptors[0]
     if any(candidate.value_type is not descriptor.value_type for candidate in descriptors[1:]):
         raise GraphValidationError(
@@ -985,25 +980,20 @@ def _output_publication_selection(
     raise GraphValidationError(f"graph output source {source.node_id!r} has no unique completion activation coordinate")
 
 
-def _compile_graph(
+def _compile_definition(
     definition: GraphDefinition[GraphValueT],
-    scope: DefinitionScope,
+    nested_graphs: dict[GraphNodeId, CompiledGraph[GraphValueT]],
 ) -> CompiledGraph[GraphValueT]:
-    nested_graphs: dict[GraphNodeId, CompiledGraph[GraphValueT]] = {}
-    for node in definition.nodes:
-        if isinstance(node, NestedGraphNodeDefinition):
-            nested_graphs[node.node_id] = _compile_graph(node.graph, (*scope, node.node_id))
     resource_order = tuple(resource.resource_id for resource in definition.resources)
     positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
     nodes = {
         node.node_id: (
             CallableNodeDefinition(
                 node.node_id,
-                node.operation,
+                node.invoker,
                 node.inputs,
                 node.outputs,
                 tuple(sorted(node.resources, key=positions.__getitem__)),
-                node.typed_invoker,
             )
             if isinstance(node, CallableNodeDefinition)
             else node
@@ -1037,7 +1027,6 @@ def _compile_graph(
                 continue
             source, descriptor = _resolve_source(
                 declared_source,
-                scope=scope,
                 graph_inputs=graph_inputs,
                 node_outputs=node_outputs,
                 consumer=node_id,
@@ -1046,7 +1035,7 @@ def _compile_graph(
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
                 ResolvedInputBinding(
-                    NodeInputPort(scope, node_id, binding.local_name),
+                    NodeInputPort(node_id, binding.local_name),
                     source,
                     descriptor,
                     None,
@@ -1109,14 +1098,13 @@ def _compile_graph(
                 declared_source,
                 target=node_id,
                 input_name=input_name,
-                scope=scope,
                 node_outputs=node_outputs,
                 entries=entries,
                 gates=activation_gates[node_id],
             )
             resolved.append(
                 ResolvedInputBinding(
-                    NodeInputPort(scope, node_id, input_name),
+                    NodeInputPort(node_id, input_name),
                     source,
                     descriptor,
                     None,
@@ -1218,7 +1206,6 @@ def _compile_graph(
     for output in definition.outputs.entries:
         source, descriptor = _resolve_source(
             output.source,
-            scope=scope,
             graph_inputs=graph_inputs,
             node_outputs=node_outputs,
             consumer=None,
@@ -1229,7 +1216,7 @@ def _compile_graph(
             )
         graph_output_bindings.append(
             GraphOutputBinding(
-                GraphOutputPort(scope, output.boundary_name),
+                GraphOutputPort(output.boundary_name),
                 source,
                 descriptor,
                 None
@@ -1309,7 +1296,6 @@ def _compile_graph(
     return CompiledGraph(
         definition_id=definition.definition_id,
         version=definition.version,
-        definition_scope=scope,
         nodes=frozen_map(nodes),
         nested_graphs=frozen_map(nested_graphs),
         graph_input_descriptor=_frame_descriptor(definition, FrameKind.GRAPH_INPUT, 0, graph_inputs),
@@ -1330,11 +1316,40 @@ def _compile_graph(
     )
 
 
-def compile_graph(definition: GraphDefinition[GraphValueT]) -> CompiledGraph[GraphValueT]:
-    """Compile one complete graph family without mutating its builder owners."""
+class GraphCompiler(Generic[GraphValueT]):
+    """Short-lived owner of one immutable graph-family compilation."""
 
-    validate_graph(definition)
-    return _compile_graph(definition, ())
+    __slots__ = ("_compiled_definitions", "_root")
+
+    def __init__(
+        self,
+        root: GraphDefinition[GraphValueT],
+        retained: tuple[tuple[GraphDefinition[GraphValueT], CompiledGraph[GraphValueT]], ...] = (),
+    ) -> None:
+        self._root = root
+        self._compiled_definitions = {id(definition): compiled for definition, compiled in retained}
+
+    def compile(self) -> CompiledGraph[GraphValueT]:
+        validate_graph(self._root)
+        return self._compile_validated(self._root)
+
+    def plan_for(self, definition: GraphDefinition[GraphValueT]) -> CompiledGraph[GraphValueT]:
+        """Return a definition's plan after the root family was compiled."""
+
+        return self._compiled_definitions[id(definition)]
+
+    def _compile_validated(self, definition: GraphDefinition[GraphValueT]) -> CompiledGraph[GraphValueT]:
+        existing = self._compiled_definitions.get(id(definition))
+        if existing is not None:
+            return existing
+        nested_graphs = {
+            node.node_id: self._compile_validated(node.graph)
+            for node in definition.nodes
+            if isinstance(node, NestedGraphNodeDefinition)
+        }
+        compiled = _compile_definition(definition, nested_graphs)
+        self._compiled_definitions[id(definition)] = compiled
+        return compiled
 
 
 __all__: list[str] = []

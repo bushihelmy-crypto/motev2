@@ -16,7 +16,6 @@ GraphValueT = TypeVar("GraphValueT")
 GraphValueT_co = TypeVar("GraphValueT_co", covariant=True)
 ValueT = TypeVar("ValueT")
 ValueT_co = TypeVar("ValueT_co", covariant=True)
-DefinitionScope: TypeAlias = tuple[GraphNodeId, ...]
 
 
 def _is_protocol_type(value_type: type[ValueT], /) -> bool:
@@ -83,26 +82,10 @@ class PredecessorOutputRef(Generic[GraphValueT_co]):
 
 
 @dataclass(frozen=True, slots=True)
-class NodeInputSlot(Generic[ValueT_co]):
-    """One statically typed local input declaration for a callable node."""
-
-    name: str
-    descriptor: NominalTypeDescriptor[ValueT_co]
-
-
-@dataclass(frozen=True, slots=True)
-class NodeOutputSlot(Generic[ValueT_co]):
-    """The one typed DTO publication declared by a typed node contract."""
-
-    name: str
-    descriptor: NominalTypeDescriptor[ValueT_co]
-
-
-@dataclass(frozen=True, slots=True)
 class TypedInputBinding(Generic[ValueT_co]):
     """A typed facade binding lowered to the existing immutable graph IR."""
 
-    destination: NodeInputSlot[ValueT_co]
+    name: str
     source: GraphInputRef[ValueT_co] | NodeOutputRef[ValueT_co] | PredecessorOutputRef[ValueT_co]
 
 
@@ -112,27 +95,23 @@ InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | PredecessorOutputR
 
 @dataclass(frozen=True, slots=True, order=True)
 class GraphInputPort:
-    definition_scope: DefinitionScope
     name: str
 
 
 @dataclass(frozen=True, slots=True, order=True)
 class NodeInputPort:
-    definition_scope: DefinitionScope
     node_id: GraphNodeId
     local_name: str
 
 
 @dataclass(frozen=True, slots=True, order=True)
 class NodeOutputPort:
-    definition_scope: DefinitionScope
     node_id: GraphNodeId
     output_name: str
 
 
 @dataclass(frozen=True, slots=True, order=True)
 class GraphOutputPort:
-    definition_scope: DefinitionScope
     boundary_name: str
 
 
