@@ -13,8 +13,7 @@ import mote_kernel.think.context as context_package
 import mote_kernel.think.inference as inference_package
 import mote_kernel.think.node as think_assembly_package
 import mote_kernel.think.prompt as prompt_package
-from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.hooks.contract import HookRequest
 from mote_kernel.think import ThinkNode
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
@@ -86,17 +85,15 @@ async def test_prompt_loads_system_placeholder_and_user_in_order_once() -> None:
     state = HookState(3)
     request = ThinkRequest(payload, state)
 
-    output = await _node(port)(Graph.values(request=request))
+    output = await _node(port)(request)
 
-    assert type(output) is Graph.Values
+    assert type(output) is HookRequest
     assert port.calls == [
         ("system", payload),
         ("placeholder", payload),
         ("user", payload),
     ]
-    hook_request = output["hook_request"]
-    assert type(hook_request) is HookRequest
-    hook_request = cast(HookRequest[ThinkFrame[PromptStep[str, str, str], HookState], HookState], hook_request)
+    hook_request = output
     assert hook_request.state is state
     assert type(hook_request.value) is ThinkFrame
     frame = hook_request.value
@@ -110,7 +107,7 @@ async def test_prompt_passes_the_exact_payload_to_each_port_operation() -> None:
     port = RecordingPromptPort()
     payload = Payload("same object")
 
-    await _node(port)(Graph.values(request=ThinkRequest(payload, HookState(1))))
+    await _node(port)(ThinkRequest(payload, HookState(1)))
 
     assert all(seen_payload is payload for _operation, seen_payload in port.calls)
 
@@ -126,7 +123,7 @@ async def test_prompt_does_not_call_later_port_operations_after_an_error() -> No
     port = _FailingPromptPort()
 
     with pytest.raises(RuntimeError, match="placeholder unavailable"):
-        await _node(port)(Graph.values(request=ThinkRequest(Payload("text"), HookState(1))))
+        await _node(port)(ThinkRequest(Payload("text"), HookState(1)))
 
     assert [operation for operation, _payload in port.calls] == ["system", "placeholder"]
 
@@ -164,7 +161,7 @@ async def test_prompt_propagates_cancellation_without_running_later_port_operati
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await node(Graph.values(request=ThinkRequest(Payload("text"), HookState(1))))
+        await node(ThinkRequest(Payload("text"), HookState(1)))
 
 
 def test_prompt_rejects_a_port_with_non_callable_methods_at_assembly() -> None:
@@ -192,11 +189,15 @@ def test_prompt_rejects_a_port_with_a_missing_method_at_assembly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_rejects_a_non_think_request_at_its_graph_boundary() -> None:
-    port = RecordingPromptPort()
+async def test_prompt_rejects_a_forged_missing_port_before_operations() -> None:
+    node = cast(
+        PromptNode[Payload, HookState, str, str, str],
+        object.__new__(PromptNode),
+    )
+    object.__setattr__(node, "prompt_port", None)
 
-    with pytest.raises(ThinkContractError, match="ThinkRequest"):
-        await _node(port)(Graph.values(request=cast(HookGraphValue, object())))
+    with pytest.raises(ThinkContractError, match="PromptPort"):
+        await node(ThinkRequest(Payload("text"), HookState(1)))
 
 
 @pytest.mark.parametrize(

@@ -315,9 +315,13 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
                 owners[node.attr].add(relative)
 
     assert owners == {
-        "direct_targets": {"execution/engine/routing.py"},
-        "conditional_targets": {"execution/engine/routing.py"},
-        "joins_by_source": {"execution/engine/routing.py"},
+        # Recovery preflight must replay the same compiled control topology
+        # when projecting a nested terminal route.  It does not own a second
+        # topology; it only reads the immutable transition plan owned by the
+        # compiler.
+        "direct_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
+        "conditional_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
+        "joins_by_source": {"execution/engine/recovery.py", "execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
     forbidden = {"materializations", "graph_outputs"}
@@ -326,7 +330,9 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
 
 
 def test_node_and_runtime_invocation_have_distinct_single_owners() -> None:
-    assert _call_owner_modules("operation") == ("execution/engine/scheduler.py",)
+    # Typed node operations are invoked only by the Graph-owned adapter.  The
+    # scheduler submits tasks and never reaches into a contract directly.
+    assert _call_owner_modules("operation") == ("execution/node_adapter.py",)
     violations: list[str] = []
     for relative, tree in _production_modules():
         if not relative.startswith("execution/"):
@@ -336,9 +342,7 @@ def test_node_and_runtime_invocation_have_distinct_single_owners() -> None:
                 violations.append(f"{relative}:{node.lineno}")
             elif isinstance(node, ast.Import):
                 violations.extend(
-                    f"{relative}:{node.lineno}"
-                    for alias in node.names
-                    if alias.name == "mote_kernel.invocation"
+                    f"{relative}:{node.lineno}" for alias in node.names if alias.name == "mote_kernel.invocation"
                 )
     assert not violations, (
         "Graph execution owns NodeCallable invocation; Runtime Invocation belongs behind owner-defined Ports: "

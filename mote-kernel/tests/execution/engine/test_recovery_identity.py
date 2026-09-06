@@ -311,6 +311,7 @@ def baseline_transfer() -> RecoveryTransferState[str]:
         ),
     )
     assert boundaries
+    assert boundaries[0].completion_route_known is False
     return boundaries[0]
 
 
@@ -871,6 +872,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     assert len(terminal) == 1
     assert terminal[0].control.status is GraphRunStatus.COMPLETED
     assert terminal[0].control.execution_sequence == completed.execution_sequence
+    assert terminal[0].completion_route_known is True
 
 
 def test_recovery_preflight_requires_exact_resume_input_availability_for_each_interrupt_action() -> None:
@@ -977,18 +979,37 @@ def test_recovery_preflight_requires_exact_resume_input_availability_for_each_in
 
 
 def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
+    # Keep the branch explosion while making every route converge on one
+    # terminal node.  The exported route of a nested terminal is therefore
+    # not ambiguous; the proof must still stop at its bounded transfer-state
+    # budget rather than enumerate all 2**13 histories.
     node_ids = tuple(GraphNodeId(f"decision-{index:02d}") for index in range(13))
-    nodes = tuple(
+    terminal = GraphNodeId("finish")
+    nodes = (
+        *(
+            CallableNodeDefinition(
+                node_id,
+                empty_node,
+                normalize_input_bindings({}),
+                normalize_output_declarations({}),
+            )
+            for node_id in node_ids
+        ),
         CallableNodeDefinition(
-            node_id,
+            terminal,
             empty_node,
             normalize_input_bindings({}),
             normalize_output_declarations({}),
-        )
-        for node_id in node_ids
+        ),
     )
     edges = tuple(
-        ConditionalEdge(node_id, GraphRouteId(route), END) for node_id in node_ids for route in ("left", "right")
+        ConditionalEdge(
+            node_id,
+            GraphRouteId(route),
+            node_ids[index + 1] if index + 1 < len(node_ids) else terminal,
+        )
+        for index, node_id in enumerate(node_ids)
+        for route in ("left", "right")
     )
     graph = compile_graph(
         GraphDefinition(
@@ -1009,7 +1030,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
                 RecoveryStateBinding(root_scope_run(state.run_id), state),
                 (),
                 ScopedFrameIndex(),
-                ExecutionLimits(2, len(node_ids)),
+                ExecutionLimits(100_000, len(node_ids)),
             ),
         )
 

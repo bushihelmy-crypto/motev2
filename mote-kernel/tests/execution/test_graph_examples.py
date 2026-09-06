@@ -75,8 +75,8 @@ async def test_cyclic_join_runs_two_distinct_occurrences_and_reads_each_cohort()
     graph.add_edge("tick", "left")
     graph.add_edge("tick", "right")
     graph.add_join(("left", "right"), "joined")
-    graph.add_conditional_edge("joined", "again", "tick")
-    graph.add_conditional_edge("joined", "done", Graph.END)
+    graph.add_edge("joined", "again", "tick")
+    graph.add_edge("joined", "done", Graph.END)
     graph.set_outputs({"total": Graph.node_output("joined", "total")})
 
     result = await graph.run(
@@ -145,8 +145,8 @@ async def test_cyclic_join_accepts_nested_children_at_each_occurrence() -> None:
     graph.add_edge("tick", "left")
     graph.add_edge("tick", "right")
     graph.add_join(("left", "right"), "joined")
-    graph.add_conditional_edge("joined", "again", "tick")
-    graph.add_conditional_edge("joined", "done", Graph.END)
+    graph.add_edge("joined", "again", "tick")
+    graph.add_edge("joined", "done", Graph.END)
     graph.set_outputs({"total": Graph.node_output("joined", "total")})
 
     result = await graph.run(Graph.values(seed=1), max_supersteps=8)

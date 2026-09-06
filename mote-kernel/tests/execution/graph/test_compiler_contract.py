@@ -112,7 +112,7 @@ async def identity(values: Graph.Values[PipelineValue], /) -> Graph.Values[Pipel
 def node(
     node_id: str,
     *,
-    inputs: Mapping[str, GraphInputRef[PipelineValue] | NodeOutputRef],
+    inputs: Mapping[str, GraphInputRef[PipelineValue] | NodeOutputRef[PipelineValue]],
     outputs: Mapping[str, type[PipelineValue]],
 ) -> CallableNodeDefinition[PipelineValue]:
     return CallableNodeDefinition(

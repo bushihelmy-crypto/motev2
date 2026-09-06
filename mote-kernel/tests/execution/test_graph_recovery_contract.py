@@ -75,8 +75,8 @@ async def test_recovered_settled_conditional_uses_only_its_authoritative_route(
         inputs={"value": Graph.node_output("source", "value")},
         outputs={},
     )
-    graph.add_conditional_edge("source", "safe", "safe")
-    graph.add_conditional_edge("source", "needs-history", "consumer")
+    graph.add_edge("source", "safe", "safe")
+    graph.add_edge("source", "needs-history", "consumer")
     graph.set_outputs({})
 
     with pytest.raises(AcknowledgementLostError):
@@ -161,8 +161,8 @@ async def test_recovered_future_conditional_checks_every_declared_success_route(
         outputs={},
     )
     graph.add_edge("producer", "decision")
-    graph.add_conditional_edge("decision", "exit", Graph.END)
-    graph.add_conditional_edge("decision", "needs-history", "consumer")
+    graph.add_edge("decision", "exit", Graph.END)
+    graph.add_edge("decision", "needs-history", "consumer")
     graph.set_outputs({})
 
     with pytest.raises(AcknowledgementLostError):
@@ -202,7 +202,7 @@ async def test_recovered_control_target_rejects_a_lost_graph_input_before_mutati
         inputs={"value": Graph.graph_input("value", str)},
         outputs={},
     )
-    graph.add_conditional_edge("source", "consume", "consumer")
+    graph.add_edge("source", "consume", "consumer")
     graph.set_outputs({})
     with pytest.raises(AcknowledgementLostError):
         await graph.run(Graph.values(value="lost"), commit=lose_settlement)
@@ -433,8 +433,8 @@ def loop_graph(operation: NodeCallable[str], definition_id: str) -> Graph[str]:
     graph = Graph[str](definition_id)
     graph.add_node("loop", operation, inputs={}, outputs={})
     graph.add_edge(Graph.START, "loop")
-    graph.add_conditional_edge("loop", "again", "loop")
-    graph.add_conditional_edge("loop", "done", Graph.END)
+    graph.add_edge("loop", "again", "loop")
+    graph.add_edge("loop", "done", Graph.END)
     graph.set_outputs({})
     return graph
 
@@ -597,8 +597,8 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
         inputs={"query": Graph.node_output("produce", "query")},
     )
     graph.add_edge(Graph.START, "produce")
-    graph.add_conditional_edge("produce", "child", "child")
-    graph.add_conditional_edge("produce", "done", Graph.END)
+    graph.add_edge("produce", "child", "child")
+    graph.add_edge("produce", "done", Graph.END)
     graph.add_edge("child", "produce")
     graph.set_outputs({})
     first_commits = CommitLog()

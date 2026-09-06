@@ -175,8 +175,8 @@ async def test_multiple_causal_inputs_read_the_same_exact_predecessor_publicatio
         outputs={"left": int, "right": int},
     )
     graph.add_edge("initialize", "loop")
-    graph.add_conditional_edge("loop", "continue", "loop")
-    graph.add_conditional_edge("loop", "done", Graph.END)
+    graph.add_edge("loop", "continue", "loop")
+    graph.add_edge("loop", "done", Graph.END)
     graph.set_outputs({"value": Graph.node_output("loop", "left")})
 
     result = await graph.run(Graph.values(left_seed=1, right_seed=100))
@@ -383,8 +383,8 @@ async def test_multi_node_cycle_uses_the_actual_predecessor_at_every_hop() -> No
     graph.add_edge("initialize", "a")
     graph.add_edge("a", "b")
     graph.add_edge("b", "c")
-    graph.add_conditional_edge("c", "again", "a")
-    graph.add_conditional_edge("c", "done", Graph.END)
+    graph.add_edge("c", "again", "a")
+    graph.add_edge("c", "done", Graph.END)
     graph.set_outputs({"value": Graph.node_output("c", "value")})
 
     result = await graph.run(Graph.values(seed=0))
@@ -426,8 +426,8 @@ async def test_shared_node_reads_the_output_of_the_branch_that_actually_activate
         inputs={"request": Graph.node_output("hook_request")},
         outputs={"result": str},
     )
-    graph.add_conditional_edge("decision", "left", "left")
-    graph.add_conditional_edge("decision", "right", "right")
+    graph.add_edge("decision", "left", "left")
+    graph.add_edge("decision", "right", "right")
     graph.add_edge("left", "hook")
     graph.add_edge("right", "hook")
     graph.set_outputs({"result": Graph.node_output("hook", "result")})
@@ -457,8 +457,8 @@ async def test_same_predecessor_routes_share_one_exact_causal_publication(select
         inputs={"request": Graph.node_output("hook_request")},
         outputs={"result": str},
     )
-    graph.add_conditional_edge("source", "left", "hook")
-    graph.add_conditional_edge("source", "right", "hook")
+    graph.add_edge("source", "left", "hook")
+    graph.add_edge("source", "right", "hook")
     graph.set_outputs({"result": Graph.node_output("hook", "result")})
 
     result = await graph.run(Graph.values())
@@ -560,8 +560,8 @@ async def test_nested_causal_loop_reuses_child_family_owner_and_local_publicatio
         outputs={"value": int},
     )
     child.add_edge("initialize", "loop")
-    child.add_conditional_edge("loop", "again", "loop")
-    child.add_conditional_edge("loop", "done", Graph.END)
+    child.add_edge("loop", "again", "loop")
+    child.add_edge("loop", "done", Graph.END)
     child.set_outputs({"value": child.node_output("loop", "value")})
 
     parent = Graph[int]("predecessor.nested-loop.parent")
@@ -641,9 +641,9 @@ async def test_shared_nested_node_reads_each_actual_predecessor_across_rounds() 
     )
     parent.add_edge("initialize", "hook")
     parent.add_edge("hook", "route")
-    parent.add_conditional_edge("route", "left", "left")
-    parent.add_conditional_edge("route", "right", "right")
-    parent.add_conditional_edge("route", "done", "finish")
+    parent.add_edge("route", "left", "left")
+    parent.add_edge("route", "right", "right")
+    parent.add_edge("route", "done", "finish")
     parent.add_edge("left", "hook")
     parent.add_edge("right", "hook")
     parent.set_outputs({"result": parent.node_output("finish", "result")})

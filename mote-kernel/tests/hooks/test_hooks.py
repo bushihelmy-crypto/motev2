@@ -24,10 +24,11 @@ from mote_kernel.hooks.contract import (
     HookRequest,
     HookResult,
     HookStageResult,
+    HookTransitionAdmission,
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage, hook_definition_id
 from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
-from mote_kernel.invocation import Invocation, InvocationAdmissionError, InvocationTypeError
+from mote_kernel.invocation import Invocation, InvocationAdmissionError, InvocationBoundaryError, InvocationTypeError
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 
@@ -60,6 +61,33 @@ class Increment:
 class InvocationCall:
     config: PriorityConfig
     request: HookRequest[str, Counter]
+
+
+@dataclass(frozen=True, slots=True)
+class TransitionCall:
+    request: HookRequest[str, Counter]
+    result: HookStageResult[str, Increment]
+
+
+class RecordingTransitionAdmission:
+    def __init__(self, reject_rank: int | None = None) -> None:
+        self.reject_rank = reject_rank
+        self.calls: list[TransitionCall] = []
+        self.failure = RuntimeError("transition rejected")
+
+    def admit_transition(
+        self,
+        request: HookRequest[str, Counter],
+        result: HookStageResult[str, Increment],
+        /,
+    ) -> None:
+        self.calls.append(TransitionCall(request, result))
+        if len(self.calls) == self.reject_rank:
+            raise self.failure
+
+
+class NonCallableTransitionAdmission:
+    admit_transition = None
 
 
 class ConfigSource:
@@ -213,6 +241,20 @@ class RaisingAdmissionErrorRuntime:
         raise self.error from self.cause
 
 
+class RaisingBoundaryErrorRuntime:
+    def __init__(self) -> None:
+        self.calls: list[InvocationCall] = []
+        self.error = InvocationBoundaryError("runtime boundary failure")
+
+    async def invoke(
+        self,
+        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        /,
+    ) -> HookStageResult[str, Increment]:
+        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
+        raise self.error
+
+
 class InvalidResultRuntime:
     def __init__(self, invalid_rank: int) -> None:
         self.invalid_rank = invalid_rank
@@ -339,8 +381,17 @@ def _node(
     return HookNode(_slot(), source, loader, invocation, _admission())
 
 
-def _admission() -> HookPayloadAdmission[Config, PriorityConfig, str, Counter, Increment]:
-    return HookPayloadAdmission(Config, PriorityConfig, str, Counter, Increment)
+def _admission(
+    transition_admission: HookTransitionAdmission[str, Counter, Increment] | None = None,
+) -> HookPayloadAdmission[Config, PriorityConfig, str, Counter, Increment]:
+    return HookPayloadAdmission(
+        Config,
+        PriorityConfig,
+        str,
+        Counter,
+        Increment,
+        transition_admission,
+    )
 
 
 def _request(value: str = "x") -> HookRequest[str, Counter]:
@@ -448,6 +499,59 @@ async def test_hook_preserves_stage_command_order_and_duplicates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concrete_transition_admission_checks_every_priority_transition() -> None:
+    transition = RecordingTransitionAdmission()
+    runtime = SerialRuntime()
+    node = HookNode(
+        _slot(),
+        ConfigSource(_config()),
+        PlanLoader(),
+        runtime,
+        _admission(transition),
+    )
+
+    completion = _completion(await node.run(Graph.values(request=_request())))
+
+    assert completion.value == "x1a2b3c"
+    assert tuple(call.request.value for call in transition.calls) == (
+        "x",
+        "x1a",
+        "x1a2b",
+    )
+    assert tuple(call.result.value for call in transition.calls) == (
+        "x1a",
+        "x1a2b",
+        "x1a2b3c",
+    )
+    assert tuple(call.result.commands for call in transition.calls) == (
+        (Increment(1),),
+        (Increment(2),),
+        (Increment(3),),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject_rank", [1, 2, 3])
+async def test_transition_admission_failure_stops_before_the_next_priority(reject_rank: int) -> None:
+    transition = RecordingTransitionAdmission(reject_rank)
+    runtime = SerialRuntime()
+    node = HookNode(
+        _slot(),
+        ConfigSource(_config()),
+        PlanLoader(),
+        runtime,
+        _admission(transition),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await node.run(Graph.values(request=_request()))
+
+    assert raised.value is transition.failure
+    assert tuple(call.config.rank for call in runtime.calls) == tuple(range(1, reject_rank + 1))
+    assert len(transition.calls) == reject_rank
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure_rank", "expected_ranks"),
     [
@@ -487,6 +591,17 @@ async def test_hook_port_does_not_translate_an_invocation_admission_error() -> N
     runtime = RaisingAdmissionErrorRuntime()
 
     with pytest.raises(InvocationAdmissionError) as raised:
+        await _node(ConfigSource(_config()), PlanLoader(), runtime).run(Graph.values(request=_request()))
+
+    assert raised.value is runtime.error
+    assert tuple(call.config.rank for call in runtime.calls) == (1,)
+
+
+@pytest.mark.asyncio
+async def test_hook_port_preserves_an_invocation_boundary_error() -> None:
+    runtime = RaisingBoundaryErrorRuntime()
+
+    with pytest.raises(InvocationBoundaryError) as raised:
         await _node(ConfigSource(_config()), PlanLoader(), runtime).run(Graph.values(request=_request()))
 
     assert raised.value is runtime.error
@@ -613,6 +728,10 @@ async def test_hook_node_composes_as_a_nested_graph() -> None:
     loader = PlanLoader()
     runtime = SerialRuntime()
     hook = _node(source, loader, runtime)
+    assert type(hook.payload_admission) is HookPayloadAdmission
+    result_ref = hook.output_ref("p3", "result")
+    assert result_ref.node_id == GraphNodeId("p3")
+    assert result_ref.output_name == "result"
     parent = Graph[HookGraphValue]("react.parent")
     request_type = cast(type[HookGraphValue], HookRequest)
     parent.add_node(
@@ -620,13 +739,37 @@ async def test_hook_node_composes_as_a_nested_graph() -> None:
         hook,
         inputs={"request": Graph.graph_input("request", request_type)},
     )
-    parent.set_outputs({"result": Graph.node_output("hook", "result")})
+    parent_result_ref = parent.output_ref("hook", "result")
+    assert result_ref.descriptor is parent_result_ref.descriptor
+    parent.set_outputs({"result": parent_result_ref})
 
     completion = _completion(await parent.run(Graph.values(request=_request())))
 
     assert completion.value == "x1a2b3c"
     with pytest.raises(GraphValidationError, match="immutable"):
         hook.set_outputs({"result": Graph.node_output("p3", "result")})
+
+
+@pytest.mark.asyncio
+async def test_hook_completion_exports_the_originating_node_route() -> None:
+    hook = _node(ConfigSource(_config()), PlanLoader(), SerialRuntime())
+    parent = Graph[HookGraphValue]("hook.route.parent")
+    request_type = cast(type[HookGraphValue], HookRequest)
+    parent.add_node(
+        "hook",
+        hook,
+        inputs={"request": Graph.graph_input("request", request_type)},
+    )
+    parent.add_edge("hook", "origin", Graph.END)
+    parent.set_outputs({"result": Graph.node_output("hook", "result")})
+
+    request = HookRequest("x", Counter(1), GraphNodeId("origin"))
+    result = await parent.run(Graph.values(request=request))
+    assert isinstance(result, Graph.CompletedResult)
+    completion = _completion(result)
+
+    assert completion.value == "x1a2b3c"
+    assert result.state.completion_route == "origin"
 
 
 @pytest.mark.asyncio
@@ -796,6 +939,14 @@ def test_plan_and_result_validate_their_minimal_nominal_boundaries() -> None:
         HookResult("value", cast(tuple[Increment, ...], []))
 
 
+def test_request_and_result_reject_noncanonical_node_ids() -> None:
+    invalid_node_id = cast(GraphNodeId, "bad\nnode")
+    with pytest.raises(HookContractError, match="canonical GraphNodeId"):
+        HookRequest("value", Counter(1), invalid_node_id)
+    with pytest.raises(HookContractError, match="canonical GraphNodeId"):
+        HookResult("value", node_id=invalid_node_id)
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
@@ -813,6 +964,18 @@ def test_payload_admission_rejects_erased_descriptor_types(field: str, replaceme
 
     with pytest.raises(HookContractError, match=f"hook {field} type must be one concrete nominal class"):
         HookPayloadAdmission(*types)  # type: ignore[arg-type]
+
+
+def test_payload_admission_rejects_invalid_transition_admission_contracts() -> None:
+    with pytest.raises(HookContractError, match="HookTransitionAdmission"):
+        _admission(cast(HookTransitionAdmission[str, Counter, Increment], object()))
+    with pytest.raises(HookContractError, match="HookTransitionAdmission"):
+        _admission(
+            cast(
+                HookTransitionAdmission[str, Counter, Increment],
+                NonCallableTransitionAdmission(),
+            )
+        )
 
 
 def test_payload_admission_rejects_malformed_nominal_result_objects() -> None:

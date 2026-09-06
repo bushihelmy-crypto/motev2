@@ -418,8 +418,8 @@ async def test_conditional_frontier_admits_only_the_selected_resource_target() -
             outputs={"value": str},
             resources=("file",),
         )
-    graph.add_conditional_edge("route", "left", "left")
-    graph.add_conditional_edge("route", "right", "right")
+    graph.add_edge("route", "left", "left")
+    graph.add_edge("route", "right", "right")
     graph.set_outputs({})
     commits = CommitLog()
 
@@ -470,10 +470,10 @@ async def test_conditional_resource_branch_waits_with_its_sibling_before_join(
     graph.add_node("shared", shared, inputs={}, outputs={})
     graph.add_node("target", target, inputs={}, outputs={})
     graph.add_edge("choose", "ordinary")
-    graph.add_conditional_edge("choose", "left", "left")
-    graph.add_conditional_edge("choose", "right", "right")
-    graph.add_conditional_edge("left", "go", "shared")
-    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_edge("choose", "left", "left")
+    graph.add_edge("choose", "right", "right")
+    graph.add_edge("left", "go", "shared")
+    graph.add_edge("right", "go", "shared")
     graph.add_join(("ordinary", "shared"), "target")
     graph.set_outputs({})
 

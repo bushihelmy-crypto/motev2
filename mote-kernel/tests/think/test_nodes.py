@@ -3,24 +3,27 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Never, cast
+from typing import Never, TypeVar, cast
 
 import pytest
 
-from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
 from mote_kernel.think.context import ContextNode
 from mote_kernel.think.contract import (
+    CommandNodeInput,
     CommandStep,
     CompactedContext,
+    CompactNodeInput,
     CompactRequest,
     CompactStep,
     ContextFrame,
+    ContextNodeInput,
     ContextRequest,
     ContextStep,
+    InferenceNodeInput,
     InferenceRequest,
     InferenceResult,
     InferenceStep,
@@ -53,10 +56,54 @@ COMPACTED: CompactedContext[tuple[str, ...]] = CompactedContext(("history",), 1)
 INFERENCE: InferenceResult[str] = InferenceResult("answer")
 CORE: ThinkCoreResult[str] = ThinkCoreResult("command")
 MODEL = ModelBinding("provider", "model", 1)
+StepT = TypeVar("StepT", bound=ThinkStep)
 
 
-def _result(step: ThinkStep) -> HookResult[ThinkFrame[ThinkStep, State], HookGraphValue]:
+def _result(step: StepT) -> HookResult[ThinkFrame[StepT, State], HookGraphValue]:
     return HookResult(ThinkFrame(step, REQUEST.hook_state), ())
+
+
+def _context_input(result: object) -> ContextNodeInput[Payload, State, str, str, str, HookGraphValue]:
+    return ContextNodeInput(
+        REQUEST,
+        cast(HookResult[ThinkFrame[PromptStep[str, str, str], State], HookGraphValue], result),
+    )
+
+
+def _compact_input(
+    result: object,
+) -> CompactNodeInput[State, str, str, str, tuple[str, ...], HookGraphValue]:
+    return CompactNodeInput(
+        cast(
+            HookResult[ThinkFrame[ContextStep[str, str, str, tuple[str, ...]], State], HookGraphValue],
+            result,
+        )
+    )
+
+
+def _inference_input(
+    result: object,
+) -> InferenceNodeInput[State, str, str, str, tuple[str, ...], tuple[str, ...], HookGraphValue]:
+    return InferenceNodeInput(
+        cast(
+            HookResult[
+                ThinkFrame[CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], State],
+                HookGraphValue,
+            ],
+            result,
+        )
+    )
+
+
+def _command_input(
+    result: object,
+) -> CommandNodeInput[State, str, str, str, tuple[str, ...], str, HookGraphValue]:
+    return CommandNodeInput(
+        cast(
+            HookResult[ThinkFrame[InferenceStep[str, str, str, tuple[str, ...], str], State], HookGraphValue],
+            result,
+        )
+    )
 
 
 class StagePorts:
@@ -187,9 +234,9 @@ async def test_context_node_builds_one_request_and_next_frame() -> None:
     node = _context_node(ports)
     prompt_step = PromptStep(PROMPT)
 
-    output = await node(Graph.values(request=REQUEST, hook_result=_result(prompt_step)))
+    output = await node(_context_input(_result(prompt_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.state is REQUEST.hook_state
     assert hook_request.node_id == GraphNodeId("context")
     step = cast(ContextStep[str, str, str, tuple[str, ...]], hook_request.value.step)
@@ -204,9 +251,9 @@ async def test_compact_node_builds_one_request_and_next_frame() -> None:
     node = _compact_node(ports)
     context_step = ContextStep(PROMPT, CONTEXT)
 
-    output = await node(Graph.values(hook_result=_result(context_step)))
+    output = await node(_compact_input(_result(context_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("compact")
     step = cast(CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], hook_request.value.step)
     assert step.compacted is COMPACTED
@@ -220,9 +267,9 @@ async def test_inference_node_captures_the_exact_model_binding() -> None:
     node = _inference_node(ports)
     compact_step = CompactStep(PROMPT, CONTEXT, COMPACTED)
 
-    output = await node(Graph.values(hook_result=_result(compact_step)))
+    output = await node(_inference_input(_result(compact_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("inference")
     step = cast(InferenceStep[str, str, str, tuple[str, ...], str], hook_request.value.step)
     assert step.inference is INFERENCE
@@ -239,9 +286,9 @@ async def test_command_node_only_structures_the_inference_result() -> None:
     node = _command_node(ports)
     inference_step = InferenceStep(PROMPT, COMPACTED, INFERENCE)
 
-    output = await node(Graph.values(hook_result=_result(inference_step)))
+    output = await node(_command_input(_result(inference_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("command")
     assert type(hook_request.value.step) is not InferenceStep
     assert type(hook_request.value.step) is not PromptStep
@@ -354,37 +401,25 @@ def _command_with_port(port: object) -> object:
     return _command_node(port)
 
 
-def _bad_context_values() -> Graph.Values[HookGraphValue]:
-    return Graph.values(request=REQUEST, hook_result=cast(HookGraphValue, object()))
-
-
-def _bad_later_values() -> Graph.Values[HookGraphValue]:
-    return Graph.values(hook_result=cast(HookGraphValue, object()))
-
-
-NodeOperation = Callable[[Graph.Values[HookGraphValue]], Awaitable[Graph.Values[HookGraphValue]]]
+NodeOperation = Callable[[object], Awaitable[object]]
 
 
 def _operation(node: object) -> NodeOperation:
     return cast(NodeOperation, node)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("node_factory", "values"),
+    "input_factory",
     [
-        (_context_factory, _bad_context_values),
-        (_compact_factory, _bad_later_values),
-        (_inference_factory, _bad_later_values),
-        (_command_factory, _bad_later_values),
+        _context_input,
+        _compact_input,
+        _inference_input,
+        _command_input,
     ],
 )
-async def test_non_prompt_stage_nodes_reject_non_hook_results(
-    node_factory: Callable[[], object],
-    values: Callable[[], Graph.Values[HookGraphValue]],
-) -> None:
-    with pytest.raises(ThinkContractError, match="input must be a HookResult"):
-        await _operation(node_factory())(values())
+def test_non_prompt_stage_inputs_reject_non_hook_results(input_factory: Callable[[object], object]) -> None:
+    with pytest.raises(ThinkContractError, match="HookResult"):
+        input_factory(object())
 
 
 @pytest.mark.asyncio
@@ -393,106 +428,103 @@ async def test_context_node_rejects_wrong_request_frame_and_state() -> None:
     prompt_result = _result(PromptStep(PROMPT))
 
     with pytest.raises(ThinkContractError, match="ThinkRequest"):
-        await node(Graph.values(request=cast(Never, object()), hook_result=prompt_result))
+        ContextNodeInput(cast(Never, object()), prompt_result)
     with pytest.raises(ThinkContractError, match="ThinkFrame"):
-        await node(Graph.values(request=REQUEST, hook_result=HookResult(cast(Never, object()), ())))
+        await node(_context_input(HookResult(cast(Never, object()), ())))
     wrong_state = ThinkFrame(PromptStep(PROMPT), State(2))
     with pytest.raises(ThinkContractError, match="state does not match"):
-        await node(Graph.values(request=REQUEST, hook_result=HookResult(wrong_state, ())))
+        await node(_context_input(HookResult(wrong_state, ())))
     with pytest.raises(ThinkContractError, match="PromptStep"):
-        await node(Graph.values(request=REQUEST, hook_result=_result(ContextStep(PROMPT, CONTEXT))))
+        await node(_context_input(_result(ContextStep(PROMPT, CONTEXT))))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("node_factory", "step", "message"),
+    ("node_factory", "input_factory", "step", "message"),
     [
-        (_compact_factory, PromptStep(PROMPT), "ContextStep"),
-        (_inference_factory, ContextStep(PROMPT, CONTEXT), "CompactStep"),
-        (_command_factory, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceStep"),
+        (_compact_factory, _compact_input, PromptStep(PROMPT), "ContextStep"),
+        (_inference_factory, _inference_input, ContextStep(PROMPT, CONTEXT), "CompactStep"),
+        (_command_factory, _command_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceStep"),
     ],
 )
 async def test_later_stage_nodes_reject_wrong_step(
     node_factory: Callable[[], object],
+    input_factory: Callable[[object], object],
     step: ThinkStep,
     message: str,
 ) -> None:
     with pytest.raises(ThinkContractError, match=message):
-        await _operation(node_factory())(Graph.values(hook_result=_result(step)))
+        await _operation(node_factory())(input_factory(_result(step)))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("node_factory", "step", "expected_producer", "needs_request"),
+    ("node_factory", "input_factory", "step", "expected_producer"),
     [
-        (_context_factory, PromptStep(PROMPT), "prompt", True),
-        (_compact_factory, ContextStep(PROMPT, CONTEXT), "context", False),
-        (_inference_factory, CompactStep(PROMPT, CONTEXT, COMPACTED), "compact", False),
-        (_command_factory, InferenceStep(PROMPT, COMPACTED, INFERENCE), "inference", False),
+        (_context_factory, _context_input, PromptStep(PROMPT), "prompt"),
+        (_compact_factory, _compact_input, ContextStep(PROMPT, CONTEXT), "context"),
+        (_inference_factory, _inference_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "compact"),
+        (_command_factory, _command_input, InferenceStep(PROMPT, COMPACTED, INFERENCE), "inference"),
     ],
 )
 async def test_stage_nodes_reject_a_hook_result_from_the_wrong_producer(
     node_factory: Callable[[], object],
+    input_factory: Callable[[object], object],
     step: ThinkStep,
     expected_producer: str,
-    needs_request: bool,
 ) -> None:
     wrong_result = HookResult(
         ThinkFrame(step, REQUEST.hook_state),
         (),
         GraphNodeId("wrong-producer"),
     )
-    values: Graph.Values[HookGraphValue]
-    if needs_request:
-        values = Graph.values(request=REQUEST, hook_result=wrong_result)
-    else:
-        values = Graph.values(hook_result=wrong_result)
-
     with pytest.raises(ThinkContractError, match=f"produced by {expected_producer}"):
-        await _operation(node_factory())(values)
+        await _operation(node_factory())(input_factory(wrong_result))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("node_factory", "message"),
+    ("node_factory", "input_factory", "message"),
     [
-        (_compact_factory, "ThinkFrame"),
-        (_inference_factory, "ThinkFrame"),
-        (_command_factory, "ThinkFrame"),
+        (_compact_factory, _compact_input, "ThinkFrame"),
+        (_inference_factory, _inference_input, "ThinkFrame"),
+        (_command_factory, _command_input, "ThinkFrame"),
     ],
 )
 async def test_later_stage_nodes_reject_a_hook_result_without_a_frame(
     node_factory: Callable[[], object],
+    input_factory: Callable[[object], object],
     message: str,
 ) -> None:
     malformed = HookResult(cast(Never, object()), ())
     with pytest.raises(ThinkContractError, match=message):
-        await _operation(node_factory())(Graph.values(hook_result=malformed))
+        await _operation(node_factory())(input_factory(malformed))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("node_factory", "step", "message"),
+    ("node_factory", "input_factory", "step", "message"),
     [
-        (_compact_with_port, ContextStep(PROMPT, CONTEXT), "CompactedContext"),
-        (_inference_with_port, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceResult"),
-        (_command_with_port, InferenceStep(PROMPT, COMPACTED, INFERENCE), "ThinkCoreResult"),
+        (_compact_with_port, _compact_input, ContextStep(PROMPT, CONTEXT), "CompactedContext"),
+        (_inference_with_port, _inference_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceResult"),
+        (_command_with_port, _command_input, InferenceStep(PROMPT, COMPACTED, INFERENCE), "ThinkCoreResult"),
     ],
 )
 async def test_later_stage_nodes_reject_wrong_port_results(
     node_factory: Callable[[object], object],
+    input_factory: Callable[[object], object],
     step: ThinkStep,
     message: str,
 ) -> None:
     ports = BadResultPorts()
     with pytest.raises(ThinkContractError, match=message):
-        await _operation(node_factory(ports))(Graph.values(hook_result=_result(step)))
+        await _operation(node_factory(ports))(input_factory(_result(step)))
 
 
 @pytest.mark.asyncio
 async def test_context_node_rejects_wrong_port_result() -> None:
     with pytest.raises(ThinkContractError, match="ContextFrame"):
-        await _context_node(BadResultPorts())(Graph.values(request=REQUEST, hook_result=_result(PromptStep(PROMPT))))
+        await _context_node(BadResultPorts())(_context_input(_result(PromptStep(PROMPT))))
 
 
 @pytest.mark.asyncio
@@ -508,7 +540,7 @@ async def test_stage_cancellation_is_not_converted_to_a_value() -> None:
 
     node = _inference_node(CancellingInferencePort())
     with pytest.raises(asyncio.CancelledError):
-        await node(Graph.values(hook_result=_result(CompactStep(PROMPT, CONTEXT, COMPACTED))))
+        await node(_inference_input(_result(CompactStep(PROMPT, CONTEXT, COMPACTED))))
 
 
 @pytest.mark.parametrize("token_count", [-1, True, 1.5])

@@ -706,8 +706,8 @@ async def test_interrupt_resume_then_self_loop_starts_a_clean_activation() -> No
 
     graph = interrupt_graph(operation)
     graph.add_edge(Graph.START, "a")
-    graph.add_conditional_edge("a", "again", "a")
-    graph.add_conditional_edge("a", "done", Graph.END)
+    graph.add_edge("a", "again", "a")
+    graph.add_edge("a", "done", Graph.END)
     first = await graph.run(Graph.values(value="initial"))
     assert isinstance(first, Graph.AwaitingResumeResult)
     completed = await graph.run(

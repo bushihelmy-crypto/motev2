@@ -757,23 +757,56 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
     assert isinstance(nested_event.error, NodeExecutionContractError)
     await nested.aclose()
 
-    async def invalid(values: Graph.Values[str]) -> Graph.Outcome[str]:
-        return Graph.success(values, route="unexpected")
+    async def terminal(values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(values, route="exported")
 
-    invalid_graph = compile_graph(
+    terminal_graph = compile_graph(
         GraphDefinition(
-            definition_id=GraphDefinitionId("invalid.graph"),
+            definition_id=GraphDefinitionId("terminal.route"),
             version=GraphDefinitionVersion(1),
-            nodes=(string_node("a", invalid),),
+            nodes=(string_node("a", terminal),),
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
     )
-    invalid_state = reduce_graph_run(
+    terminal_state = reduce_graph_run(
         None,
-        project_start_graph_command(invalid_graph, GraphRunId("run")),
+        project_start_graph_command(terminal_graph, GraphRunId("run")),
     )
+    terminal_scheduler = TaskScheduler(terminal_graph)
+    terminal_scheduler.submit(
+        (
+            ExecutableTask(
+                GraphTask(
+                    task_identity(GraphRunId("run"), 0, GraphNodeId("a")),
+                    GraphRunId("run"),
+                    0,
+                    GraphNodeId("a"),
+                ),
+                executable_input(terminal_graph, terminal_state, "a"),
+            ),
+        )
+    )
+    terminal_event = await terminal_scheduler.next_completion()
+    assert isinstance(terminal_event, TaskSuccess)
+    assert terminal_event.route == "exported"
+    await terminal_scheduler.aclose()
+
+    async def invalid_nonterminal(values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(values, route="unexpected")
+
+    invalid_graph = compile_graph(
+        GraphDefinition(
+            definition_id=GraphDefinitionId("invalid.nonterminal-route"),
+            version=GraphDefinitionVersion(1),
+            nodes=(string_node("a", invalid_nonterminal), string_node("b")),
+            edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),),
+            entries=(),
+            outputs=normalize_graph_output_declarations({}),
+        )
+    )
+    invalid_state = reduce_graph_run(None, project_start_graph_command(invalid_graph, GraphRunId("run")))
     invalid_scheduler = TaskScheduler(invalid_graph)
     invalid_scheduler.submit(
         (

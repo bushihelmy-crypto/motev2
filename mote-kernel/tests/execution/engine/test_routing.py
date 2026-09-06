@@ -301,8 +301,11 @@ def routed(
     return GraphFrontierActivation(GraphNodeId(node_id), RoutedActivationCause(references, occurrence))
 
 
-def expected_complete() -> CompleteGraphFrontier:
-    return CompleteGraphFrontier(0)
+def expected_complete(completion_route: str | None = None) -> CompleteGraphFrontier:
+    return CompleteGraphFrontier(
+        0,
+        completion_route=GraphRouteId(completion_route) if completion_route is not None else None,
+    )
 
 
 def continue_for(*node_ids: str) -> tuple[tuple[GraphNodeId, GraphRoutingContribution], ...]:
@@ -604,7 +607,7 @@ def test_causal_self_loop_terminal_route_completes_without_a_new_activation() ->
 
     command = resolve_routing(graph, state, root_scope_run(state.run_id), frames)
 
-    assert command == CompleteGraphFrontier(state.revision)
+    assert command == CompleteGraphFrontier(state.revision, completion_route=GraphRouteId("done"))
 
 
 def test_causal_self_loop_rejects_a_forged_start_cause_after_round_zero() -> None:
@@ -716,20 +719,18 @@ def test_routing_validator_rejects_topology_incompatible_contribution() -> None:
             GraphNodeId("a"),
             SelectGraphRoute(GraphRouteId("unknown")),
         )
-    with pytest.raises(InvalidRoutingCommandError, match="non-conditional"):
-        validate_routing_contribution(
-            topology("a"),
-            GraphNodeId("a"),
-            SelectGraphRoute(GraphRouteId("route")),
-        )
+    # A terminal node without conditional edges may export an opaque route;
+    # its containing nested graph can use that value on its own conditional
+    # edges.
+    validate_routing_contribution(
+        topology("a"),
+        GraphNodeId("a"),
+        SelectGraphRoute(GraphRouteId("route")),
+    )
     with pytest.raises(InvalidRoutingCommandError, match="unknown node"):
         validate_routing_contribution(topology("a"), GraphNodeId("foreign"), ContinueGraphRouting())
-    with pytest.raises(InvalidRoutingCommandError, match="non-conditional"):
-        validate_routing_contribution(
-            topology("a"),
-            GraphNodeId("a"),
-            cast(GraphRoutingContribution, object()),
-        )
+    with pytest.raises(InvalidRoutingCommandError, match="unsupported"):
+        validate_routing_contribution(topology("a"), GraphNodeId("a"), cast(GraphRoutingContribution, object()))
 
 
 def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:

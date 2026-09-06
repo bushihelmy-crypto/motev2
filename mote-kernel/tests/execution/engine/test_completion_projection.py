@@ -19,6 +19,7 @@ from mote_kernel.execution.engine.task import GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
 from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.definition import GraphDefinition
+from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
@@ -31,12 +32,15 @@ from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
+    GraphRouteId,
     GraphRunId,
     GraphRunStatus,
     InterruptedGraphNodeOutcome,
     PendingGraphNode,
+    SelectGraphRoute,
     SettleGraphNode,
     SucceededGraphNode,
+    SucceededGraphNodeOutcome,
     reduce_graph_run,
 )
 
@@ -256,15 +260,26 @@ def test_unknown_canonical_task_cannot_settle_a_pending_task() -> None:
         )
 
 
-def test_success_routing_is_validated_for_the_completed_node() -> None:
+def test_terminal_success_route_is_carried_as_an_exported_completion_route() -> None:
     graph, state, tasks = planned()
 
-    with pytest.raises(InvalidRoutingCommandError):
-        settle_result(
-            graph,
-            leased_state(state),
-            task_success(tasks[0], "output", route="missing"),
-        )
+    command = settle_result(
+        graph,
+        leased_state(state),
+        task_success(tasks[0], "output", route="exported"),
+    )
+
+    assert isinstance(command.outcome, SucceededGraphNodeOutcome)
+    assert command.outcome.routing == SelectGraphRoute(GraphRouteId("exported"))
+
+
+def test_nonterminal_success_route_is_still_rejected_without_conditional_edges() -> None:
+    graph = compiled_graph("a", "b", entries=("a",), edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),))
+    state = running_state(frontier=("a",))
+    task = plan_tasks(graph, state, ExecutionLimits())[0]
+
+    with pytest.raises(InvalidRoutingCommandError, match="terminal"):
+        settle_result(graph, leased_state(state), task_success(task, "output", route="unexpected"))
 
 
 def test_interrupt_projection_uses_the_current_execution_generation() -> None:

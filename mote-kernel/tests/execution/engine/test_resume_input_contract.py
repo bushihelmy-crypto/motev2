@@ -106,7 +106,7 @@ class BytesDecoder:
 
 def callable_node(
     node_id: str,
-    inputs: Mapping[str, GraphInputRef[str] | NodeOutputRef],
+    inputs: Mapping[str, GraphInputRef[str] | NodeOutputRef[str]],
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),

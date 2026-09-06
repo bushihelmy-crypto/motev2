@@ -260,7 +260,7 @@ async def test_conditional_callable_rejects_an_unknown_declared_route_before_set
         inputs={"value": Graph.graph_input("value", str)},
         outputs={"value": str},
     )
-    graph.add_conditional_edge("choose", "known", Graph.END)
+    graph.add_edge("choose", "known", Graph.END)
     graph.set_outputs({"value": Graph.node_output("choose", "value")})
 
     with pytest.raises(Graph.RoutingError, match="unknown conditional route"):
@@ -296,8 +296,8 @@ async def test_public_causal_output_reads_the_immediately_previous_activation_un
         outputs={"value": int},
     )
     graph.add_edge("initialize", "loop")
-    graph.add_conditional_edge("loop", "again", "loop")
-    graph.add_conditional_edge("loop", "done", Graph.END)
+    graph.add_edge("loop", "again", "loop")
+    graph.add_edge("loop", "done", Graph.END)
     graph.set_outputs({"value": Graph.node_output("loop", "value")})
 
     result = await graph.run(Graph.values(seed=0), run_id="public-predecessor-run")
@@ -420,7 +420,7 @@ async def test_missing_control_fails_before_side_effects_and_leaves_the_builder_
     )
     if outgoing == "conditional":
         graph.add_node("visible", visible, inputs={}, outputs={})
-        graph.add_conditional_edge("source", "go", "visible")
+        graph.add_edge("source", "go", "visible")
     else:
         graph.add_edge("source", Graph.END)
     graph.set_outputs({})
@@ -464,8 +464,8 @@ async def test_conditional_control_alone_selects_a_node_output_consumer(route: s
         inputs={"value": Graph.node_output("choose", "value")},
         outputs={},
     )
-    graph.add_conditional_edge("choose", "go", "consume")
-    graph.add_conditional_edge("choose", "stop", Graph.END)
+    graph.add_edge("choose", "go", "consume")
+    graph.add_edge("choose", "stop", Graph.END)
     graph.set_outputs({})
 
     result = await graph.run(Graph.values())
@@ -638,8 +638,8 @@ async def test_node_resources_register_once_in_deterministic_first_seen_order() 
     conditional.add_node("choose", choose, inputs={}, outputs={})
     conditional.add_node("target", empty, inputs={}, outputs={})
     with pytest.raises(Graph.ValidationError, match="invalid boundary direction"):
-        conditional.add_conditional_edge(Graph.START, "next", "target")
-    conditional.add_conditional_edge("choose", "next", "target")
+        conditional.add_edge(Graph.START, "next", "target")
+    conditional.add_edge("choose", "next", "target")
     conditional.set_outputs({})
     assert isinstance(await conditional.run(Graph.values()), Graph.CompletedResult)
 
@@ -691,7 +691,7 @@ async def test_public_builder_supports_conditional_routing_and_joins() -> None:
         },
         outputs={"value": str},
     )
-    graph.add_conditional_edge("decision", "left", "left")
+    graph.add_edge("decision", "left", "left")
     graph.add_join(("left", "side"), "joined")
     graph.set_outputs({"value": Graph.node_output("joined", "value")})
 
@@ -768,10 +768,10 @@ async def test_fanout_conditional_branches_and_join_share_one_activation() -> No
         },
         outputs={"value": str},
     )
-    graph.add_conditional_edge("choose", "left", "left")
-    graph.add_conditional_edge("choose", "right", "right")
-    graph.add_conditional_edge("left", "go", "shared")
-    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_edge("choose", "left", "left")
+    graph.add_edge("choose", "right", "right")
+    graph.add_edge("left", "go", "shared")
+    graph.add_edge("right", "go", "shared")
     graph.add_edge("shared", "left-result")
     graph.add_edge("shared", "right-result")
     graph.add_join(("left-result", "right-result"), "merge")
@@ -825,10 +825,10 @@ async def test_mutually_exclusive_routes_converge_without_repeating_the_shared_n
     graph.add_node("shared", shared, inputs={}, outputs={})
     graph.add_node("target", target, inputs={}, outputs={})
     graph.add_edge("choose", "ordinary")
-    graph.add_conditional_edge("choose", "left", "left")
-    graph.add_conditional_edge("choose", "right", "right")
-    graph.add_conditional_edge("left", "go", "shared")
-    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_edge("choose", "left", "left")
+    graph.add_edge("choose", "right", "right")
+    graph.add_edge("left", "go", "shared")
+    graph.add_edge("right", "go", "shared")
     graph.add_join(("ordinary", "shared"), "target")
     graph.set_outputs({})
 

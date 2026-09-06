@@ -32,8 +32,8 @@ class RuntimeAddNode(Protocol):
         node_id: str,
         operation: NodeCallable[str] | Graph[str],
         *,
-        inputs: Mapping[str, GraphInputRef[str] | NodeOutputRef | type[str]],
-        outputs: Mapping[str, type[str] | GraphInputRef[str] | NodeOutputRef] | None = None,
+        inputs: Mapping[str, GraphInputRef[str] | NodeOutputRef[str] | type[str]],
+        outputs: Mapping[str, type[str] | GraphInputRef[str] | NodeOutputRef[str]] | None = None,
         resources: tuple[str, ...] = (),
     ) -> Graph[str]: ...
 
@@ -111,12 +111,12 @@ def test_builder_local_failures_leave_a_clean_retry_surface() -> None:
         )
 
 
-class ReentrantOutputs(Mapping[str, GraphInputRef[str] | NodeOutputRef]):
+class ReentrantOutputs(Mapping[str, GraphInputRef[str] | NodeOutputRef[str]]):
     def __init__(self, graph: Graph[str]) -> None:
         self._graph = graph
         self._entered = False
 
-    def __getitem__(self, key: str) -> GraphInputRef[str] | NodeOutputRef:
+    def __getitem__(self, key: str) -> GraphInputRef[str] | NodeOutputRef[str]:
         raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:

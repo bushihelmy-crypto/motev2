@@ -5,7 +5,7 @@ import pytest
 import mote_kernel.execution.graph.values as values_owner
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValueAdmissionError
-from mote_kernel.execution.graph.ports import normalize_output_declarations
+from mote_kernel.execution.graph.ports import NominalTypeDescriptor, normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
     NamedValue,
@@ -15,6 +15,7 @@ from mote_kernel.execution.graph.values import (
     _admit_node_input_frame,
     _admit_node_output_frame,
     _frame_value,
+    _frame_value_typed,
     _make_graph_input_frame,
     _make_node_input_frame,
 )
@@ -91,3 +92,34 @@ def test_frame_value_rejects_a_name_absent_from_the_compiled_descriptor() -> Non
 
     with pytest.raises(GraphValueAdmissionError, match="does not contain"):
         _frame_value(frame, "missing")
+
+
+def test_frame_value_typed_restores_the_port_descriptor_type() -> None:
+    declarations = normalize_output_declarations({"value": int})
+    frame = _make_node_input_frame((NamedValue("value", 7),), declarations)
+
+    value = _frame_value_typed(frame, "value", declarations.entries[0].descriptor)
+
+    assert value == 7
+
+
+def test_frame_value_typed_repeats_exact_admission_at_the_adapter_boundary() -> None:
+    declarations = normalize_output_declarations({"value": int})
+    frame = _make_node_input_frame((NamedValue("value", 7),), declarations)
+    wrong = normalize_output_declarations({"value": str}).entries[0].descriptor
+
+    with pytest.raises(GraphValueAdmissionError, match=r"node input value.*exact declared type"):
+        _frame_value_typed(frame, "value", wrong)
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    (
+        NominalTypeDescriptor(cast(type[int], object)),
+        NominalTypeDescriptor(cast(type[int], list)),
+        cast(NominalTypeDescriptor[int], object()),
+    ),
+)
+def test_admit_exact_rejects_a_malformed_descriptor(descriptor: NominalTypeDescriptor[int]) -> None:
+    with pytest.raises(GraphValueAdmissionError, match="malformed nominal descriptor"):
+        values_owner.admit_exact(1, descriptor)

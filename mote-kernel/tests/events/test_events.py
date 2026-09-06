@@ -415,7 +415,7 @@ async def test_each_conditional_node_still_has_exactly_one_settlement_reference(
     graph = Graph[str]("events.conditional")
     graph.add_node("choose", choose, inputs={}, outputs={})
     graph.add_node("target", target, inputs={}, outputs={})
-    graph.add_conditional_edge("choose", "approved", "target")
+    graph.add_edge("choose", "approved", "target")
     graph.set_outputs({})
     persistence = RecordingPersistence()
 

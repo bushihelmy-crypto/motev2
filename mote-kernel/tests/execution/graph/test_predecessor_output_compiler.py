@@ -22,7 +22,7 @@ from mote_kernel.execution.graph.ports import (
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId, GraphRouteId
 
 Value: TypeAlias = str | int
-InputRef: TypeAlias = GraphInputRef[Value] | NodeOutputRef | PredecessorOutputRef
+InputRef: TypeAlias = GraphInputRef[Value] | NodeOutputRef[Value] | PredecessorOutputRef[Value]
 
 
 async def identity(values: Graph.Values[Value], /) -> Graph.Values[Value]:

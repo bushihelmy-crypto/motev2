@@ -15,7 +15,6 @@ from mote_kernel.execution.engine.frontier import FrontierPreparation
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
-    GraphValidationError,
     GraphValueAdmissionError,
     NodeExecutionContractError,
     ResultCollectionError,
@@ -24,7 +23,6 @@ from mote_kernel.execution.errors import (
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import fresh_root
 from mote_kernel.execution.graph.compiler import compile_graph
-from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
@@ -88,7 +86,6 @@ from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
-    GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -125,7 +122,7 @@ def node(
     node_id: str,
     operation: NodeCallable[str] = echo,
     *,
-    inputs: dict[str, GraphInputRef[str] | NodeOutputRef] | None = None,
+    inputs: dict[str, GraphInputRef[str] | NodeOutputRef[str]] | None = None,
     resources: tuple[ResourceId, ...] = (),
 ) -> CallableNodeDefinition[str]:
     bindings = {"value": Graph.graph_input("value", str)} if inputs is None else inputs
@@ -883,51 +880,28 @@ async def test_prepare_rejects_an_empty_resource_admission_projection(
         executor.prepare(string_request(graph, state, "input"))
 
 
-async def test_nested_conditional_source_is_rejected_at_compile_time() -> None:
-    child = child_definition("nested.error.child")
-    with pytest.raises(GraphValidationError, match=r"nested.*conditional"):
-        graph_with_nodes(
-            nested_node("nested", child),
-            edges=(ConditionalEdge(GraphNodeId("nested"), GraphRouteId("done"), END),),
-            definition_id="nested.error.parent",
-        )
-
-
-async def test_nested_invalid_completion_enters_error_draining() -> None:
+async def test_nested_graph_terminal_route_drives_parent_conditional_edge() -> None:
     calls = 0
-    commits: list[Graph.Transition[str]] = []
 
-    async def leaf(values: Graph.Values[str]) -> Graph.Values[str]:
+    async def leaf(_values: Graph.Values[str]) -> Graph.Outcome[str]:
         nonlocal calls
         calls += 1
-        return values
+        return Graph.success(Graph.values(), route="done")
 
-    async def commit(transition: Graph.Transition[str], /) -> Graph.State:
-        commits.append(transition)
-        return transition.candidate_state
+    child = Graph[str]("nested.route.child")
+    child.add_node("leaf", leaf, inputs={}, outputs={})
+    child.set_outputs({})
 
-    child = Graph[str]("nested.invalid-completion.child")
-    child.add_node(
-        "leaf",
-        leaf,
-        inputs={"value": Graph.graph_input("value", str)},
-        outputs={"value": str},
-    )
-    child.set_outputs({"value": Graph.node_output("leaf", "value")})
-    parent = Graph[str]("nested.invalid-completion.parent")
-    parent.add_node(
-        "nested",
-        child,
-        inputs={"value": Graph.graph_input("value", str)},
-    )
-    parent.add_conditional_edge("nested", "done", Graph.END)
+    parent = Graph[str]("nested.route.parent")
+    parent.add_node("nested", child, inputs={})
+    parent.add_edge("nested", "done", Graph.END)
     parent.set_outputs({})
 
-    with pytest.raises(GraphValidationError, match=r"nested.*conditional"):
-        await parent.run(Graph.values(value="input"), commit=commit)
+    result = await parent.run(Graph.values())
 
-    assert calls == 0
-    assert commits == []
+    assert isinstance(result, Graph.CompletedResult)
+    assert calls == 1
+    assert result.state.completion_route == "done"
 
 
 async def test_prepared_claim_remains_bound_to_executor_and_prepared_input() -> None:
