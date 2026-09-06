@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Never, cast
+from typing import Never, Protocol, cast
 
 import pytest
 
@@ -137,6 +137,24 @@ class _HookInvocation:
 
 _ObserveHook = HookNode[_Config, _Priority, ObserveHookEnvelope, _State, _Command]
 _ObserveGraph = ObserveNode[_Config, _Priority, _State, _Command]
+
+
+class _BuilderNode(Protocol):
+    @property
+    def node_id(self) -> GraphNodeId: ...
+
+
+class _NestedBuilderNode(_BuilderNode, Protocol):
+    @property
+    def graph(self) -> Graph[HookGraphValue]: ...
+
+
+class _InspectableObserveGraph(_ObserveGraph):
+    """Test-only adapter exposing the immutable assembly snapshot explicitly."""
+
+    @property
+    def builder_nodes(self) -> tuple[_BuilderNode, ...]:
+        return self._builder_state.nodes
 
 
 @dataclass
@@ -292,7 +310,7 @@ def _hook(
     return HookNode(slot, _ConfigSource(), _PlanLoader(), invocation, admission)
 
 
-def _observe(ports: _Ports, invocation: _HookInvocation) -> _ObserveGraph:
+def _observe(ports: _Ports, invocation: _HookInvocation) -> _InspectableObserveGraph:
     admission = _admission()
     return _observe_with_hook(ports, invocation, _hook("observe.test", invocation, admission), admission)
 
@@ -302,11 +320,11 @@ def _observe_with_hook(
     invocation: _HookInvocation,
     hook: _ObserveHook,
     admission: ObservePayloadAdmission | None = None,
-) -> _ObserveGraph:
+) -> _InspectableObserveGraph:
     if admission is None:
         transition_admission = hook.payload_admission.transition_admission if type(hook) is HookNode else None
         admission = transition_admission if type(transition_admission) is ObservePayloadAdmission else _admission()
-    return ObserveNode(
+    return _InspectableObserveGraph(
         "observe.test",
         queue_port=ports,
         background_task_port=ports,
@@ -356,15 +374,16 @@ make_observe_with_hook = _observe_with_hook
 make_request = _request
 
 
-def builder_node_ids(observe: _ObserveGraph) -> tuple[str, ...]:
+def builder_node_ids(observe: _InspectableObserveGraph) -> tuple[str, ...]:
     # This helper intentionally inspects the private builder snapshot: the
     # test locks the assembly invariant without adding a production
     # introspection API solely for tests.
-    return tuple(str(candidate.node_id) for candidate in observe._builder_state.nodes)  # pyright: ignore[reportPrivateUsage]
+    return tuple(str(candidate.node_id) for candidate in observe.builder_nodes)
 
 
-def builder_hook_is_shared(observe: _ObserveGraph) -> bool:
-    return observe._builder_state.nodes[1].graph is observe.hook  # type: ignore[union-attr]
+def builder_hook_is_shared(observe: _InspectableObserveGraph) -> bool:
+    candidate = cast(_NestedBuilderNode, observe.builder_nodes[1])
+    return candidate.graph is observe.hook
 
 
 @pytest.mark.asyncio

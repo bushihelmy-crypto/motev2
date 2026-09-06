@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Generic, Never, TypeVar, cast
+from typing import Generic, Never, Protocol, TypeVar, cast
 
 import pytest
 
@@ -133,6 +133,24 @@ class _Config:
 @dataclass(frozen=True, slots=True)
 class _PriorityConfig:
     ordinal: int
+
+
+class _BuilderNode(Protocol):
+    @property
+    def node_id(self) -> GraphNodeId: ...
+
+
+class _NestedBuilderNode(_BuilderNode, Protocol):
+    @property
+    def graph(self) -> Graph[HookGraphValue]: ...
+
+
+class _InspectableActGraph(ActNode[_Config, _PriorityConfig, _State, _Command]):
+    """Test-only adapter exposing the immutable assembly snapshot explicitly."""
+
+    @property
+    def builder_nodes(self) -> tuple[CallableNodeDefinition[HookGraphValue] | _NestedBuilderNode, ...]:
+        return self._builder_state.nodes
 
 
 class _ConfigSource:
@@ -662,9 +680,9 @@ def _hook(
     return HookNode(slot, _ConfigSource(), _PlanLoader(), runtime, admission)
 
 
-def _act(ports: _Ports, runtime: _HookRuntime) -> ActNode[_Config, _PriorityConfig, _State, _Command]:
+def _act(ports: _Ports, runtime: _HookRuntime) -> _InspectableActGraph:
     admission = ActPayloadAdmission(_State, _Command)
-    return ActNode(
+    return _InspectableActGraph(
         "act.test",
         resolve_port=ports,
         authorize_port=ports,
@@ -699,10 +717,10 @@ def _assemble(
     )
 
 
-def _builder_node_ids(act: ActNode[_Config, _PriorityConfig, _State, _Command]) -> tuple[str, ...]:
+def _builder_node_ids(act: _InspectableActGraph) -> tuple[str, ...]:
     # Lock the fixed composition without adding production introspection only
     # for tests.
-    return tuple(str(candidate.node_id) for candidate in act._builder_state.nodes)  # pyright: ignore[reportPrivateUsage]
+    return tuple(str(candidate.node_id) for candidate in act.builder_nodes)
 
 
 def test_each_stage_module_exposes_only_its_node() -> None:
@@ -724,17 +742,13 @@ def test_act_builder_contains_exactly_four_business_nodes_and_one_shared_hook() 
         "execute",
         "settle",
     )
-    hook_candidate = act._builder_state.nodes[1]  # pyright: ignore[reportPrivateUsage]
-    assert hook_candidate.graph is act.hook  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+    hook_candidate = cast(_NestedBuilderNode, act.builder_nodes[1])
+    assert hook_candidate.graph is act.hook
 
 
 def test_all_act_business_nodes_use_typed_graph_contracts() -> None:
     act = _act(_Ports(), _HookRuntime())
-    candidates = tuple(
-        candidate
-        for candidate in act._builder_state.nodes  # pyright: ignore[reportPrivateUsage]
-        if isinstance(candidate, CallableNodeDefinition)
-    )
+    candidates = tuple(candidate for candidate in act.builder_nodes if isinstance(candidate, CallableNodeDefinition))
 
     assert len(candidates) == 4
     for candidate in candidates:

@@ -8,7 +8,6 @@ from typing import Never, cast
 
 import pytest
 
-import mote_kernel.observe.contract as observe_contract
 from mote_kernel.hooks.contract import HookRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
@@ -1000,8 +999,25 @@ def test_observation_kind_rejects_a_conflicting_batch() -> None:
 
     with pytest.raises(ObserveContractError, match="conflicting"):
         observation_kind(batch)
+
+    boundary = _boundary()
+    context = ContextAppendReceipt(
+        (DeliveryId("user"),),
+        boundary,
+        boundary,
+        "context",
+        NonConfigObservationFamily.USER,
+    )
+    object.__setattr__(context, "family", cast(Never, object()))
+    receipt = ObservationBatchReceipt(
+        boundary,
+        boundary,
+        None,
+        context,
+        DeliveryAckReference("stream", (DeliveryId("user"),), "ack"),
+    )
     with pytest.raises(ObserveContractError, match="family is invalid"):
-        observe_contract._kind_for_family(cast(Never, object()))  # pyright: ignore[reportPrivateUsage]
+        _ = receipt.current_state
 
 
 def test_request_frame_result_and_ack_are_frozen_slot_values() -> None:
@@ -1018,4 +1034,4 @@ def test_request_frame_result_and_ack_are_frozen_slot_values() -> None:
     for value in values:
         assert "__dict__" not in type(value).__slots__
     with pytest.raises(FrozenInstanceError):
-        request.cursor = _cursor(1)  # type: ignore[misc]
+        request.__setattr__("cursor", _cursor(1))

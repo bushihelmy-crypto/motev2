@@ -108,6 +108,15 @@ def _user_frame() -> ObserveFrame:
     return ObserveFrame(available.batch, available.boundary, _snapshot())
 
 
+def _unknown_hook_stage() -> ObserveHookStage:
+    """Build an enum-shaped provider value that is not a declared stage."""
+
+    stage = str.__new__(ObserveHookStage, "unknown")
+    object.__setattr__(stage, "_name_", "UNKNOWN")
+    object.__setattr__(stage, "_value_", "unknown")
+    return stage
+
+
 def _user_result() -> ObserveResult:
     frame = _user_frame()
     receipt = ObservationBatchReceipt(
@@ -356,7 +365,8 @@ def test_admission_checks_hook_request_state_and_stage_identity() -> None:
         _admission().admit_hook_request(HookRequest(envelope, _State(), GraphNodeId("write_observation")))
 
     with pytest.raises(ObserveContractError, match="stage is unknown"):
-        _admission()._expected_hook_node(cast(Never, object()))  # pyright: ignore[reportPrivateUsage]
+        unknown = ObserveHookEnvelope(_unknown_hook_stage(), GetObservationStageValue(frame), _State())
+        _admission().admit_hook_request(HookRequest(unknown, _State(), GraphNodeId("get_observation")))
 
 
 def test_admission_rejects_abstract_or_mixed_hook_commands() -> None:
