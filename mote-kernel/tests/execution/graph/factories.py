@@ -9,6 +9,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_output_declarations,
 )
 from mote_kernel.execution.graph.topology import CompiledJoin
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphJoinIdentity, GraphNodeId
 
@@ -20,7 +21,7 @@ async def identity(values: Graph.Values[str]) -> Graph.Values[str]:
 def node(node_id: str) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        identity,
+        make_node_invoker(identity),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
     )

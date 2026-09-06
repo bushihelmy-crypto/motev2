@@ -5,7 +5,6 @@ PACKAGE_ROOT = Path(__file__).parents[2] / "src" / "mote_kernel"
 REQUIRED_PACKAGES = frozenset(
     {
         "act",
-        "act/tool_use",
         "events",
         "execution",
         "execution/engine",
@@ -14,10 +13,8 @@ REQUIRED_PACKAGES = frozenset(
         "hooks",
         "logging",
         "loop",
-        "loop/react",
         "observability",
         "observe",
-        "operations",
         "execution/resource",
         "role",
         "role/restore",
@@ -40,10 +37,23 @@ def test_confirmed_kernel_packages_exist() -> None:
     assert not missing, f"missing confirmed Kernel packages: {missing}"
 
 
+def test_act_is_flat_and_stage_modules_are_files() -> None:
+    act_root = PACKAGE_ROOT / "act"
+    assert not (act_root / "tool_use").exists()
+    for module in ("resolve.py", "authorize.py", "execute.py", "settle.py"):
+        assert (act_root / module).is_file()
+    for package in ("resolve", "authorize", "execute", "settle", "route"):
+        assert not (act_root / package).exists()
+
+
 def test_kernel_invocation_is_one_module() -> None:
     assert (PACKAGE_ROOT / "invocation.py").is_file()
     assert not (PACKAGE_ROOT / "invocation" / "__init__.py").exists()
     assert not (PACKAGE_ROOT / "invocation" / "contract.py").exists()
+
+
+def test_loop_has_no_private_react_package() -> None:
+    assert not (PACKAGE_ROOT / "loop" / "react").exists()
 
 
 def test_generic_ownerless_packages_are_forbidden() -> None:

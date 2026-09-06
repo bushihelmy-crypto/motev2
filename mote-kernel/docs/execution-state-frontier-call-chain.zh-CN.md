@@ -142,6 +142,7 @@ family_driver._execute_frontier(...)
               +-- 复用 prepare 阶段的 ExecutableTask / effective input
               +-- TaskScheduler.submit(...)
               |     `-- await node.operation(node_input)
+              |           （NodeCallable；Kernel 节点契约，不是通用 Runtime Invocation）
               |
               +-- TaskSuccess | TaskFailure | TaskInterrupt
               |
@@ -163,7 +164,8 @@ family_driver._execute_frontier(...)
 
 `GraphExecutor.prepare()` 只准备 disposition 和 claim，不执行节点，也不调用 reducer。
 `GraphExecutor.issue_session()` 只验证精确 reducer 后继并签发由 claim 授权的 session，不拥有持久化或 State 变更。
-普通 callable node 的唯一调用点是 `TaskScheduler`。
+普通 `NodeCallable` node 的唯一调用点是 `TaskScheduler`；节点若需要外部能力，沿 owner-defined Port
+再进入 `mote_kernel.invocation.Invocation`，而不是让 Graph 直接解析 Runtime。
 
 ## 5. 并发执行、逐节点提交
 

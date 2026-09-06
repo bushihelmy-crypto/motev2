@@ -359,6 +359,7 @@ def advance_graph_frontier(state: GraphRunState, command: AdvanceGraphFrontier) 
                 )
             ),
             join_progress=command.join_progress,
+            completion_route=None,
         )
     )
 
@@ -379,6 +380,7 @@ def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier
             frontier=GraphFrontierState(()),
             join_progress=(),
             settled_activations=(),
+            completion_route=command.completion_route,
         )
     )
 

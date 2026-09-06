@@ -8,7 +8,7 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import project_graph_outputs
 from mote_kernel.execution.engine.routing import graph_outputs_available, resolve_routing
 from mote_kernel.execution.errors import GraphValueAdmissionError, InvalidRoutingCommandError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.ports import GraphOutputBindings, normalize_graph_output_declarations
 from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.run_context import ScopedFrameIndex
@@ -25,12 +25,12 @@ from mote_kernel.state.graph_state import (
 
 
 def output_graph():
-    return compile_graph(
+    return GraphCompiler(
         graph(
             nodes=(node("source"),),
             outputs=normalize_graph_output_declarations({"value": Graph.node_output("source", "value")}),
         )
-    )
+    ).compile()
 
 
 def test_output_projection_rejects_a_compiled_binding_without_activation_selection() -> None:
@@ -66,12 +66,12 @@ def test_output_projection_reports_a_missing_confirmed_publication() -> None:
 
 
 def test_graph_output_availability_reports_a_missing_admitted_graph_input() -> None:
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         graph(
             nodes=(node("complete"),),
             outputs=normalize_graph_output_declarations({"result": Graph.graph_input("value", str)}),
         )
-    )
+    ).compile()
 
     assert not graph_outputs_available(
         compiled,

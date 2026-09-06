@@ -1,16 +1,22 @@
 """The private HookNode adapter for the shared invocation boundary."""
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 from mote_kernel.hooks.contract import (
+    HookContractError,
     HookInvocationRequest,
     HookPayloadAdmission,
     HookRequest,
     HookStageResult,
 )
 from mote_kernel.hooks.plan import HookPriorityPlan
-from mote_kernel.invocation import Invocation, invoke_strict
+from mote_kernel.invocation import (
+    Invocation,
+    InvocationBoundaryAdmissionError,
+    InvocationTypeContract,
+    invoke_typed,
+)
 
 ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
@@ -40,8 +46,19 @@ class HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
         /,
     ) -> HookStageResult[ValueT, CommandT]:
         invocation_request = self.admission.admit_invocation_request(HookInvocationRequest(plan.config, request))
-        result = await invoke_strict(self.invocation, invocation_request)
-        return self.admission.admit_stage_result(result)
+        request_type = cast(
+            type[HookInvocationRequest[PriorityConfigT, ValueT, StateT]],
+            HookInvocationRequest,
+        )
+        result_type = cast(type[HookStageResult[ValueT, CommandT]], HookStageResult)
+        contract = InvocationTypeContract(request_type, result_type)
+        try:
+            result = await invoke_typed(self.invocation, invocation_request, contract)
+        except InvocationBoundaryAdmissionError as error:
+            raise HookContractError(str(error)) from error
+        admitted = self.admission.admit_stage_result(result)
+        self.admission.admit_transition(request, admitted)
+        return admitted
 
 
 __all__ = ["HookPort"]

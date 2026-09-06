@@ -1,5 +1,6 @@
 import typing
-from typing import cast
+from abc import ABC, abstractmethod
+from typing import Never, Protocol, cast
 
 import pytest
 
@@ -27,6 +28,27 @@ def test_nominal_type_rejects_a_nonclass_declaration() -> None:
 def test_nominal_type_rejects_unbounded_top_types(value_type: type[object]) -> None:
     with pytest.raises(GraphValidationError, match="concrete nominal class"):
         canonical_nominal_type(value_type)
+
+
+@pytest.mark.parametrize("value_type", [list, dict, set, bytearray, memoryview])
+def test_nominal_type_rejects_mutable_container_classes(value_type: type[object]) -> None:
+    with pytest.raises(GraphValidationError, match="concrete nominal class"):
+        canonical_nominal_type(value_type)
+
+
+def test_nominal_type_rejects_protocol_and_abstract_declarations() -> None:
+    class Capability(Protocol):
+        def call(self) -> str: ...
+
+    class AbstractDto(ABC):
+        @abstractmethod
+        def value(self) -> str:
+            """Return one value."""
+
+    with pytest.raises(GraphValidationError, match="concrete nominal class"):
+        canonical_nominal_type(Capability)
+    with pytest.raises(GraphValidationError, match="concrete nominal class"):
+        canonical_nominal_type(AbstractDto)
 
 
 def test_nominal_type_identity_does_not_depend_on_mutable_class_metadata() -> None:
@@ -95,7 +117,7 @@ def test_predecessor_output_name_is_canonicalized_at_the_facade() -> None:
 
 
 def test_predecessor_output_reference_is_only_valid_as_a_node_input() -> None:
-    causal = cast(NodeOutputRef, Graph.node_output("value"))
+    causal = cast(NodeOutputRef[Never], Graph.node_output("value"))
 
     with pytest.raises(GraphValidationError, match="graph output 'value' must bind"):
         normalize_graph_output_declarations({"value": causal})

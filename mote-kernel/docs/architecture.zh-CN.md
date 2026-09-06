@@ -15,6 +15,33 @@ routing、lease、resource、恢复坐标和 revision）。以后增加节点/Ho
 
 `mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面。它在第一次 `run()` 前是 topology builder，第一次运行时完成校验并冻结为 immutable compiled runtime。门面实例不保存 run snapshot、session 或 transient output，因此同一张已组装图可以驱动相互独立的 run，而不会成为第二份状态真相。
 
+### Graph 节点与 Runtime Invocation 的边界
+
+这里有两个容易被混叫成“调用”的概念，但它们不是两条 Graph 执行路径：
+
+```text
+Graph / Execution
+    └─> Kernel-owned NodeCallable ──> TaskScheduler（唯一节点调用点）
+                                      └─> owner-defined Port
+                                           └─> Invocation（需要跨进程/传输时）
+                                                └─> Runtime
+```
+
+`execution.graph.node.NodeCallable` 是 Kernel 节点契约：它描述一个已经装配进图的节点如何消费
+typed frame、产生 Graph outcome；`CallableNodeDefinition` 只保存这个节点程序，运行时由
+`execution.engine.scheduler.TaskScheduler` 统一调用。它不是 Runtime service，也不解析 transport、
+resolver 或外部 operation receipt。
+
+`mote_kernel.invocation.Invocation` 是 Port 到 Runtime 的窄适配契约。它由具体 Port 持有并按该 Port
+自己的 request/result 使用；它不是通用 Graph node runner，Graph 也不直接依赖它。节点需要外部能力时，
+由节点调用 owner-defined Port，Port 再决定是否通过 Invocation 到达 Runtime。这样既保留纯节点的本地
+计算，又让外部能力的 Kernel/Runtime 边界保持显式。
+
+当前 pre-alpha 没有具体的跨进程 Graph worker consumer，因此不在 Graph 中增加 operation registry、
+通用 operation identity 或 callable wrapper。未来若出现远程节点执行的真实 consumer，应新增一个明确
+版本化的 operation binding/resolver，并一次性迁移节点定义；不能在现有 NodeCallable 旁边再铺一条
+隐式 Invocation 执行路径。
+
 `Graph.run()` 从显式传入的 authoritative `GraphRunState` 启动或继续运行。failure、interrupt、skip、节点结果和
 Hook 变化都通过同一个 `GraphRunCommand` 入口处理，不存在第二个状态或 resume runner。未传 commit 回调时，
 `run()` 只在进程内应用纯状态转换；传入回调时，每条 command、candidate 和完整 typed write-set 都交给回调

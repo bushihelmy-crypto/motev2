@@ -83,14 +83,14 @@ def require_scoped_snapshot_matches_graph(
     """Require one snapshot to belong to one compiled scoped run."""
 
     require_snapshot_matches_graph(graph, state)
-    if graph.definition_scope != scope_run.scope or state.run_id != scope_run.graph_run_id:
+    if state.run_id != scope_run.graph_run_id:
         raise SnapshotMismatchError("scope-run coordinate does not match its compiled graph state")
     if not scope_run.scope:
         if state.parent is not None:
             raise SnapshotMismatchError("root graph state cannot carry a parent activation")
         return
     if state.parent is None or state.parent.node_id != scope_run.scope[-1]:
-        raise SnapshotMismatchError("nested graph state does not match its compiled definition scope")
+        raise SnapshotMismatchError("nested graph state does not match its runtime scope")
 
 
 __all__ = ["require_scoped_snapshot_matches_graph", "require_snapshot_matches_graph"]

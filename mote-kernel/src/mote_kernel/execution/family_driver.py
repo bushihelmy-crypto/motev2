@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from contextlib import suppress
 from typing import Generic, TypeAlias, TypeVar, cast, final
 
@@ -102,45 +102,96 @@ _EvidenceReader: TypeAlias = Callable[
     tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]],
 ]
 _EvidencePublisher: TypeAlias = Callable[[ChildStateBinding, ScopedFrameIndex[GraphValueT]], None]
-_ChildWaitResult: TypeAlias = (
-    tuple[
-        GraphBoundary,
-        _ChildTerminal[GraphValueT] | None,
-        ConfirmedChildBoundary[GraphValueT] | None,
-    ]
-    | asyncio.CancelledError
-)
 
 
 @final
-class _ChildHandle(Generic[GraphValueT]):
-    """Opaque drive, fence, abort, and release capabilities for one child call."""
+class _ChildCall(Generic[GraphValueT]):
+    """The explicit lifecycle owner for one nested graph activation."""
 
-    __slots__ = ("_abort", "_drive", "_fence", "_release")
+    __slots__ = ("_owner", "parent", "phase", "position")
 
     def __init__(
         self,
-        drive: Callable[[], Awaitable[_ChildWaitResult[GraphValueT]]],
-        abort: Callable[[GraphAbortReason], Awaitable[None]],
-        fence: Callable[[], Awaitable[None]],
-        release: Callable[[], Awaitable[None]],
+        position: tuple[int, ...],
+        parent: GraphActivationIdentity,
+        phase: _ChildPhase[GraphValueT],
+        owner: _GraphRun[GraphValueT] | None,
     ) -> None:
-        self._drive = drive
-        self._abort = abort
-        self._fence = fence
-        self._release = release
+        if isinstance(phase, AwaitingResume):
+            raise ResultCollectionError("a restored child call must already be terminal")
+        if owner is None and not isinstance(phase, CompletedChild | FailedChild | AbortedChild):
+            raise ResultCollectionError("an active child call requires one live child owner")
+        if owner is not None and not isinstance(phase, ActiveChild):
+            raise ResultCollectionError("a live child owner must enter through the active phase")
+        if phase.parent != parent:
+            raise ResultCollectionError("child call phase does not match its parent activation")
+        self.position = position
+        self.parent = parent
+        self.phase = phase
+        self._owner = owner
 
-    async def drive(self) -> _ChildWaitResult[GraphValueT]:
-        return await self._drive()
+    @property
+    def live(self) -> bool:
+        return self._owner is not None
+
+    def _require_owner(self) -> _GraphRun[GraphValueT]:
+        if self._owner is None:
+            raise ResultCollectionError("child call was already released")
+        return self._owner
+
+    async def drive(self) -> ConfirmedChildBoundary[GraphValueT] | asyncio.CancelledError | None:
+        current = self._require_owner()
+        if not isinstance(self.phase, ActiveChild):
+            raise ResultCollectionError("only an active child call can be driven")
+        try:
+            disposition = await current.drive_quantum()
+        except asyncio.CancelledError as error:
+            if current.consume_commit_origin_cancellation(error):
+                return error
+            raise
+        if isinstance(disposition, AwaitingResume):
+            current.handoff_evidence()
+            self.phase = disposition
+            return None
+        terminal = current.terminal_projection(self.parent)
+        boundary = current.terminal_boundary(self.parent, terminal)
+        if isinstance(disposition, CompletedGraph) and not isinstance(terminal, CompletedChild):
+            raise ResultCollectionError("completed child returned a non-completed terminal projection")
+        if isinstance(disposition, FailedGraph) and not isinstance(terminal, FailedChild):
+            raise ResultCollectionError("failed child returned a non-failed terminal projection")
+        if isinstance(disposition, AbortedGraph) and not isinstance(terminal, AbortedChild):
+            raise ResultCollectionError("aborted child returned a non-aborted terminal projection")
+        current.handoff_evidence()
+        self.phase = terminal
+        return boundary
 
     async def abort(self, reason: GraphAbortReason) -> None:
-        await self._abort(reason)
+        current = self._owner
+        if current is None:
+            return
+        try:
+            await current.abort(reason)
+        finally:
+            if current.state.status is not GraphRunStatus.RUNNING:
+                current.handoff_evidence()
+                self.phase = current.terminal_projection(self.parent)
 
     async def fence(self) -> None:
-        await self._fence()
+        current = self._owner
+        if current is None:
+            return
+        try:
+            await current.fence_after_worker_failure()
+        finally:
+            if current.state.execution is None:
+                current.handoff_evidence()
 
     async def release(self) -> None:
-        await self._release()
+        current = self._owner
+        if current is None:
+            return
+        await current.release()
+        self._owner = None
 
 
 _ChildConstructor: TypeAlias = Callable[
@@ -150,13 +201,7 @@ _ChildConstructor: TypeAlias = Callable[
         GraphInputFrame[GraphValueT],
         tuple[int, ...],
     ],
-    Coroutine[None, None, _ChildHandle[GraphValueT]],
-]
-_ChildCall: TypeAlias = tuple[
-    tuple[int, ...],
-    GraphActivationIdentity,
-    _ChildPhase[GraphValueT],
-    _ChildHandle[GraphValueT] | None,
+    Coroutine[None, None, _ChildCall[GraphValueT]],
 ]
 
 
@@ -174,7 +219,7 @@ def _child_failure_reason(state: GraphRunState) -> str:
 
 
 async def _cleanup_unhanded_child(
-    handle: _ChildHandle[GraphValueT],
+    call: _ChildCall[GraphValueT],
     reason: GraphAbortReason,
     *,
     abort: bool,
@@ -182,9 +227,9 @@ async def _cleanup_unhanded_child(
     async def cleanup() -> None:
         if abort:
             with suppress(BaseException):
-                await handle.abort(reason)
+                await call.abort(reason)
         with suppress(BaseException):
-            await handle.release()
+            await call.release()
 
     cleanup_task = asyncio.create_task(cleanup())
     with suppress(BaseException):
@@ -329,40 +374,25 @@ class _GraphRun(Generic[GraphValueT]):
     def frames(self) -> ScopedFrameIndex[GraphValueT]:
         return self._frames
 
-    def _call_index(self, parent: GraphActivationIdentity) -> int | None:
-        return next((index for index, call in enumerate(self._children) if call[1] == parent), None)
+    def _child_call(self, parent: GraphActivationIdentity) -> _ChildCall[GraphValueT] | None:
+        return next((call for call in self._children if call.parent == parent), None)
 
     def child_position(self, parent: GraphActivationIdentity) -> tuple[int, ...]:
-        if self._call_index(parent) is not None:
+        if self._child_call(parent) is not None:
             raise ResultCollectionError("one parent activation cannot admit more than one child call")
         node_ids = tuple(self._graph.nodes)
         try:
             ordinal = node_ids.index(parent.node_id)
         except ValueError as error:
             raise ResultCollectionError("child activation is not part of the parent definition") from error
-        generation = sum(1 for call in self._children if call[1].node_id == parent.node_id)
+        generation = sum(1 for call in self._children if call.parent.node_id == parent.node_id)
         return (*self._position, ordinal, generation)
 
-    def accept_child_call(
-        self,
-        position: tuple[int, ...],
-        parent: GraphActivationIdentity,
-        phase: _ChildPhase[GraphValueT],
-        handle: _ChildHandle[GraphValueT] | None,
-    ) -> None:
-        if position != self.child_position(parent):
+    def accept_child_call(self, call: _ChildCall[GraphValueT]) -> None:
+        if call.position != self.child_position(call.parent):
             raise ResultCollectionError("child call position does not match its parent activation")
-        self._children.append((position, parent, phase, handle))
-        self._children.sort(key=lambda call: call[0])
-
-    def _replace_child(
-        self,
-        index: int,
-        phase: _ChildPhase[GraphValueT],
-        handle: _ChildHandle[GraphValueT] | None,
-    ) -> None:
-        position, parent, _old_phase, _old_handle = self._children[index]
-        self._children[index] = (position, parent, phase, handle)
+        self._children.append(call)
+        self._children.sort(key=lambda candidate: candidate.position)
 
     def _child_projections(self) -> tuple[ChildProjection[GraphValueT], ...]:
         projections: list[ChildProjection[GraphValueT]] = []
@@ -370,11 +400,11 @@ class _GraphRun(Generic[GraphValueT]):
             if node_id not in self._graph.nested_graphs:
                 continue
             parent = GraphActivationIdentity(self._state.run_id, self._state.superstep, node_id)
-            index = self._call_index(parent)
-            if index is None:
+            call = self._child_call(parent)
+            if call is None:
                 projections.append(MissingChild(parent))
                 continue
-            phase = self._children[index][2]
+            phase = call.phase
             if isinstance(phase, AwaitingResume | ActiveChild):
                 projections.append(ActiveChild(parent))
             else:
@@ -441,10 +471,10 @@ class _GraphRun(Generic[GraphValueT]):
 
     def _install_terminal(
         self,
-        index: int,
+        call: _ChildCall[GraphValueT],
         boundary: ConfirmedChildBoundary[GraphValueT] | None,
     ) -> None:
-        _position, _parent, phase, _handle = self._children[index]
+        phase = call.phase
         if not isinstance(phase, CompletedChild):
             if boundary is not None:
                 raise ResultCollectionError("aborted child cannot provide a completed output boundary")
@@ -475,15 +505,15 @@ class _GraphRun(Generic[GraphValueT]):
                 position,
             )
         )
-        handle, cancellation = await wait_for_owner_task(
+        call, cancellation = await wait_for_owner_task(
             construction,
             self._mark_commit_origin_cancellation,
         )
         try:
-            self.accept_child_call(position, parent, ActiveChild(parent), handle)
+            self.accept_child_call(call)
         except BaseException:
             await _cleanup_unhanded_child(
-                handle,
+                call,
                 GraphAbortReason("nested graph owner handoff failed"),
                 abort=True,
             )
@@ -491,43 +521,27 @@ class _GraphRun(Generic[GraphValueT]):
         if cancellation is not None:
             raise cancellation
 
-    async def _drive_child(self, index: int) -> None:
-        _position, _parent, phase, handle = self._children[index]
-        if handle is None or not isinstance(phase, ActiveChild):
+    async def _drive_child(self, call: _ChildCall[GraphValueT]) -> None:
+        if not isinstance(call.phase, ActiveChild):
             return
-        child_result = await handle.drive()
+        child_result = await call.drive()
         if isinstance(child_result, asyncio.CancelledError):
             self._mark_commit_origin_cancellation(child_result)
             raise child_result
-        disposition, terminal, boundary = child_result
-        if isinstance(disposition, AwaitingResume):
-            if terminal is not None or boundary is not None:
-                raise ResultCollectionError("awaiting child returned terminal evidence")
-            self._replace_child(index, disposition, handle)
-            return
-        if terminal is None:
-            raise ResultCollectionError("terminal child returned no terminal projection")
-        if isinstance(disposition, CompletedGraph) and not isinstance(terminal, CompletedChild):
-            raise ResultCollectionError("completed child returned a non-completed terminal projection")
-        if isinstance(disposition, FailedGraph) and not isinstance(terminal, FailedChild):
-            raise ResultCollectionError("failed child returned a non-failed terminal projection")
-        if isinstance(disposition, AbortedGraph) and not isinstance(terminal, AbortedChild):
-            raise ResultCollectionError("aborted child returned a non-aborted terminal projection")
-        self._replace_child(index, terminal, handle)
-        self._install_terminal(index, boundary)
+        if isinstance(call.phase, CompletedChild | FailedChild | AbortedChild):
+            self._install_terminal(call, child_result)
 
     async def _abort_awaiting_children_after_failure(self) -> bool:
         if not any(isinstance(node.settlement, FailedGraphNode) for node in self._state.frontier.nodes):
             return False
         reason = SUPERSEDED_CHILD_ABORT_REASON
         aborted = False
-        for index, (_position, parent, phase, handle) in enumerate(tuple(self._children)):
-            if not isinstance(phase, AwaitingResume):
+        for call in tuple(self._children):
+            if not isinstance(call.phase, AwaitingResume):
                 continue
-            if handle is None:
-                raise ResultCollectionError("awaiting child has no live owner handle")
-            await handle.abort(reason)
-            self._replace_child(index, AbortedChild(parent, reason), handle)
+            if not call.live:
+                raise ResultCollectionError("awaiting child has no live owner")
+            await call.abort(reason)
             aborted = True
         return aborted
 
@@ -542,11 +556,11 @@ class _GraphRun(Generic[GraphValueT]):
         """
 
         errors: list[BaseException] = []
-        for _position, _parent, phase, handle in tuple(self._children):
-            if handle is None or isinstance(phase, CompletedChild | FailedChild | AbortedChild):
+        for call in tuple(self._children):
+            if not call.live or isinstance(call.phase, CompletedChild | FailedChild | AbortedChild):
                 continue
             try:
-                await handle.fence()
+                await call.fence()
             except BaseException as error:
                 errors.append(error)
         session = self._session
@@ -567,15 +581,12 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def _retire_child(self, result: TaskResult[GraphValueT]) -> None:
         parent = GraphActivationIdentity(result.task.run_id, result.task.superstep, result.task.node_id)
-        index = self._call_index(parent)
-        if index is None:
+        call = self._child_call(parent)
+        if call is None:
             raise ResultCollectionError("settled nested node has no admitted child call")
-        _position, _parent, phase, handle = self._children[index]
-        if not isinstance(phase, CompletedChild | FailedChild | AbortedChild):
+        if not isinstance(call.phase, CompletedChild | FailedChild | AbortedChild):
             raise ResultCollectionError("nested node settlement requires one unretired terminal child")
-        if handle is not None:
-            await handle.release()
-        self._replace_child(index, phase, None)
+        await call.release()
 
     async def _consume_session(
         self,
@@ -715,18 +726,18 @@ class _GraphRun(Generic[GraphValueT]):
             raise
         self._session = session
         try:
-            child_indexes = tuple(
-                index
-                for index, (_position, parent, phase, _handle) in enumerate(self._children)
+            child_calls = tuple(
+                call
+                for call in self._children
                 if (
-                    isinstance(phase, ActiveChild)
-                    and parent.run_id == self._state.run_id
-                    and parent.superstep == self._state.superstep
+                    isinstance(call.phase, ActiveChild)
+                    and call.parent.run_id == self._state.run_id
+                    and call.parent.superstep == self._state.superstep
                 )
             )
             workers = (
                 ("parent", self._consume_session(session, execution.token)),
-                *((f"child:{index}", self._drive_child(index)) for index in child_indexes),
+                *((f"child:{index}", self._drive_child(call)) for index, call in enumerate(child_calls)),
             )
             await self._drive_workers(workers)
         finally:
@@ -758,11 +769,11 @@ class _GraphRun(Generic[GraphValueT]):
                     continue
                 child_workers: list[tuple[str, Coroutine[None, None, None]]] = []
                 for active in disposition.active:
-                    index = self._call_index(active.parent)
-                    if index is None:
+                    call = self._child_call(active.parent)
+                    if call is None:
                         raise ResultCollectionError("active child projection has no admitted child call")
-                    if isinstance(self._children[index][2], ActiveChild):
-                        child_workers.append((f"child:{index}", self._drive_child(index)))
+                    if isinstance(call.phase, ActiveChild):
+                        child_workers.append((f"child:{len(child_workers)}", self._drive_child(call)))
                 if child_workers:
                     await self._drive_workers(tuple(child_workers))
                     continue
@@ -783,7 +794,7 @@ class _GraphRun(Generic[GraphValueT]):
     ) -> tuple[GraphRunState, tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
         if self._parent_activation is not None:
             raise SnapshotMismatchError("child graph evidence cannot be exported as the root")
-        if any(isinstance(phase, ActiveChild) for _position, _parent, phase, _handle in self._children):
+        if any(isinstance(call.phase, ActiveChild) for call in self._children):
             raise SnapshotMismatchError("active child call has no handed-off export evidence")
         descendants, frames = evidence_reader()
         return self._state, descendants, _merge_frames((self._frames, frames))
@@ -804,6 +815,7 @@ class _GraphRun(Generic[GraphValueT]):
                     self._state.superstep,
                     self._frames,
                 ),
+                None if self._state.completion_route is None else str(self._state.completion_route),
             )
         if self._state.status is GraphRunStatus.FAILED:
             return FailedChild(parent, _child_failure_reason(self._state))
@@ -838,11 +850,11 @@ class _GraphRun(Generic[GraphValueT]):
 
     async def abort(self, reason: GraphAbortReason) -> None:
         errors: list[BaseException] = []
-        for _position, _parent, phase, handle in self._children:
-            if handle is None or isinstance(phase, CompletedChild | FailedChild | AbortedChild):
+        for call in self._children:
+            if not call.live or isinstance(call.phase, CompletedChild | FailedChild | AbortedChild):
                 continue
             try:
-                await handle.abort(reason)
+                await call.abort(reason)
             except BaseException as error:
                 errors.append(error)
         if self._session is not None:
@@ -868,13 +880,11 @@ class _GraphRun(Generic[GraphValueT]):
         if self._released:
             return
         errors: list[BaseException] = []
-        for index, call in enumerate(tuple(self._children)):
-            position, parent, phase, handle = call
-            if handle is None:
+        for call in tuple(self._children):
+            if not call.live:
                 continue
             try:
-                await handle.release()
-                self._children[index] = (position, parent, phase, None)
+                await call.release()
             except BaseException as error:
                 errors.append(error)
         if self._session is not None:
@@ -892,6 +902,7 @@ OwnerHandoff: TypeAlias = tuple[_GraphRun[GraphValueT], _EvidenceReader[GraphVal
 
 
 def _make_child_constructor(
+    owner_graph: CompiledGraph[GraphValueT],
     owner_scope_run: ScopeRunCoordinate,
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
@@ -902,10 +913,13 @@ def _make_child_constructor(
         child_graph: CompiledGraph[GraphValueT],
         child_input: GraphInputFrame[GraphValueT],
         position: tuple[int, ...],
-    ) -> _ChildHandle[GraphValueT]:
+    ) -> _ChildCall[GraphValueT]:
+        expected_graph = owner_graph.nested_graphs.get(parent.node_id)
+        if expected_graph is None:
+            raise SnapshotMismatchError("child construction references a non-nested parent activation")
+        if child_graph is not expected_graph:
+            raise SnapshotMismatchError("child construction does not match its parent topology")
         coordinate = child_scope_run_for_activation(owner_scope_run, parent)
-        if child_graph.definition_scope != coordinate.scope:
-            raise SnapshotMismatchError("child construction does not match its parent activation")
         activation = stable_activation(owner_scope_run, parent)
         child_commit = scoped_commit(coordinate, commit)
         command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
@@ -927,7 +941,7 @@ def _make_child_constructor(
                 staged_frames,
                 limits,
                 child_commit,
-                _make_child_constructor(coordinate, limits, commit, evidence_publisher),
+                _make_child_constructor(child_graph, coordinate, limits, commit, evidence_publisher),
                 position,
                 activation,
                 evidence_publisher,
@@ -949,72 +963,9 @@ def _make_child_constructor(
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
             raise
-        return _opaque_handle(child, parent)
+        return _ChildCall(position, parent, ActiveChild(parent), child)
 
     return construct
-
-
-def _opaque_handle(
-    child: _GraphRun[GraphValueT],
-    parent: GraphActivationIdentity,
-) -> _ChildHandle[GraphValueT]:
-    owner: _GraphRun[GraphValueT] | None = child
-    handed_off = False
-
-    def require_owner() -> _GraphRun[GraphValueT]:
-        if owner is None:
-            raise ResultCollectionError("child call handle was already released")
-        return owner
-
-    async def drive() -> _ChildWaitResult[GraphValueT]:
-        nonlocal handed_off
-        current = require_owner()
-        if handed_off:
-            raise ResultCollectionError("child call evidence can only be handed off once")
-        try:
-            disposition = await current.drive_quantum()
-        except asyncio.CancelledError as error:
-            if current.consume_commit_origin_cancellation(error):
-                return error
-            raise
-        if isinstance(disposition, AwaitingResume):
-            current.handoff_evidence()
-            handed_off = True
-            return disposition, None, None
-        terminal = current.terminal_projection(parent)
-        boundary = current.terminal_boundary(parent, terminal)
-        current.handoff_evidence()
-        handed_off = True
-        return disposition, terminal, boundary
-
-    async def fence() -> None:
-        current = owner
-        if current is None:
-            return
-        try:
-            await current.fence_after_worker_failure()
-        finally:
-            if current.state.execution is None:
-                current.handoff_evidence()
-
-    async def abort(reason: GraphAbortReason) -> None:
-        current = owner
-        if current is None:
-            return
-        try:
-            await current.abort(reason)
-        finally:
-            if current.state.status is not GraphRunStatus.RUNNING:
-                current.handoff_evidence()
-
-    async def release() -> None:
-        nonlocal owner
-        if owner is None:
-            return
-        await owner.release()
-        owner = None
-
-    return _ChildHandle(drive, abort, fence, release)
 
 
 async def admit_continued_root(
@@ -1056,7 +1007,7 @@ async def admit_continued_root(
             owner_frames,
             limits,
             owner_commit,
-            _make_child_constructor(owner_scope_run, limits, commit, evidence_publisher),
+            _make_child_constructor(owner_graph, owner_scope_run, limits, commit, evidence_publisher),
             position,
             parent_activation,
             evidence_publisher,
@@ -1115,7 +1066,7 @@ async def admit_continued_root(
         position: tuple[int, ...],
         fence: PlannedFence | None,
         resume: PlannedResume[GraphValueT] | None,
-    ) -> _ChildHandle[GraphValueT]:
+    ) -> _ChildCall[GraphValueT]:
         nonlocal failed_scope
         child: _GraphRun[GraphValueT] | None = None
         child_commit = scoped_commit(binding.coordinate, commit)
@@ -1130,7 +1081,7 @@ async def admit_continued_root(
             )
             await apply_admission(child, fence, resume, tuple(binding.coordinate.scope))
             await admit_children(child, child_graph, binding.coordinate, binding.state)
-            return _opaque_handle(child, parent)
+            return _ChildCall(position, parent, ActiveChild(parent), child)
         except BaseException:
             if failed_scope is None:
                 failed_scope = tuple(binding.coordinate.scope)
@@ -1172,24 +1123,25 @@ async def admit_continued_root(
                     phase: _ChildPhase[GraphValueT] = CompletedChild(
                         parent,
                         owner.frames.lookup(availability).frame,
+                        None if binding.state.completion_route is None else str(binding.state.completion_route),
                     )
                 elif binding.state.status is GraphRunStatus.FAILED:
                     phase = FailedChild(parent, _child_failure_reason(binding.state))
                 else:
                     abort = cast(GraphAbort, binding.state.abort)
                     phase = AbortedChild(parent, abort.reason)
-                owner.accept_child_call(position, parent, phase, None)
+                owner.accept_child_call(_ChildCall(position, parent, phase, None))
                 continue
 
             fence = fences_by_scope.get(binding.coordinate)
             resume = resumes_by_scope.get(binding.coordinate)
-            handle = await construct_child(parent, binding, child_graph, position, fence, resume)
+            call = await construct_child(parent, binding, child_graph, position, fence, resume)
             try:
-                owner.accept_child_call(position, parent, ActiveChild(parent), handle)
+                owner.accept_child_call(call)
             except BaseException:
                 failed_scope = tuple(binding.coordinate.scope)
                 await _cleanup_unhanded_child(
-                    handle,
+                    call,
                     GraphAbortReason("continued graph owner handoff failed"),
                     abort=not transition_attempted,
                 )
@@ -1249,7 +1201,7 @@ async def fresh_root(
     commit: GraphCommit[GraphValueT] | None,
 ) -> OwnerHandoff[GraphValueT]:
     evidence_publisher, evidence_reader = _evidence_adapter((), ScopedFrameIndex())
-    child_constructor = _make_child_constructor(scope_run, limits, commit, evidence_publisher)
+    child_constructor = _make_child_constructor(graph, scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
     command = project_start_graph_command(graph, scope_run.graph_run_id)
     transition = prepare_transition(

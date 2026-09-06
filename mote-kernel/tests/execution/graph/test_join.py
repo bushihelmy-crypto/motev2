@@ -2,7 +2,7 @@ import pytest
 from tests.execution.graph.factories import compiled_join, graph, node
 
 from mote_kernel.execution.errors import GraphValidationError, InvalidJoinError, UnreachableNodeError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.edge import DirectEdge, JoinEdge
 from mote_kernel.state.graph_state import GraphNodeId
 
@@ -17,7 +17,7 @@ from mote_kernel.state.graph_state import GraphNodeId
 )
 def test_invalid_join_shapes_fail_closed(edge: JoinEdge) -> None:
     with pytest.raises(InvalidJoinError):
-        compile_graph(graph(nodes=(node("a"), node("b")), edges=(edge,)))
+        GraphCompiler(graph(nodes=(node("a"), node("b")), edges=(edge,))).compile()
 
 
 def test_duplicate_join_fails_closed_regardless_of_source_order() -> None:
@@ -30,7 +30,7 @@ def test_duplicate_join_fails_closed_regardless_of_source_order() -> None:
     )
 
     with pytest.raises(InvalidJoinError):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_direct_edges_and_multiple_joins_coexist_deterministically() -> None:
@@ -43,7 +43,7 @@ def test_direct_edges_and_multiple_joins_coexist_deterministically() -> None:
             DirectEdge(GraphNodeId("a"), GraphNodeId("b")),
         ),
     )
-    compiled = compile_graph(definition)
+    compiled = GraphCompiler(definition).compile()
 
     assert compiled.transition.direct_targets[GraphNodeId("a")] == (GraphNodeId("b"), GraphNodeId("c"))
     assert compiled.transition.joins_by_source[GraphNodeId("a")] == (
@@ -61,7 +61,7 @@ def test_distinct_joins_sharing_a_target_are_rejected_without_occurrence_identit
         ),
     )
     with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_join_target_requires_every_source_to_be_structurally_reachable() -> None:
@@ -74,7 +74,7 @@ def test_join_target_requires_every_source_to_be_structurally_reachable() -> Non
     )
 
     with pytest.raises(UnreachableNodeError):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_join_reachability_reaches_fixed_point() -> None:
@@ -87,6 +87,6 @@ def test_join_reachability_reaches_fixed_point() -> None:
         ),
     )
 
-    assert compile_graph(definition).transition.joins_by_source[GraphNodeId("c")] == (
+    assert GraphCompiler(definition).compile().transition.joins_by_source[GraphNodeId("c")] == (
         compiled_join(("c", "d"), "e", (2, 1)),
     )

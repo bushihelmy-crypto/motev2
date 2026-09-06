@@ -3,7 +3,7 @@ from typing import TypeVar
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.task import GraphTask
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
@@ -14,6 +14,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import NodeOutputFrame, _frame_value, _make_node_output_frame
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.result import TaskSuccess
 from mote_kernel.state.graph_state import (
     ActivationReference,
@@ -69,7 +70,7 @@ def task_success(task: GraphTask, value: ValueT, route: str | None = None) -> Ta
 def callable_node(node_id: str) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        identity,
+        make_node_invoker(identity),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
     )
@@ -82,7 +83,7 @@ def _compile(
 ) -> CompiledGraph[str]:
     incoming = {edge.target for edge in edges if edge.target != Graph.END}
     explicit_entries = tuple(GraphNodeId(node_id) for node_id in entries if GraphNodeId(node_id) in incoming)
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
@@ -91,7 +92,7 @@ def _compile(
             entries=explicit_entries,
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
 
 
 def compiled_graph(

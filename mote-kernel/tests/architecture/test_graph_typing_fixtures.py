@@ -12,6 +12,7 @@ FIXTURE_ROOT = PROJECT_ROOT / "tests" / "typing_negative"
 class NegativeTypingCase:
     filename: str
     expected_fragments: tuple[str, ...]
+    error_count: int = 1
 
 
 CASES = (
@@ -101,7 +102,7 @@ CASES = (
     ),
     NegativeTypingCase(
         "constructor_values.py",
-        ("Arguments missing for parameters", "_construction", "_seal", "reportCallIssue"),
+        ("Arguments missing for parameters", "_entries", "_seal", "reportCallIssue"),
     ),
     NegativeTypingCase(
         "constructor_success_outcome.py",
@@ -185,19 +186,33 @@ CASES = (
     ),
     NegativeTypingCase(
         "node_output_non_string.py",
-        ('"Literal[42]"', '"str"', "reportArgumentType"),
+        ('"Literal[42]"', '"NodeOutputRef[ValueT@node_output]"', "reportArgumentType"),
+        error_count=2,
     ),
     NegativeTypingCase(
         "node_output_causal_graph_output.py",
         (
             'parameter "outputs"',
-            '"PredecessorOutputRef" is not assignable to "NodeOutputRef"',
+            '"PredecessorOutputRef[Never]"',
+            '"NodeOutputRef[int]"',
             "reportArgumentType",
         ),
     ),
     NegativeTypingCase(
         "node_output_wrong_arity.py",
         ("No overloads", "Argument types", "Literal['extra']", "reportCallIssue"),
+    ),
+    NegativeTypingCase(
+        "typed_node_wrong_input.py",
+        ("NodeInputMaterializer", '"Source"', '"Request"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "typed_node_wrong_output.py",
+        (
+            '"NodeOutputRef[WrongResult | Result]"',
+            '"NodeOutputRef[Result]"',
+            "reportAssignmentType",
+        ),
     ),
 )
 
@@ -222,8 +237,9 @@ def test_invalid_public_generic_programs_remain_rejected(case: NegativeTypingCas
     completed = _pyright(case.filename)
 
     assert completed.returncode == 1, completed.stdout + completed.stderr
-    assert completed.stdout.count(" - error:") == 1, completed.stdout
-    assert "1 error, 0 warnings, 0 informations" in completed.stdout, completed.stdout
+    assert completed.stdout.count(" - error:") == case.error_count, completed.stdout
+    summary = f"{case.error_count} error{'' if case.error_count == 1 else 's'}, 0 warnings, 0 informations"
+    assert summary in completed.stdout, completed.stdout
     assert all(fragment in completed.stdout for fragment in case.expected_fragments), completed.stdout
 
 
@@ -263,6 +279,19 @@ def test_events_port_positive_fixture_is_exact_and_contains_no_unknown() -> None
 def test_node_output_overloads_positive_fixture_is_exact_and_contains_no_unknown() -> None:
     completed = subprocess.run(
         ("pyright", "tests/typing_positive/node_output_overloads.py"),
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout
+
+
+def test_typed_node_contract_positive_fixture_is_exact_and_contains_no_unknown() -> None:
+    completed = subprocess.run(
+        ("pyright", "tests/typing_positive/typed_node_contract.py"),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,

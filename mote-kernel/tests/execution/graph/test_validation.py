@@ -16,7 +16,7 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
     UnreachableNodeError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
@@ -172,7 +172,7 @@ def definition(
 )
 def test_invalid_graphs_fail_closed(definition: GraphDefinition[str], error: type[GraphValidationError]) -> None:
     with pytest.raises(error):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_duplicate_conditional_route_fails_closed() -> None:
@@ -185,14 +185,14 @@ def test_duplicate_conditional_route_fails_closed() -> None:
     )
 
     with pytest.raises(DuplicateEdgeError):
-        compile_graph(definition)
+        GraphCompiler(definition).compile()
 
 
 def test_validation_checks_all_node_identities_before_duplicate_nodes() -> None:
     invalid = graph(nodes=(node("a"), node("a"), node(" invalid")))
 
     with pytest.raises(InvalidGraphIdentityError, match="node identity"):
-        compile_graph(invalid)
+        GraphCompiler(invalid).compile()
 
 
 def test_validation_preserves_edge_declaration_order_across_nominal_variants() -> None:
@@ -207,7 +207,7 @@ def test_validation_preserves_edge_declaration_order_across_nominal_variants() -
     )
     for edges, error, message in cases:
         with pytest.raises(error, match=message):
-            compile_graph(graph(nodes=(node("a"), node("b")), edges=edges))
+            GraphCompiler(graph(nodes=(node("a"), node("b")), edges=edges)).compile()
 
 
 def test_conditional_endpoint_error_precedes_nested_source_error() -> None:
@@ -227,7 +227,7 @@ def test_conditional_endpoint_error_precedes_nested_source_error() -> None:
     )
 
     with pytest.raises(UnknownNodeError, match="conditional edge"):
-        compile_graph(parent)
+        GraphCompiler(parent).compile()
 
 
 @pytest.mark.parametrize(
@@ -240,36 +240,36 @@ def test_conditional_endpoint_error_precedes_nested_source_error() -> None:
 )
 def test_invalid_resource_definitions_fail_closed(resources: tuple[ResourceDefinition, ...]) -> None:
     with pytest.raises(InvalidResourceDefinitionError):
-        compile_graph(graph(nodes=(node("a"),), resources=resources))
+        GraphCompiler(graph(nodes=(node("a"),), resources=resources)).compile()
 
 
 def test_node_resource_requirements_must_be_unique_and_declared() -> None:
     declared = (ResourceDefinition(ResourceId("file")),)
 
     with pytest.raises(InvalidResourceDefinitionError, match="unknown"):
-        compile_graph(
+        GraphCompiler(
             graph(
                 nodes=(replace(node("a"), resources=(ResourceId("database"),)),),
                 resources=declared,
             )
-        )
+        ).compile()
     with pytest.raises(InvalidResourceDefinitionError, match="repeats"):
-        compile_graph(
+        GraphCompiler(
             graph(
                 nodes=(replace(node("a"), resources=(ResourceId("file"), ResourceId("file"))),),
                 resources=declared,
             )
-        )
+        ).compile()
 
 
 def test_resume_input_codec_version_must_be_positive() -> None:
     codec = Codec()
     with pytest.raises(InvalidGraphIdentityError, match="codec version"):
-        compile_graph(
+        GraphCompiler(
             definition(
                 "graph",
                 1,
                 nodes=(node("a"),),
-                resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 0, codec, codec),
+                resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 0, codec.encode, codec.decode),
             )
-        )
+        ).compile()

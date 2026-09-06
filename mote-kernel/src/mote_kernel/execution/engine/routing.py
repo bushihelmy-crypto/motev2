@@ -76,6 +76,7 @@ class RoutingFacts:
     unavailable_graph_outputs: tuple[str, ...]
     activations: tuple[GraphFrontierActivation, ...]
     consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
+    completion_route: GraphRouteId | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,15 +177,26 @@ def validate_routing_contribution(
 ) -> None:
     if node_id not in graph.nodes:
         raise InvalidRoutingCommandError("routing contribution references an unknown node")
+    if type(contribution) not in (ContinueGraphRouting, SelectGraphRoute):
+        raise InvalidRoutingCommandError("routing contribution has an unsupported variant")
     conditional = graph.transition.conditional_targets[node_id]
     if isinstance(contribution, ContinueGraphRouting):
         if conditional:
             raise InvalidRoutingCommandError("a conditional node must select one declared route")
     else:
-        if not conditional:
-            raise InvalidRoutingCommandError("a non-conditional node cannot select a route")
-        if contribution.route not in conditional:
-            raise UnknownRouteError("node selected an unknown conditional route")
+        if conditional:
+            if contribution.route not in conditional:
+                raise UnknownRouteError("node selected an unknown conditional route")
+            return
+        # A route on a node without conditional edges is an exported terminal
+        # route.  It is carried in the completed graph state so a parent
+        # nested node can route from the child's return value.  It cannot be
+        # used on a node that still has a local successor: accepting it there
+        # would silently discard a control decision.
+        if graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]:
+            raise InvalidRoutingCommandError(
+                "a route may be returned without conditional edges only by a terminal node"
+            )
 
 
 def settled_activation_admission_error(
@@ -211,8 +223,10 @@ def settled_activation_admission_error(
                 return f"conditional settled activation {node_id!r} lacks its selected route"
             if route not in conditional:
                 return f"settled activation {node_id!r} selected an unknown route {route!r}"
-        elif route is not None:
-            return f"non-conditional settled activation {node_id!r} selected route {route!r}"
+        elif route is not None and (
+            graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]
+        ):
+            return f"non-terminal settled activation {node_id!r} selected route {route!r}"
     return None
 
 
@@ -445,11 +459,11 @@ def _post_advance_error(
         routes = graph.transition.conditional_targets[source]
         if routes and reference.route is None:
             return "conditional predecessor settlement lacks its selected route"
-        if reference.route is not None and reference.route not in routes:
+        if reference.route is not None and routes and reference.route not in routes:
             return "predecessor settlement selected an unknown route"
         for target in graph.transition.direct_targets[source]:
             _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if reference.route is not None:
+        if reference.route is not None and routes:
             target = routes[reference.route]
             if target != END:
                 _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
@@ -591,7 +605,6 @@ def _resolve_control(
     direct_control_targets: set[GraphNodeId] = set()
     completed_join_targets: set[GraphNodeId] = set()
     candidates: dict[GraphNodeId, list[RoutedActivationCause]] = {}
-
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)
         selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
@@ -600,7 +613,7 @@ def _resolve_control(
         for target in graph.transition.direct_targets[node_id]:
             direct_control_targets.add(target)
             _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if isinstance(contribution, SelectGraphRoute):
+        if isinstance(contribution, SelectGraphRoute) and graph.transition.conditional_targets[node_id]:
             target = graph.transition.conditional_targets[node_id][contribution.route]
             if target != END:
                 direct_control_targets.add(target)
@@ -611,6 +624,7 @@ def _resolve_control(
             if any(item.activation.node_id == node_id for item in join_arrivals):
                 raise JoinProgressError("join source activation occurrence repeated")
             join_arrivals.append(reference)
+
     remaining: list[GraphJoinProgress] = []
     consumed_progress: list[GraphJoinOccurrenceIdentity] = []
     prior_occurrences = frozenset(progress.occurrence for progress in state.join_progress)
@@ -652,6 +666,32 @@ def _resolve_control(
     )
 
 
+def _completion_route(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> GraphRouteId | None:
+    """Return the one route exposed by a terminal settled frontier.
+
+    A completed nested graph has no frontier left from which its terminal
+    node's explicit ``Graph.success(..., route=...)`` can be read.  Resolve it
+    before completion and retain it in the completed state.  More than one
+    distinct terminal route is ambiguous, so completion fails closed instead
+    of silently choosing one.
+    """
+
+    routes: list[GraphRouteId | None] = []
+    for node_id, contribution in routing_contributions(state.frontier):
+        validate_routing_contribution(graph, node_id, contribution)
+        route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
+        routes.append(route)
+    if not routes:
+        raise RoutingDeadlockError("a terminal frontier has no settled routing contribution")
+    distinct = tuple(dict.fromkeys(routes))
+    if len(distinct) != 1:
+        raise RoutingDeadlockError("terminal frontier exposes conflicting completion routes")
+    return distinct[0]
+
+
 def transition_admission_error(
     graph: CompiledGraph[GraphValueT],
     previous_state: GraphRunState | None,
@@ -676,6 +716,12 @@ def transition_admission_error(
         return "graph completion discarded a compiled successor or partial Join occurrence"
     if control.consumed_join_progress != command.consumed_join_progress:
         return "graph completion consumed the wrong Join occurrences"
+    try:
+        expected_route = _completion_route(graph, previous_state)
+    except (InvalidRoutingCommandError, RoutingDeadlockError) as error:
+        return str(error)
+    if command.completion_route != expected_route:
+        return "graph completion route does not match the terminal frontier"
     return None
 
 
@@ -717,6 +763,7 @@ def resolve_routing_facts(
         output_diagnostics,
         control.activations,
         control.consumed_join_progress,
+        None if control.activations or control.remaining_join_progress else _completion_route(graph, state),
     )
 
 
@@ -743,7 +790,7 @@ def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> Resoluti
             state.revision,
             GraphAbortReason("required graph output values are unavailable at completion"),
         )
-    return CompleteGraphFrontier(state.revision, facts.consumed_join_progress)
+    return CompleteGraphFrontier(state.revision, facts.consumed_join_progress, facts.completion_route)
 
 
 def resolve_routing(

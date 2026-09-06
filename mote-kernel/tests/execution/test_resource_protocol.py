@@ -9,7 +9,7 @@ from mote_kernel.execution.engine.snapshot_guard import require_snapshot_matches
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.errors import InvalidExecutionSnapshotError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
 from mote_kernel.execution.graph.ports import (
@@ -19,6 +19,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -137,7 +138,7 @@ def internal_node(
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        echo,
+        make_node_invoker(echo),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
         resources,
@@ -149,7 +150,7 @@ def internal_resource_graph(
     resource_order: tuple[ResourceId, ...],
     requirement: tuple[ResourceId, ...],
 ) -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("resource.snapshot"),
             version=GraphDefinitionVersion(1),
@@ -159,7 +160,7 @@ def internal_resource_graph(
             outputs=normalize_graph_output_declarations({}),
             resources=tuple(ResourceDefinition(resource_id) for resource_id in resource_order),
         )
-    )
+    ).compile()
 
 
 def claimed_internal_state(
@@ -418,8 +419,8 @@ async def test_conditional_frontier_admits_only_the_selected_resource_target() -
             outputs={"value": str},
             resources=("file",),
         )
-    graph.add_conditional_edge("route", "left", "left")
-    graph.add_conditional_edge("route", "right", "right")
+    graph.add_edge("route", "left", "left")
+    graph.add_edge("route", "right", "right")
     graph.set_outputs({})
     commits = CommitLog()
 
@@ -470,10 +471,10 @@ async def test_conditional_resource_branch_waits_with_its_sibling_before_join(
     graph.add_node("shared", shared, inputs={}, outputs={})
     graph.add_node("target", target, inputs={}, outputs={})
     graph.add_edge("choose", "ordinary")
-    graph.add_conditional_edge("choose", "left", "left")
-    graph.add_conditional_edge("choose", "right", "right")
-    graph.add_conditional_edge("left", "go", "shared")
-    graph.add_conditional_edge("right", "go", "shared")
+    graph.add_edge("choose", "left", "left")
+    graph.add_edge("choose", "right", "right")
+    graph.add_edge("left", "go", "shared")
+    graph.add_edge("right", "go", "shared")
     graph.add_join(("ordinary", "shared"), "target")
     graph.set_outputs({})
 

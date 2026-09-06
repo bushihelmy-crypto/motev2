@@ -90,19 +90,20 @@ _EvidencePublisherView: TypeAlias = Callable[[ChildStateBinding, ScopedFrameInde
 _EvidenceReaderView: TypeAlias = Callable[[], tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[str]]]
 _ChildConstructorView: TypeAlias = Callable[
     [GraphActivationIdentity, CompiledGraph[str], GraphInputFrame[str], tuple[int, ...]],
-    Coroutine[None, None, "_ChildHandleView"],
-]
-_ChildCallView: TypeAlias = tuple[
-    tuple[int, ...],
-    GraphActivationIdentity,
-    _ChildPhaseView,
-    "_ChildHandleView | None",
+    Coroutine[None, None, "_ChildCallView"],
 ]
 
 
 @runtime_checkable
-class _ChildHandleView(Protocol):
-    async def drive(self) -> _ChildWaitResultView: ...
+class _ChildCallView(Protocol):
+    position: tuple[int, ...]
+    parent: GraphActivationIdentity
+    phase: _ChildPhaseView
+
+    @property
+    def live(self) -> bool: ...
+
+    async def drive(self) -> ConfirmedChildBoundary[str] | asyncio.CancelledError | None: ...
 
     async def abort(self, reason: GraphAbortReason) -> None: ...
 
@@ -128,10 +129,7 @@ class _GraphRunView(Protocol):
 
     def accept_child_call(
         self,
-        position: tuple[int, ...],
-        parent: GraphActivationIdentity,
-        phase: _ChildPhaseView,
-        handle: _ChildHandleView | None,
+        call: _ChildCallView,
     ) -> None: ...
 
     async def _transition(
@@ -151,11 +149,11 @@ class _GraphRunView(Protocol):
 
     async def _start_child(self, missing: MissingChild) -> None: ...
 
-    async def _drive_child(self, index: int) -> None: ...
+    async def _drive_child(self, call: _ChildCallView) -> None: ...
 
     def _install_terminal(
         self,
-        index: int,
+        call: _ChildCallView,
         boundary: ConfirmedChildBoundary[str] | None,
     ) -> None: ...
 
@@ -194,10 +192,7 @@ class _GraphRunClassView(Protocol):
 
     def __call__(self, *args: object, **kwargs: object) -> _GraphRunView: ...
 
-    accept_child_call: Callable[
-        [_GraphRunView, tuple[int, ...], GraphActivationIdentity, _ChildPhaseView, _ChildHandleView | None],
-        None,
-    ]
+    accept_child_call: Callable[[_GraphRunView, _ChildCallView], None]
     apply_admission_resume: Callable[[_GraphRunView, PlannedResume[str]], Awaitable[None]]
     abort: Callable[[_GraphRunView, GraphAbortReason], Awaitable[None]]
     release: Callable[[_GraphRunView], Awaitable[None]]
@@ -205,26 +200,28 @@ class _GraphRunClassView(Protocol):
 
 class _FamilyDriverPrivateView(Protocol):
     _child_failure_reason: Callable[[GraphRunState], str]
-    _ChildHandle: Callable[..., _ChildHandleView]
+    _ChildCall: Callable[
+        [tuple[int, ...], GraphActivationIdentity, _ChildPhaseView, _GraphRunView | None],
+        _ChildCallView,
+    ]
     _evidence_adapter: Callable[..., tuple[_EvidencePublisherView, _EvidenceReaderView]]
     _frames_for_owner: Callable[..., ScopedFrameIndex[str]]
     _GraphRun: _GraphRunClassView
     _make_child_constructor: Callable[..., _ChildConstructorView]
-    _opaque_handle: Callable[[_GraphRunView, GraphActivationIdentity], _ChildHandleView]
 
     @staticmethod
     def child_failure_reason(module: object, state: GraphRunState) -> str:
         return cast(_FamilyDriverPrivateView, module)._child_failure_reason(state)
 
     @staticmethod
-    def child_handle(
+    def child_call(
         module: object,
-        drive: Callable[[], Awaitable[_ChildWaitResultView]],
-        abort: Callable[[GraphAbortReason], Awaitable[None]],
-        fence: Callable[[], Awaitable[None]],
-        release: Callable[[], Awaitable[None]],
-    ) -> _ChildHandleView:
-        return cast(_FamilyDriverPrivateView, module)._ChildHandle(drive, abort, fence, release)
+        position: tuple[int, ...],
+        parent: GraphActivationIdentity,
+        phase: _ChildPhaseView,
+        owner: _GraphRunView | None,
+    ) -> _ChildCallView:
+        return cast(_FamilyDriverPrivateView, module)._ChildCall(position, parent, phase, owner)
 
     @staticmethod
     def evidence_adapter(
@@ -250,25 +247,19 @@ class _FamilyDriverPrivateView(Protocol):
     @staticmethod
     def make_child_constructor(
         module: object,
+        owner_graph: CompiledGraph[str],
         owner_scope_run: ScopeRunCoordinate,
         limits: ExecutionLimits,
         commit: GraphCommit[str] | None,
         evidence_publisher: _EvidencePublisherView,
     ) -> _ChildConstructorView:
         return cast(_FamilyDriverPrivateView, module)._make_child_constructor(
+            owner_graph,
             owner_scope_run,
             limits,
             commit,
             evidence_publisher,
         )
-
-    @staticmethod
-    def opaque_handle(
-        module: object,
-        child: _GraphRunView,
-        parent: GraphActivationIdentity,
-    ) -> _ChildHandleView:
-        return cast(_FamilyDriverPrivateView, module)._opaque_handle(child, parent)
 
 
 class _GraphRunPrivateView(Protocol):
@@ -343,16 +334,16 @@ class _GraphRunPrivateView(Protocol):
         await cast(_GraphRunPrivateView, owner)._start_child(missing)
 
     @staticmethod
-    async def drive_child(owner: object, index: int) -> None:
-        await cast(_GraphRunPrivateView, owner)._drive_child(index)
+    async def drive_child(owner: object, call: _ChildCallView) -> None:
+        await cast(_GraphRunPrivateView, owner)._drive_child(call)
 
     @staticmethod
     def install_terminal(
         owner: object,
-        index: int,
+        call: _ChildCallView,
         boundary: ConfirmedChildBoundary[str] | None,
     ) -> None:
-        cast(_GraphRunPrivateView, owner)._install_terminal(index, boundary)
+        cast(_GraphRunPrivateView, owner)._install_terminal(call, boundary)
 
     @staticmethod
     async def abort_awaiting_children_after_failure(owner: object) -> bool:
@@ -373,6 +364,111 @@ class _GraphCompilePrivateView(Protocol):
 
 class _CompiledOwnerView(Protocol):
     graph: CompiledGraph[str]
+
+
+class _CallbackChildOwner:
+    """Test-owned corruptible child owner for fail-closed lifecycle checks."""
+
+    def __init__(
+        self,
+        drive: Callable[[], Awaitable[_ChildWaitResultView]],
+        abort: Callable[[GraphAbortReason], Awaitable[None]],
+        fence: Callable[[], Awaitable[None]],
+        release: Callable[[], Awaitable[None]],
+    ) -> None:
+        self.state = running_state()
+        self._drive = drive
+        self._abort = abort
+        self._fence = fence
+        self._release = release
+        self._result: tuple[GraphBoundary, _ChildTerminalView | None, ConfirmedChildBoundary[str] | None] | None = None
+        self._cancellation: asyncio.CancelledError | None = None
+
+    async def drive_quantum(self) -> GraphBoundary:
+        result = await self._drive()
+        if isinstance(result, asyncio.CancelledError):
+            self._cancellation = result
+            raise result
+        self._result = result
+        return result[0]
+
+    def consume_commit_origin_cancellation(self, error: asyncio.CancelledError) -> bool:
+        return error is self._cancellation
+
+    def terminal_projection(self, _parent: GraphActivationIdentity) -> _ChildTerminalView:
+        if self._result is None or self._result[1] is None:
+            raise ResultCollectionError("terminal child returned no terminal projection")
+        return self._result[1]
+
+    def terminal_boundary(
+        self,
+        _parent: GraphActivationIdentity,
+        _terminal: _ChildTerminalView,
+    ) -> ConfirmedChildBoundary[str] | None:
+        if self._result is None:
+            raise ResultCollectionError("terminal child returned no terminal projection")
+        return self._result[2]
+
+    def handoff_evidence(self) -> None:
+        return None
+
+    async def abort(self, reason: GraphAbortReason) -> None:
+        await self._abort(reason)
+
+    async def fence_after_worker_failure(self) -> None:
+        await self._fence()
+
+    async def release(self) -> None:
+        await self._release()
+
+
+def callback_child_call(
+    position: tuple[int, ...],
+    parent: GraphActivationIdentity,
+    drive: Callable[[], Awaitable[_ChildWaitResultView]],
+    abort: Callable[[GraphAbortReason], Awaitable[None]],
+    fence: Callable[[], Awaitable[None]],
+    release: Callable[[], Awaitable[None]],
+) -> _ChildCallView:
+    owner = _CallbackChildOwner(drive, abort, fence, release)
+    return _FamilyDriverPrivateView.child_call(
+        family_driver,
+        position,
+        parent,
+        ActiveChild(parent),
+        cast(_GraphRunView, owner),
+    )
+
+
+async def _awaiting_child() -> tuple[AwaitingResume, None, None]:
+    return AwaitingResume(()), None, None
+
+
+async def _ignore_abort(_reason: GraphAbortReason) -> None:
+    return None
+
+
+async def _ignore_child_action() -> None:
+    return None
+
+
+def inert_child_call(position: tuple[int, ...], parent: GraphActivationIdentity) -> _ChildCallView:
+    return callback_child_call(
+        position,
+        parent,
+        _awaiting_child,
+        _ignore_abort,
+        _ignore_child_action,
+        _ignore_child_action,
+    )
+
+
+def restored_child_call(
+    position: tuple[int, ...],
+    parent: GraphActivationIdentity,
+    phase: _ChildTerminalView,
+) -> _ChildCallView:
+    return _FamilyDriverPrivateView.child_call(family_driver, position, parent, phase, None)
 
 
 async def produce(_values: Graph.Values[str]) -> Graph.Values[str]:
@@ -449,7 +545,14 @@ def graph_owner(
         ScopedFrameIndex() if frames is None else frames,
         limits,
         scoped_commit(scope_run, commit),
-        _FamilyDriverPrivateView.make_child_constructor(family_driver, scope_run, limits, commit, evidence_publisher),
+        _FamilyDriverPrivateView.make_child_constructor(
+            family_driver,
+            graph,
+            scope_run,
+            limits,
+            commit,
+            evidence_publisher,
+        ),
         position,
         parent_activation,
         evidence_publisher,
@@ -749,11 +852,13 @@ async def test_fence_after_worker_failure_attempts_every_owner_cleanup_and_keeps
     leased = leased_state(state)
     owner = root_owner(graph, leased, commit=reject_owner_fence)
     _GraphRunPrivateView.children(owner).append(
-        (
+        callback_child_call(
             (0, 0),
             parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, no_drive, no_abort, fail_child_fence, no_release),
+            no_drive,
+            no_abort,
+            fail_child_fence,
+            no_release,
         )
     )
     _GraphRunPrivateView.set_session(owner, cast(GraphExecutionSession[str], FailingSession()))
@@ -873,7 +978,7 @@ def test_frame_partition_requires_known_children() -> None:
 @pytest.mark.asyncio
 async def test_graph_owner_rejects_foreign_scope_and_duplicate_or_unknown_positions() -> None:
     graph, state, owner, parent, _child_scope, _activation, _child_state = nested_runtime()
-    with pytest.raises(SnapshotMismatchError, match="scope-run coordinate"):
+    with pytest.raises(SnapshotMismatchError, match="runtime scope"):
         graph_owner(
             graph,
             ScopeRunCoordinate((GraphNodeId("foreign"),), state.run_id),
@@ -882,8 +987,8 @@ async def test_graph_owner_rejects_foreign_scope_and_duplicate_or_unknown_positi
 
     position = owner.child_position(parent)
     with pytest.raises(ResultCollectionError, match="position does not match"):
-        owner.accept_child_call((*position, 99), parent, ActiveChild(parent), None)
-    _GraphRunPrivateView.children(owner).append((position, parent, ActiveChild(parent), None))
+        owner.accept_child_call(inert_child_call((*position, 99), parent))
+    _GraphRunPrivateView.children(owner).append(inert_child_call(position, parent))
     with pytest.raises(ResultCollectionError, match="more than one child call"):
         owner.child_position(parent)
 
@@ -891,16 +996,20 @@ async def test_graph_owner_rejects_foreign_scope_and_duplicate_or_unknown_positi
     with pytest.raises(ResultCollectionError, match="not part of the parent definition"):
         owner.child_position(unknown)
 
-    foreign_parent = replace(parent, run_id=GraphRunId("foreign-parent"))
     child_graph = graph.nested_graphs[parent.node_id]
+    child_input = admit_graph_input(child_graph, Graph.values())
+    with pytest.raises(SnapshotMismatchError, match="non-nested parent activation"):
+        await _GraphRunPrivateView.child_constructor(owner)(unknown, child_graph, child_input, position)
+
+    foreign_parent = replace(parent, run_id=GraphRunId("foreign-parent"))
     with pytest.raises(SnapshotMismatchError, match="parent activation does not belong"):
         await _GraphRunPrivateView.child_constructor(owner)(
             foreign_parent,
             child_graph,
-            admit_graph_input(child_graph, Graph.values()),
+            child_input,
             position,
         )
-    with pytest.raises(SnapshotMismatchError, match="construction does not match"):
+    with pytest.raises(SnapshotMismatchError, match="parent topology"):
         await _GraphRunPrivateView.child_constructor(owner)(
             parent,
             graph,
@@ -930,26 +1039,28 @@ def test_child_admits_its_terminal_boundary_before_parent_installation() -> None
         child_owner.terminal_boundary(foreign_parent, terminal)
 
     aborted_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(aborted_owner).append(
-        ((0, 0), parent, AbortedChild(parent, GraphAbortReason("aborted")), None)
-    )
+    aborted_call = restored_child_call((0, 0), parent, AbortedChild(parent, GraphAbortReason("aborted")))
+    _GraphRunPrivateView.children(aborted_owner).append(aborted_call)
     with pytest.raises(ResultCollectionError, match="aborted child"):
-        _GraphRunPrivateView.install_terminal(aborted_owner, 0, boundary)
+        _GraphRunPrivateView.install_terminal(aborted_owner, aborted_call, boundary)
 
     missing_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(missing_owner).append(((0, 0), parent, CompletedChild(parent, output), None))
+    missing_call = restored_child_call((0, 0), parent, CompletedChild(parent, output))
+    _GraphRunPrivateView.children(missing_owner).append(missing_call)
     with pytest.raises(ResultCollectionError, match="exact output boundary"):
-        _GraphRunPrivateView.install_terminal(missing_owner, 0, None)
+        _GraphRunPrivateView.install_terminal(missing_owner, missing_call, None)
 
     mismatch_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(mismatch_owner).append(((0, 0), parent, CompletedChild(parent, output), None))
+    mismatch_call = restored_child_call((0, 0), parent, CompletedChild(parent, output))
+    _GraphRunPrivateView.children(mismatch_owner).append(mismatch_call)
     other = graph_output(child_graph, "other")
     with pytest.raises(ResultCollectionError, match="exact output boundary"):
-        _GraphRunPrivateView.install_terminal(mismatch_owner, 0, replace(boundary, frame=other))
+        _GraphRunPrivateView.install_terminal(mismatch_owner, mismatch_call, replace(boundary, frame=other))
 
     parent_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(parent_owner).append(((0, 0), parent, CompletedChild(parent, output), None))
-    _GraphRunPrivateView.install_terminal(parent_owner, 0, boundary)
+    completed_call = restored_child_call((0, 0), parent, CompletedChild(parent, output))
+    _GraphRunPrivateView.children(parent_owner).append(completed_call)
+    _GraphRunPrivateView.install_terminal(parent_owner, completed_call, boundary)
     assert _GraphRunPrivateView.frames(parent_owner).child_boundaries == (boundary,)
 
 
@@ -985,10 +1096,11 @@ async def test_child_start_hands_off_a_confirmed_owner_before_rethrowing_cancell
         await task
 
     assert len(_GraphRunPrivateView.children(owner)) == 1
-    _position, recorded_parent, phase, handle = _GraphRunPrivateView.children(owner)[0]
-    assert recorded_parent == parent
-    assert isinstance(phase, ActiveChild)
-    assert isinstance(handle, _ChildHandleView)
+    call = _GraphRunPrivateView.children(owner)[0]
+    assert call.parent == parent
+    assert isinstance(call.phase, ActiveChild)
+    assert isinstance(call, _ChildCallView)
+    assert call.live
     await owner.abort(GraphAbortReason("cancelled"))
     await owner.release()
 
@@ -998,7 +1110,7 @@ async def test_fresh_child_handoff_failure_cleans_the_unhanded_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     graph, state, _owner, parent, _child_scope, _activation, _child_state = nested_runtime()
-    handles: list[_ChildHandleView] = []
+    calls: list[_ChildCallView] = []
     transitions: list[GraphTransition[str]] = []
 
     class HandoffError(RuntimeError):
@@ -1008,13 +1120,10 @@ async def test_fresh_child_handoff_failure_cleans_the_unhanded_owner(
 
     def reject_handoff(
         _owner: _GraphRunView,
-        _position: tuple[int, ...],
-        _parent: GraphActivationIdentity,
-        _phase: _ChildPhaseView,
-        handle: _ChildHandleView | None,
+        call: _ChildCallView,
     ) -> None:
-        assert handle is not None
-        handles.append(handle)
+        assert call.live
+        calls.append(call)
         raise original
 
     async def commit(transition: GraphTransition[str], /) -> GraphRunState:
@@ -1032,13 +1141,13 @@ async def test_fresh_child_handoff_failure_cleans_the_unhanded_owner(
     assert tuple(transition.scope for transition in transitions if isinstance(transition.command, AbortGraphRun)) == (
         ("nested",),
     )
-    assert len(handles) == 1
+    assert len(calls) == 1
     with pytest.raises(ResultCollectionError, match="already released"):
-        await handles[0].drive()
+        await calls[0].drive()
 
 
 @pytest.mark.asyncio
-async def test_child_drive_rejects_inconsistent_terminal_projections() -> None:
+async def test_child_call_rejects_impossible_initial_phases_and_inconsistent_terminal_projections() -> None:
     graph, state, _owner, parent, child_scope, _activation, _child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     output = graph_output(child_graph, "output")
@@ -1056,84 +1165,100 @@ async def test_child_drive_rejects_inconsistent_terminal_projections() -> None:
     async def no_release() -> None:
         return None
 
-    invalid_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(invalid_owner).append(((0, 0), parent, AwaitingResume(()), None))
-    await _GraphRunPrivateView.drive_child(invalid_owner, 0)
-
-    async def awaiting_terminal() -> tuple[AwaitingResume, AbortedChild, None]:
-        return AwaitingResume(()), AbortedChild(parent, GraphAbortReason("aborted")), None
-
-    awaiting_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(awaiting_owner).append(
-        (
+    with pytest.raises(ResultCollectionError, match="requires one live child owner"):
+        _FamilyDriverPrivateView.child_call(family_driver, (0, 0), parent, ActiveChild(parent), None)
+    with pytest.raises(ResultCollectionError, match="must already be terminal"):
+        _FamilyDriverPrivateView.child_call(
+            family_driver,
             (0, 0),
             parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, awaiting_terminal, no_abort, no_fence, no_release),
+            AwaitingResume(()),
+            root_owner(graph, state),
         )
-    )
-    with pytest.raises(ResultCollectionError, match="awaiting child returned terminal"):
-        await _GraphRunPrivateView.drive_child(awaiting_owner, 0)
+    with pytest.raises(ResultCollectionError, match="live child owner must enter through the active phase"):
+        _FamilyDriverPrivateView.child_call(
+            family_driver,
+            (0, 0),
+            parent,
+            AbortedChild(parent, GraphAbortReason("aborted")),
+            root_owner(graph, state),
+        )
+    foreign_parent = replace(parent, node_id=GraphNodeId("foreign"))
+    with pytest.raises(ResultCollectionError, match="phase does not match its parent activation"):
+        restored_child_call(
+            (0, 0),
+            parent,
+            AbortedChild(foreign_parent, GraphAbortReason("aborted")),
+        )
+
+    running_call = inert_child_call((0, 0), parent)
+    await running_call.abort(GraphAbortReason("ignored by corruptible test owner"))
+    assert isinstance(running_call.phase, ActiveChild)
+    await running_call.release()
 
     async def missing_terminal() -> tuple[CompletedGraph, None, None]:
         return CompletedGraph(), None, None
 
     missing_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(missing_owner).append(
-        (
-            (0, 0),
-            parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, missing_terminal, no_abort, no_fence, no_release),
-        )
+    missing_call = callback_child_call(
+        (0, 0),
+        parent,
+        missing_terminal,
+        no_abort,
+        no_fence,
+        no_release,
     )
+    _GraphRunPrivateView.children(missing_owner).append(missing_call)
     with pytest.raises(ResultCollectionError, match="no terminal projection"):
-        await _GraphRunPrivateView.drive_child(missing_owner, 0)
+        await _GraphRunPrivateView.drive_child(missing_owner, missing_call)
 
     async def completed() -> tuple[CompletedGraph, AbortedChild, None]:
         return CompletedGraph(), AbortedChild(parent, GraphAbortReason("aborted")), None
 
     completed_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(completed_owner).append(
-        (
-            (0, 0),
-            parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, completed, no_abort, no_fence, no_release),
-        )
+    completed_call = callback_child_call(
+        (0, 0),
+        parent,
+        completed,
+        no_abort,
+        no_fence,
+        no_release,
     )
+    _GraphRunPrivateView.children(completed_owner).append(completed_call)
     with pytest.raises(ResultCollectionError, match="non-completed"):
-        await _GraphRunPrivateView.drive_child(completed_owner, 0)
+        await _GraphRunPrivateView.drive_child(completed_owner, completed_call)
 
     async def failed() -> tuple[FailedGraph, AbortedChild, None]:
         return FailedGraph(), AbortedChild(parent, GraphAbortReason("aborted")), None
 
     failed_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(failed_owner).append(
-        (
-            (0, 0),
-            parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, failed, no_abort, no_fence, no_release),
-        )
+    failed_call = callback_child_call(
+        (0, 0),
+        parent,
+        failed,
+        no_abort,
+        no_fence,
+        no_release,
     )
+    _GraphRunPrivateView.children(failed_owner).append(failed_call)
     with pytest.raises(ResultCollectionError, match="non-failed"):
-        await _GraphRunPrivateView.drive_child(failed_owner, 0)
+        await _GraphRunPrivateView.drive_child(failed_owner, failed_call)
 
     async def aborted() -> tuple[AbortedGraph, CompletedChild[str], ConfirmedChildBoundary[str]]:
         return AbortedGraph(), CompletedChild(parent, output), boundary
 
     aborted_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(aborted_owner).append(
-        (
-            (0, 0),
-            parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, aborted, no_abort, no_fence, no_release),
-        )
+    aborted_call = callback_child_call(
+        (0, 0),
+        parent,
+        aborted,
+        no_abort,
+        no_fence,
+        no_release,
     )
+    _GraphRunPrivateView.children(aborted_owner).append(aborted_call)
     with pytest.raises(ResultCollectionError, match="non-aborted"):
-        await _GraphRunPrivateView.drive_child(aborted_owner, 0)
+        await _GraphRunPrivateView.drive_child(aborted_owner, aborted_call)
 
     commit_cancellation = asyncio.CancelledError("child commit cancelled")
 
@@ -1141,16 +1266,17 @@ async def test_child_drive_rejects_inconsistent_terminal_projections() -> None:
         return commit_cancellation
 
     cancelled_owner = root_owner(graph, state)
-    _GraphRunPrivateView.children(cancelled_owner).append(
-        (
-            (0, 0),
-            parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, cancelled_commit, no_abort, no_fence, no_release),
-        )
+    cancelled_call = callback_child_call(
+        (0, 0),
+        parent,
+        cancelled_commit,
+        no_abort,
+        no_fence,
+        no_release,
     )
+    _GraphRunPrivateView.children(cancelled_owner).append(cancelled_call)
     with pytest.raises(asyncio.CancelledError, match="child commit cancelled") as raised:
-        await _GraphRunPrivateView.drive_child(cancelled_owner, 0)
+        await _GraphRunPrivateView.drive_child(cancelled_owner, cancelled_call)
     assert raised.value is commit_cancellation
     assert cancelled_owner.consume_commit_origin_cancellation(commit_cancellation)
 
@@ -1173,14 +1299,18 @@ async def test_awaiting_child_failure_cleanup_requires_its_live_owner_handle() -
         ),
     )
     waiting_parent = replace(parent, node_id=GraphNodeId("waiting"))
+    waiting_call = inert_child_call((0, 1), waiting_parent)
+    await waiting_call.drive()
+    await _GraphRunPrivateView.drive_child(owner, waiting_call)
+    await waiting_call.release()
     _GraphRunPrivateView.children(owner).extend(
         (
-            ((0, 0), parent, FailedChild(parent, "failed"), None),
-            ((0, 1), waiting_parent, AwaitingResume(()), None),
+            restored_child_call((0, 0), parent, FailedChild(parent, "failed")),
+            waiting_call,
         )
     )
 
-    with pytest.raises(ResultCollectionError, match="no live owner handle"):
+    with pytest.raises(ResultCollectionError, match="no live owner"):
         await _GraphRunPrivateView.abort_awaiting_children_after_failure(owner)
 
     await owner.release()
@@ -1221,7 +1351,7 @@ async def test_nested_settlement_requires_one_terminal_child_call() -> None:
     with pytest.raises(ResultCollectionError, match="no admitted child call"):
         await _GraphRunPrivateView.retire_child(owner, result)
 
-    _GraphRunPrivateView.children(owner).append(((0, 0), parent, ActiveChild(parent), None))
+    _GraphRunPrivateView.children(owner).append(inert_child_call((0, 0), parent))
     with pytest.raises(ResultCollectionError, match="unretired terminal child"):
         await _GraphRunPrivateView.retire_child(owner, result)
 
@@ -1243,13 +1373,13 @@ def test_owner_evidence_cannot_cross_root_child_roles_or_leave_an_active_call() 
     with pytest.raises(SnapshotMismatchError, match="child graph evidence"):
         child_owner.freeze_root_evidence(lambda: ((), ScopedFrameIndex()))
 
-    _GraphRunPrivateView.children(owner).append(((0, 0), parent, ActiveChild(parent), None))
+    _GraphRunPrivateView.children(owner).append(inert_child_call((0, 0), parent))
     with pytest.raises(SnapshotMismatchError, match="no handed-off export evidence"):
         owner.freeze_root_evidence(lambda: ((), ScopedFrameIndex()))
 
 
 @pytest.mark.asyncio
-async def test_opaque_handle_is_one_shot_and_inert_after_release() -> None:
+async def test_child_call_is_one_shot_and_inert_after_release() -> None:
     graph, _state, _owner, parent, child_scope, activation, child_state = nested_runtime()
     aborted_state = reduce_graph_run(
         child_state,
@@ -1263,23 +1393,27 @@ async def test_opaque_handle_is_one_shot_and_inert_after_release() -> None:
         position=(0, 0),
         parent_activation=activation,
     )
-    handle = _FamilyDriverPrivateView.opaque_handle(family_driver, child_owner, parent)
+    call = _FamilyDriverPrivateView.child_call(
+        family_driver,
+        (0, 0),
+        parent,
+        ActiveChild(parent),
+        child_owner,
+    )
 
-    child_result = await handle.drive()
+    child_result = await call.drive()
     assert not isinstance(child_result, asyncio.CancelledError)
-    disposition, terminal, boundary = child_result
-    assert isinstance(disposition, AbortedGraph)
-    assert isinstance(terminal, AbortedChild)
-    assert boundary is None
-    with pytest.raises(ResultCollectionError, match="only be handed off once"):
-        await handle.drive()
+    assert isinstance(call.phase, AbortedChild)
+    assert child_result is None
+    with pytest.raises(ResultCollectionError, match="only an active child call"):
+        await call.drive()
 
-    await handle.release()
-    await handle.release()
-    await handle.abort(GraphAbortReason("ignored"))
-    await handle.fence()
+    await call.release()
+    await call.release()
+    await call.abort(GraphAbortReason("ignored"))
+    await call.fence()
     with pytest.raises(ResultCollectionError, match="already released"):
-        await handle.drive()
+        await call.drive()
 
     repeated = root_owner(graph, running_state(definition_id=graph.definition_id, frontier=("nested",)))
     await repeated.release()
@@ -1287,7 +1421,7 @@ async def test_opaque_handle_is_one_shot_and_inert_after_release() -> None:
 
 
 @pytest.mark.asyncio
-async def test_opaque_handle_does_not_publish_a_child_whose_abort_was_not_committed() -> None:
+async def test_child_call_does_not_publish_a_child_whose_abort_was_not_committed() -> None:
     class AbortCommitError(RuntimeError):
         pass
 
@@ -1313,19 +1447,25 @@ async def test_opaque_handle_does_not_publish_a_child_whose_abort_was_not_commit
         parent_activation=activation,
         publisher=publish,
     )
-    handle = _FamilyDriverPrivateView.opaque_handle(family_driver, child_owner, parent)
+    call = _FamilyDriverPrivateView.child_call(
+        family_driver,
+        (0, 0),
+        parent,
+        ActiveChild(parent),
+        child_owner,
+    )
 
     with pytest.raises(AbortCommitError) as raised:
-        await handle.abort(GraphAbortReason("abort"))
+        await call.abort(GraphAbortReason("abort"))
 
     assert raised.value is original
     assert child_owner.state.status is GraphRunStatus.RUNNING
     assert published == []
-    await handle.release()
+    await call.release()
 
 
 @pytest.mark.asyncio
-async def test_opaque_handle_does_not_handoff_evidence_while_fence_keeps_lease() -> None:
+async def test_child_call_does_not_handoff_evidence_while_fence_keeps_lease() -> None:
     graph, _state, _owner, parent, child_scope, activation, child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     fence_error = RuntimeError("fence commit failed")
@@ -1348,15 +1488,21 @@ async def test_opaque_handle_does_not_handoff_evidence_while_fence_keeps_lease()
         parent_activation=activation,
         publisher=publish,
     )
-    handle = _FamilyDriverPrivateView.opaque_handle(family_driver, child_owner, parent)
+    call = _FamilyDriverPrivateView.child_call(
+        family_driver,
+        (0, 0),
+        parent,
+        ActiveChild(parent),
+        child_owner,
+    )
 
     with pytest.raises(RuntimeError) as raised:
-        await handle.fence()
+        await call.fence()
 
     assert raised.value is fence_error
     assert child_owner.state.execution is not None
     assert published == []
-    await handle.release()
+    await call.release()
 
 
 @pytest.mark.asyncio
@@ -1381,10 +1527,10 @@ async def test_continued_owner_projects_a_terminal_failed_child_without_reexecut
 
     try:
         assert len(_GraphRunPrivateView.children(root)) == 1
-        _position, _parent, phase, handle = _GraphRunPrivateView.children(root)[0]
-        assert isinstance(phase, FailedChild)
-        assert phase.failure == "child failed"
-        assert handle is None
+        call = _GraphRunPrivateView.children(root)[0]
+        assert isinstance(call.phase, FailedChild)
+        assert call.phase.failure == "child failed"
+        assert not call.live
 
         disposition = await root.drive_quantum()
 
@@ -1430,10 +1576,10 @@ async def test_continued_owner_projects_a_completed_child_from_its_confirmed_bou
 
     try:
         assert len(_GraphRunPrivateView.children(root)) == 1
-        _position, _parent, phase, handle = _GraphRunPrivateView.children(root)[0]
-        assert isinstance(phase, CompletedChild)
-        assert phase.output == output
-        assert handle is None
+        call = _GraphRunPrivateView.children(root)[0]
+        assert isinstance(call.phase, CompletedChild)
+        assert call.phase.output == output
+        assert not call.live
 
         disposition = await root.drive_quantum()
 
@@ -1444,7 +1590,7 @@ async def test_continued_owner_projects_a_completed_child_from_its_confirmed_bou
 
 
 @pytest.mark.asyncio
-async def test_child_owner_completes_resume_before_opaque_handle_handoff(
+async def test_child_owner_completes_resume_before_child_call_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempts = 0
@@ -1472,14 +1618,11 @@ async def test_child_owner_completes_resume_before_opaque_handle_handoff(
 
     def record_handoff(
         self: _GraphRunView,
-        position: tuple[int, ...],
-        parent_activation: GraphActivationIdentity,
-        phase: _ChildPhaseView,
-        handle: _ChildHandleView | None,
+        call: _ChildCallView,
     ) -> None:
-        if handle is not None:
-            events.append(("handoff", (parent_activation.node_id,)))
-        original_accept(self, position, parent_activation, phase, handle)
+        if call.live:
+            events.append(("handoff", (call.parent.node_id,)))
+        original_accept(self, call)
 
     async def record_owner_resume(
         self: _GraphRunView,
@@ -1608,14 +1751,11 @@ async def test_existing_child_handoff_failure_cleans_a_constructed_candidate(
 
     def reject_child_handoff(
         self: _GraphRunView,
-        position: tuple[int, ...],
-        parent_activation: GraphActivationIdentity,
-        phase: _ChildPhaseView,
-        handle: _ChildHandleView | None,
+        call: _ChildCallView,
     ) -> None:
-        if handle is not None:
+        if call.live:
             raise original
-        original_accept(self, position, parent_activation, phase, handle)
+        original_accept(self, call)
 
     async def commit(transition: GraphTransition[str], /) -> GraphRunState:
         if transition.scope and isinstance(transition.command, AbortGraphRun):
@@ -1653,7 +1793,7 @@ async def test_transitioned_child_handoff_base_signal_releases_without_stale_abo
     root_state = leased_state(state)
     binding = ChildStateBinding(child_scope, activation, child_state)
     _planned, fences = plan_fences(graph, lineage_states(root_state, (binding,)))
-    handles: list[_ChildHandleView] = []
+    calls: list[_ChildCallView] = []
     transitions: list[GraphTransition[str]] = []
 
     class HandoffSignal(BaseException):
@@ -1663,13 +1803,10 @@ async def test_transitioned_child_handoff_base_signal_releases_without_stale_abo
 
     def interrupt_handoff(
         _owner: _GraphRunView,
-        _position: tuple[int, ...],
-        _parent: GraphActivationIdentity,
-        _phase: _ChildPhaseView,
-        handle: _ChildHandleView | None,
+        call: _ChildCallView,
     ) -> None:
-        assert handle is not None
-        handles.append(handle)
+        assert call.live
+        calls.append(call)
         raise original
 
     async def commit(transition: GraphTransition[str], /) -> GraphRunState:
@@ -1689,9 +1826,9 @@ async def test_transitioned_child_handoff_base_signal_releases_without_stale_abo
     assert raised.value is original
     assert tuple(transition.scope for transition in transitions) == ((),)
     assert transitions[0].command == fences[0].command
-    assert len(handles) == 1
+    assert len(calls) == 1
     with pytest.raises(ResultCollectionError, match="already released"):
-        await handles[0].drive()
+        await calls[0].drive()
 
 
 @pytest.mark.asyncio
@@ -1875,16 +2012,16 @@ async def test_abort_preserves_first_child_session_fence_or_state_error() -> Non
     async def no_release() -> None:
         return None
 
-    handle = _FamilyDriverPrivateView.child_handle(family_driver, no_drive, fail_abort, no_fence, no_release)
+    call = callback_child_call((0, 0), parent, no_drive, fail_abort, no_fence, no_release)
     child_owner = root_owner(graph, completed)
-    _GraphRunPrivateView.children(child_owner).append(((0, 0), parent, ActiveChild(parent), handle))
+    _GraphRunPrivateView.children(child_owner).append(call)
     with pytest.raises(CleanupError) as raised_child:
         await child_owner.abort(GraphAbortReason("abort"))
     assert raised_child.value is child_error
 
     skipped_owner = root_owner(graph, completed)
     _GraphRunPrivateView.children(skipped_owner).append(
-        ((0, 0), parent, AbortedChild(parent, GraphAbortReason("done")), handle)
+        restored_child_call((0, 0), parent, AbortedChild(parent, GraphAbortReason("done")))
     )
     await skipped_owner.abort(GraphAbortReason("ignored"))
 
@@ -1945,11 +2082,13 @@ async def test_release_preserves_child_or_session_errors_and_allows_retry() -> N
 
     release_owner = root_owner(graph, completed)
     _GraphRunPrivateView.children(release_owner).append(
-        (
+        callback_child_call(
             (0, 0),
             parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, no_drive, no_abort, no_fence, fail_release),
+            no_drive,
+            no_abort,
+            no_fence,
+            fail_release,
         )
     )
     with pytest.raises(CleanupError) as raised_release:
@@ -1978,11 +2117,13 @@ async def test_release_preserves_child_or_session_errors_and_allows_retry() -> N
 
     retry_owner = root_owner(graph, completed)
     _GraphRunPrivateView.children(retry_owner).append(
-        (
+        callback_child_call(
             (0, 0),
             parent,
-            ActiveChild(parent),
-            _FamilyDriverPrivateView.child_handle(family_driver, no_drive, no_abort, no_fence, release_on_retry),
+            no_drive,
+            no_abort,
+            no_fence,
+            release_on_retry,
         )
     )
     with pytest.raises(CleanupError):

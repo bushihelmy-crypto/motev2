@@ -17,7 +17,7 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError, SnapshotMismatchError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
@@ -28,6 +28,7 @@ from mote_kernel.execution.graph.ports import (
 from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
@@ -86,7 +87,7 @@ def test_interrupt_projection_uses_current_generation() -> None:
             return Graph.values(value=payload.decode())
 
     codec = Codec()
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("graph"),
             GraphDefinitionVersion(1),
@@ -94,9 +95,9 @@ def test_interrupt_projection_uses_current_generation() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 1, codec, codec),
+            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 1, codec.encode, codec.decode),
         )
-    )
+    ).compile()
     state = replace(
         running_state(definition_id="graph"),
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("input"), 1),
@@ -124,14 +125,14 @@ def test_falsy_output_is_not_copied_into_the_state_command() -> None:
     async def node(values: Graph.Values[bool]) -> Graph.Values[bool]:
         return values
 
-    graph = compile_graph(
+    graph = GraphCompiler(
         GraphDefinition[bool](
             GraphDefinitionId("boolean.graph"),
             GraphDefinitionVersion(1),
             (
                 CallableNodeDefinition(
                     GraphNodeId("a"),
-                    node,
+                    make_node_invoker(node),
                     normalize_input_bindings({"value": Graph.graph_input("value", bool)}),
                     normalize_output_declarations({"value": bool}),
                 ),
@@ -140,7 +141,7 @@ def test_falsy_output_is_not_copied_into_the_state_command() -> None:
             (),
             normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     current = running_state(definition_id="boolean.graph")
     task = plan_tasks(graph, current, ExecutionLimits())[0]
     state = leased_state(current)

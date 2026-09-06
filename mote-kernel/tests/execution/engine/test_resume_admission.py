@@ -6,7 +6,7 @@ import pytest
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.resume_admission import prepare_resume
 from mote_kernel.execution.errors import GraphValueAdmissionError, SnapshotMismatchError
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
@@ -21,6 +21,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import root_scope_run
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -105,17 +106,17 @@ def interruptible_graph(
         binding = ResumeInputBinding(
             GraphResumeInputCodecId("resume.input.v1"),
             1,
-            implementation,
-            implementation,
+            implementation.encode,
+            implementation.decode,
         )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("resume.admission"),
             GraphDefinitionVersion(1),
             tuple(
                 CallableNodeDefinition(
                     GraphNodeId(node_id),
-                    _node,
+                    make_node_invoker(_node),
                     normalize_input_bindings({"value": Graph.graph_input("value", str)}),
                     normalize_output_declarations({}),
                 )
@@ -126,7 +127,7 @@ def interruptible_graph(
             normalize_graph_output_declarations({}),
             resume_input=binding,
         )
-    )
+    ).compile()
 
 
 def predecessor_interruptible_graph() -> CompiledGraph[str]:
@@ -134,18 +135,18 @@ def predecessor_interruptible_graph() -> CompiledGraph[str]:
     loop_id = GraphNodeId("loop")
     initialize = CallableNodeDefinition(
         initialize_id,
-        _node,
+        make_node_invoker(_node),
         normalize_input_bindings({"value": Graph.graph_input("seed", str)}),
         normalize_output_declarations({"value": str}),
     )
     loop = CallableNodeDefinition(
         loop_id,
-        _node,
+        make_node_invoker(_node),
         normalize_input_bindings({"value": Graph.node_output("value")}),
         normalize_output_declarations({"value": str}),
     )
     codec = _Codec()
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("resume.predecessor"),
             GraphDefinitionVersion(1),
@@ -160,11 +161,11 @@ def predecessor_interruptible_graph() -> CompiledGraph[str]:
             resume_input=ResumeInputBinding(
                 GraphResumeInputCodecId("resume.input.v1"),
                 1,
-                codec,
-                codec,
+                codec.encode,
+                codec.decode,
             ),
         )
-    )
+    ).compile()
 
 
 def interrupted_predecessor_state(graph: CompiledGraph[str]) -> GraphRunState:

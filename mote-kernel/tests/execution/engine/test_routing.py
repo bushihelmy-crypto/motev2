@@ -36,7 +36,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
     UnknownRouteError,
 )
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
@@ -53,6 +53,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph, CompiledJoin, fr
 from mote_kernel.execution.graph.values import _make_node_output_frame
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, root_scope_run
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     ConfirmedPublication,
@@ -301,8 +302,11 @@ def routed(
     return GraphFrontierActivation(GraphNodeId(node_id), RoutedActivationCause(references, occurrence))
 
 
-def expected_complete() -> CompleteGraphFrontier:
-    return CompleteGraphFrontier(0)
+def expected_complete(completion_route: str | None = None) -> CompleteGraphFrontier:
+    return CompleteGraphFrontier(
+        0,
+        completion_route=GraphRouteId(completion_route) if completion_route is not None else None,
+    )
 
 
 def continue_for(*node_ids: str) -> tuple[tuple[GraphNodeId, GraphRoutingContribution], ...]:
@@ -389,17 +393,17 @@ def predecessor_loop_graph() -> CompiledGraph[int]:
     loop_id = GraphNodeId("loop")
     initialize_node = CallableNodeDefinition(
         initialize_id,
-        initialize,
+        make_node_invoker(initialize),
         normalize_input_bindings({"seed": Graph.graph_input("seed", int)}),
         normalize_output_declarations({"value": int}),
     )
     loop_node = CallableNodeDefinition(
         loop_id,
-        loop,
+        make_node_invoker(loop),
         normalize_input_bindings({"value": Graph.node_output("value")}),
         normalize_output_declarations({"value": int}),
     )
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             GraphDefinitionId("predecessor.routing"),
             GraphDefinitionVersion(1),
@@ -412,7 +416,7 @@ def predecessor_loop_graph() -> CompiledGraph[int]:
             (),
             normalize_graph_output_declarations({"value": Graph.node_output(loop_id, "value")}),
         )
-    )
+    ).compile()
 
 
 def settled_predecessor_loop(
@@ -604,7 +608,7 @@ def test_causal_self_loop_terminal_route_completes_without_a_new_activation() ->
 
     command = resolve_routing(graph, state, root_scope_run(state.run_id), frames)
 
-    assert command == CompleteGraphFrontier(state.revision)
+    assert command == CompleteGraphFrontier(state.revision, completion_route=GraphRouteId("done"))
 
 
 def test_causal_self_loop_rejects_a_forged_start_cause_after_round_zero() -> None:
@@ -716,20 +720,18 @@ def test_routing_validator_rejects_topology_incompatible_contribution() -> None:
             GraphNodeId("a"),
             SelectGraphRoute(GraphRouteId("unknown")),
         )
-    with pytest.raises(InvalidRoutingCommandError, match="non-conditional"):
-        validate_routing_contribution(
-            topology("a"),
-            GraphNodeId("a"),
-            SelectGraphRoute(GraphRouteId("route")),
-        )
+    # A terminal node without conditional edges may export an opaque route;
+    # its containing nested graph can use that value on its own conditional
+    # edges.
+    validate_routing_contribution(
+        topology("a"),
+        GraphNodeId("a"),
+        SelectGraphRoute(GraphRouteId("route")),
+    )
     with pytest.raises(InvalidRoutingCommandError, match="unknown node"):
         validate_routing_contribution(topology("a"), GraphNodeId("foreign"), ContinueGraphRouting())
-    with pytest.raises(InvalidRoutingCommandError, match="non-conditional"):
-        validate_routing_contribution(
-            topology("a"),
-            GraphNodeId("a"),
-            cast(GraphRoutingContribution, object()),
-        )
+    with pytest.raises(InvalidRoutingCommandError, match="unsupported"):
+        validate_routing_contribution(topology("a"), GraphNodeId("a"), cast(GraphRoutingContribution, object()))
 
 
 def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
@@ -1394,6 +1396,61 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         == "graph completion consumed the wrong Join occurrences"
     )
 
+    empty_previous = replace(previous, frontier=GraphFrontierState(()), settled_activations=())
+    assert (
+        transition_admission_error(
+            topology("a"),
+            empty_previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "a terminal frontier has no settled routing contribution"
+    )
+
+    conflicting_graph = topology(
+        "a",
+        "b",
+        edges=(conditional("a", "left", END), conditional("b", "right", END)),
+        entries=("a", "b"),
+    )
+    conflicting_previous = replace(
+        running_state(frontier=("a", "b")),
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("a"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("left"))),
+                    StartActivationCause(),
+                ),
+                GraphFrontierNode(
+                    GraphNodeId("b"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("right"))),
+                    StartActivationCause(),
+                ),
+            )
+        ),
+        settled_activations=(reference("a", route="left"), reference("b", route="right")),
+    )
+    assert (
+        transition_admission_error(
+            conflicting_graph,
+            conflicting_previous,
+            CompleteGraphFrontier(0),
+            completed,
+        )
+        == "terminal frontier exposes conflicting completion routes"
+    )
+
+    assert (
+        transition_admission_error(
+            topology("a"),
+            previous,
+            CompleteGraphFrontier(0, completion_route=GraphRouteId("unexpected")),
+            completed,
+        )
+        == "graph completion route does not match the terminal frontier"
+    )
+
 
 def predecessor_binding(graph: CompiledGraph[int]) -> CompiledPredecessorInput:
     source = graph.transition.materializations[GraphNodeId("loop")].bindings.entries[0].source
@@ -1444,7 +1501,7 @@ def test_predecessor_source_selects_the_exact_causal_publication() -> None:
         predecessor_binding(graph),
     )
 
-    assert selected.source == NodeOutputPort((), GraphNodeId("initialize"), "value")
+    assert selected.source == NodeOutputPort(GraphNodeId("initialize"), "value")
     assert selected.predecessor == GraphActivationIdentity(state.run_id, 0, GraphNodeId("initialize"))
 
 
@@ -1528,7 +1585,7 @@ def test_predecessor_source_rejects_an_uncompiled_source() -> None:
     state, _frames = settled_predecessor_loop(graph, "continue")
     binding = replace(
         predecessor_binding(graph),
-        sources=(NodeOutputPort((), GraphNodeId("other"), "value"),),
+        sources=(NodeOutputPort(GraphNodeId("other"), "value"),),
     )
 
     with pytest.raises(InvalidRoutingCommandError, match="not an allowed predecessor source"):

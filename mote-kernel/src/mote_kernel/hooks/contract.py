@@ -8,6 +8,8 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.ports import canonical_nominal_type
 from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
@@ -27,6 +29,18 @@ class HookGraphValue:
     __slots__ = ()
 
 
+@runtime_checkable
+class HookTransitionAdmission(Protocol[ValueT, StateT, CommandT]):
+    """Admit one concrete Hook priority transition for its composition owner."""
+
+    def admit_transition(
+        self,
+        request: HookRequest[ValueT, StateT],
+        result: HookStageResult[ValueT, CommandT],
+        /,
+    ) -> None: ...
+
+
 def _validate_nominal_type(payload_type: type[PayloadT], field: str, /) -> None:
     try:
         canonical_nominal_type(payload_type)
@@ -40,6 +54,11 @@ def _admit_exact(payload: PayloadT, expected: type[PayloadT], field: str, /) -> 
     return payload
 
 
+def _admit_node_id(node_id: GraphNodeId | None, field: str, /) -> None:
+    if node_id is not None and not is_canonical_identity(node_id):
+        raise HookContractError(f"{field} must be a canonical GraphNodeId or None")
+
+
 @dataclass(frozen=True, slots=True)
 class HookRequest(HookGraphValue, Generic[ValueT, StateT]):
     """The current value and owner-provided read-only state for one priority.
@@ -50,6 +69,13 @@ class HookRequest(HookGraphValue, Generic[ValueT, StateT]):
 
     value: ValueT
     state: StateT
+    # Identity of the business node whose result is entering the shared Hook.
+    # Generic callers may omit it; family graphs always provide the canonical
+    # GraphNodeId so the parent graph can route the nested completion.
+    node_id: GraphNodeId | None = None
+
+    def __post_init__(self) -> None:
+        _admit_node_id(self.node_id, "hook request node_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +92,7 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
     value_type: type[ValueT]
     state_type: type[StateT]
     command_type: type[CommandT]
+    transition_admission: HookTransitionAdmission[ValueT, StateT, CommandT] | None = None
 
     def __post_init__(self) -> None:
         _validate_nominal_type(self.config_type, "config")
@@ -73,6 +100,14 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         _validate_nominal_type(self.value_type, "value")
         _validate_nominal_type(self.state_type, "state")
         _validate_nominal_type(self.command_type, "command")
+        transition_admission = self.transition_admission
+        if transition_admission is not None:
+            try:
+                admit_transition = transition_admission.admit_transition
+            except AttributeError as error:
+                raise HookContractError("hook transition admission must satisfy HookTransitionAdmission") from error
+            if not callable(admit_transition):
+                raise HookContractError("hook transition admission must satisfy HookTransitionAdmission")
 
     def admit_snapshot(
         self,
@@ -102,6 +137,7 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
             raise HookContractError("hook invocation must contain a HookRequest")
         _admit_exact(request.value, self.value_type, "value")
         _admit_exact(request.state, self.state_type, "state")
+        _admit_node_id(request.node_id, "hook request node_id")
         return request
 
     def admit_invocation_request(
@@ -129,6 +165,16 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
             _admit_exact(command, self.command_type, "command")
         return result
 
+    def admit_transition(
+        self,
+        request: HookRequest[ValueT, StateT],
+        result: HookStageResult[ValueT, CommandT],
+        /,
+    ) -> None:
+        admission = self.transition_admission
+        if admission is not None:
+            admission.admit_transition(request, result)
+
     def admit_result(self, result: HookResult[ValueT, CommandT], /) -> HookResult[ValueT, CommandT]:
         if type(result) is not HookResult:
             raise HookContractError("hook result must be a HookResult")
@@ -137,6 +183,7 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
             raise HookContractError("hook result commands must be a tuple")
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
+        _admit_node_id(result.node_id, "hook result node_id")
         return result
 
 
@@ -177,10 +224,12 @@ class HookResult(HookGraphValue, Generic[ValueT, CommandT]):
 
     value: ValueT
     commands: tuple[CommandT, ...] = ()
+    node_id: GraphNodeId | None = None
 
     def __post_init__(self) -> None:
         if type(self.commands) is not tuple:
             raise TypeError("hook result commands must be a tuple")
+        _admit_node_id(self.node_id, "hook result node_id")
 
 
 @runtime_checkable
@@ -207,4 +256,5 @@ __all__ = [
     "HookRequest",
     "HookResult",
     "HookStageResult",
+    "HookTransitionAdmission",
 ]

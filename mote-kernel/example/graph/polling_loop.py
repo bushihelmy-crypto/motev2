@@ -73,8 +73,8 @@ def build_graph() -> Graph[PollRequest]:
         outputs={"request": PollRequest},
     )
     graph.add_edge(Graph.START, "poll")
-    graph.add_conditional_edge("poll", "again", "poll")
-    graph.add_conditional_edge("poll", "done", Graph.END)
+    graph.add_edge("poll", "again", "poll")
+    graph.add_edge("poll", "done", Graph.END)
     graph.set_outputs({"request": Graph.node_output("poll", "request")})
     return graph
 

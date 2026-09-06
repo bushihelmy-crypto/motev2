@@ -73,7 +73,7 @@ class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         self,
         values: Graph.Values[HookGraphValue],
         /,
-    ) -> Graph.Values[HookGraphValue]:
+    ) -> Graph.Values[HookGraphValue] | Graph.Outcome[HookGraphValue]:
         progress = cast(
             _HookProgress[PriorityConfigT, ValueT, StateT, CommandT],
             values["progress"],
@@ -87,10 +87,21 @@ class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         result = await self.port.execute(priority_plan, progress.request)
         ordered_commands = progress.commands + result.commands
         if self.priority is HookPriority.P3:
-            return Graph.values(result=self.port.admission.admit_result(HookResult(result.value, ordered_commands)))
+            hook_result = self.port.admission.admit_result(
+                HookResult(result.value, ordered_commands, progress.request.node_id)
+            )
+            output = Graph.values(result=hook_result)
+            # The shared Hook only reports which business node supplied the
+            # request.  It does not know the containing graph's topology.  A
+            # parent graph declares the meaning of that opaque node token on
+            # its own conditional edges; the token is carried as the nested
+            # graph's terminal route.
+            if hook_result.node_id is None:
+                return output
+            return Graph.success(output, route=str(hook_result.node_id))
         return Graph.values(
             progress=_HookProgress(
-                HookRequest(result.value, progress.request.state),
+                HookRequest(result.value, progress.request.state, progress.request.node_id),
                 progress.plan,
                 ordered_commands,
             )
@@ -103,7 +114,7 @@ class HookNode(
 ):
     """A typed plan -> P1 -> P2 -> P3 Graph using one dynamic plan."""
 
-    __slots__ = ("_slot",)
+    __slots__ = ("_payload_admission", "_slot")
 
     def __init__(
         self,
@@ -132,6 +143,7 @@ class HookNode(
             hook_definition_id(slot),
             version=int(slot.definition_version),
         )
+        self._payload_admission = payload_admission
         self._slot = slot
 
         request_type = cast(type[HookGraphValue], HookRequest)
@@ -185,13 +197,22 @@ class HookNode(
         self.add_edge("p1", "p2")
         self.add_edge("p2", "p3")
         self.add_edge("p3", Graph.END)
-        self.set_outputs({"result": Graph.node_output("p3", "result")})
+        # Graph owns typed output resolution, including nested boundaries.
+        self.set_outputs({"result": self.output_ref("p3", "result")})
 
     @property
     def slot(self) -> HookSlotId:
         """Return the immutable assembly slot used to define this HookNode."""
 
         return self._slot
+
+    @property
+    def payload_admission(
+        self,
+    ) -> HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]:
+        """Return the immutable concrete payload contract bound at assembly."""
+
+        return self._payload_admission
 
 
 __all__ = ["HookNode"]

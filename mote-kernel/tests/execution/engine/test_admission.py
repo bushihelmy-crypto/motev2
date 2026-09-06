@@ -6,7 +6,7 @@ from tests.execution.engine.factories import callable_node
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_tasks, select_executable_tasks
 from mote_kernel.execution.engine.task import GraphTask, TaskId
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
@@ -53,7 +53,7 @@ def task(name: str) -> GraphTask:
 
 
 def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         definition(
             (
                 replace(callable_node("a"), resources=(FILE,)),
@@ -62,7 +62,7 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
             ),
             resources=(ResourceDefinition(FILE),),
         )
-    )
+    ).compile()
 
     admission = admit_tasks(graph, (task("c"), task("b"), task("a")), ResourceSnapshot((ResourceLock(FILE),)))
 
@@ -73,12 +73,12 @@ def test_admission_allows_resource_free_tasks_and_one_exclusive_owner() -> None:
 
 
 def test_admission_reuses_committed_acquisition_without_requeueing() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         definition(
             (replace(callable_node("a"), resources=(FILE,)),),
             resources=(ResourceDefinition(FILE),),
         )
-    )
+    ).compile()
     first = admit_tasks(graph, (task("a"),), ResourceSnapshot((ResourceLock(FILE),)))
 
     second = admit_tasks(graph, (task("a"),), first.snapshot)
@@ -94,7 +94,7 @@ def test_admission_rejects_snapshot_with_noncompiled_resource_order() -> None:
 
 
 def resource_graph() -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         definition(
             (
                 replace(callable_node("a"), resources=(FILE,)),
@@ -102,7 +102,7 @@ def resource_graph() -> CompiledGraph[str]:
             ),
             resources=(ResourceDefinition(FILE),),
         )
-    )
+    ).compile()
 
 
 def test_admission_rejects_duplicate_unknown_and_stale_batch_tasks() -> None:
@@ -141,7 +141,7 @@ def test_admission_rejects_acquisition_for_free_task_and_requirement_drift() -> 
 
 def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
     child = definition((callable_node("child-step"),), definition_id="child")
-    graph = compile_graph(
+    graph = GraphCompiler(
         definition(
             (
                 NestedGraphNodeDefinition(
@@ -151,14 +151,14 @@ def test_admission_rejects_nested_graph_tasks_at_its_narrow_boundary() -> None:
                 ),
             ),
         )
-    )
+    ).compile()
 
     with pytest.raises(ResourceTransitionError, match="executable node"):
         admit_tasks(graph, (task("a"),), ResourceSnapshot(()))
 
 
 def test_admission_is_independent_of_input_task_order() -> None:
-    graph = compile_graph(
+    graph = GraphCompiler(
         definition(
             (
                 replace(callable_node("a"), resources=(FILE,)),
@@ -166,7 +166,7 @@ def test_admission_is_independent_of_input_task_order() -> None:
             ),
             resources=(ResourceDefinition(FILE),),
         )
-    )
+    ).compile()
     snapshot = ResourceSnapshot((ResourceLock(FILE),))
 
     forward = admit_tasks(graph, (task("a"), task("b")), snapshot)
@@ -216,7 +216,7 @@ def test_shared_selector_applies_slots_started_nodes_and_canonical_order() -> No
 
 def test_shared_selector_skips_waiting_resource_and_nested_tasks() -> None:
     child = definition((callable_node("child-step"),), definition_id="child")
-    graph = compile_graph(
+    graph = GraphCompiler(
         definition(
             (
                 replace(callable_node("a"), resources=(FILE,)),
@@ -229,7 +229,7 @@ def test_shared_selector_skips_waiting_resource_and_nested_tasks() -> None:
             ),
             resources=(ResourceDefinition(FILE),),
         )
-    )
+    ).compile()
     snapshot = admit_tasks(
         graph,
         (task("a"), task("b")),

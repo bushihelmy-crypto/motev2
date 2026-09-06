@@ -11,7 +11,7 @@ from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import ExecutableTask
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
-from mote_kernel.execution.graph.compiler import compile_graph
+from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge
@@ -25,6 +25,7 @@ from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.request import StepRequest
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import (
@@ -65,7 +66,7 @@ def node(
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
-        operation,
+        make_node_invoker(operation),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
         resources,
@@ -77,7 +78,7 @@ def graph(
     *,
     resources: tuple[ResourceDefinition, ...] = (),
 ) -> CompiledGraph[str]:
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("session.graph"),
             version=GraphDefinitionVersion(1),
@@ -87,7 +88,7 @@ def graph(
             outputs=normalize_graph_output_declarations({}),
             resources=resources,
         )
-    )
+    ).compile()
 
 
 def interrupt_graph(
@@ -103,7 +104,7 @@ def interrupt_graph(
             return values
 
         nodes = (*nodes, node("b", sibling))
-    return compile_graph(
+    return GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("session.interrupt"),
             version=GraphDefinitionVersion(1),
@@ -114,11 +115,11 @@ def interrupt_graph(
             resume_input=ResumeInputBinding(
                 GraphResumeInputCodecId("session.v1"),
                 1,
-                codec,
-                codec,
+                codec.encode,
+                codec.decode,
             ),
         )
-    )
+    ).compile()
 
 
 def request(
@@ -810,7 +811,7 @@ async def test_invalid_routing_completion_drains_a_typed_sibling() -> None:
     async def valid(values: Graph.Values[str]) -> Graph.Values[str]:
         return values
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("session.invalid-route"),
             version=GraphDefinitionVersion(1),
@@ -819,7 +820,7 @@ async def test_invalid_routing_completion_drains_a_typed_sibling() -> None:
             entries=(GraphNodeId("b"),),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(compiled, state)
     try:
@@ -838,7 +839,7 @@ async def test_invalid_queued_routing_completion_becomes_an_ordinary_error() -> 
     async def invalid(values: Graph.Values[str]) -> Graph.Values[str]:
         return values
 
-    compiled = compile_graph(
+    compiled = GraphCompiler(
         GraphDefinition(
             definition_id=GraphDefinitionId("session.queued-invalid-route"),
             version=GraphDefinitionVersion(1),
@@ -847,7 +848,7 @@ async def test_invalid_queued_routing_completion_becomes_an_ordinary_error() -> 
             entries=(),
             outputs=normalize_graph_output_declarations({}),
         )
-    )
+    ).compile()
     state = reduce_graph_run(None, project_start_graph_command(compiled, GraphRunId("run")))
     _executor, claimed, session = claim_session(compiled, state)
     try:

@@ -2,14 +2,20 @@
 
 from collections.abc import Iterator, Mapping
 from dataclasses import InitVar, dataclass, field
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
-from mote_kernel.execution.errors import GraphValueAdmissionError
-from mote_kernel.execution.graph.ports import OutputDeclarations, canonical_port_name
+from mote_kernel.execution.errors import GraphValidationError, GraphValueAdmissionError
+from mote_kernel.execution.graph.ports import (
+    NominalTypeDescriptor,
+    OutputDeclarations,
+    canonical_nominal_type,
+    canonical_port_name,
+)
 
 FactoryValueT = TypeVar("FactoryValueT")
 GraphValueT = TypeVar("GraphValueT")
 GraphValueT_co = TypeVar("GraphValueT_co", covariant=True)
+ValueT = TypeVar("ValueT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,29 +32,13 @@ _VALUES_SEAL = _ValuesSeal()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _ValuesConstruction(Generic[GraphValueT_co]):
-    entries: tuple[NamedValue[GraphValueT_co], ...]
+class _GraphValues(Generic[GraphValueT_co]):
+    _entries: tuple[NamedValue[GraphValueT_co], ...] = field(repr=False)
     _seal: InitVar[_ValuesSeal]
 
     def __post_init__(self, _seal: _ValuesSeal) -> None:
         if _seal is not _VALUES_SEAL:
             raise GraphValueAdmissionError("Graph values require their canonical owner construction")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _GraphValues(Generic[GraphValueT_co]):
-    _construction: InitVar[_ValuesConstruction[GraphValueT_co]]
-    _seal: InitVar[_ValuesSeal]
-    _entries: tuple[NamedValue[GraphValueT_co], ...] = field(init=False, repr=False)
-
-    def __post_init__(
-        self,
-        _construction: _ValuesConstruction[GraphValueT_co],
-        _seal: _ValuesSeal,
-    ) -> None:
-        if _seal is not _VALUES_SEAL:
-            raise GraphValueAdmissionError("Graph values require their canonical owner construction")
-        object.__setattr__(self, "_entries", _construction.entries)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -129,8 +119,12 @@ def _normalize_mapping(values: Mapping[str, GraphValueT]) -> tuple[NamedValue[Gr
 
 def _make_graph_values(**values: FactoryValueT) -> _GraphValues[FactoryValueT]:
     entries = _normalize_mapping(values)
-    construction = _ValuesConstruction(entries=entries, _seal=_VALUES_SEAL)
-    return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
+    return _GraphValues(_entries=entries, _seal=_VALUES_SEAL)
+
+
+def _make_single_graph_value(name: str, value: FactoryValueT) -> _GraphValues[FactoryValueT]:
+    entry = NamedValue(canonical_port_name(name, kind="value"), value)
+    return _GraphValues(_entries=(entry,), _seal=_VALUES_SEAL)
 
 
 def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[GraphValueT]:
@@ -147,6 +141,31 @@ def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[Gra
 def _entries_of(values: _GraphValues[GraphValueT]) -> tuple[NamedValue[GraphValueT], ...]:
     admitted = _require_graph_values(values)
     return tuple(NamedValue(name, value) for name, value in admitted.items())
+
+
+def admit_exact(
+    value: ValueT,
+    descriptor: NominalTypeDescriptor[ValueT],
+    *,
+    kind: str = "value",
+) -> ValueT:
+    """Admit one value against its compiled nominal descriptor.
+
+    This is the single exact-class check used by every frame wrapper and by
+    the typed node adapter.  The descriptor is the runtime half of the
+    statically declared port contract; no structural or subclass admission is
+    performed here.
+    """
+
+    if type(descriptor) is not NominalTypeDescriptor:
+        raise GraphValueAdmissionError(f"{kind} has a malformed nominal descriptor")
+    try:
+        canonical_nominal_type(descriptor.value_type)
+    except GraphValidationError as error:
+        raise GraphValueAdmissionError(f"{kind} has a malformed nominal descriptor") from error
+    if type(value) is not descriptor.value_type:
+        raise GraphValueAdmissionError(f"{kind} does not have its exact declared type")
+    return cast(ValueT, value)
 
 
 def _admit_entries(
@@ -166,8 +185,11 @@ def _admit_entries(
             f"{kind} names do not match the compiled descriptor: expected {expected_names!r}, got {actual_names!r}"
         )
     for entry, declaration in zip(entries, declarations.entries, strict=True):
-        if type(entry.value) is not declaration.descriptor.value_type:
-            raise GraphValueAdmissionError(f"{kind} value for {entry.name!r} does not have its exact declared type")
+        admit_exact(
+            entry.value,
+            declaration.descriptor,
+            kind=f"{kind} value for {entry.name!r}",
+        )
     return entries
 
 
@@ -259,19 +281,10 @@ def _make_graph_output_view(
     return GraphOutputView(entries=admitted, _seal=_FRAME_SEAL)
 
 
-def _public_values(view: GraphOutputView[GraphValueT]) -> _GraphValues[GraphValueT]:
-    construction = _ValuesConstruction(entries=view.entries, _seal=_VALUES_SEAL)
-    return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
-
-
-def _public_node_output(frame: NodeOutputFrame[GraphValueT]) -> _GraphValues[GraphValueT]:
-    construction = _ValuesConstruction(entries=frame.entries, _seal=_VALUES_SEAL)
-    return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
-
-
-def _public_node_input(frame: NodeInputFrame[GraphValueT]) -> _GraphValues[GraphValueT]:
-    construction = _ValuesConstruction(entries=frame.entries, _seal=_VALUES_SEAL)
-    return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
+def _public_values(
+    frame: NodeInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT] | GraphOutputView[GraphValueT],
+) -> _GraphValues[GraphValueT]:
+    return _GraphValues(_entries=frame.entries, _seal=_VALUES_SEAL)
 
 
 def _frame_value(
@@ -287,6 +300,20 @@ def _frame_value(
     raise GraphValueAdmissionError(f"compiled frame does not contain value {name!r}")
 
 
+def _frame_value_typed(
+    frame: NodeInputFrame[GraphValueT],
+    name: str,
+    descriptor: NominalTypeDescriptor[ValueT],
+) -> ValueT:
+    """Materialize one declared node input with its exact port-local type."""
+
+    return admit_exact(
+        cast(ValueT, _frame_value(frame, name)),
+        descriptor,
+        kind=f"node input value for {name!r}",
+    )
+
+
 __all__ = [
     "_GraphValues",
     "_admit_graph_input_frame",
@@ -294,15 +321,16 @@ __all__ = [
     "_admit_node_input_frame",
     "_admit_node_output_frame",
     "_frame_value",
+    "_frame_value_typed",
     "_graph_input_from_node_input",
     "_make_graph_input_frame",
     "_make_graph_output_view",
     "_make_graph_values",
     "_make_node_input_frame",
     "_make_node_output_frame",
+    "_make_single_graph_value",
     "_node_output_from_view",
-    "_public_node_input",
-    "_public_node_output",
     "_public_values",
     "_require_graph_values",
+    "admit_exact",
 ]
