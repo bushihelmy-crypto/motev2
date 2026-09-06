@@ -31,7 +31,7 @@ outcome、state 和 resume action 显式传递。示例从基础拓扑逐步覆�
 | 需求 / Need | 示例 / Example | 关键 API / API to study |
 | --- | --- | --- |
 | 固定步骤串联 / Fixed sequence | `linear_treasure_hunt` | `add_edge`, `node_output` |
-| 按结果选择路径 / Select a route | `conditional_mood_radio` | `Graph.success(..., route=...)`, `add_conditional_edge` |
+| 按结果选择路径 / Select a route | `conditional_mood_radio` | `Graph.success(..., route=...)`, `add_edge(source, route, target)` |
 | 同时取数后汇总 / Fan-out then aggregate | `parallel_detectives` | `add_join` |
 | 扇出后直接结束 / Fan-out then finish | `fanout_terminal` | multiple `add_edge`, `add_join(..., Graph.END)` |
 | 循环轮询 / Poll until an answer | `polling_loop` | `Graph.START`, back-edge, `resume_interrupted` |
@@ -120,8 +120,8 @@ loop.add_node(
     outputs={"value": int},
 )
 loop.add_edge("initialize", "step")
-loop.add_conditional_edge("step", "again", "step")
-loop.add_conditional_edge("step", "done", Graph.END)
+loop.add_edge("step", "again", "step")
+loop.add_edge("step", "done", Graph.END)
 loop.set_outputs({"value": Graph.node_output("step", "value")})
 ```
 

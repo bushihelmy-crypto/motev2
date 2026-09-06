@@ -50,8 +50,8 @@ def build_graph() -> Graph[str]:
         inputs={"playlist": Graph.node_output("dj", "playlist")},
         outputs={"message": str},
     )
-    graph.add_conditional_edge("dj", "party", "party-playlist")
-    graph.add_conditional_edge("dj", "quiet", "quiet-playlist")
+    graph.add_edge("dj", "party", "party-playlist")
+    graph.add_edge("dj", "quiet", "quiet-playlist")
     graph.add_edge("party-playlist", "playback")
     graph.add_edge("quiet-playlist", "playback")
     graph.set_outputs({"message": Graph.node_output("playback", "message")})
