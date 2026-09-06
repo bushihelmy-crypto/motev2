@@ -701,7 +701,7 @@ def test_observe_rejects_a_forged_hook_payload_admission_outer_type() -> None:
     object.__setattr__(hook, "_payload_admission", cast(Never, object()))
 
     with pytest.raises(ObserveContractError, match="HookPayloadAdmission"):
-        _observe_with_hook(ports, invocation, hook)
+        _observe_with_hook(ports, invocation, hook, _admission())
 
 
 @pytest.mark.parametrize(
@@ -732,12 +732,15 @@ def test_observe_rejects_wrong_shared_hook_concrete_bindings_before_graph_assemb
     invocation = _HookInvocation()
     admission = _admission()
     hook = _hook("observe.test", invocation, admission)
+    value_type = cast(type[ObserveHookEnvelope], OtherValue) if fault == "value" else ObserveHookEnvelope
+    state_type = cast(type[_State], OtherState) if fault == "state" else _State
+    command_type = cast(type[_Command], OtherCommand) if fault == "command" else _Command
     hook_admission = HookPayloadAdmission(
         _Config,
         _Priority,
-        OtherValue if fault == "value" else ObserveHookEnvelope,
-        OtherState if fault == "state" else _State,
-        OtherCommand if fault == "command" else _Command,
+        value_type,
+        state_type,
+        command_type,
         _admission() if fault == "transition" else admission,
     )
     object.__setattr__(hook, "_payload_admission", hook_admission)

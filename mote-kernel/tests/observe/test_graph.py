@@ -328,7 +328,7 @@ async def test_observe_typed_materializer_rejects_a_missing_graph_input_before_a
     invocation = _HookInvocation()
     observe = _observe(ports, invocation)
 
-    with pytest.raises(Graph.ValueAdmissionError, match="required input"):
+    with pytest.raises(Graph.ValueAdmissionError, match="input names do not match"):
         await observe.run(Graph.values())
     assert ports.reads == []
     assert invocation.requests == []
