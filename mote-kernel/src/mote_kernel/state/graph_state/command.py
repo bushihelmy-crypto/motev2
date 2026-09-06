@@ -19,6 +19,7 @@ from mote_kernel.state.graph_state.identity import (
     GraphInterruptId,
     GraphJoinOccurrenceIdentity,
     GraphNodeId,
+    GraphRouteId,
     GraphRunId,
 )
 from mote_kernel.state.graph_state.model import (
@@ -64,6 +65,7 @@ class AdvanceGraphFrontier:
 class CompleteGraphFrontier:
     expected_revision: int
     consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...] = ()
+    completion_route: GraphRouteId | None = None
 
 
 @dataclass(frozen=True, slots=True)

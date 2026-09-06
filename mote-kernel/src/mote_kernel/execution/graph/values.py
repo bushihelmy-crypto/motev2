@@ -2,14 +2,20 @@
 
 from collections.abc import Iterator, Mapping
 from dataclasses import InitVar, dataclass, field
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
-from mote_kernel.execution.errors import GraphValueAdmissionError
-from mote_kernel.execution.graph.ports import OutputDeclarations, canonical_port_name
+from mote_kernel.execution.errors import GraphValidationError, GraphValueAdmissionError
+from mote_kernel.execution.graph.ports import (
+    NominalTypeDescriptor,
+    OutputDeclarations,
+    canonical_nominal_type,
+    canonical_port_name,
+)
 
 FactoryValueT = TypeVar("FactoryValueT")
 GraphValueT = TypeVar("GraphValueT")
 GraphValueT_co = TypeVar("GraphValueT_co", covariant=True)
+ValueT = TypeVar("ValueT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +139,12 @@ def _make_graph_values(**values: FactoryValueT) -> _GraphValues[FactoryValueT]:
     return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
 
 
+def _make_single_graph_value(name: str, value: FactoryValueT) -> _GraphValues[FactoryValueT]:
+    entry = NamedValue(canonical_port_name(name, kind="value"), value)
+    construction = _ValuesConstruction(entries=(entry,), _seal=_VALUES_SEAL)
+    return _GraphValues(_construction=construction, _seal=_VALUES_SEAL)
+
+
 def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[GraphValueT]:
     if type(values) is not _GraphValues:
         raise GraphValueAdmissionError("graph values must be produced by Graph.values()")
@@ -147,6 +159,31 @@ def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[Gra
 def _entries_of(values: _GraphValues[GraphValueT]) -> tuple[NamedValue[GraphValueT], ...]:
     admitted = _require_graph_values(values)
     return tuple(NamedValue(name, value) for name, value in admitted.items())
+
+
+def admit_exact(
+    value: ValueT,
+    descriptor: NominalTypeDescriptor[ValueT],
+    *,
+    kind: str = "value",
+) -> ValueT:
+    """Admit one value against its compiled nominal descriptor.
+
+    This is the single exact-class check used by every frame wrapper and by
+    the typed node adapter.  The descriptor is the runtime half of the
+    statically declared port contract; no structural or subclass admission is
+    performed here.
+    """
+
+    if type(descriptor) is not NominalTypeDescriptor:
+        raise GraphValueAdmissionError(f"{kind} has a malformed nominal descriptor")
+    try:
+        canonical_nominal_type(descriptor.value_type)
+    except GraphValidationError as error:
+        raise GraphValueAdmissionError(f"{kind} has a malformed nominal descriptor") from error
+    if type(value) is not descriptor.value_type:
+        raise GraphValueAdmissionError(f"{kind} does not have its exact declared type")
+    return cast(ValueT, value)
 
 
 def _admit_entries(
@@ -166,8 +203,11 @@ def _admit_entries(
             f"{kind} names do not match the compiled descriptor: expected {expected_names!r}, got {actual_names!r}"
         )
     for entry, declaration in zip(entries, declarations.entries, strict=True):
-        if type(entry.value) is not declaration.descriptor.value_type:
-            raise GraphValueAdmissionError(f"{kind} value for {entry.name!r} does not have its exact declared type")
+        admit_exact(
+            entry.value,
+            declaration.descriptor,
+            kind=f"{kind} value for {entry.name!r}",
+        )
     return entries
 
 
@@ -287,6 +327,20 @@ def _frame_value(
     raise GraphValueAdmissionError(f"compiled frame does not contain value {name!r}")
 
 
+def _frame_value_typed(
+    frame: NodeInputFrame[GraphValueT],
+    name: str,
+    descriptor: NominalTypeDescriptor[ValueT],
+) -> ValueT:
+    """Materialize one declared node input with its exact port-local type."""
+
+    return admit_exact(
+        cast(ValueT, _frame_value(frame, name)),
+        descriptor,
+        kind=f"node input value for {name!r}",
+    )
+
+
 __all__ = [
     "_GraphValues",
     "_admit_graph_input_frame",
@@ -294,15 +348,18 @@ __all__ = [
     "_admit_node_input_frame",
     "_admit_node_output_frame",
     "_frame_value",
+    "_frame_value_typed",
     "_graph_input_from_node_input",
     "_make_graph_input_frame",
     "_make_graph_output_view",
     "_make_graph_values",
     "_make_node_input_frame",
     "_make_node_output_frame",
+    "_make_single_graph_value",
     "_node_output_from_view",
     "_public_node_input",
     "_public_node_output",
     "_public_values",
     "_require_graph_values",
+    "admit_exact",
 ]

@@ -198,6 +198,10 @@ class ActiveChild:
 class CompletedChild(Generic[GraphValueT]):
     parent: GraphActivationIdentity
     output: GraphOutputView[GraphValueT]
+    # A completed nested graph may expose the route selected by its terminal
+    # node.  The route is intentionally opaque to the child projection; the
+    # parent graph validates it against its own conditional edge domain.
+    route: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, overload
+from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, cast, overload
 from uuid import uuid4
 
 from mote_kernel.execution.cancellation import wait_for_owner_task
@@ -35,7 +35,15 @@ from mote_kernel.execution.graph.compiler import compile_graph
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
-from mote_kernel.execution.graph.node import CallableNodeDefinition, NodeCallable
+from mote_kernel.execution.graph.node import (
+    CallableNodeDefinition,
+    NodeCallable,
+    NodeInputMaterializer,
+    NodeInputs,
+    NodeOperation,
+    TypedNodeAssembly,
+    make_typed_node_assembly,
+)
 from mote_kernel.execution.graph.outcome import (
     GraphOutcome,
     _failure,
@@ -49,8 +57,11 @@ from mote_kernel.execution.graph.ports import (
     GraphInputRef,
     GraphOutputDeclarations,
     InputBindings,
+    NodeInputSlot,
     NodeOutputRef,
+    NominalTypeDescriptor,
     PredecessorOutputRef,
+    TypedInputBinding,
     canonical_nominal_type,
     canonical_port_name,
     normalize_graph_output_declarations,
@@ -78,6 +89,7 @@ from mote_kernel.execution.invocation import (
     validate_context,
 )
 from mote_kernel.execution.limits import ExecutionLimits
+from mote_kernel.execution.node_adapter import make_typed_node_invoker
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -116,6 +128,8 @@ from mote_kernel.state.graph_state import (
 )
 
 GraphValueT = TypeVar("GraphValueT")
+InputT = TypeVar("InputT")
+OutputT = TypeVar("OutputT")
 ValueT = TypeVar("ValueT")
 
 
@@ -185,6 +199,9 @@ class Graph(Generic[GraphValueT]):
     START: ClassVar[str] = START
     END: ClassVar[str] = END
     Values = _GraphValues
+    Inputs = NodeInputs
+    InputBinding = TypedInputBinding
+    OutputRef = NodeOutputRef
     SuccessOutcome = _GraphSuccessOutcome
     FailureOutcome = _GraphFailureOutcome
     InterruptOutcome = _GraphInterruptOutcome
@@ -248,26 +265,198 @@ class Graph(Generic[GraphValueT]):
 
     @staticmethod
     @overload
-    def node_output(output_name: str, /) -> PredecessorOutputRef: ...
+    def node_output(output_name: str, /) -> PredecessorOutputRef[Never]: ...
 
     @staticmethod
     @overload
-    def node_output(node_id: str, output_name: str, /) -> NodeOutputRef: ...
+    def node_output(node_id: str, output_name: str, /) -> NodeOutputRef[Never]: ...
+
+    @staticmethod
+    @overload
+    def node_output(output: NodeOutputRef[ValueT], /) -> PredecessorOutputRef[ValueT]: ...
 
     @staticmethod
     def node_output(
-        node_id_or_output_name: str,
+        node_id_or_output_name: str | NodeOutputRef[ValueT],
         output_name: str | None = None,
         /,
-    ) -> NodeOutputRef | PredecessorOutputRef:
+    ) -> NodeOutputRef[Never] | PredecessorOutputRef[Never] | PredecessorOutputRef[ValueT]:
         """Reference either one fixed producer or the actual control predecessor."""
 
+        if isinstance(node_id_or_output_name, NodeOutputRef):
+            if output_name is not None or node_id_or_output_name.descriptor is None:
+                raise GraphValidationError("typed predecessor output requires one typed node output")
+            return PredecessorOutputRef(
+                node_id_or_output_name.output_name,
+                node_id_or_output_name.descriptor,
+            )
         if output_name is None:
             return PredecessorOutputRef(canonical_port_name(node_id_or_output_name, kind="source output"))
         return NodeOutputRef(
             GraphNodeId(canonical_port_name(node_id_or_output_name, kind="source node")),
             canonical_port_name(output_name, kind="source output"),
         )
+
+    @staticmethod
+    def bind(
+        name: str,
+        source: GraphInputRef[ValueT] | NodeOutputRef[ValueT] | PredecessorOutputRef[ValueT],
+        /,
+    ) -> TypedInputBinding[ValueT]:
+        """Bind one typed source without repeating its nominal descriptor."""
+
+        if type(source) not in (GraphInputRef, NodeOutputRef, PredecessorOutputRef):
+            raise GraphValidationError("typed input must bind one graph input or typed node output")
+        descriptor = source.descriptor
+        if descriptor is None:
+            raise GraphValidationError("typed input source must come from a typed Graph handle")
+        destination = NodeInputSlot(canonical_port_name(name, kind="input"), descriptor)
+        return TypedInputBinding(destination, source)
+
+    def output_ref(
+        self,
+        node_id: str,
+        output_name: str,
+        /,
+    ) -> NodeOutputRef[GraphValueT]:
+        """Return a typed handle for a declared node or nested graph output.
+
+        ``Graph.node_output()`` remains the address-only constructor used by
+        legacy mappings.  This instance method is the one typed composition
+        entry point: it resolves the declaration in the current builder and,
+        for a nested node, follows that child's public ``set_outputs``
+        boundary.  The descriptor is always the object owned by the original
+        declaration; no type is inferred from a runtime value and no fresh
+        descriptor is manufactured at the parent boundary.
+        """
+        canonical_node = GraphNodeId(canonical_port_name(node_id, kind="source node"))
+        canonical_output = canonical_port_name(output_name, kind="source output")
+        descriptor = self._resolve_declared_output_descriptor(
+            canonical_node,
+            canonical_output,
+            {self},
+        )
+        return NodeOutputRef(canonical_node, canonical_output, descriptor)
+
+    @staticmethod
+    def _validated_descriptor(
+        descriptor: NominalTypeDescriptor[GraphValueT],
+        *,
+        owner: str,
+    ) -> NominalTypeDescriptor[GraphValueT]:
+        if type(descriptor) is not NominalTypeDescriptor:
+            raise GraphValidationError(f"{owner} has a malformed nominal descriptor")
+        try:
+            canonical_nominal_type(descriptor.value_type)
+        except GraphValidationError as error:
+            raise GraphValidationError(f"{owner} has a non-concrete nominal descriptor") from error
+        return descriptor
+
+    def _graph_input_descriptor(
+        self,
+        name: str,
+        /,
+    ) -> NominalTypeDescriptor[GraphValueT]:
+        """Resolve one local graph-input descriptor like the compiler does."""
+
+        selected: NominalTypeDescriptor[GraphValueT] | None = None
+        for candidate in self._builder_state.nodes:
+            for binding in candidate.inputs.entries:
+                source = binding.source
+                if not isinstance(source, GraphInputRef) or source.name != name:
+                    continue
+                descriptor = self._validated_descriptor(
+                    source.descriptor,
+                    owner=f"graph input {name!r}",
+                )
+                if selected is not None and selected.value_type is not descriptor.value_type:
+                    raise GraphValidationError(f"graph input {name!r} has conflicting exact type declarations")
+                selected = descriptor
+        outputs = self._builder_state.outputs
+        if outputs is not None:
+            for declaration in outputs.entries:
+                source = declaration.source
+                if not isinstance(source, GraphInputRef) or source.name != name:
+                    continue
+                descriptor = self._validated_descriptor(
+                    source.descriptor,
+                    owner=f"graph input {name!r}",
+                )
+                if selected is not None and selected.value_type is not descriptor.value_type:
+                    raise GraphValidationError(f"graph input {name!r} has conflicting exact type declarations")
+                selected = descriptor
+        if selected is None:
+            raise GraphValidationError(f"graph input {name!r} is not declared")
+        return selected
+
+    def _resolve_boundary_source_descriptor(
+        self,
+        source: GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT],
+        visiting: set["Graph[GraphValueT]"],
+        /,
+    ) -> NominalTypeDescriptor[GraphValueT]:
+        if isinstance(source, GraphInputRef):
+            # Graph input declarations are intentionally compared by concrete
+            # value type, matching compiler input collection.  Repeated
+            # Graph.graph_input() calls may therefore use equal-type descriptor
+            # objects while the compiler's selected declaration remains the
+            # authoritative identity.
+            self._validated_descriptor(source.descriptor, owner=f"graph input {source.name!r}")
+            return self._graph_input_descriptor(source.name)
+        if type(source) is not NodeOutputRef:
+            raise GraphValidationError("graph output boundary must bind a graph input or node output")
+        descriptor = self._resolve_declared_output_descriptor(
+            source.node_id,
+            source.output_name,
+            visiting,
+        )
+        if source.descriptor is not None:
+            declared = self._validated_descriptor(
+                source.descriptor,
+                owner=f"node output {source.node_id!r}.{source.output_name!r}",
+            )
+            if declared is not descriptor:
+                raise GraphValidationError(
+                    f"declared output {source.node_id!r}.{source.output_name!r} has a foreign descriptor"
+                )
+        return descriptor
+
+    def _resolve_declared_output_descriptor(
+        self,
+        node_id: GraphNodeId,
+        output_name: str,
+        visiting: set["Graph[GraphValueT]"],
+        /,
+    ) -> NominalTypeDescriptor[GraphValueT]:
+        matches = tuple(candidate for candidate in self._builder_state.nodes if candidate.node_id == node_id)
+        if len(matches) != 1:
+            raise GraphValidationError(f"typed output handle requires exactly one declared node {node_id!r}")
+        candidate = matches[0]
+        if isinstance(candidate, CallableNodeDefinition):
+            declarations = tuple(entry for entry in candidate.outputs.entries if entry.name == output_name)
+            if len(declarations) != 1:
+                raise GraphValidationError(f"node {node_id!r} does not declare output {output_name!r}")
+            declaration = declarations[0]
+            return self._validated_descriptor(
+                declaration.descriptor,
+                owner=f"node output {node_id!r}.{output_name!r}",
+            )
+
+        child = candidate.graph
+        if child in visiting:
+            raise GraphValidationError("graph composition recursively contains itself")
+        child_outputs = child._builder_state.outputs
+        if child_outputs is None:
+            raise GraphValidationError(
+                f"nested node {node_id!r} child graph requires exactly one set_outputs() declaration"
+            )
+        boundaries = tuple(entry for entry in child_outputs.entries if entry.boundary_name == output_name)
+        if len(boundaries) != 1:
+            raise GraphValidationError(f"nested node {node_id!r} does not declare boundary output {output_name!r}")
+        boundary = boundaries[0]
+        child_visiting = set(visiting)
+        child_visiting.add(child)
+        return child._resolve_boundary_source_descriptor(boundary.source, child_visiting)
 
     @staticmethod
     @overload
@@ -305,7 +494,7 @@ class Graph(Generic[GraphValueT]):
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT] | PredecessorOutputRef[GraphValueT],
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
@@ -315,36 +504,65 @@ class Graph(Generic[GraphValueT]):
     def add_node(
         self,
         node_id: str,
+        operation: NodeOperation[InputT, OutputT],
+        *,
+        inputs: tuple[TypedInputBinding[GraphValueT], ...],
+        input_type: type[InputT],
+        materialize: NodeInputMaterializer[GraphValueT, InputT],
+        output_name: str,
+        output_type: type[OutputT],
+        resources: tuple[str, ...] = (),
+    ) -> NodeOutputRef[OutputT]: ...
+
+    @overload
+    def add_node(
+        self,
+        node_id: str,
         operation: "Graph[GraphValueT]",
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
+            GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT] | PredecessorOutputRef[GraphValueT],
         ],
     ) -> Self: ...
 
     def add_node(
         self,
         node_id: str,
-        operation: NodeCallable[GraphValueT] | "Graph[GraphValueT]",
+        operation: NodeCallable[GraphValueT] | NodeOperation[InputT, OutputT] | "Graph[GraphValueT]",
         *,
         inputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | PredecessorOutputRef,
-        ],
+            GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT] | PredecessorOutputRef[GraphValueT],
+        ]
+        | tuple[TypedInputBinding[GraphValueT], ...],
         outputs: Mapping[
             str,
-            type[GraphValueT] | GraphInputRef[GraphValueT] | NodeOutputRef,
+            type[GraphValueT] | GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT],
         ]
         | None = None,
+        input_type: type[InputT] | None = None,
+        materialize: NodeInputMaterializer[GraphValueT, InputT] | None = None,
+        output_name: str | None = None,
+        output_type: type[OutputT] | None = None,
         resources: tuple[str, ...] = (),
-    ) -> Self:
+    ) -> Self | NodeOutputRef[OutputT]:
         state = self._require_mutable()
         canonical_id = GraphNodeId(canonical_port_name(node_id, kind="node"))
-        bindings = normalize_input_bindings(inputs)
+        typed_fields = (
+            input_type is not None,
+            materialize is not None,
+            output_name is not None,
+            output_type is not None,
+        )
+        if any(typed_fields) and not all(typed_fields):
+            raise GraphValidationError("typed graph nodes require input, materializer, and output declarations")
+        typed = all(typed_fields)
+        typed_assembly: TypedNodeAssembly[GraphValueT, InputT, OutputT] | None = None
         if isinstance(operation, Graph):
-            if outputs is not None or resources:
+            if typed or outputs is not None or resources or type(inputs) is tuple:
                 raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")
+            bindings = normalize_input_bindings(inputs)
             candidate: NodeCandidate[GraphValueT] = _NestedNodeCandidate(
                 canonical_id,
                 operation,
@@ -354,17 +572,41 @@ class Graph(Generic[GraphValueT]):
         else:
             if not callable(operation):
                 raise GraphValidationError("ordinary graph node operation must be callable")
-            if outputs is None:
-                raise GraphValidationError("callable graph nodes require an explicit outputs mapping")
-            declarations = normalize_output_declarations(outputs)
             resource_ids = _canonical_resources(resources)
-            candidate = CallableNodeDefinition(
-                canonical_id,
-                operation,
-                bindings,
-                declarations,
-                resource_ids,
-            )
+            if typed:
+                if outputs is not None or type(inputs) is not tuple:
+                    raise GraphValidationError("typed graph nodes use typed bindings and one typed output")
+                if input_type is None or materialize is None or output_name is None or output_type is None:
+                    raise GraphValidationError("typed graph nodes require complete input and output declarations")
+                typed_assembly = make_typed_node_assembly(
+                    canonical_id,
+                    cast(NodeOperation[InputT, OutputT], operation),
+                    inputs,
+                    input_type,
+                    materialize,
+                    output_name,
+                    output_type,
+                )
+                candidate = CallableNodeDefinition(
+                    canonical_id,
+                    None,
+                    typed_assembly.inputs,
+                    typed_assembly.outputs,
+                    resource_ids,
+                    make_typed_node_invoker(typed_assembly.contract),
+                )
+            else:
+                if type(inputs) is tuple or outputs is None:
+                    raise GraphValidationError("callable graph nodes require explicit outputs and input mappings")
+                bindings = normalize_input_bindings(inputs)
+                declarations = normalize_output_declarations(outputs)
+                candidate = CallableNodeDefinition(
+                    canonical_id,
+                    cast(NodeCallable[GraphValueT], operation),
+                    bindings,
+                    declarations,
+                    resource_ids,
+                )
             known = {resource.resource_id for resource in state.resources}
             added = tuple(ResourceDefinition(resource_id) for resource_id in resource_ids if resource_id not in known)
             replacement = replace(
@@ -373,13 +615,17 @@ class Graph(Generic[GraphValueT]):
                 resources=(*state.resources, *added),
             )
         self._commit_builder(state, replacement)
+        if typed:
+            if typed_assembly is None:
+                raise GraphValidationError("typed graph node assembly was not created")
+            return typed_assembly.output_ref
         return self
 
     def set_outputs(
         self,
         outputs: Mapping[
             str,
-            GraphInputRef[GraphValueT] | NodeOutputRef | type[GraphValueT],
+            GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT] | type[GraphValueT],
         ],
     ) -> Self:
         state = self._require_mutable()
@@ -390,41 +636,54 @@ class Graph(Generic[GraphValueT]):
         self._commit_builder(state, replacement)
         return self
 
-    def add_edge(self, source: str, target: str) -> Self:
+    @overload
+    def add_edge(self, source: str, target: str, /) -> Self: ...
+
+    @overload
+    def add_edge(self, source: str, route: str, target: str, /) -> Self: ...
+
+    def add_edge(
+        self,
+        source: str,
+        route_or_target: str,
+        target: str | None = None,
+        /,
+    ) -> Self:
         state = self._require_mutable()
         canonical_source = canonical_port_name(source, kind="edge source")
-        canonical_target = canonical_port_name(target, kind="edge target")
-        if canonical_source == Graph.START:
-            if canonical_target in (Graph.START, Graph.END):
-                raise GraphValidationError("START must target one concrete node")
-            replacement = replace(state, entries=(*state.entries, GraphNodeId(canonical_target)))
+        if target is None:
+            canonical_target = canonical_port_name(route_or_target, kind="edge target")
+            if canonical_source == Graph.START:
+                if canonical_target in (Graph.START, Graph.END):
+                    raise GraphValidationError("START must target one concrete node")
+                replacement = replace(state, entries=(*state.entries, GraphNodeId(canonical_target)))
+            else:
+                replacement = replace(
+                    state,
+                    edges=(
+                        *state.edges,
+                        DirectEdge(
+                            GraphNodeId(canonical_source),
+                            END if canonical_target == Graph.END else GraphNodeId(canonical_target),
+                        ),
+                    ),
+                )
         else:
+            canonical_route = canonical_port_name(route_or_target, kind="route")
+            canonical_target = canonical_port_name(target, kind="conditional target")
+            if canonical_source in (Graph.START, Graph.END) or canonical_target == Graph.START:
+                raise GraphValidationError("conditional edge has an invalid boundary direction")
             replacement = replace(
                 state,
                 edges=(
                     *state.edges,
-                    DirectEdge(
+                    ConditionalEdge(
                         GraphNodeId(canonical_source),
+                        GraphRouteId(canonical_route),
                         END if canonical_target == Graph.END else GraphNodeId(canonical_target),
                     ),
                 ),
             )
-        self._commit_builder(state, replacement)
-        return self
-
-    def add_conditional_edge(self, source: str, route: str, target: str) -> Self:
-        state = self._require_mutable()
-        canonical_source = canonical_port_name(source, kind="conditional source")
-        canonical_route = canonical_port_name(route, kind="route")
-        canonical_target = canonical_port_name(target, kind="conditional target")
-        if canonical_source in (Graph.START, Graph.END) or canonical_target == Graph.START:
-            raise GraphValidationError("conditional edge has an invalid boundary direction")
-        edge = ConditionalEdge(
-            GraphNodeId(canonical_source),
-            GraphRouteId(canonical_route),
-            END if canonical_target == Graph.END else GraphNodeId(canonical_target),
-        )
-        replacement = replace(state, edges=(*state.edges, edge))
         self._commit_builder(state, replacement)
         return self
 
@@ -500,7 +759,13 @@ class Graph(Generic[GraphValueT]):
                 nodes.append(candidate)
             else:
                 child = candidate.graph._definition(definitions, visiting)
-                nodes.append(NestedGraphNodeDefinition(candidate.node_id, child, candidate.inputs))
+                nodes.append(
+                    NestedGraphNodeDefinition(
+                        candidate.node_id,
+                        child,
+                        candidate.inputs,
+                    )
+                )
         definition = GraphDefinition(
             self._definition_id,
             self._version,

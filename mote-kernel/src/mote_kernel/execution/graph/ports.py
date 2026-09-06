@@ -2,10 +2,11 @@
 
 import operator
 import typing
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping, MutableSequence, MutableSet
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Generic, TypeAlias, TypeVar
+from inspect import isabstract
+from typing import Generic, Never, Protocol, TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import ExecutionError, GraphValidationError
 from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
@@ -14,7 +15,21 @@ from mote_kernel.state.graph_state.identity import is_canonical_identity
 GraphValueT = TypeVar("GraphValueT")
 GraphValueT_co = TypeVar("GraphValueT_co", covariant=True)
 ValueT = TypeVar("ValueT")
+ValueT_co = TypeVar("ValueT_co", covariant=True)
 DefinitionScope: TypeAlias = tuple[GraphNodeId, ...]
+
+
+def _is_protocol_type(value_type: type[ValueT], /) -> bool:
+    return isinstance(value_type, type(Protocol)) and value_type.__dict__.get("_is_protocol") is True
+
+
+def _is_mutable_container_type(value_type: type[ValueT], /) -> bool:
+    return (
+        value_type is memoryview
+        or MutableMapping.__subclasscheck__(value_type)
+        or MutableSequence.__subclasscheck__(value_type)
+        or MutableSet.__subclasscheck__(value_type)
+    )
 
 
 def canonical_port_name(name: str, *, kind: str = "port") -> str:
@@ -32,6 +47,12 @@ def canonical_nominal_type(value_type: type[ValueT] | str) -> "NominalTypeDescri
         raise GraphValidationError("port type must be one concrete nominal class")
     if value_type is object or operator.is_(value_type, typing.Any):
         raise GraphValidationError("port type must be one concrete nominal class")
+    if _is_protocol_type(value_type):
+        raise GraphValidationError("port type must be one concrete nominal class")
+    if isabstract(value_type):
+        raise GraphValidationError("port type must be one concrete nominal class")
+    if _is_mutable_container_type(value_type):
+        raise GraphValidationError("port type must be one concrete nominal class")
     return NominalTypeDescriptor(value_type)
 
 
@@ -47,20 +68,46 @@ class GraphInputRef(Generic[GraphValueT_co]):
 
 
 @dataclass(frozen=True, slots=True)
-class NodeOutputRef:
+class NodeOutputRef(Generic[GraphValueT_co]):
     node_id: GraphNodeId
     output_name: str
+    descriptor: NominalTypeDescriptor[GraphValueT_co] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class PredecessorOutputRef:
+class PredecessorOutputRef(Generic[GraphValueT_co]):
     """An output port supplied by the activation's one actual predecessor."""
 
     output_name: str
+    descriptor: NominalTypeDescriptor[GraphValueT_co] | None = None
 
 
-ValueSourceRef: TypeAlias = GraphInputRef[GraphValueT] | NodeOutputRef
-InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | PredecessorOutputRef
+@dataclass(frozen=True, slots=True)
+class NodeInputSlot(Generic[ValueT_co]):
+    """One statically typed local input declaration for a callable node."""
+
+    name: str
+    descriptor: NominalTypeDescriptor[ValueT_co]
+
+
+@dataclass(frozen=True, slots=True)
+class NodeOutputSlot(Generic[ValueT_co]):
+    """The one typed DTO publication declared by a typed node contract."""
+
+    name: str
+    descriptor: NominalTypeDescriptor[ValueT_co]
+
+
+@dataclass(frozen=True, slots=True)
+class TypedInputBinding(Generic[ValueT_co]):
+    """A typed facade binding lowered to the existing immutable graph IR."""
+
+    destination: NodeInputSlot[ValueT_co]
+    source: GraphInputRef[ValueT_co] | NodeOutputRef[ValueT_co] | PredecessorOutputRef[ValueT_co]
+
+
+ValueSourceRef: TypeAlias = GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT]
+InputBindingSource: TypeAlias = ValueSourceRef[GraphValueT] | PredecessorOutputRef[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -103,6 +150,7 @@ ActivationGate: TypeAlias = tuple[ActivationGateSource, ...]
 class InputBinding(Generic[GraphValueT]):
     local_name: str
     source: InputBindingSource[GraphValueT]
+    expected: NominalTypeDescriptor[GraphValueT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +165,8 @@ class OutputDeclaration(Generic[GraphValueT_co]):
 
 
 @dataclass(frozen=True, slots=True)
-class OutputDeclarations(Generic[GraphValueT]):
-    entries: tuple[OutputDeclaration[GraphValueT], ...]
+class OutputDeclarations(Generic[GraphValueT_co]):
+    entries: tuple[OutputDeclaration[GraphValueT_co], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,11 +275,44 @@ class MaterializationPlan(Generic[GraphValueT]):
     descriptor: FrameDescriptor[GraphValueT]
 
 
+@overload
 def normalize_input_bindings(
-    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]] | None,
+    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]],
+) -> InputBindings[GraphValueT]: ...
+
+
+@overload
+def normalize_input_bindings(
+    values: tuple[TypedInputBinding[GraphValueT], ...],
+) -> InputBindings[GraphValueT]: ...
+
+
+@overload
+def normalize_input_bindings(values: None) -> Never: ...
+
+
+def normalize_input_bindings(
+    values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]]
+    | tuple[TypedInputBinding[GraphValueT], ...]
+    | None,
 ) -> InputBindings[GraphValueT]:
+    if type(values) is tuple:
+        if any(type(binding) is not TypedInputBinding for binding in values):
+            raise GraphValidationError("typed inputs must contain only Graph.bind() results")
+        typed_entries = tuple(
+            sorted(
+                (
+                    InputBinding(binding.destination.name, binding.source, binding.destination.descriptor)
+                    for binding in values
+                ),
+                key=lambda binding: binding.local_name,
+            )
+        )
+        if len(typed_entries) != len({entry.local_name for entry in typed_entries}):
+            raise GraphValidationError("typed inputs require unique canonical destination slots")
+        return InputBindings(typed_entries)
     if not isinstance(values, Mapping):
-        raise GraphValidationError("inputs must be a mapping")
+        raise GraphValidationError("inputs must be a mapping or typed binding tuple")
     entries: list[InputBinding[GraphValueT]] = []
     for name, source in sorted(values.items()):
         canonical = canonical_port_name(name, kind="input")
@@ -242,7 +323,11 @@ def normalize_input_bindings(
 
 
 def normalize_output_declarations(
-    values: Mapping[str, type[GraphValueT] | GraphInputRef[GraphValueT] | NodeOutputRef] | None,
+    values: Mapping[
+        str,
+        type[GraphValueT] | GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT],
+    ]
+    | None,
 ) -> OutputDeclarations[GraphValueT]:
     if not isinstance(values, Mapping):
         raise GraphValidationError("outputs must be a mapping")
@@ -256,7 +341,11 @@ def normalize_output_declarations(
 
 
 def normalize_graph_output_declarations(
-    values: Mapping[str, GraphInputRef[GraphValueT] | NodeOutputRef | type[GraphValueT]] | None,
+    values: Mapping[
+        str,
+        GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT] | type[GraphValueT],
+    ]
+    | None,
 ) -> GraphOutputDeclarations[GraphValueT]:
     if not isinstance(values, Mapping):
         raise GraphValidationError("graph outputs must be a mapping")

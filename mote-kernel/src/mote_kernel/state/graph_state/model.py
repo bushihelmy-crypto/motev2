@@ -12,6 +12,7 @@ from mote_kernel.state.graph_state.identity import (
     GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphJoinOccurrenceIdentity,
+    GraphRouteId,
     GraphRunId,
 )
 from mote_kernel.state.graph_state.resource_model import ResourceSnapshot
@@ -68,6 +69,10 @@ class GraphRunState:
     abort: GraphAbort | None = None
     parent: GraphActivationIdentity | None = None
     revision: int = 0
+    # The terminal route selected by the last completed frontier.  It is
+    # retained after the canonical completed state clears the frontier so a
+    # parent nested graph can route from the child's returned value.
+    completion_route: GraphRouteId | None = None
 
 
 __all__ = [

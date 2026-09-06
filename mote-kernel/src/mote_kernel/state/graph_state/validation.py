@@ -291,6 +291,8 @@ def validate_graph_run_state(state: GraphRunState) -> None:
     if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
         raise GraphStateTransitionError("graph counters cannot be negative")
     _validate_settled_activations(state)
+    if state.completion_route is not None:
+        _require_identity(state.completion_route, "graph completion route identity")
     if state.parent is not None:
         _require_identity(state.parent.run_id, "parent graph run identity")
         _require_identity(state.parent.node_id, "parent graph node identity")
@@ -337,6 +339,8 @@ def validate_graph_run_state(state: GraphRunState) -> None:
                 raise GraphStateTransitionError("a quiescent failed frontier requires terminal failed status")
             if state.abort is not None:
                 raise GraphStateTransitionError("a running graph cannot retain an abort")
+            if state.completion_route is not None:
+                raise GraphStateTransitionError("a running graph cannot retain a completion route")
             # The resource and execution checks above already require a Pending
             # node for every non-empty durable lease/snapshot, so AWAITING_RESUME
             # and SETTLED states are necessarily quiescent here.
@@ -352,10 +356,16 @@ def validate_graph_run_state(state: GraphRunState) -> None:
                 or state.resources is not None
                 or state.execution is not None
                 or state.abort is not None
+                or state.completion_route is not None
             ):
                 raise GraphStateTransitionError("a failed graph must retain one quiescent failed diagnostic frontier")
         case GraphRunStatus.ABORTED:
-            if not state.frontier.nodes or state.abort is None or state.resources is not None:
+            if (
+                not state.frontier.nodes
+                or state.abort is None
+                or state.resources is not None
+                or state.completion_route is not None
+            ):
                 raise GraphStateTransitionError("an aborted graph must retain one quiescent diagnostic frontier")
             _require_identity(state.abort.reason, "graph abort reason")
         case _:

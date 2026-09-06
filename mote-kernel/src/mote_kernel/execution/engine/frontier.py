@@ -20,7 +20,7 @@ from mote_kernel.execution.result import (
     TaskResult,
     TaskSuccess,
 )
-from mote_kernel.state.graph_state import GraphActivationIdentity
+from mote_kernel.state.graph_state import GraphActivationIdentity, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -56,7 +56,13 @@ def prepare_frontier(
             active.append(projection)
         elif isinstance(projection, CompletedChild):
             declarations = graph.transition.publications[task.node_id].declarations
-            nested_results.append(TaskSuccess(task, _node_output_from_view(projection.output, declarations), None))
+            output = _node_output_from_view(projection.output, declarations)
+            # The child carries the route selected by its terminal return.
+            # It is projected unchanged; the parent validates it against the
+            # nested node's own conditional edge domain during settlement and
+            # routing resolution.
+            route = None if projection.route is None else GraphRouteId(projection.route)
+            nested_results.append(TaskSuccess(task, output, route))
         elif isinstance(projection, FailedChild):
             nested_results.append(TaskFailure(task, projection.failure))
         else:

@@ -193,7 +193,7 @@ def _resolve_source(
 
 @overload
 def _resolve_source(
-    source: NodeOutputRef,
+    source: NodeOutputRef[GraphValueT],
     *,
     scope: DefinitionScope,
     graph_inputs: OutputDeclarations[GraphValueT],
@@ -203,7 +203,7 @@ def _resolve_source(
 
 
 def _resolve_source(
-    source: GraphInputRef[GraphValueT] | NodeOutputRef,
+    source: GraphInputRef[GraphValueT] | NodeOutputRef[GraphValueT],
     *,
     scope: DefinitionScope,
     graph_inputs: OutputDeclarations[GraphValueT],
@@ -219,11 +219,16 @@ def _resolve_source(
     if outputs is None:
         raise UnknownNodeError(f"value source references unknown node {source.node_id!r}")
     declaration = _declaration(outputs, source.output_name, owner=f"node {source.node_id!r}")
+    if source.descriptor is not None and source.descriptor is not declaration.descriptor:
+        raise GraphValidationError(
+            f"typed node output {source.node_id!r}.{source.output_name!r} does not match "
+            "its declared exact type/descriptor"
+        )
     return NodeOutputPort(scope, source.node_id, source.output_name), declaration.descriptor
 
 
 def _resolve_predecessor_output(
-    source: PredecessorOutputRef,
+    source: PredecessorOutputRef[GraphValueT],
     *,
     target: GraphNodeId,
     input_name: str,
@@ -253,6 +258,10 @@ def _resolve_predecessor_output(
     if any(candidate.value_type is not descriptor.value_type for candidate in descriptors[1:]):
         raise GraphValidationError(
             f"predecessor input {input_name!r} on node {target!r} has conflicting exact output types"
+        )
+    if source.descriptor is not None and source.descriptor.value_type is not descriptor.value_type:
+        raise GraphValidationError(
+            f"typed predecessor input {input_name!r} on node {target!r} does not match its declared exact type"
         )
     return CompiledPredecessorInput(target, input_name, tuple(ports)), descriptor
 
@@ -994,6 +1003,7 @@ def _compile_graph(
                 node.inputs,
                 node.outputs,
                 tuple(sorted(node.resources, key=positions.__getitem__)),
+                node.typed_invoker,
             )
             if isinstance(node, CallableNodeDefinition)
             else node
@@ -1011,16 +1021,32 @@ def _compile_graph(
         for node_id in node_ids
     }
     input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
-    predecessor_bindings_by_node: dict[GraphNodeId, tuple[tuple[str, PredecessorOutputRef], ...]] = {}
+    predecessor_bindings_by_node: dict[
+        GraphNodeId,
+        tuple[
+            tuple[
+                str,
+                PredecessorOutputRef[GraphValueT],
+                NominalTypeDescriptor[GraphValueT] | None,
+            ],
+            ...,
+        ],
+    ] = {}
     data_dependencies = {node_id: set[GraphNodeId]() for node_id in node_ids}
     for node_id in node_ids:
         node = nodes[node_id]
         resolved: list[ResolvedInputBinding[GraphValueT]] = []
-        predecessor_bindings: list[tuple[str, PredecessorOutputRef]] = []
+        predecessor_bindings: list[
+            tuple[
+                str,
+                PredecessorOutputRef[GraphValueT],
+                NominalTypeDescriptor[GraphValueT] | None,
+            ]
+        ] = []
         for binding in node.inputs.entries:
             declared_source = binding.source
             if isinstance(declared_source, PredecessorOutputRef):
-                predecessor_bindings.append((binding.local_name, declared_source))
+                predecessor_bindings.append((binding.local_name, declared_source, binding.expected))
                 continue
             source, descriptor = _resolve_source(
                 declared_source,
@@ -1029,6 +1055,10 @@ def _compile_graph(
                 node_outputs=node_outputs,
                 consumer=node_id,
             )
+            if binding.expected is not None and binding.expected.value_type is not descriptor.value_type:
+                raise GraphValidationError(
+                    f"typed input {binding.local_name!r} on node {node_id!r} does not match its source exact type"
+                )
             if isinstance(source, NodeOutputPort):
                 data_dependencies[node_id].add(source.node_id)
             resolved.append(
@@ -1069,6 +1099,7 @@ def _compile_graph(
                 gates_to_end.append(frozenset(edge.sources))
             else:
                 activation_gates[edge.target].append(tuple((source, None) for source in normalized.sources))
+
     explicit_entries = tuple(sorted(definition.entries))
     if any(data_dependencies[node_id] for node_id in explicit_entries):
         raise GraphValidationError("an explicit START target cannot require a node output")
@@ -1090,7 +1121,7 @@ def _compile_graph(
 
     for node_id in node_ids:
         resolved = list(input_bindings_by_node[node_id].entries)
-        for input_name, declared_source in predecessor_bindings_by_node[node_id]:
+        for input_name, declared_source, expected_descriptor in predecessor_bindings_by_node[node_id]:
             source, descriptor = _resolve_predecessor_output(
                 declared_source,
                 target=node_id,
@@ -1100,6 +1131,10 @@ def _compile_graph(
                 entries=entries,
                 gates=activation_gates[node_id],
             )
+            if expected_descriptor is not None and expected_descriptor.value_type is not descriptor.value_type:
+                raise GraphValidationError(
+                    f"typed input {input_name!r} on node {node_id!r} does not match its predecessor exact type"
+                )
             resolved.append(
                 ResolvedInputBinding(
                     NodeInputPort(scope, node_id, input_name),

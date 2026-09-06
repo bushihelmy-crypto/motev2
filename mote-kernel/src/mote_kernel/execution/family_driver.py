@@ -804,6 +804,7 @@ class _GraphRun(Generic[GraphValueT]):
                     self._state.superstep,
                     self._frames,
                 ),
+                None if self._state.completion_route is None else str(self._state.completion_route),
             )
         if self._state.status is GraphRunStatus.FAILED:
             return FailedChild(parent, _child_failure_reason(self._state))
@@ -1172,6 +1173,7 @@ async def admit_continued_root(
                     phase: _ChildPhase[GraphValueT] = CompletedChild(
                         parent,
                         owner.frames.lookup(availability).frame,
+                        None if binding.state.completion_route is None else str(binding.state.completion_route),
                     )
                 elif binding.state.status is GraphRunStatus.FAILED:
                     phase = FailedChild(parent, _child_failure_reason(binding.state))

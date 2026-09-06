@@ -83,8 +83,6 @@ def _validate_edges(
             require_graph_identity(edge.route, kind="route")
             if edge.source not in nodes_by_id or (edge.target != END and edge.target not in nodes_by_id):
                 raise UnknownNodeError("conditional edge references an unknown node")
-            if isinstance(nodes_by_id[edge.source], NestedGraphNodeDefinition):
-                raise InvalidGraphIdentityError("nested graph nodes cannot be conditional routing sources")
             key = (edge.source, edge.route)
             if key in conditional_seen:
                 raise DuplicateEdgeError(f"duplicate conditional route {edge.route!r} from {edge.source!r}")
