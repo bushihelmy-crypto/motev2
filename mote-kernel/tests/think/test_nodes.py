@@ -9,6 +9,7 @@ import pytest
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
 from mote_kernel.think.context import ContextNode
@@ -190,8 +191,10 @@ async def test_context_node_builds_one_request_and_next_frame() -> None:
 
     hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
     assert hook_request.state is REQUEST.hook_state
+    assert hook_request.node_id == GraphNodeId("context")
     step = cast(ContextStep[str, str, str, tuple[str, ...]], hook_request.value.step)
     assert step.context is CONTEXT
+    assert hook_request.value.hook_state is REQUEST.hook_state
     assert ports.context_requests == [ContextRequest(REQUEST, PROMPT)]
 
 
@@ -204,8 +207,10 @@ async def test_compact_node_builds_one_request_and_next_frame() -> None:
     output = await node(Graph.values(hook_result=_result(context_step)))
 
     hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    assert hook_request.node_id == GraphNodeId("compact")
     step = cast(CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], hook_request.value.step)
     assert step.compacted is COMPACTED
+    assert hook_request.value.hook_state is REQUEST.hook_state
     assert ports.compact_requests == [CompactRequest(PROMPT, CONTEXT)]
 
 
@@ -218,8 +223,10 @@ async def test_inference_node_captures_the_exact_model_binding() -> None:
     output = await node(Graph.values(hook_result=_result(compact_step)))
 
     hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    assert hook_request.node_id == GraphNodeId("inference")
     step = cast(InferenceStep[str, str, str, tuple[str, ...], str], hook_request.value.step)
     assert step.inference is INFERENCE
+    assert hook_request.value.hook_state is REQUEST.hook_state
     assert len(ports.inference_requests) == 1
     assert ports.inference_requests[0].model is MODEL
     assert ports.inference_requests[0].compacted is COMPACTED
@@ -235,10 +242,12 @@ async def test_command_node_only_structures_the_inference_result() -> None:
     output = await node(Graph.values(hook_result=_result(inference_step)))
 
     hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output["hook_request"])
+    assert hook_request.node_id == GraphNodeId("command")
     assert type(hook_request.value.step) is not InferenceStep
     assert type(hook_request.value.step) is not PromptStep
     step = cast(CommandStep[str, str, str, tuple[str, ...], str, str], hook_request.value.step)
     assert step.core is CORE
+    assert hook_request.value.hook_state is REQUEST.hook_state
     assert ports.command_requests == [INFERENCE]
 
 
@@ -410,6 +419,37 @@ async def test_later_stage_nodes_reject_wrong_step(
 ) -> None:
     with pytest.raises(ThinkContractError, match=message):
         await _operation(node_factory())(Graph.values(hook_result=_result(step)))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("node_factory", "step", "expected_producer", "needs_request"),
+    [
+        (_context_factory, PromptStep(PROMPT), "prompt", True),
+        (_compact_factory, ContextStep(PROMPT, CONTEXT), "context", False),
+        (_inference_factory, CompactStep(PROMPT, CONTEXT, COMPACTED), "compact", False),
+        (_command_factory, InferenceStep(PROMPT, COMPACTED, INFERENCE), "inference", False),
+    ],
+)
+async def test_stage_nodes_reject_a_hook_result_from_the_wrong_producer(
+    node_factory: Callable[[], object],
+    step: ThinkStep,
+    expected_producer: str,
+    needs_request: bool,
+) -> None:
+    wrong_result = HookResult(
+        ThinkFrame(step, REQUEST.hook_state),
+        (),
+        GraphNodeId("wrong-producer"),
+    )
+    values: Graph.Values[HookGraphValue]
+    if needs_request:
+        values = Graph.values(request=REQUEST, hook_result=wrong_result)
+    else:
+        values = Graph.values(hook_result=wrong_result)
+
+    with pytest.raises(ThinkContractError, match=f"produced by {expected_producer}"):
+        await _operation(node_factory())(values)
 
 
 @pytest.mark.asyncio

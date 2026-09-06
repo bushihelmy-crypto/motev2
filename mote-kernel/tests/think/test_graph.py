@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Never, cast
+from typing import Generic, Never, TypeVar, cast
 
 import pytest
 
@@ -18,6 +19,7 @@ from mote_kernel.hooks.contract import (
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.invocation import InvocationTypeContract
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 from mote_kernel.think import ThinkNode
 from mote_kernel.think.contract import (
@@ -40,6 +42,10 @@ from mote_kernel.think.contract import (
     ThinkRequest,
     ThinkStep,
 )
+from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort
+
+InvocationRequestT = TypeVar("InvocationRequestT")
+InvocationResultT = TypeVar("InvocationResultT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +143,176 @@ class FailingContextPorts(Ports):
         raise RuntimeError("context unavailable")
 
 
+class StageFailurePorts(Ports):
+    """A deterministic Port double that fails at exactly one operation."""
+
+    def __init__(self, failure: str) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def _maybe_fail(self, operation: str) -> None:
+        if self.failure == operation:
+            raise RuntimeError(f"{operation} failure")
+
+    async def load_system_prompt(self, payload: Payload, /) -> str:
+        self.calls.append("system")
+        self._maybe_fail("system")
+        return "system"
+
+    async def load_placeholder(self, payload: Payload, /) -> str:
+        self.calls.append("placeholder")
+        self._maybe_fail("placeholder")
+        return "placeholder"
+
+    async def load_user_prompt(self, payload: Payload, /) -> str:
+        self.calls.append("user")
+        self._maybe_fail("user")
+        return payload.text
+
+    async def load_context(
+        self,
+        request: ContextRequest[Payload, State, str, str, str],
+        /,
+    ) -> ContextFrame[tuple[str, ...]]:
+        self.calls.append("context")
+        self._maybe_fail("context")
+        return ContextFrame((request.request.payload.text,))
+
+    async def compact(
+        self,
+        request: CompactRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> CompactedContext[tuple[str, ...]]:
+        self.calls.append("compact")
+        self._maybe_fail("compact")
+        return CompactedContext(request.context.snapshot, 1)
+
+    async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
+        self.calls.append("inference")
+        self._maybe_fail("inference")
+        return InferenceResult(request.prompt.user)
+
+    async def build_command(self, request: InferenceResult[str], /) -> ThinkCoreResult[str]:
+        self.calls.append("command")
+        self._maybe_fail("command")
+        return ThinkCoreResult(request.output)
+
+
+class IsolatedPorts(Ports):
+    """A Port double whose outputs are derived only from the current payload."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple[str, str]] = []
+
+    async def load_system_prompt(self, payload: Payload, /) -> str:
+        await asyncio.sleep(0)
+        self.events.append(("system", payload.text))
+        return f"system:{payload.text}"
+
+    async def load_placeholder(self, payload: Payload, /) -> str:
+        await asyncio.sleep(0)
+        self.events.append(("placeholder", payload.text))
+        return f"placeholder:{payload.text}"
+
+    async def load_user_prompt(self, payload: Payload, /) -> str:
+        await asyncio.sleep(0)
+        self.events.append(("user", payload.text))
+        return f"user:{payload.text}"
+
+    async def load_context(
+        self,
+        request: ContextRequest[Payload, State, str, str, str],
+        /,
+    ) -> ContextFrame[tuple[str, ...]]:
+        await asyncio.sleep(0)
+        payload = request.request.payload.text
+        self.events.append(("context", payload))
+        return ContextFrame((f"history:{payload}",))
+
+    async def compact(
+        self,
+        request: CompactRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> CompactedContext[tuple[str, ...]]:
+        await asyncio.sleep(0)
+        payload = request.context.snapshot[0].split(":", 1)[1]
+        self.events.append(("compact", payload))
+        return CompactedContext(request.context.snapshot, 1)
+
+    async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
+        await asyncio.sleep(0)
+        payload = request.prompt.user.split(":", 1)[1]
+        self.events.append(("inference", payload))
+        return InferenceResult(f"answer:{payload}")
+
+    async def build_command(self, request: InferenceResult[str], /) -> ThinkCoreResult[str]:
+        await asyncio.sleep(0)
+        payload = request.output.split(":", 1)[1]
+        self.events.append(("command", payload))
+        return ThinkCoreResult(f"command:{payload}")
+
+
+class BlockingContextPorts(Ports):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def load_context(
+        self,
+        request: ContextRequest[Payload, State, str, str, str],
+        /,
+    ) -> ContextFrame[tuple[str, ...]]:
+        self.calls.append("context")
+        self.entered.set()
+        await self.release.wait()
+        return ContextFrame((request.request.payload.text,))
+
+
+class FailingHookRuntime(HookRuntime):
+    def __init__(self, failure_node: str) -> None:
+        super().__init__()
+        self.failure_node = failure_node
+
+    async def invoke(
+        self,
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        /,
+    ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
+        self.calls.append(request)
+        if request.request.node_id == GraphNodeId(self.failure_node):
+            raise RuntimeError(f"{self.failure_node} hook failure")
+        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+
+
+class BlockingHookRuntime(HookRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def invoke(
+        self,
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        /,
+    ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
+        self.calls.append(request)
+        self.entered.set()
+        await self.release.wait()
+        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingInvocation(Generic[InvocationRequestT, InvocationResultT]):
+    result: InvocationResultT
+    calls: list[InvocationRequestT]
+
+    async def invoke(self, request: InvocationRequestT, /) -> InvocationResultT:
+        self.calls.append(request)
+        return self.result
+
+
 def make_hook(
     runtime: HookRuntime,
     *,
@@ -186,7 +362,8 @@ async def test_full_graph() -> None:
     runtime = HookRuntime()
     ports = Ports()
     think = make_think(runtime, ports)
-    result = await think.run(Graph.values(request=ThinkRequest(Payload("hello"), State(1))))
+    request = ThinkRequest(Payload("hello"), State(1))
+    result = await think.run(Graph.values(request=request))
     assert isinstance(result, Graph.CompletedResult)
     assert ports.calls == ["system", "placeholder", "user", "context", "compact", "inference", "command"]
     assert len(runtime.calls) == 15
@@ -200,6 +377,15 @@ async def test_full_graph() -> None:
     output = cast(HookResult[ThinkFrame[object, State], Command], result.outputs["result"])
     assert type(output.value) is ThinkFrame
     assert output.node_id == GraphNodeId("command")
+    assert output.value.hook_state is request.hook_state
+    raw_step: object = output.value.step
+    assert type(raw_step) is CommandStep
+    final_step = cast(CommandStep[str, str, str, tuple[str, ...], str, str], raw_step)
+    assert final_step.core.command == "hello"
+    # Hook commands belong to the terminal Hook activation's result.  Think
+    # forwards that result unchanged; it does not merge commands from earlier
+    # Hook activations into a second command stream.
+    assert output.commands == (Command("CommandStep"),) * 3
     assert result.state.completion_route == "command"
 
 
@@ -373,3 +559,338 @@ def test_think_exposes_the_same_shared_hook() -> None:
     ports = Ports()
     think = make_think(runtime, ports)
     assert think.hook is think.hook
+
+
+@pytest.mark.asyncio
+async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
+    runtime = HookRuntime()
+    ports = IsolatedPorts()
+    think = make_think(runtime, ports)
+    first_request = ThinkRequest(Payload("first"), State(11))
+    second_request = ThinkRequest(Payload("second"), State(22))
+
+    first, second = await asyncio.gather(
+        think.run(Graph.values(request=first_request), run_id="think-first"),
+        think.run(Graph.values(request=second_request), run_id="think-second"),
+    )
+
+    assert isinstance(first, Graph.CompletedResult)
+    assert isinstance(second, Graph.CompletedResult)
+    assert first.state is not second.state
+    outputs: dict[int, HookResult[ThinkFrame[ThinkStep, State], Command]] = {}
+    for result in (first, second):
+        output = result.outputs["result"]
+        assert type(output) is HookResult
+        typed_output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], output)
+        outputs[typed_output.value.hook_state.turn] = typed_output
+
+    assert set(outputs) == {11, 22}
+    for turn, payload in ((11, "first"), (22, "second")):
+        output = outputs[turn]
+        assert output.node_id == GraphNodeId("command")
+        raw_step = output.value.step
+        assert type(raw_step) is CommandStep
+        step = cast(CommandStep[str, str, str, tuple[str, ...], str, str], raw_step)
+        assert step.core.command == f"command:{payload}"
+        assert output.value.hook_state is (first_request.hook_state if turn == 11 else second_request.hook_state)
+
+    for payload in ("first", "second"):
+        assert [operation for operation, seen in ports.events if seen == payload] == [
+            "system",
+            "placeholder",
+            "user",
+            "context",
+            "compact",
+            "inference",
+            "command",
+        ]
+    assert len(runtime.calls) == 30
+    assert {call.request.state.turn for call in runtime.calls} == {11, 22}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_calls", "expected_hook_calls"),
+    [
+        ("system", ["system"], 0),
+        ("placeholder", ["system", "placeholder"], 0),
+        ("user", ["system", "placeholder", "user"], 0),
+        ("context", ["system", "placeholder", "user", "context"], 3),
+        ("compact", ["system", "placeholder", "user", "context", "compact"], 6),
+        ("inference", ["system", "placeholder", "user", "context", "compact", "inference"], 9),
+        (
+            "command",
+            ["system", "placeholder", "user", "context", "compact", "inference", "command"],
+            12,
+        ),
+    ],
+)
+async def test_think_port_failure_stops_at_the_failed_stage(
+    failure: str,
+    expected_calls: list[str],
+    expected_hook_calls: int,
+) -> None:
+    runtime = HookRuntime()
+    ports = StageFailurePorts(failure)
+    think = make_think(runtime, ports)
+
+    with pytest.raises(RuntimeError, match=f"{failure} failure"):
+        await think.run(Graph.values(request=ThinkRequest(Payload("failure"), State(1))))
+
+    assert ports.calls == expected_calls
+    assert len(runtime.calls) == expected_hook_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_node", "expected_hook_calls"),
+    [("prompt", 1), ("context", 4), ("compact", 7), ("inference", 10), ("command", 13)],
+)
+async def test_think_hook_failure_stops_without_advancing_to_a_later_stage(
+    failure_node: str,
+    expected_hook_calls: int,
+) -> None:
+    runtime = FailingHookRuntime(failure_node)
+    ports = Ports()
+    think = make_think(runtime, ports)
+
+    with pytest.raises(RuntimeError, match=f"{failure_node} hook failure"):
+        await think.run(Graph.values(request=ThinkRequest(Payload("hook-failure"), State(2))))
+
+    assert len(runtime.calls) == expected_hook_calls
+    expected_port_calls = {
+        "prompt": ["system", "placeholder", "user"],
+        "context": ["system", "placeholder", "user", "context"],
+        "compact": ["system", "placeholder", "user", "context", "compact"],
+        "inference": ["system", "placeholder", "user", "context", "compact", "inference"],
+        "command": ["system", "placeholder", "user", "context", "compact", "inference", "command"],
+    }
+    assert ports.calls == expected_port_calls[failure_node]
+
+
+@pytest.mark.asyncio
+async def test_think_propagates_caller_cancellation_while_a_port_is_waiting() -> None:
+    runtime = HookRuntime()
+    ports = BlockingContextPorts()
+    think = make_think(runtime, ports)
+    task = asyncio.create_task(think.run(Graph.values(request=ThinkRequest(Payload("cancel"), State(3)))))
+
+    await asyncio.wait_for(ports.entered.wait(), timeout=1)
+    task.cancel("caller cancelled Think")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ports.calls == ["system", "placeholder", "user", "context"]
+    assert len(runtime.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_think_propagates_caller_cancellation_while_shared_hook_is_waiting() -> None:
+    runtime = BlockingHookRuntime()
+    ports = Ports()
+    think = make_think(runtime, ports)
+    task = asyncio.create_task(think.run(Graph.values(request=ThinkRequest(Payload("cancel-hook"), State(4)))))
+
+    await asyncio.wait_for(runtime.entered.wait(), timeout=1)
+    task.cancel("caller cancelled shared Hook")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ports.calls == ["system", "placeholder", "user"]
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_nested_think_propagates_root_cancellation() -> None:
+    runtime = HookRuntime()
+    ports = BlockingContextPorts()
+    think = make_think(runtime, ports)
+    parent: Graph[HookGraphValue] = Graph("think.cancel.parent")
+    request_type = cast(type[HookGraphValue], ThinkRequest)
+    parent.add_node(
+        "think",
+        think,
+        inputs={"request": Graph.graph_input("request", request_type)},
+    )
+    parent.set_outputs({"result": Graph.node_output("think", "result")})
+
+    task = asyncio.create_task(
+        parent.run(
+            Graph.values(request=ThinkRequest(Payload("nested-cancel"), State(5))),
+            run_id="nested-cancel-run",
+        )
+    )
+    await asyncio.wait_for(ports.entered.wait(), timeout=1)
+    task.cancel("caller cancelled nested Think")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert ports.calls == ["system", "placeholder", "user", "context"]
+    assert len(runtime.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_nested_think_forwards_terminal_result_and_all_commands_to_parent() -> None:
+    runtime = HookRuntime()
+    ports = Ports()
+    think = make_think(runtime, ports)
+    parent: Graph[HookGraphValue] = Graph("think.result.parent")
+    request_type = cast(type[HookGraphValue], ThinkRequest)
+    parent.add_node(
+        "think",
+        think,
+        inputs={"request": Graph.graph_input("request", request_type)},
+    )
+
+    async def consume(values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
+        return Graph.values(result=values["result"])
+
+    parent.add_node(
+        "consume",
+        consume,
+        inputs={"result": Graph.node_output("think", "result")},
+        outputs={"result": HookResult},
+    )
+    parent.add_edge("think", "command", "consume")
+    parent.add_edge("consume", Graph.END)
+    parent.set_outputs({"result": Graph.node_output("consume", "result")})
+
+    result = await parent.run(Graph.values(request=ThinkRequest(Payload("parent"), State(6))))
+
+    assert isinstance(result, Graph.CompletedResult)
+    output = result.outputs["result"]
+    assert type(output) is HookResult
+    typed_output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], output)
+    assert typed_output.node_id == GraphNodeId("command")
+    assert typed_output.commands == (Command("CommandStep"),) * 3
+    assert type(typed_output.value.step) is CommandStep
+
+
+def test_think_graph_is_immutable_after_first_compile_for_every_builder_mutator() -> None:
+    runtime = HookRuntime()
+    ports = Ports()
+    think = make_think(runtime, ports)
+
+    async def late_node(_values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
+        return Graph.values()
+
+    # Compilation is synchronous inside the first run before the first await.
+    # Use a completed coroutine to make the test independent of stage timing.
+    asyncio.run(think.run(Graph.values(request=ThinkRequest(Payload("compile"), State(7)))))
+
+    with pytest.raises(Graph.ValidationError, match="immutable"):
+        think.add_node("late", late_node, inputs={}, outputs={})
+    with pytest.raises(Graph.ValidationError, match="immutable"):
+        think.add_edge("command", Graph.END)
+    with pytest.raises(Graph.ValidationError, match="immutable"):
+        think.set_outputs({"result": Graph.node_output("hook", "result")})
+
+
+@pytest.mark.asyncio
+async def test_think_rejects_a_wrong_graph_input_before_running_any_port() -> None:
+    runtime = HookRuntime()
+    ports = Ports()
+    think = make_think(runtime, ports)
+
+    with pytest.raises(Graph.ValueAdmissionError, match="exact declared type"):
+        await think.run(Graph.values(request=cast(HookGraphValue, object())))
+    assert ports.calls == []
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end() -> None:
+    payload = Payload("typed")
+    state = State(8)
+    request = ThinkRequest(payload, state)
+    prompt_frame: PromptFrame[str, str, str] = PromptFrame("system-typed", "placeholder-typed", "user-typed")
+    context_frame: ContextFrame[tuple[str, ...]] = ContextFrame(("history-typed",))
+    compacted: CompactedContext[tuple[str, ...]] = CompactedContext(("compacted-typed",), 2)
+    inference_result: InferenceResult[str] = InferenceResult("answer-typed")
+    core_result: ThinkCoreResult[str] = ThinkCoreResult("command-typed")
+
+    system = RecordingInvocation[Payload, str]("system-typed", [])
+    placeholder = RecordingInvocation[Payload, str]("placeholder-typed", [])
+    user = RecordingInvocation[Payload, str]("user-typed", [])
+    context = RecordingInvocation[ContextRequest[Payload, State, str, str, str], ContextFrame[tuple[str, ...]]](
+        context_frame,
+        [],
+    )
+    compact = RecordingInvocation[CompactRequest[str, str, str, tuple[str, ...]], CompactedContext[tuple[str, ...]]](
+        compacted,
+        [],
+    )
+    inference = RecordingInvocation[
+        InferenceRequest[str, str, str, tuple[str, ...]],
+        InferenceResult[str],
+    ](inference_result, [])
+    command = RecordingInvocation[InferenceResult[str], ThinkCoreResult[str]](core_result, [])
+
+    prompt_port: PromptPort[Payload, str, str, str] = PromptPort(
+        system,
+        placeholder,
+        user,
+        InvocationTypeContract(Payload, str),
+        InvocationTypeContract(Payload, str),
+        InvocationTypeContract(Payload, str),
+    )
+    context_port: ContextPort[
+        ContextRequest[Payload, State, str, str, str],
+        ContextFrame[tuple[str, ...]],
+    ] = ContextPort(
+        context,
+        InvocationTypeContract[ContextRequest[Payload, State, str, str, str], ContextFrame[tuple[str, ...]]](
+            ContextRequest,
+            ContextFrame,
+        ),
+    )
+    compact_port: CompactPort[
+        CompactRequest[str, str, str, tuple[str, ...]],
+        CompactedContext[tuple[str, ...]],
+    ] = CompactPort(
+        compact,
+        InvocationTypeContract[CompactRequest[str, str, str, tuple[str, ...]], CompactedContext[tuple[str, ...]]](
+            CompactRequest,
+            CompactedContext,
+        ),
+    )
+    inference_port: InferencePort[
+        InferenceRequest[str, str, str, tuple[str, ...]],
+        InferenceResult[str],
+    ] = InferencePort(
+        inference,
+        InvocationTypeContract[InferenceRequest[str, str, str, tuple[str, ...]], InferenceResult[str]](
+            InferenceRequest,
+            InferenceResult,
+        ),
+    )
+    command_port: CommandPort[InferenceResult[str], ThinkCoreResult[str]] = CommandPort(
+        command,
+        InvocationTypeContract[InferenceResult[str], ThinkCoreResult[str]](InferenceResult, ThinkCoreResult),
+    )
+    runtime = HookRuntime()
+    think = ThinkNode(
+        "think.typed",
+        prompt_port=prompt_port,
+        context_port=context_port,
+        compact_port=compact_port,
+        inference_port=inference_port,
+        command_port=command_port,
+        model_binding=ModelBinding("provider", "typed-model", 1),
+        hook=make_hook(runtime, definition_id="think.typed"),
+    )
+
+    result = await think.run(Graph.values(request=request))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert system.calls == [payload]
+    assert placeholder.calls == [payload]
+    assert user.calls == [payload]
+    assert context.calls == [ContextRequest(request, prompt_frame)]
+    assert compact.calls == [CompactRequest(prompt_frame, context_frame)]
+    assert inference.calls == [InferenceRequest(prompt_frame, compacted, ModelBinding("provider", "typed-model", 1))]
+    assert command.calls == [inference_result]
+    output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], result.outputs["result"])
+    raw_step = output.value.step
+    assert type(raw_step) is CommandStep
+    assert cast(CommandStep[str, str, str, tuple[str, ...], str, str], raw_step).core == core_result

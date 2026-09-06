@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import FrozenInstanceError, dataclass
 from typing import Generic, Never, TypeVar, cast
 
 import pytest
 
-from mote_kernel.invocation import InvocationAdmissionError, InvocationTypeContract, InvocationTypeError
+from mote_kernel.invocation import (
+    InvocationAdmissionError,
+    InvocationBoundaryError,
+    InvocationTypeContract,
+    InvocationTypeError,
+)
 from mote_kernel.think.contract import CommandPort as CommandPortContract
 from mote_kernel.think.contract import CompactPort as CompactPortContract
 from mote_kernel.think.contract import ContextPort as ContextPortContract
 from mote_kernel.think.contract import InferencePort as InferencePortContract
 from mote_kernel.think.contract import PromptPort as PromptPortContract
+from mote_kernel.think.contract import ThinkContractError
 from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort
 
 RequestT = TypeVar("RequestT")
@@ -238,3 +245,120 @@ def test_ports_reject_missing_or_non_callable_invocations_at_assembly() -> None:
         CommandPort[str, str](cast(Never, None), _string_contract())
     with pytest.raises(ValueError, match=r"ContextPort\.contract"):
         ContextPort[str, str](_RecordingInvocation[str, str]("context", []), cast(Never, object()))
+
+
+def test_each_stage_port_rejects_a_missing_or_invalid_contract_at_assembly() -> None:
+    invocation = _RecordingInvocation[str, str]("result", [])
+    with pytest.raises(ValueError, match=r"PromptPort\.system_contract"):
+        PromptPort[str, str, str, str](
+            invocation,
+            _RecordingInvocation[str, str]("placeholder", []),
+            _RecordingInvocation[str, str]("user", []),
+            cast(Never, None),
+            _string_contract(),
+            _string_contract(),
+        )
+    with pytest.raises(ValueError, match=r"PromptPort\.placeholder_contract"):
+        PromptPort[str, str, str, str](
+            invocation,
+            _RecordingInvocation[str, str]("placeholder", []),
+            _RecordingInvocation[str, str]("user", []),
+            _string_contract(),
+            cast(Never, object()),
+            _string_contract(),
+        )
+    with pytest.raises(ValueError, match=r"PromptPort\.user_contract"):
+        PromptPort[str, str, str, str](
+            invocation,
+            _RecordingInvocation[str, str]("placeholder", []),
+            _RecordingInvocation[str, str]("user", []),
+            _string_contract(),
+            _string_contract(),
+            cast(Never, object()),
+        )
+    with pytest.raises(ValueError, match=r"CompactPort\.contract"):
+        CompactPort[str, str](invocation, cast(Never, None))
+    with pytest.raises(ValueError, match=r"InferencePort\.contract"):
+        InferencePort[str, str](invocation, cast(Never, object()))
+    with pytest.raises(ValueError, match=r"CommandPort\.contract"):
+        CommandPort[str, str](invocation, cast(Never, None))
+
+
+@pytest.mark.asyncio
+async def test_each_stage_port_rejects_a_wrong_result_before_returning_to_the_node() -> None:
+    wrong = cast(str, object())
+    prompt = PromptPort[str, str, str, str](
+        _RecordingInvocation[str, str](wrong, []),
+        _RecordingInvocation[str, str]("placeholder", []),
+        _RecordingInvocation[str, str]("user", []),
+        _string_contract(),
+        _string_contract(),
+        _string_contract(),
+    )
+    context = ContextPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
+    compact = CompactPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
+    inference = InferencePort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
+    command = CommandPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
+
+    operations: tuple[tuple[str, Callable[[str], Awaitable[str]]], ...] = (
+        ("prompt", prompt.load_system_prompt),
+        ("context", context.load_context),
+        ("compact", compact.compact),
+        ("inference", inference.infer),
+        ("command", command.build_command),
+    )
+    for _name, operation in operations:
+        with pytest.raises(ThinkContractError, match="invocation result") as raised:
+            await operation("request")
+        assert isinstance(raised.value.__cause__, InvocationBoundaryError)
+
+
+@pytest.mark.asyncio
+async def test_prompt_port_validates_each_contract_before_calling_its_corresponding_invocation() -> None:
+    system = _RecordingInvocation[str, str]("system", [])
+    placeholder = _RecordingInvocation[str, str]("placeholder", [])
+    user = _RecordingInvocation[str, str]("user", [])
+    port = PromptPort[str, str, str, str](
+        system,
+        placeholder,
+        user,
+        cast(InvocationTypeContract[str, str], InvocationTypeContract(int, str)),
+        cast(InvocationTypeContract[str, str], InvocationTypeContract(str, int)),
+        InvocationTypeContract(str, str),
+    )
+
+    with pytest.raises(ThinkContractError, match="invocation request"):
+        await port.load_system_prompt("payload")
+    assert system.calls == []
+
+    # The system contract is valid for this separate adapter; the placeholder
+    # contract rejects its request before the invocation is reached.
+    valid_system = _RecordingInvocation[str, str]("system", [])
+    port = PromptPort[str, str, str, str](
+        valid_system,
+        placeholder,
+        user,
+        _string_contract(),
+        cast(InvocationTypeContract[str, str], InvocationTypeContract(int, str)),
+        _string_contract(),
+    )
+    assert await port.load_system_prompt("payload") == "system"
+    with pytest.raises(ThinkContractError, match="invocation request"):
+        await port.load_placeholder("payload")
+    assert placeholder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_port_does_not_retry_an_invocation_after_a_boundary_failure() -> None:
+    calls: list[str] = []
+
+    @dataclass
+    class WrongResult:
+        async def invoke(self, request: str, /) -> str:
+            calls.append(request)
+            return cast(str, object())
+
+    port = ContextPort[str, str](WrongResult(), _string_contract())
+    with pytest.raises(ThinkContractError, match="invocation result"):
+        await port.load_context("one")
+    assert calls == ["one"]
