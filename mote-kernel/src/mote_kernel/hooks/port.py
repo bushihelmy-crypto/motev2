@@ -56,7 +56,9 @@ class HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
             result = await invoke_typed(self.invocation, invocation_request, contract)
         except InvocationBoundaryAdmissionError as error:
             raise HookContractError(str(error)) from error
-        return self.admission.admit_stage_result(result)
+        admitted = self.admission.admit_stage_result(result)
+        self.admission.admit_transition(request, admitted)
+        return admitted
 
 
 __all__ = ["HookPort"]

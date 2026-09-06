@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
-from mote_kernel.hooks.contract import HookGraphValue
+from mote_kernel.hooks.contract import HookGraphValue, HookResult
+from mote_kernel.state.graph_state import GraphNodeId
 
 PayloadT_contra = TypeVar("PayloadT_contra", contravariant=True)
 SystemPromptT_co = TypeVar("SystemPromptT_co", covariant=True)
@@ -38,6 +39,8 @@ CompactedSnapshotT = TypeVar("CompactedSnapshotT")
 ModelOutputT = TypeVar("ModelOutputT")
 CommandT = TypeVar("CommandT")
 ThinkStepT = TypeVar("ThinkStepT")
+HookCommandT = TypeVar("HookCommandT")
+StageT = TypeVar("StageT", bound="ThinkStep")
 
 
 class ThinkContractError(ValueError):
@@ -201,6 +204,128 @@ class InferenceRequest(
         _require_exact(self.model, ModelBinding, "inference request model")
 
 
+@dataclass(frozen=True, slots=True)
+class ContextNodeInput(
+    HookGraphValue,
+    Generic[
+        PayloadT,
+        HookStateT,
+        SystemPromptT,
+        PlaceholderT,
+        UserPromptT,
+        HookCommandT,
+    ],
+):
+    """Typed materialization input for the Context node.
+
+    ``HookResult`` is intentionally the only predecessor value here.  The
+    Context node validates its revised frame and then derives the
+    ``ContextRequest`` sent to the Context Port.
+    """
+
+    request: ThinkRequest[PayloadT, HookStateT]
+    hook_result: HookResult[
+        ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
+        HookCommandT,
+    ]
+
+    def __post_init__(self) -> None:
+        _require_exact(self.request, ThinkRequest, "context node request")
+        _require_exact(self.hook_result, HookResult, "context node HookResult")
+
+
+@dataclass(frozen=True, slots=True)
+class CompactNodeInput(
+    HookGraphValue,
+    Generic[
+        HookStateT,
+        SystemPromptT,
+        PlaceholderT,
+        UserPromptT,
+        ContextSnapshotT,
+        HookCommandT,
+    ],
+):
+    """Typed materialization input for the Compact node."""
+
+    hook_result: HookResult[
+        ThinkFrame[
+            ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
+            HookStateT,
+        ],
+        HookCommandT,
+    ]
+
+    def __post_init__(self) -> None:
+        _require_exact(self.hook_result, HookResult, "compact node HookResult")
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceNodeInput(
+    HookGraphValue,
+    Generic[
+        HookStateT,
+        SystemPromptT,
+        PlaceholderT,
+        UserPromptT,
+        ContextSnapshotT,
+        CompactedSnapshotT,
+        HookCommandT,
+    ],
+):
+    """Typed materialization input for the Inference node."""
+
+    hook_result: HookResult[
+        ThinkFrame[
+            CompactStep[
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                ContextSnapshotT,
+                CompactedSnapshotT,
+            ],
+            HookStateT,
+        ],
+        HookCommandT,
+    ]
+
+    def __post_init__(self) -> None:
+        _require_exact(self.hook_result, HookResult, "inference node HookResult")
+
+
+@dataclass(frozen=True, slots=True)
+class CommandNodeInput(
+    HookGraphValue,
+    Generic[
+        HookStateT,
+        SystemPromptT,
+        PlaceholderT,
+        UserPromptT,
+        CompactedSnapshotT,
+        ModelOutputT,
+        HookCommandT,
+    ],
+):
+    """Typed materialization input for the Command node."""
+
+    hook_result: HookResult[
+        ThinkFrame[
+            InferenceStep[
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                CompactedSnapshotT,
+                ModelOutputT,
+            ],
+            HookStateT,
+        ],
+        HookCommandT,
+    ]
+
+    def __post_init__(self) -> None:
+        _require_exact(self.hook_result, HookResult, "command node HookResult")
+
+
 class ThinkStep(HookGraphValue):
     """Nominal base for the closed set of Think stage values."""
 
@@ -310,6 +435,122 @@ class ThinkFrame(HookGraphValue, Generic[ThinkStepT, HookStateT]):
         if type(self.step) not in _THINK_STEP_VARIANTS:
             raise ThinkContractError("think frame must contain a known ThinkStep")
         _require_present(self.hook_state, "think frame hook_state")
+
+
+def admit_prompt_frame(
+    result: HookResult[
+        ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
+        HookCommandT,
+    ],
+    state: HookStateT,
+    /,
+) -> ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT]:
+    """Admit the frame returned by the Prompt Hook activation."""
+
+    return _admit_stage_frame(
+        result,
+        expected_step=PromptStep,
+        expected_node=GraphNodeId("prompt"),
+        stage="context",
+        expected_state=state,
+    )
+
+
+def admit_context_frame(
+    result: HookResult[
+        ThinkFrame[ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT], HookStateT],
+        HookCommandT,
+    ],
+    /,
+) -> ThinkFrame[ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT], HookStateT]:
+    """Admit the frame returned by the Context Hook activation."""
+
+    return _admit_stage_frame(
+        result,
+        expected_step=ContextStep,
+        expected_node=GraphNodeId("context"),
+        stage="compact",
+    )
+
+
+def admit_compact_frame(
+    result: HookResult[
+        ThinkFrame[
+            CompactStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT, CompactedSnapshotT],
+            HookStateT,
+        ],
+        HookCommandT,
+    ],
+    /,
+) -> ThinkFrame[
+    CompactStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT, CompactedSnapshotT],
+    HookStateT,
+]:
+    """Admit the frame returned by the Compact Hook activation."""
+
+    return _admit_stage_frame(
+        result,
+        expected_step=CompactStep,
+        expected_node=GraphNodeId("compact"),
+        stage="inference",
+    )
+
+
+def admit_inference_frame(
+    result: HookResult[
+        ThinkFrame[
+            InferenceStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT, ModelOutputT],
+            HookStateT,
+        ],
+        HookCommandT,
+    ],
+    /,
+) -> ThinkFrame[
+    InferenceStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT, ModelOutputT],
+    HookStateT,
+]:
+    """Admit the frame returned by the Inference Hook activation."""
+
+    return _admit_stage_frame(
+        result,
+        expected_step=InferenceStep,
+        expected_node=GraphNodeId("inference"),
+        stage="command",
+    )
+
+
+def _admit_stage_frame(
+    result: HookResult[ThinkFrame[StageT, HookStateT], HookCommandT],
+    *,
+    expected_step: type[StageT],
+    expected_node: GraphNodeId,
+    stage: str,
+    expected_state: HookStateT | None = None,
+) -> ThinkFrame[StageT, HookStateT]:
+    """Admit one Hook result at a Think stage boundary.
+
+    The execution adapter admits the outer ``HookResult`` class.  The nested
+    Hook is nevertheless allowed to revise its value, so Think keeps this
+    small semantic guard for the frame, predecessor identity, state (when the
+    stage has the original request), and closed step kind.  Generic recovery
+    is concentrated here; stage nodes receive a concrete frame and never
+    recover a type from a ``Graph.Values`` mapping.
+    """
+
+    if type(result) is not HookResult:
+        raise ThinkContractError(f"{stage} input must be a HookResult")
+    raw_frame = result.value
+    if type(raw_frame) is not ThinkFrame:
+        raise ThinkContractError(f"{stage} HookResult must contain a ThinkFrame")
+    frame = raw_frame
+    if expected_state is not None and frame.hook_state != expected_state:
+        raise ThinkContractError(f"{stage} HookResult state does not match the ThinkRequest state")
+    if result.node_id is not None and result.node_id != expected_node:
+        raise ThinkContractError(f"{stage} requires a HookResult produced by {expected_node}")
+    raw_step = frame.step
+    if type(raw_step) is not expected_step:
+        raise ThinkContractError(f"{stage} requires a {expected_step.__name__}")
+    return frame
 
 
 class ThinkRoute(StrEnum):

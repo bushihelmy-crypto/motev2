@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
+from mote_kernel.execution.graph.ports import (
+    GraphInputRef,
+    TypedInputBinding,
+)
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
@@ -14,29 +17,31 @@ from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
 from mote_kernel.think.context import ContextNode
 from mote_kernel.think.contract import (
+    CommandNodeInput,
     CommandPort,
     CompactedContext,
+    CompactNodeInput,
     CompactPort,
     CompactRequest,
     CompactStep,
     ContextFrame,
+    ContextNodeInput,
     ContextPort,
     ContextRequest,
     ContextStep,
+    InferenceNodeInput,
     InferencePort,
     InferenceRequest,
     InferenceResult,
     InferenceStep,
     ModelBinding,
     PromptPort,
+    PromptStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
     ThinkRequest,
     ThinkStep,
-    CommandStep,
-    PromptStep,
-    ThinkRoute,
 )
 from mote_kernel.think.inference import InferenceNode
 from mote_kernel.think.prompt import PromptNode
@@ -53,56 +58,6 @@ ContextSnapshotT = TypeVar("ContextSnapshotT")
 CompactedSnapshotT = TypeVar("CompactedSnapshotT")
 ModelOutputT = TypeVar("ModelOutputT")
 CommandT = TypeVar("CommandT")
-
-
-def _think_route_for_result(
-    result: HookResult[ThinkFrame[ThinkStep, HookGraphValue], HookGraphValue],
-    /,
-) -> str:
-    """Map one admitted Think Hook result to its fixed successor token."""
-
-    if type(result) is not HookResult:
-        raise ThinkContractError("route selector requires a HookResult")
-    frame = result.value
-    if type(frame) is not ThinkFrame:
-        raise ThinkContractError("route selector requires a ThinkFrame")
-    step_type = type(frame.step)
-    if step_type is PromptStep:
-        return ThinkRoute.CONTEXT.value
-    if step_type is ContextStep:
-        return ThinkRoute.COMPACT.value
-    if step_type is CompactStep:
-        return ThinkRoute.INFERENCE.value
-    if step_type is InferenceStep:
-        return ThinkRoute.COMMAND.value
-    if step_type is CommandStep:
-        return ThinkRoute.FINISH.value
-    raise ThinkContractError("route selector received an unknown ThinkStep")
-
-
-@dataclass(frozen=True, slots=True)
-class _RouteNode:
-    """Private compatibility projector for a typed Think Hook result.
-
-    ``ThinkNode`` no longer installs a second routing node: its containing
-    graph owns the transition.  This callable remains useful to internal
-    diagnostics and preserves the small, deterministic step-to-route proof
-    without becoming another public graph API.
-    """
-
-    async def __call__(
-        self,
-        values: Graph.Values[HookGraphValue],
-        /,
-    ) -> Graph.Outcome[HookGraphValue]:
-        try:
-            raw_result = values["result"]
-        except (KeyError, TypeError) as error:
-            raise ThinkContractError("route input is missing 'result'") from error
-        if type(raw_result) is not HookResult:
-            raise ThinkContractError("route input must be a HookResult")
-        result = cast(HookResult[ThinkFrame[ThinkStep, HookGraphValue], HookGraphValue], raw_result)
-        return Graph.success(Graph.values(hook_result=result), route=_think_route_for_result(result))
 
 
 class ThinkNode(
@@ -202,71 +157,136 @@ class ThinkNode(
         super().__init__(definition_id, version=version)
         self._hook = hook
 
-        request_type = cast(type[HookGraphValue], ThinkRequest)
-        hook_request_type = cast(type[HookGraphValue], HookRequest)
-        request_input = Graph.graph_input("request", request_type)
-
-        self.add_node(
+        request_input = cast(
+            GraphInputRef[ThinkRequest[PayloadT, HookStateT]],
+            Graph.graph_input("request", ThinkRequest),
+        )
+        request_binding = Graph.bind("request", request_input)
+        prompt_output = self.add_node(
             "prompt",
             prompt,
-            inputs={"request": request_input},
-            outputs={"hook_request": hook_request_type},
-        )
-        self.add_node(
-            "context",
-            context,
-            inputs={
-                "request": request_input,
-                "hook_result": Graph.node_output("result"),
-            },
-            outputs={"hook_request": hook_request_type},
-        )
-        self.add_node(
-            "compact",
-            compact,
-            inputs={"hook_result": Graph.node_output("result")},
-            outputs={"hook_request": hook_request_type},
-        )
-        self.add_node(
-            "inference",
-            inference,
-            inputs={"hook_result": Graph.node_output("result")},
-            outputs={"hook_request": hook_request_type},
-        )
-        self.add_node(
-            "command",
-            command,
-            inputs={"hook_result": Graph.node_output("result")},
-            outputs={"hook_request": hook_request_type},
+            inputs=(request_binding,),
+            input_type=ThinkRequest,
+            materialize=lambda values: values.get(request_binding),
+            output_name="hook_request",
+            output_type=HookRequest,
         )
         self.add_node(
             "hook",
             hook,
-            inputs={"request": Graph.node_output("hook_request")},
+            inputs={"request": Graph.node_output(prompt_output)},
+        )
+        # Resolve the shared nested Hook boundary through Graph's generic
+        # output API.  The returned descriptor is the child declaration's
+        # identity, so every typed stage binding remains compiler-checked.
+        hook_result_ref = self.output_ref("hook", "result")
+        hook_result_source = Graph.node_output(hook_result_ref)
+        context_hook_binding = cast(
+            TypedInputBinding[
+                HookResult[
+                    ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
+                    HookGraphValue,
+                ]
+            ],
+            Graph.bind("hook_result", hook_result_source),
+        )
+        compact_hook_binding = cast(
+            TypedInputBinding[
+                HookResult[
+                    ThinkFrame[
+                        ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
+                        HookStateT,
+                    ],
+                    HookGraphValue,
+                ]
+            ],
+            Graph.bind("hook_result", hook_result_source),
+        )
+        inference_hook_binding = cast(
+            TypedInputBinding[
+                HookResult[
+                    ThinkFrame[
+                        CompactStep[
+                            SystemPromptT,
+                            PlaceholderT,
+                            UserPromptT,
+                            ContextSnapshotT,
+                            CompactedSnapshotT,
+                        ],
+                        HookStateT,
+                    ],
+                    HookGraphValue,
+                ]
+            ],
+            Graph.bind("hook_result", hook_result_source),
+        )
+        command_hook_binding = cast(
+            TypedInputBinding[
+                HookResult[
+                    ThinkFrame[
+                        InferenceStep[
+                            SystemPromptT,
+                            PlaceholderT,
+                            UserPromptT,
+                            CompactedSnapshotT,
+                            ModelOutputT,
+                        ],
+                        HookStateT,
+                    ],
+                    HookGraphValue,
+                ]
+            ],
+            Graph.bind("hook_result", hook_result_source),
+        )
+        self.add_node(
+            "context",
+            context,
+            inputs=(request_binding, context_hook_binding),
+            input_type=ContextNodeInput,
+            materialize=lambda values: ContextNodeInput(
+                values.get(request_binding),
+                values.get(context_hook_binding),
+            ),
+            output_name="hook_request",
+            output_type=HookRequest,
+        )
+        self.add_node(
+            "compact",
+            compact,
+            inputs=(compact_hook_binding,),
+            input_type=CompactNodeInput,
+            materialize=lambda values: CompactNodeInput(values.get(compact_hook_binding)),
+            output_name="hook_request",
+            output_type=HookRequest,
+        )
+        self.add_node(
+            "inference",
+            inference,
+            inputs=(inference_hook_binding,),
+            input_type=InferenceNodeInput,
+            materialize=lambda values: InferenceNodeInput(values.get(inference_hook_binding)),
+            output_name="hook_request",
+            output_type=HookRequest,
+        )
+        self.add_node(
+            "command",
+            command,
+            inputs=(command_hook_binding,),
+            input_type=CommandNodeInput,
+            materialize=lambda values: CommandNodeInput(values.get(command_hook_binding)),
+            output_name="hook_request",
+            output_type=HookRequest,
         )
         for business_node in ("prompt", "context", "compact", "inference", "command"):
             self.add_edge(business_node, "hook")
-        self.add_edge("hook", ThinkRoute.CONTEXT.value, "context")
-        self.add_edge("hook", ThinkRoute.COMPACT.value, "compact")
-        self.add_edge("hook", ThinkRoute.INFERENCE.value, "inference")
-        self.add_edge("hook", ThinkRoute.COMMAND.value, "command")
-        self.add_edge("hook", ThinkRoute.FINISH.value, Graph.END)
-        self.set_route_selector(
-            "hook",
-            Graph.result_selector(
-                "result",
-                cast(type[HookResult[ThinkFrame[ThinkStep, HookGraphValue], HookGraphValue]], HookResult),
-                _think_route_for_result,
-                routes=(
-                    ThinkRoute.CONTEXT.value,
-                    ThinkRoute.COMPACT.value,
-                    ThinkRoute.INFERENCE.value,
-                    ThinkRoute.COMMAND.value,
-                    ThinkRoute.FINISH.value,
-                ),
-            ),
-        )
-        self.set_outputs({"result": Graph.node_output("hook", "result")})
+        # The shared Hook returns the current business node identity as its
+        # terminal route.  This graph decides what each identity means.
+        self.add_edge("hook", "prompt", "context")
+        self.add_edge("hook", "context", "compact")
+        self.add_edge("hook", "compact", "inference")
+        self.add_edge("hook", "inference", "command")
+        self.add_edge("hook", "command", Graph.END)
+        self.set_outputs({"result": hook_result_ref})
 
     @property
     def hook(

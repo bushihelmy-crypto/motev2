@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 
-from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookGraphValue, HookRequest
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     CompactedContext,
+    CompactNodeInput,
     CompactPort,
     CompactRequest,
     CompactStep,
-    ContextStep,
     ThinkContractError,
     ThinkFrame,
-    ThinkStep,
+    admit_context_frame,
 )
 
 HookStateT = TypeVar("HookStateT")
@@ -68,38 +67,35 @@ class CompactNode(
 
     async def __call__(
         self,
-        values: Graph.Values[HookGraphValue],
+        value: CompactNodeInput[
+            HookStateT,
+            SystemPromptT,
+            PlaceholderT,
+            UserPromptT,
+            ContextSnapshotT,
+            HookGraphValue,
+        ],
         /,
-    ) -> Graph.Values[HookGraphValue]:
-        hook_value = values["hook_result"]
-        if type(hook_value) is not HookResult:
-            raise ThinkContractError("compact input must be a HookResult")
-        hook_result = cast(HookResult[ThinkFrame[ThinkStep, HookStateT], HookGraphValue], hook_value)
-        frame_value = hook_result.value
-        if type(frame_value) is not ThinkFrame:
-            raise ThinkContractError("compact HookResult must contain a ThinkFrame")
-        frame = frame_value
-        raw_step = frame.step
-        if type(raw_step) is not ContextStep:
-            raise ThinkContractError("compact requires a ContextStep")
-        if hook_result.node_id is not None and hook_result.node_id != GraphNodeId("context"):
-            raise ThinkContractError("compact requires a HookResult produced by context")
-        step = cast(ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT], raw_step)
+    ) -> HookRequest[
+        ThinkFrame[
+            CompactStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT, CompactedSnapshotT],
+            HookStateT,
+        ],
+        HookStateT,
+    ]:
+        frame = admit_context_frame(value.hook_result)
+        step = frame.step
         request = CompactRequest(step.prompt, step.context)
 
-        port = cast(
-            CompactPort[
-                CompactRequest[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
-                CompactedContext[CompactedSnapshotT],
-            ],
-            self.compact_port,
-        )
+        port = self.compact_port
+        if port is None:
+            raise ThinkContractError("compact requires a CompactPort")
         compacted_value = await port.compact(request)
         if type(compacted_value) is not CompactedContext:
             raise ThinkContractError("CompactPort.compact must return a CompactedContext")
         compacted = compacted_value
         next_frame = ThinkFrame(CompactStep(step.prompt, step.context, compacted), frame.hook_state)
-        return Graph.values(hook_request=HookRequest(next_frame, frame.hook_state, GraphNodeId("compact")))
+        return HookRequest(next_frame, frame.hook_state, GraphNodeId("compact"))
 
 
 __all__ = ["CompactNode"]

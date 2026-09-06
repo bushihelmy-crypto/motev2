@@ -386,8 +386,8 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 
         graph.add_edge("load_plan", "invoke")
         graph.add_edge("invoke", "observe")
-        graph.add_conditional_edge("observe", ObservationRoute.PREPARE.value, "prepare")
-        graph.add_conditional_edge("observe", _FINISH_ROUTE, "finish")
+        graph.add_edge("observe", ObservationRoute.PREPARE.value, "prepare")
+        graph.add_edge("observe", _FINISH_ROUTE, "finish")
         graph.add_edge("prepare", "invoke")
         graph.add_edge("finish", Graph.END)
         graph.set_outputs({"result": graph.node_output("finish", "result")})

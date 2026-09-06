@@ -29,6 +29,18 @@ class HookGraphValue:
     __slots__ = ()
 
 
+@runtime_checkable
+class HookTransitionAdmission(Protocol[ValueT, StateT, CommandT]):
+    """Admit one concrete Hook priority transition for its composition owner."""
+
+    def admit_transition(
+        self,
+        request: HookRequest[ValueT, StateT],
+        result: HookStageResult[ValueT, CommandT],
+        /,
+    ) -> None: ...
+
+
 def _validate_nominal_type(payload_type: type[PayloadT], field: str, /) -> None:
     try:
         canonical_nominal_type(payload_type)
@@ -80,6 +92,7 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
     value_type: type[ValueT]
     state_type: type[StateT]
     command_type: type[CommandT]
+    transition_admission: HookTransitionAdmission[ValueT, StateT, CommandT] | None = None
 
     def __post_init__(self) -> None:
         _validate_nominal_type(self.config_type, "config")
@@ -87,6 +100,14 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         _validate_nominal_type(self.value_type, "value")
         _validate_nominal_type(self.state_type, "state")
         _validate_nominal_type(self.command_type, "command")
+        transition_admission = self.transition_admission
+        if transition_admission is not None:
+            try:
+                admit_transition = transition_admission.admit_transition
+            except AttributeError as error:
+                raise HookContractError("hook transition admission must satisfy HookTransitionAdmission") from error
+            if not callable(admit_transition):
+                raise HookContractError("hook transition admission must satisfy HookTransitionAdmission")
 
     def admit_snapshot(
         self,
@@ -143,6 +164,16 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
         return result
+
+    def admit_transition(
+        self,
+        request: HookRequest[ValueT, StateT],
+        result: HookStageResult[ValueT, CommandT],
+        /,
+    ) -> None:
+        admission = self.transition_admission
+        if admission is not None:
+            admission.admit_transition(request, result)
 
     def admit_result(self, result: HookResult[ValueT, CommandT], /) -> HookResult[ValueT, CommandT]:
         if type(result) is not HookResult:
@@ -225,4 +256,5 @@ __all__ = [
     "HookRequest",
     "HookResult",
     "HookStageResult",
+    "HookTransitionAdmission",
 ]

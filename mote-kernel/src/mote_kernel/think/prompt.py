@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 
-from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.hooks.contract import HookRequest
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import (
     PromptFrame,
@@ -51,25 +50,25 @@ class PromptNode(
 
     async def __call__(
         self,
-        values: Graph.Values[HookGraphValue],
+        request: ThinkRequest[PayloadT, HookStateT],
         /,
-    ) -> Graph.Values[HookGraphValue]:
-        request_value = values["request"]
-        if type(request_value) is not ThinkRequest:
-            raise ThinkContractError("prompt input must be a ThinkRequest")
-        request = cast(ThinkRequest[PayloadT, HookStateT], request_value)
-
-        prompt_port = cast(
-            PromptPort[PayloadT, SystemPromptT, PlaceholderT, UserPromptT],
-            self.prompt_port,
-        )
-        system = await prompt_port.load_system_prompt(request.payload)
-        placeholder = await prompt_port.load_placeholder(request.payload)
-        user = await prompt_port.load_user_prompt(request.payload)
+    ) -> HookRequest[
+        ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
+        HookStateT,
+    ]:
+        port = self.prompt_port
+        if port is None:
+            # The constructor admits this capability.  Keep the guard local
+            # so a forged instance cannot turn a missing port into an
+            # attribute error at the execution boundary.
+            raise ThinkContractError("prompt requires a PromptPort")
+        system = await port.load_system_prompt(request.payload)
+        placeholder = await port.load_placeholder(request.payload)
+        user = await port.load_user_prompt(request.payload)
 
         prompt = PromptFrame[SystemPromptT, PlaceholderT, UserPromptT](system, placeholder, user)
         frame = ThinkFrame(PromptStep(prompt), request.hook_state)
-        return Graph.values(hook_request=HookRequest(frame, request.hook_state, GraphNodeId("prompt")))
+        return HookRequest(frame, request.hook_state, GraphNodeId("prompt"))
 
 
 __all__ = ["PromptNode"]
