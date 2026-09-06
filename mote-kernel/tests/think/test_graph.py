@@ -12,6 +12,7 @@ from mote_kernel.hooks.contract import (
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
+    HookRequest,
     HookResult,
     HookStageResult,
 )
@@ -37,10 +38,8 @@ from mote_kernel.think.contract import (
     ThinkCoreResult,
     ThinkFrame,
     ThinkRequest,
-    ThinkRoute,
     ThinkStep,
 )
-from mote_kernel.think.node import _RouteNode  # pyright: ignore[reportPrivateUsage]
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,8 +190,68 @@ async def test_full_graph() -> None:
     assert isinstance(result, Graph.CompletedResult)
     assert ports.calls == ["system", "placeholder", "user", "context", "compact", "inference", "command"]
     assert len(runtime.calls) == 15
+    assert [str(call.request.node_id) for call in runtime.calls] == [
+        *(["prompt"] * 3),
+        *(["context"] * 3),
+        *(["compact"] * 3),
+        *(["inference"] * 3),
+        *(["command"] * 3),
+    ]
     output = cast(HookResult[ThinkFrame[object, State], Command], result.outputs["result"])
     assert type(output.value) is ThinkFrame
+    assert output.node_id == GraphNodeId("command")
+    assert result.state.completion_route == "command"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("node_id", "step"),
+    [
+        ("prompt", PromptStep(PromptFrame("system", "placeholder", "user"))),
+        ("context", ContextStep(PromptFrame("system", "placeholder", "user"), ContextFrame(("history",)))),
+        (
+            "compact",
+            CompactStep(
+                PromptFrame("system", "placeholder", "user"),
+                ContextFrame(("history",)),
+                CompactedContext(("history",), 1),
+            ),
+        ),
+        (
+            "inference",
+            InferenceStep(
+                PromptFrame("system", "placeholder", "user"),
+                CompactedContext(("history",), 1),
+                InferenceResult("answer"),
+            ),
+        ),
+        (
+            "command",
+            CommandStep(
+                PromptFrame("system", "placeholder", "user"),
+                CompactedContext(("history",), 1),
+                InferenceResult("answer"),
+                ThinkCoreResult("command"),
+            ),
+        ),
+    ],
+)
+async def test_shared_hook_exports_the_originating_node_route(node_id: str, step: ThinkStep) -> None:
+    """The new API carries the route on the shared Hook terminal result."""
+
+    runtime = HookRuntime()
+    hook = make_hook(runtime)
+    state = State(1)
+    frame = ThinkFrame(step, state)
+    request = HookRequest(frame, state, GraphNodeId(node_id))
+
+    result = await hook.run(Graph.values(request=request))
+
+    assert isinstance(result, Graph.CompletedResult)
+    hook_result = cast(HookResult[ThinkFrame[ThinkStep, State], Command], result.outputs["result"])
+    assert hook_result.value is frame
+    assert hook_result.node_id == GraphNodeId(node_id)
+    assert result.state.completion_route == node_id
 
 
 @pytest.mark.asyncio
@@ -218,7 +277,10 @@ async def test_nested_parent_sees_only_think_boundary() -> None:
         inputs={"result": Graph.node_output("think", "result")},
         outputs={"result": HookResult},
     )
-    parent.add_edge("think", "consume")
+    # Think exports the terminal Hook route through the nested boundary; the
+    # parent must consume that route with a conditional edge in the new Graph
+    # API rather than treating the child as an ordinary direct successor.
+    parent.add_edge("think", "command", "consume")
     parent.add_edge("consume", Graph.END)
     parent.set_outputs({"result": Graph.node_output("consume", "result")})
 
@@ -237,74 +299,6 @@ async def test_port_exception_stops_the_graph_before_later_stages() -> None:
         await think.run(Graph.values(request=ThinkRequest(Payload("failed"), State(3))))
     assert ports.calls == ["system", "placeholder", "user", "context"]
     assert len(runtime.calls) == 3
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("step", "route"),
-    [
-        (PromptStep(PromptFrame("system", "placeholder", "user")), ThinkRoute.CONTEXT.value),
-        (
-            ContextStep(
-                PromptFrame("system", "placeholder", "user"),
-                ContextFrame(("history",)),
-            ),
-            ThinkRoute.COMPACT.value,
-        ),
-        (
-            CompactStep(
-                PromptFrame("system", "placeholder", "user"),
-                ContextFrame(("history",)),
-                CompactedContext(("history",), 1),
-            ),
-            ThinkRoute.INFERENCE.value,
-        ),
-        (
-            InferenceStep(
-                PromptFrame("system", "placeholder", "user"),
-                CompactedContext(("history",), 1),
-                InferenceResult("answer"),
-            ),
-            ThinkRoute.COMMAND.value,
-        ),
-        (
-            CommandStep(
-                PromptFrame("system", "placeholder", "user"),
-                CompactedContext(("history",), 1),
-                InferenceResult("answer"),
-                ThinkCoreResult("command"),
-            ),
-            ThinkRoute.FINISH.value,
-        ),
-    ],
-)
-async def test_route_maps_every_known_step_and_preserves_result(step: ThinkStep, route: str) -> None:
-    hook_result = HookResult(ThinkFrame(step, State(1)), (Command("opaque"),))
-    output = await _RouteNode()(Graph.values(result=hook_result))
-
-    assert isinstance(output, Graph.SuccessOutcome)
-    assert output.route == route
-    assert output.output["hook_result"] is hook_result
-
-
-@pytest.mark.asyncio
-async def test_route_rejects_wrong_outer_and_inner_values() -> None:
-    route = _RouteNode()
-    with pytest.raises(ThinkContractError, match="HookResult"):
-        await route(Graph.values(result=cast(HookGraphValue, object())))
-    with pytest.raises(ThinkContractError, match="ThinkFrame"):
-        await route(Graph.values(result=HookResult(cast(Never, object()), ())))
-
-
-@pytest.mark.asyncio
-async def test_route_rejects_an_unknown_step_even_inside_a_malformed_frame() -> None:
-    malformed = cast(ThinkFrame[ThinkStep, State], object.__new__(ThinkFrame))
-    object.__setattr__(malformed, "step", ThinkStep())
-    object.__setattr__(malformed, "hook_state", State(1))
-
-    with pytest.raises(ThinkContractError, match="unknown ThinkStep"):
-        malformed_result: HookResult[ThinkFrame[ThinkStep, State], Command] = HookResult(malformed, ())
-        await _RouteNode()(Graph.values(result=malformed_result))
 
 
 def _think_with_hook(hook: object, *, definition_id: str = "think.test", version: int = 1) -> object:
