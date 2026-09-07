@@ -16,7 +16,6 @@ from mote_kernel.execution.engine.resume_input import (
 )
 from mote_kernel.execution.engine.routing import (
     PublicationHistoryWindow,
-    _success_routes,
     graph_outputs_available,
     project_routing_facts,
     publication_history_window,
@@ -1253,7 +1252,8 @@ def _expand_live(
     successors: list[_RecoveryWorkItem[GraphValueT]] = []
     node_id = item.live[0]
     remaining_live = item.live[1:]
-    for route in _success_routes(graph, node_id):
+    routes = tuple(graph.transition.conditional_targets[node_id]) or (None,)
+    for route in routes:
         settled = reduce_graph_run(
             item.state,
             project_success_settlement(graph, item.state, node_id, route),

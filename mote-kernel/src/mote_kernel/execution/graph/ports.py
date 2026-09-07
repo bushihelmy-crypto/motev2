@@ -253,14 +253,24 @@ class MaterializationPlan(Generic[GraphValueT]):
     descriptor: FrameDescriptor[GraphValueT]
 
 
+def _canonical_named_values(
+    values: Mapping[str, ValueT] | None,
+    *,
+    kind: str,
+    error: str,
+) -> tuple[tuple[str, ValueT], ...]:
+    """Validate and canonicalize one named declaration mapping."""
+
+    if not isinstance(values, Mapping):
+        raise GraphValidationError(error)
+    return tuple((canonical_port_name(name, kind=kind), value) for name, value in sorted(values.items()))
+
+
 def normalize_input_bindings(
     values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]] | None,
 ) -> InputBindings[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("inputs must be a mapping")
     entries: list[InputBinding[GraphValueT]] = []
-    for name, source in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="input")
+    for canonical, source in _canonical_named_values(values, kind="input", error="inputs must be a mapping"):
         if not isinstance(source, GraphInputRef | NodeOutputRef | PredecessorOutputRef):
             raise GraphValidationError(f"input {canonical!r} must bind one graph input or node output")
         entries.append(InputBinding(canonical, source))
@@ -274,11 +284,8 @@ def normalize_output_declarations(
     ]
     | None,
 ) -> OutputDeclarations[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("outputs must be a mapping")
     entries: list[OutputDeclaration[GraphValueT]] = []
-    for name, value_type in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="output")
+    for canonical, value_type in _canonical_named_values(values, kind="output", error="outputs must be a mapping"):
         if isinstance(value_type, GraphInputRef | NodeOutputRef):
             raise GraphValidationError(f"output {canonical!r} must declare one concrete nominal type")
         entries.append(OutputDeclaration(canonical, canonical_nominal_type(value_type)))
@@ -292,11 +299,12 @@ def normalize_graph_output_declarations(
     ]
     | None,
 ) -> GraphOutputDeclarations[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("graph outputs must be a mapping")
     entries: list[GraphOutputDeclaration[GraphValueT]] = []
-    for name, source in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="graph output")
+    for canonical, source in _canonical_named_values(
+        values,
+        kind="graph output",
+        error="graph outputs must be a mapping",
+    ):
         if not isinstance(source, GraphInputRef | NodeOutputRef):
             raise GraphValidationError(f"graph output {canonical!r} must bind one graph input or node output")
         entries.append(GraphOutputDeclaration(canonical, source))

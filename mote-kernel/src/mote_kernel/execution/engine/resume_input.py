@@ -5,7 +5,7 @@ from typing import TypeVar, cast
 from mote_kernel.execution.engine.routing import (
     _graph_input_coordinate,
     _node_output_coordinate,
-    predecessor_source_for_cause,
+    causal_input_source_for_cause,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -17,8 +17,8 @@ from mote_kernel.execution.graph.ports import (
     CompiledPredecessorInput,
     GraphInputPort,
     MaterializationPlan,
-    NodeOutputPort,
-    PublicationSelection,
+    ResolvedInputBinding,
+    ResolvedValueSource,
     require_publication_selection,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
@@ -96,18 +96,6 @@ def encode_resume_input(
     return OverrideGraphNodeInput(GraphResumeInputPayload(payload))
 
 
-def _admit_override(
-    graph: CompiledGraph[GraphValueT],
-    node_id: GraphNodeId,
-    values: _GraphValues[GraphValueT],
-) -> NodeInputFrame[GraphValueT]:
-    plan = _require_node_materialization(graph, node_id)
-    return _make_node_input_frame(
-        tuple(NamedValue(name, value) for name, value in values.items()),
-        plan.descriptor.declarations,
-    )
-
-
 def decode_resume_input(
     graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
@@ -122,45 +110,60 @@ def decode_resume_input(
         raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
     if not isinstance(candidate, _GraphValues):
         raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
-    return _admit_override(graph, node_id, candidate)
+    plan = _require_node_materialization(graph, node_id)
+    return _make_node_input_frame(
+        tuple(NamedValue(name, value) for name, value in candidate.items()),
+        plan.descriptor.declarations,
+    )
 
 
-def _source_coordinate(
+def _binding_source_coordinate(
     graph: CompiledGraph[GraphValueT],
+    state: GraphRunState | None,
     scope_run: ScopeRunCoordinate,
-    anchor_superstep: int,
-    source: GraphInputPort | NodeOutputPort,
-    publication: PublicationSelection | None,
-) -> GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT]:
+    activation_superstep: int,
+    binding: ResolvedInputBinding[GraphValueT],
+) -> tuple[
+    ResolvedValueSource,
+    GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+]:
+    """Resolve one compiled binding to its actual source and frame coordinate.
+
+    Predecessor bindings derive their source from the state-owned activation
+    cause; ordinary bindings use the compiler-provided publication selection.
+    Keeping this coordinate fact in one place prevents availability checks and
+    materialization from drifting while leaving their frame/error policies
+    independent.
+    """
+
+    source = binding.source
+    if isinstance(source, CompiledPredecessorInput):
+        if state is None:
+            raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
+        try:
+            node = frontier_node(state.frontier, source.target)
+            if node is None:
+                raise InvalidRoutingCommandError("predecessor-bound activation is not present in the current frontier")
+            selected = causal_input_source_for_cause(
+                graph,
+                state,
+                state.superstep,
+                node.cause,
+                binding,
+            )
+        except InvalidRoutingCommandError as error:
+            raise SnapshotMismatchError(str(error)) from error
+        if isinstance(selected, GraphInputPort):
+            return selected, _graph_input_coordinate(graph, scope_run)
+        resolved = selected.source
+        return resolved, _node_output_coordinate(graph, scope_run, resolved, selected.predecessor.superstep)
     if isinstance(source, GraphInputPort):
-        return _graph_input_coordinate(graph, scope_run)
+        return source, _graph_input_coordinate(graph, scope_run)
     selection = require_publication_selection(
-        publication,
+        binding.publication,
         SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
     )
-    return _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
-
-
-def _predecessor_source_for_state(
-    state: GraphRunState,
-    input_name: str,
-    binding: CompiledPredecessorInput,
-) -> tuple[NodeOutputPort, int]:
-    try:
-        node = frontier_node(state.frontier, binding.target)
-        if node is None:
-            raise InvalidRoutingCommandError("predecessor-bound activation is not present in the current frontier")
-        selected = predecessor_source_for_cause(
-            state,
-            binding.target,
-            input_name,
-            state.superstep,
-            node.cause,
-            binding,
-        )
-    except InvalidRoutingCommandError as error:
-        raise SnapshotMismatchError(str(error)) from error
-    return selected.source, selected.predecessor.superstep
+    return source, _node_output_coordinate(graph, scope_run, source, selection.resolve(activation_superstep))
 
 
 def node_inputs_available(
@@ -179,24 +182,13 @@ def node_inputs_available(
         if has_predecessor and activation_superstep != state.superstep:
             raise SnapshotMismatchError("predecessor input availability coordinate does not match authoritative state")
     for binding in plan.bindings.entries:
-        effective = binding.source
-        if isinstance(effective, CompiledPredecessorInput):
-            if state is None:
-                raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
-            effective, predecessor_superstep = _predecessor_source_for_state(
-                state,
-                binding.destination.local_name,
-                effective,
-            )
-            coordinate = _node_output_coordinate(graph, scope_run, effective, predecessor_superstep)
-        else:
-            coordinate = _source_coordinate(
-                graph,
-                scope_run,
-                activation_superstep,
-                effective,
-                binding.publication,
-            )
+        _source, coordinate = _binding_source_coordinate(
+            graph,
+            state,
+            scope_run,
+            activation_superstep,
+            binding,
+        )
         if isinstance(coordinate, GraphInputAvailabilityCoordinate):
             if not frames.has_graph_input(coordinate):
                 return False
@@ -270,16 +262,13 @@ def materialize_node_input(
             pass
     entries: list[NamedValue[GraphValueT]] = []
     for binding in plan.bindings.entries:
-        source = binding.source
-        if isinstance(source, CompiledPredecessorInput):
-            source, predecessor_superstep = _predecessor_source_for_state(
-                state,
-                binding.destination.local_name,
-                source,
-            )
-            coordinate = _node_output_coordinate(graph, scope_run, source, predecessor_superstep)
-        else:
-            coordinate = _source_coordinate(graph, scope_run, state.superstep, source, binding.publication)
+        source, coordinate = _binding_source_coordinate(
+            graph,
+            state,
+            scope_run,
+            state.superstep,
+            binding,
+        )
         if isinstance(source, GraphInputPort):
             value_name = source.name
             unavailable = f"graph input {source.name!r}"

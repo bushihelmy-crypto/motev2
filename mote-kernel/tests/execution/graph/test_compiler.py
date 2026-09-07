@@ -66,6 +66,18 @@ def test_join_to_end_preserves_its_runtime_barrier() -> None:
     assert compiled.transition.joins_by_source[GraphNodeId("b")] == (expected_join,)
 
 
+def test_conditional_edge_to_end_is_retained_as_a_terminal_route() -> None:
+    definition = graph(
+        nodes=(node("a"),),
+        edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId("done"), END),),
+    )
+
+    compiled = GraphCompiler(definition).compile()
+
+    assert compiled.transition.conditional_targets[GraphNodeId("a")][GraphRouteId("done")] == END
+    assert compiled.transition.activation_gates[GraphNodeId("a")] == ()
+
+
 def test_cyclic_join_compiles_when_every_source_shares_one_activation_cohort() -> None:
     definition = graph(
         nodes=(node("tick"), node("left"), node("right"), node("joined")),
