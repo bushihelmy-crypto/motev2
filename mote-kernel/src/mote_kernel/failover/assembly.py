@@ -1,4 +1,4 @@
-"""Assemble one fixed failover graph around one concrete Port binding.
+"""Assemble one fixed failover graph around one resolved Port config.
 
 The graph owns retry control flow only.  The wrapped Port may itself be a
 Hook capability, a model capability, or another typed Port; failover never
@@ -27,16 +27,7 @@ from mote_kernel.failover.contract import (
     TransformRequest,
     Unknown,
 )
-from mote_kernel.failover.plan import (
-    FailoverBindingMode,
-    FailoverConfigSource,
-    FailoverOperationId,
-    FailoverPlan,
-    FailoverPortId,
-    PortBinding,
-    RetryContext,
-    resolve_plan,
-)
+from mote_kernel.failover.plan import FailoverOperationId, FailoverPlan, FailoverPortId, RetryContext
 from mote_kernel.failover.policy import FailoverDecision, ObservationRoute, observe_and_route
 from mote_kernel.hooks.contract import HookGraphValue
 from mote_kernel.state.graph_state.identity import is_canonical_identity
@@ -86,29 +77,7 @@ class _ObserveStep(
     outcome: PortOutcome[ResultT, ReceiptT, HandleT]
 
 
-@dataclass(frozen=True, slots=True)
-class _PrepareStep(
-    _StepContext[RequestT],
-    Generic[RequestT, TransformT],
-):
-    decision: FailoverDecision[TransformT]
-
-
-@dataclass(frozen=True, slots=True)
-class _FinishStep(
-    _StepContext[RequestT],
-    Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT],
-):
-    outcome: PortOutcome[ResultT, ReceiptT, HandleT]
-    decision: FailoverDecision[TransformT]
-
-
-_FailoverStep: TypeAlias = (
-    _FinishStep[RequestT, ResultT, ReceiptT, HandleT, TransformT]
-    | _InvokeStep[RequestT]
-    | _ObserveStep[RequestT, ResultT, ReceiptT, HandleT]
-    | _PrepareStep[RequestT, TransformT]
-)
+_FailoverStep: TypeAlias = _InvokeStep[RequestT] | _ObserveStep[RequestT, ResultT, ReceiptT, HandleT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +87,11 @@ class _FailoverFrame(
 ):
     """Immutable internal value committed between failover activations."""
 
-    step: _FailoverStep[RequestT, ResultT, ReceiptT, HandleT, TransformT]
+    step: _FailoverStep[RequestT, ResultT, ReceiptT, HandleT]
     plan: FailoverPlan[TransformT]
 
     def __post_init__(self) -> None:
-        if type(self.step) not in (_InvokeStep, _ObserveStep, _PrepareStep, _FinishStep):
+        if type(self.step) not in (_InvokeStep, _ObserveStep):
             raise FailoverContractError("failover frame contains an unsupported step")
         if type(self.plan) is not FailoverPlan:
             raise FailoverContractError("failover frame requires a FailoverPlan")
@@ -135,7 +104,7 @@ class FailoverResult(
     HookGraphValue,
     Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT],
 ):
-    """The terminal typed result of one completed failover operation."""
+    """One observed attempt, exported only from a terminal graph route."""
 
     request: RequestT
     context: RetryContext
@@ -143,8 +112,8 @@ class FailoverResult(
     decision: FailoverDecision[TransformT]
 
     def __post_init__(self) -> None:
-        if self.decision.route not in (ObservationRoute.COMPLETED, ObservationRoute.RETURN_TO_MODEL):
-            raise FailoverContractError("failover result requires a non-aborting terminal decision")
+        if self.decision.route is ObservationRoute.ABORT:
+            raise FailoverContractError("failover result cannot carry an abort decision")
         if self.decision.route is ObservationRoute.COMPLETED and not isinstance(self.outcome, Completed):
             raise FailoverContractError("a completed failover result requires a completed Port outcome")
 
@@ -170,20 +139,19 @@ def _require_capability(
 
 
 @dataclass(frozen=True, slots=True)
-class _LoadPlanOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
-    port_id: FailoverPortId
-    binding: PortBinding[TransformT]
-    config_source: FailoverConfigSource[TransformT]
+class _ObserveCall(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
+    """Observe one new call together with its assembly-supplied config."""
+
+    config: FailoverPlan[TransformT]
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
         call = cast(FailoverCall[RequestT], values["request"])
-        plan = cast(FailoverPlan[TransformT], resolve_plan(self.config_source.snapshot(), self.port_id, self.binding))
         frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
             _InvokeStep[RequestT](
                 call.request,
-                RetryContext(call.operation_id, plan.plan_revision),
+                RetryContext(call.operation_id, self.config.plan_revision),
             ),
-            plan,
+            self.config,
         )
         return Graph.values(frame=frame)
 
@@ -210,12 +178,16 @@ class _InvokeOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 
 
 @dataclass(frozen=True, slots=True)
-class _ObserveAndRoute(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
+class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
+    """Classify one outcome, finish it, or prepare exactly one next attempt."""
+
+    preparation: AttemptPreparation[RequestT, TransformT]
+
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Outcome[HookGraphValue]:
         frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
         candidate = frame.step
         if not isinstance(candidate, _ObserveStep):
-            raise FailoverContractError("observe node requires an observe step")
+            raise FailoverContractError("prepare node requires an observe step")
         step = candidate
         decision = observe_and_route(step.outcome, frame.plan, step.context)
         context = step.context
@@ -226,76 +198,43 @@ class _ObserveAndRoute(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]
                 last_signal=step.outcome.evidence.signal,
             )
 
+        if decision.route is ObservationRoute.ABORT:
+            return Graph.failure("failover policy aborted the operation")
+        result = FailoverResult[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            step.request,
+            context,
+            step.outcome,
+            decision,
+        )
         if decision.route is ObservationRoute.PREPARE:
-            next_step: _FailoverStep[RequestT, ResultT, ReceiptT, HandleT, TransformT] = _PrepareStep[
-                RequestT, TransformT
-            ](
-                step.request,
-                context,
-                decision,
+            strategy = cast(FailureStrategy, decision.strategy)
+            action = cast(PreparationAction[TransformT], decision.preparation)
+            prepared = await self.preparation.prepare_next(step.request, action)
+            if type(prepared) is not PreparedRequest:
+                raise FailoverContractError("preparation capability must return a PreparedRequest")
+            next_context = context.with_strategy_use(strategy)
+            next_context = replace(
+                next_context,
+                request_version=next_context.request_version + int(isinstance(action, TransformRequest)),
+                attempt_ordinal=next_context.attempt_ordinal + 1,
+                endpoint_cursor=next_context.endpoint_cursor + int(isinstance(action, SwitchEndpoint)),
+                credential_cursor=next_context.credential_cursor + int(isinstance(action, RotateCredential)),
+                wait_until=None,
+            )
+            next_step: _FailoverStep[RequestT, ResultT, ReceiptT, HandleT] = _InvokeStep[RequestT](
+                prepared.request,
+                next_context,
             )
             route = ObservationRoute.PREPARE.value
-        elif decision.route is ObservationRoute.ABORT:
-            return Graph.failure("failover policy aborted the operation")
         else:
-            next_step = _FinishStep[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            next_step = _ObserveStep[RequestT, ResultT, ReceiptT, HandleT](
                 step.request,
                 context,
                 step.outcome,
-                decision,
             )
             route = _FINISH_ROUTE
         next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](next_step, frame.plan)
-        return Graph.success(Graph.values(frame=next_frame), route=route)
-
-
-@dataclass(frozen=True, slots=True)
-class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
-    preparation: AttemptPreparation[RequestT, TransformT]
-
-    async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
-        frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
-        candidate = frame.step
-        if not isinstance(candidate, _PrepareStep):
-            raise FailoverContractError("prepare node requires a prepare step")
-        step = candidate
-        strategy = cast(FailureStrategy, step.decision.strategy)
-        action = cast(PreparationAction[TransformT], step.decision.preparation)
-        prepared = await self.preparation.prepare_next(step.request, action)
-        if type(prepared) is not PreparedRequest:
-            raise FailoverContractError("preparation capability must return a PreparedRequest")
-
-        context = step.context.with_strategy_use(strategy)
-        context = replace(
-            context,
-            request_version=context.request_version + int(isinstance(action, TransformRequest)),
-            attempt_ordinal=context.attempt_ordinal + 1,
-            endpoint_cursor=context.endpoint_cursor + int(isinstance(action, SwitchEndpoint)),
-            credential_cursor=context.credential_cursor + int(isinstance(action, RotateCredential)),
-            wait_until=None,
-        )
-        next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-            _InvokeStep[RequestT](prepared.request, context),
-            frame.plan,
-        )
-        return Graph.values(frame=next_frame)
-
-
-@dataclass(frozen=True, slots=True)
-class _Finish(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
-    async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
-        frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
-        candidate = frame.step
-        if not isinstance(candidate, _FinishStep):
-            raise FailoverContractError("finish node requires a finish step")
-        step = candidate
-        result = FailoverResult[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-            step.request,
-            step.context,
-            step.outcome,
-            step.decision,
-        )
-        return Graph.values(result=result)
+        return Graph.success(Graph.values(frame=next_frame, result=result), route=route)
 
 
 def _definition_id(port_id: FailoverPortId) -> str:
@@ -307,29 +246,19 @@ def _definition_id(port_id: FailoverPortId) -> str:
 class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     """Decorate one single-attempt Port with the canonical failover graph.
 
-    Role/Flow composition supplies the binding and supporting capabilities
-    once, then calls this object with the Port being wrapped.  The returned
-    value is a normal nested :class:`Graph`, so retries remain in the parent
-    graph's state and execution boundaries rather than a decorator-owned loop.
+    Role/Flow composition supplies the resolved config and preparation
+    capability once, then calls this object with the Port being wrapped.  The
+    returned value is a normal nested :class:`Graph`, so retries remain in the
+    parent graph's state and execution boundaries rather than a decorator-owned
+    loop.
     """
 
-    port_id: FailoverPortId
-    binding: PortBinding[TransformT]
-    config_source: FailoverConfigSource[TransformT]
+    config: FailoverPlan[TransformT]
     preparation: AttemptPreparation[RequestT, TransformT]
 
     def __post_init__(self) -> None:
-        if not is_canonical_identity(self.port_id):
-            raise FailoverContractError("failover decorator port_id must be canonical")
-        if type(self.binding) is not PortBinding:
-            raise FailoverContractError("failover decorator requires a PortBinding")
-        if self.binding.mode is FailoverBindingMode.DISABLED:
-            raise FailoverContractError("disabled Port bindings must omit the failover decorator")
-        _require_capability(
-            self.config_source,
-            FailoverConfigSource,
-            "failover decorator requires a config source",
-        )
+        if type(self.config) is not FailoverPlan:
+            raise FailoverContractError("failover decorator requires a FailoverPlan config")
         _require_capability(
             self.preparation,
             AttemptPreparation,
@@ -343,19 +272,15 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     ) -> Graph[HookGraphValue]:
         _require_capability(port, SingleAttempt, "failover decorator requires one single-attempt Port")
 
-        graph = Graph[HookGraphValue](_definition_id(self.port_id), version=1)
+        graph = Graph[HookGraphValue](_definition_id(self.config.port_id), version=2)
         request_type = cast(type[HookGraphValue], FailoverCall)
         frame_type = cast(type[HookGraphValue], _FailoverFrame)
         result_type = cast(type[HookGraphValue], FailoverResult)
         request = graph.graph_input("request", request_type)
 
         graph.add_node(
-            "load_plan",
-            _LoadPlanOnce[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-                self.port_id,
-                self.binding,
-                self.config_source,
-            ),
+            "observe",
+            _ObserveCall[RequestT, ResultT, ReceiptT, HandleT, TransformT](self.config),
             inputs={"request": request},
             outputs={"frame": frame_type},
         )
@@ -366,31 +291,17 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
             outputs={"frame": frame_type},
         )
         graph.add_node(
-            "observe",
-            _ObserveAndRoute[RequestT, ResultT, ReceiptT, HandleT, TransformT](),
-            inputs={"frame": graph.node_output("invoke", "frame")},
-            outputs={"frame": frame_type},
-        )
-        graph.add_node(
             "prepare",
             _PrepareNextAttempt[RequestT, ResultT, ReceiptT, HandleT, TransformT](self.preparation),
-            inputs={"frame": graph.node_output("observe", "frame")},
-            outputs={"frame": frame_type},
-        )
-        graph.add_node(
-            "finish",
-            _Finish[RequestT, ResultT, ReceiptT, HandleT, TransformT](),
-            inputs={"frame": graph.node_output("observe", "frame")},
-            outputs={"result": result_type},
+            inputs={"frame": graph.node_output("invoke", "frame")},
+            outputs={"frame": frame_type, "result": result_type},
         )
 
-        graph.add_edge("load_plan", "invoke")
-        graph.add_edge("invoke", "observe")
-        graph.add_edge("observe", ObservationRoute.PREPARE.value, "prepare")
-        graph.add_edge("observe", _FINISH_ROUTE, "finish")
-        graph.add_edge("prepare", "invoke")
-        graph.add_edge("finish", Graph.END)
-        graph.set_outputs({"result": graph.node_output("finish", "result")})
+        graph.add_edge("observe", "invoke")
+        graph.add_edge("invoke", "prepare")
+        graph.add_edge("prepare", ObservationRoute.PREPARE.value, "invoke")
+        graph.add_edge("prepare", _FINISH_ROUTE, Graph.END)
+        graph.set_outputs({"result": graph.node_output("prepare", "result")})
         return graph
 
 
