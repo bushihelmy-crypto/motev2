@@ -32,8 +32,8 @@ dev = [
   "pytest-cov>=7.0",
   "ruff>=0.16",
   "twine>=7.0",
-  "workers-py==1.16.7",
-  "workers-runtime-sdk==1.6.15",
+  "workers-py==1.17.1",
+  "workers-runtime-sdk==1.8.2",
 ]
 
 [tool.hatch.build.targets.wheel]
