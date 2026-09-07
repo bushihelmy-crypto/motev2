@@ -18,7 +18,6 @@ from mote_kernel.invocation import (
     invoke_typed,
 )
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
@@ -26,14 +25,14 @@ CommandT = TypeVar("CommandT")
 
 
 @dataclass(frozen=True, slots=True)
-class HookPort(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
+class HookPort(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
     """Adapt one priority plan to one transport-independent invocation.
 
     The class is available from this implementation module for composition, but
     it is intentionally not part of the package-level Hooks API.
     """
 
-    admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
+    admission: HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT]
     invocation: Invocation[
         HookInvocationRequest[PriorityConfigT, ValueT, StateT],
         HookStageResult[ValueT, CommandT],

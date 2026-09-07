@@ -20,7 +20,7 @@ from mote_kernel.hooks.contract import (
     HookStageResult,
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage
-from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
 from mote_kernel.observe import ObserveNode
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.contract import (
@@ -99,27 +99,15 @@ class _AssistantPayload(str, ObservationPayload):
 
 
 @dataclass(frozen=True, slots=True)
-class _Config:
-    marker: str = "hook"
-
-
-@dataclass(frozen=True, slots=True)
 class _Priority:
     ordinal: int
 
 
-class _ConfigSource:
-    def snapshot(self) -> HookConfigSnapshot[_Config]:
-        return HookConfigSnapshot(_Config())
-
-
-class _PlanLoader:
-    def load(self, snapshot: HookConfigSnapshot[_Config], /) -> HookPlan[_Priority]:
-        return HookPlan(
-            HookPriorityPlan(_Priority(1)),
-            HookPriorityPlan(_Priority(2)),
-            HookPriorityPlan(_Priority(3)),
-        )
+def _plan() -> HookPlan[_Priority]:
+    return HookPlan(
+        HookPriorityPlan(_Priority(1)),
+        HookPriorityPlan(_Priority(2)),
+    )
 
 
 class _HookInvocation:
@@ -135,8 +123,8 @@ class _HookInvocation:
         return HookStageResult(request.request.value, (_Command(request.request.value.stage.value),))
 
 
-_ObserveHook = HookNode[_Config, _Priority, ObserveHookEnvelope, _State, _Command]
-_ObserveGraph = ObserveNode[_Config, _Priority, _State, _Command]
+_ObserveHook = HookNode[_Priority, ObserveHookEnvelope, _State, _Command]
+_ObserveGraph = ObserveNode[_Priority, _State, _Command]
 
 
 class _BuilderNode(Protocol):
@@ -294,7 +282,6 @@ def _hook(
 ) -> _ObserveHook:
     transition_admission = _admission() if observe_admission is None else observe_admission
     admission = HookPayloadAdmission(
-        _Config,
         _Priority,
         ObserveHookEnvelope,
         _State,
@@ -307,7 +294,7 @@ def _hook(
         GraphNodeId("hook"),
         HookStage.AFTER_NODE,
     )
-    return HookNode(slot, _ConfigSource(), _PlanLoader(), invocation, admission)
+    return HookNode(slot, _plan(), invocation, admission)
 
 
 def _observe(ports: _Ports, invocation: _HookInvocation) -> _InspectableObserveGraph:
@@ -359,7 +346,6 @@ ObserveTestConfigPayload = _ConfigPayload
 ObserveTestToolPayload = _ToolPayload
 ObserveTestUserPayload = _UserPayload
 ObserveTestAssistantPayload = _AssistantPayload
-ObserveTestConfig = _Config
 ObserveTestPriority = _Priority
 ObserveTestPorts = _Ports
 ObserveTestHookInvocation = _HookInvocation
@@ -402,14 +388,12 @@ async def test_available_user_batch_is_fifo_and_passes_shared_hook_twice() -> No
 
     assert isinstance(result, Graph.CompletedResult)
     hook_result = cast(HookResult[ObserveHookEnvelope, _Command], result.outputs["result"])
-    assert len(invocation.requests) == 6
-    assert tuple(request.request.node_id for request in invocation.requests[:3]) == (
-        GraphNodeId("get_observation"),
+    assert len(invocation.requests) == 4
+    assert tuple(request.request.node_id for request in invocation.requests[:2]) == (
         GraphNodeId("get_observation"),
         GraphNodeId("get_observation"),
     )
-    assert tuple(request.request.node_id for request in invocation.requests[3:]) == (
-        GraphNodeId("write_observation"),
+    assert tuple(request.request.node_id for request in invocation.requests[2:]) == (
         GraphNodeId("write_observation"),
         GraphNodeId("write_observation"),
     )
@@ -754,7 +738,6 @@ def test_observe_rejects_wrong_shared_hook_concrete_bindings_before_graph_assemb
     state_type = cast(type[_State], OtherState) if fault == "state" else _State
     command_type = cast(type[_Command], OtherCommand) if fault == "command" else _Command
     hook_admission = HookPayloadAdmission(
-        _Config,
         _Priority,
         value_type,
         state_type,

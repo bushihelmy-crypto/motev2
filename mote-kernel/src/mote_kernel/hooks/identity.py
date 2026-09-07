@@ -22,7 +22,6 @@ class HookPriority(Enum):
 
     P1 = auto()
     P2 = auto()
-    P3 = auto()
 
 
 @dataclass(frozen=True, slots=True)

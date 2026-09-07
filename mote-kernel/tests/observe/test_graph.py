@@ -114,8 +114,6 @@ async def test_observe_terminal_output_is_the_second_shared_hook_activation() ->
     assert tuple(request.request.node_id for request in invocation.requests) == (
         GraphNodeId("get_observation"),
         GraphNodeId("get_observation"),
-        GraphNodeId("get_observation"),
-        GraphNodeId("write_observation"),
         GraphNodeId("write_observation"),
         GraphNodeId("write_observation"),
     )
@@ -264,7 +262,7 @@ class _FailingPorts(_Ports):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "hook_calls"),
-    [("read", 0), ("snapshot", 0), ("config", 3), ("context", 3)],
+    [("read", 0), ("snapshot", 0), ("config", 2), ("context", 2)],
 )
 async def test_observe_port_failure_stops_before_later_graph_stages(failure: str, hook_calls: int) -> None:
     ports = _FailingPorts(failure)
@@ -297,7 +295,7 @@ class _FailingHook(_HookInvocation):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("node_id", "hook_calls"), [("get_observation", 1), ("write_observation", 4)])
+@pytest.mark.parametrize(("node_id", "hook_calls"), [("get_observation", 1), ("write_observation", 3)])
 async def test_observe_hook_failure_does_not_advance_to_a_later_stage(node_id: str, hook_calls: int) -> None:
     ports = _Ports()
     invocation = _FailingHook(node_id)

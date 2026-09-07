@@ -54,7 +54,6 @@ from mote_kernel.observe.port import (
 )
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
 HookCommandT = TypeVar("HookCommandT", bound=ObserveHookCommand)
@@ -249,7 +248,7 @@ def _context_batch(batch: ObservationBatch, /) -> ToolBatch | UserBatch | Assist
 
 class ObserveNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
+    Generic[PriorityConfigT, HookStateT, HookCommandT],
 ):
     """The two-business-node Observe nested graph with one shared Hook."""
 
@@ -271,7 +270,6 @@ class ObserveNode(
         ack_port: ObservationAckPort,
         resume_port: ObservationResumePort,
         hook: HookNode[
-            ConfigT,
             PriorityConfigT,
             ObserveHookEnvelope,
             HookStateT,
@@ -378,7 +376,7 @@ class ObserveNode(
             # activated twice; a fixed publication reference could otherwise
             # accidentally read the first activation after a topology change.
             # The typed predecessor handle reuses the descriptor owned by the
-            # shared Hook's P3 declaration instead of manufacturing a second
+            # shared Hook's P2 declaration instead of manufacturing a second
             # HookResult descriptor at this boundary.
             inputs=(hook_result_binding,),
             input_type=HookResult,
@@ -396,7 +394,6 @@ class ObserveNode(
     def hook(
         self,
     ) -> HookNode[
-        ConfigT,
         PriorityConfigT,
         ObserveHookEnvelope,
         HookStateT,

@@ -42,7 +42,6 @@ from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, Hoo
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
 HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
@@ -50,7 +49,7 @@ HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
 
 class ActNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
+    Generic[PriorityConfigT, HookStateT, HookCommandT],
 ):
     """The four-stage Act graph with one shared Hook.
 
@@ -79,7 +78,6 @@ class ActNode(
         settlement_port: SettlementPort,
         exchange_writer: ToolExchangeWriter,
         hook: HookNode[
-            ConfigT,
             PriorityConfigT,
             ActHookEnvelope,
             HookStateT,
@@ -222,7 +220,6 @@ class ActNode(
     def hook(
         self,
     ) -> HookNode[
-        ConfigT,
         PriorityConfigT,
         ActHookEnvelope,
         HookStateT,

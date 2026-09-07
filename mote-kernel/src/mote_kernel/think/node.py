@@ -50,7 +50,6 @@ from mote_kernel.think.inference import InferenceNode
 from mote_kernel.think.prompt import PromptNode
 from mote_kernel.think.router import RouterNode
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 PayloadT = TypeVar("PayloadT")
 HookStateT = TypeVar("HookStateT")
@@ -66,7 +65,7 @@ CommandT = TypeVar("CommandT")
 
 class ThinkNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
+    Generic[PriorityConfigT, HookStateT, HookCommandT],
 ):
     """The public six-stage Think graph with one shared Hook child.
 
@@ -101,7 +100,6 @@ class ThinkNode(
         command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]],
         hook_state_type: type[HookStateT],
         hook: HookNode[
-            ConfigT,
             PriorityConfigT,
             ThinkFrame[ThinkStep, HookStateT],
             HookStateT,
@@ -333,7 +331,6 @@ class ThinkNode(
     def hook(
         self,
     ) -> HookNode[
-        ConfigT,
         PriorityConfigT,
         ThinkFrame[ThinkStep, HookStateT],
         HookStateT,

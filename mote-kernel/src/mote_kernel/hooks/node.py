@@ -1,26 +1,23 @@
 """The graph-facing HookNode and its internal invocation Port."""
 
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar, cast
+from typing import Generic, TypeVar, cast
 
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import (
-    HookConfigSource,
     HookContractError,
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookPlanLoader,
     HookRequest,
     HookResult,
     HookStageResult,
 )
-from mote_kernel.hooks.identity import HookPriority, HookSlotId, hook_definition_id
+from mote_kernel.hooks.identity import HookSlotId, hook_definition_id
 from mote_kernel.hooks.plan import HookPlan
 from mote_kernel.hooks.port import HookPort
 from mote_kernel.invocation import Invocation
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
@@ -30,44 +27,39 @@ CommandT = TypeVar("CommandT")
 @dataclass(frozen=True, slots=True)
 class _HookProgress(
     HookGraphValue,
-    Generic[PriorityConfigT, ValueT, StateT, CommandT],
+    Generic[ValueT, StateT, CommandT],
 ):
     request: HookRequest[ValueT, StateT]
-    plan: HookPlan[PriorityConfigT]
     commands: tuple[CommandT, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _PlanNode(
-    Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT],
+class _P1Node(
+    Generic[PriorityConfigT, ValueT, StateT, CommandT],
 ):
-    config_source: HookConfigSource[ConfigT]
-    plan_loader: HookPlanLoader[ConfigT, PriorityConfigT]
-    admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
+    plan: HookPlan[PriorityConfigT]
+    port: HookPort[PriorityConfigT, ValueT, StateT, CommandT]
 
     async def __call__(
         self,
         values: Graph.Values[HookGraphValue],
         /,
     ) -> Graph.Values[HookGraphValue]:
-        request = self.admission.admit_request(cast(HookRequest[ValueT, StateT], values["request"]))
-        snapshot = self.config_source.snapshot()
-        snapshot = self.admission.admit_snapshot(snapshot)
-        plan = self.plan_loader.load(snapshot)
-        plan = self.admission.admit_plan(plan)
+        admission = self.port.admission
+        request = admission.admit_request(cast(HookRequest[ValueT, StateT], values["request"]))
+        result = await self.port.execute(self.plan.p1, request)
         return Graph.values(
             progress=_HookProgress(
-                request,
-                plan,
-                (),
+                HookRequest(result.value, request.state, request.node_id),
+                result.commands,
             )
         )
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
-    priority: Literal[HookPriority.P1, HookPriority.P2, HookPriority.P3]
-    port: HookPort[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]
+class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
+    plan: HookPlan[PriorityConfigT]
+    port: HookPort[PriorityConfigT, ValueT, StateT, CommandT]
 
     async def __call__(
         self,
@@ -75,69 +67,53 @@ class _PlannedPriorityNode(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         /,
     ) -> Graph.Values[HookGraphValue] | Graph.Outcome[HookGraphValue]:
         progress = cast(
-            _HookProgress[PriorityConfigT, ValueT, StateT, CommandT],
+            _HookProgress[ValueT, StateT, CommandT],
             values["progress"],
         )
-        if self.priority is HookPriority.P1:
-            priority_plan = progress.plan.p1
-        elif self.priority is HookPriority.P2:
-            priority_plan = progress.plan.p2
-        else:
-            priority_plan = progress.plan.p3
-        result = await self.port.execute(priority_plan, progress.request)
+        result = await self.port.execute(self.plan.p2, progress.request)
         ordered_commands = progress.commands + result.commands
-        if self.priority is HookPriority.P3:
-            hook_result = self.port.admission.admit_result(
-                HookResult(result.value, ordered_commands, progress.request.node_id)
-            )
-            output = Graph.values(result=hook_result)
-            # The shared Hook only reports which business node supplied the
-            # request.  It does not know the containing graph's topology.  A
-            # parent graph declares the meaning of that opaque node token on
-            # its own conditional edges; the token is carried as the nested
-            # graph's terminal route.
-            if hook_result.node_id is None:
-                return output
-            return Graph.success(output, route=str(hook_result.node_id))
-        return Graph.values(
-            progress=_HookProgress(
-                HookRequest(result.value, progress.request.state, progress.request.node_id),
-                progress.plan,
-                ordered_commands,
-            )
+        hook_result = self.port.admission.admit_result(
+            HookResult(result.value, ordered_commands, progress.request.node_id)
         )
+        output = Graph.values(result=hook_result)
+        # The shared Hook only reports which business node supplied the
+        # request.  It does not know the containing graph's topology.  A
+        # parent graph declares the meaning of that opaque node token on
+        # its own conditional edges; the token is carried as the nested
+        # graph's terminal route.
+        if hook_result.node_id is None:
+            return output
+        return Graph.success(output, route=str(hook_result.node_id))
 
 
 class HookNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT],
+    Generic[PriorityConfigT, ValueT, StateT, CommandT],
 ):
-    """A typed plan -> P1 -> P2 -> P3 Graph using one dynamic plan."""
+    """A typed P1 -> P2 Graph using one assembly-time plan."""
 
     __slots__ = ("_payload_admission", "_slot")
 
     def __init__(
         self,
         slot: HookSlotId,
-        config_source: HookConfigSource[ConfigT] | None,
-        plan_loader: HookPlanLoader[ConfigT, PriorityConfigT] | None,
+        plan: HookPlan[PriorityConfigT] | None,
         invocation: Invocation[
             HookInvocationRequest[PriorityConfigT, ValueT, StateT],
             HookStageResult[ValueT, CommandT],
         ]
         | None,
-        payload_admission: HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT] | None,
+        payload_admission: HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT] | None,
     ) -> None:
         if type(slot) is not HookSlotId:
             raise HookContractError("hook node requires a HookSlotId")
-        if not isinstance(config_source, HookConfigSource) or not callable(config_source.snapshot):
-            raise HookContractError("hook node requires a config source")
-        if not isinstance(plan_loader, HookPlanLoader) or not callable(plan_loader.load):
-            raise HookContractError("hook node requires a plan loader")
         if not isinstance(invocation, Invocation) or not callable(invocation.invoke):
             raise HookContractError("hook node requires an invocation capability")
         if type(payload_admission) is not HookPayloadAdmission:
             raise HookContractError("hook node requires a payload admission contract")
+        if type(plan) is not HookPlan:
+            raise HookContractError("hook node requires a HookPlan")
+        plan = payload_admission.admit_plan(plan)
 
         super().__init__(
             hook_definition_id(slot),
@@ -151,54 +127,25 @@ class HookNode(
         result_type = cast(type[HookGraphValue], HookResult)
         request_input = Graph.graph_input("request", request_type)
         port = HookPort(payload_admission, invocation)
-        plan = _PlanNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
-            config_source,
-            plan_loader,
-            payload_admission,
-        )
-        p1 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
-            HookPriority.P1,
-            port,
-        )
-        p2 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
-            HookPriority.P2,
-            port,
-        )
-        p3 = _PlannedPriorityNode[ConfigT, PriorityConfigT, ValueT, StateT, CommandT](
-            HookPriority.P3,
-            port,
-        )
+        p1 = _P1Node[PriorityConfigT, ValueT, StateT, CommandT](plan, port)
+        p2 = _P2Node[PriorityConfigT, ValueT, StateT, CommandT](plan, port)
 
-        self.add_node(
-            "plan",
-            plan,
-            inputs={"request": request_input},
-            outputs={"progress": progress_type},
-        )
         self.add_node(
             "p1",
             p1,
-            inputs={"progress": Graph.node_output("plan", "progress")},
+            inputs={"request": request_input},
             outputs={"progress": progress_type},
         )
         self.add_node(
             "p2",
             p2,
             inputs={"progress": Graph.node_output("p1", "progress")},
-            outputs={"progress": progress_type},
-        )
-        self.add_node(
-            "p3",
-            p3,
-            inputs={"progress": Graph.node_output("p2", "progress")},
             outputs={"result": result_type},
         )
-        self.add_edge("plan", "p1")
         self.add_edge("p1", "p2")
-        self.add_edge("p2", "p3")
-        self.add_edge("p3", Graph.END)
+        self.add_edge("p2", Graph.END)
         # Graph owns typed output resolution, including nested boundaries.
-        self.set_outputs({"result": self.output_ref("p3", "result")})
+        self.set_outputs({"result": self.output_ref("p2", "result")})
 
     @property
     def slot(self) -> HookSlotId:
@@ -209,7 +156,7 @@ class HookNode(
     @property
     def payload_admission(
         self,
-    ) -> HookPayloadAdmission[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]:
+    ) -> HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT]:
         """Return the immutable concrete payload contract bound at assembly."""
 
         return self._payload_admission

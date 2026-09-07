@@ -82,7 +82,7 @@ from mote_kernel.hooks.contract import (
     HookStageResult,
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage
-from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 HookValueT = TypeVar("HookValueT")
@@ -126,11 +126,6 @@ class _OtherHookValue(HookGraphValue):
 
 
 @dataclass(frozen=True, slots=True)
-class _Config:
-    marker: str = "hook"
-
-
-@dataclass(frozen=True, slots=True)
 class _PriorityConfig:
     ordinal: int
 
@@ -145,7 +140,7 @@ class _NestedBuilderNode(_BuilderNode, Protocol):
     def graph(self) -> Graph[HookGraphValue]: ...
 
 
-class _InspectableActGraph(ActNode[_Config, _PriorityConfig, _State, _Command]):
+class _InspectableActGraph(ActNode[_PriorityConfig, _State, _Command]):
     """Test-only adapter exposing the immutable assembly snapshot explicitly."""
 
     @property
@@ -153,19 +148,11 @@ class _InspectableActGraph(ActNode[_Config, _PriorityConfig, _State, _Command]):
         return self._builder_state.nodes
 
 
-class _ConfigSource:
-    def snapshot(self) -> HookConfigSnapshot[_Config]:
-        return HookConfigSnapshot(_Config())
-
-
-class _PlanLoader:
-    def load(self, snapshot: HookConfigSnapshot[_Config], /) -> HookPlan[_PriorityConfig]:
-        assert snapshot.config.marker == "hook"
-        return HookPlan(
-            HookPriorityPlan(_PriorityConfig(1)),
-            HookPriorityPlan(_PriorityConfig(2)),
-            HookPriorityPlan(_PriorityConfig(3)),
-        )
+def _plan() -> HookPlan[_PriorityConfig]:
+    return HookPlan(
+        HookPriorityPlan(_PriorityConfig(1)),
+        HookPriorityPlan(_PriorityConfig(2)),
+    )
 
 
 class _HookRuntime:
@@ -334,7 +321,7 @@ class _PassThroughHookRuntime(Generic[HookValueT, HookRuntimeStateT, HookRuntime
         return HookStageResult(request.request.value)
 
 
-class _ActHookSubclass(HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command]):
+class _ActHookSubclass(HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command]):
     pass
 
 
@@ -651,17 +638,15 @@ def _hook(
     node_id: str = "hook",
     stage: HookStage = HookStage.AFTER_NODE,
     payload_admission: HookPayloadAdmission[
-        _Config,
         _PriorityConfig,
         ActHookEnvelope,
         _State,
         _Command,
     ]
     | None = None,
-) -> HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command]:
+) -> HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command]:
     admission = (
         HookPayloadAdmission(
-            _Config,
             _PriorityConfig,
             ActHookEnvelope,
             _State,
@@ -677,7 +662,7 @@ def _hook(
         GraphNodeId(node_id),
         stage,
     )
-    return HookNode(slot, _ConfigSource(), _PlanLoader(), runtime, admission)
+    return HookNode(slot, _plan(), runtime, admission)
 
 
 def _act(ports: _Ports, runtime: _HookRuntime) -> _InspectableActGraph:
@@ -697,12 +682,12 @@ def _act(ports: _Ports, runtime: _HookRuntime) -> _InspectableActGraph:
 
 def _assemble(
     ports: _Ports,
-    hook: HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command],
+    hook: HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command],
     admission: ActPayloadAdmission[_State, _Command],
     *,
     definition_id: str = "act.test",
     version: int = 1,
-) -> ActNode[_Config, _PriorityConfig, _State, _Command]:
+) -> ActNode[_PriorityConfig, _State, _Command]:
     return ActNode(
         definition_id,
         version=version,
@@ -900,7 +885,7 @@ async def test_act_uses_one_shared_hook_for_each_stage_and_executes_once() -> No
     assert awaiting.interrupts[0].node_id == "authorize"
     assert ports.request_authorization_calls == 1
     assert ports.execute_calls == 0
-    assert len(runtime.calls) == 3
+    assert len(runtime.calls) == 2
 
     action = act.resume_authorization(
         awaiting=awaiting,
@@ -918,18 +903,18 @@ async def test_act_uses_one_shared_hook_for_each_stage_and_executes_once() -> No
     assert ports.execute_calls == 1
     assert ports.project_calls == 1
     assert ports.write_calls == 1
-    assert len(runtime.calls) == 12
+    assert len(runtime.calls) == 8
     assert tuple(call.request.node_id for call in runtime.calls) == (
-        *(GraphNodeId("resolve") for _ in range(3)),
-        *(GraphNodeId("authorize") for _ in range(3)),
-        *(GraphNodeId("execute") for _ in range(3)),
-        *(GraphNodeId("settle") for _ in range(3)),
+        *(GraphNodeId("resolve") for _ in range(2)),
+        *(GraphNodeId("authorize") for _ in range(2)),
+        *(GraphNodeId("execute") for _ in range(2)),
+        *(GraphNodeId("settle") for _ in range(2)),
     )
     result = cast(HookResult[ActHookEnvelope, _Command], completed.outputs["result"])
     assert result.node_id == GraphNodeId("settle")
     assert result.value.stage is ActHookStage.SETTLE
     assert result.value.hook_state is request.hook_state
-    assert result.commands == (_Command("settle"),) * 3
+    assert result.commands == (_Command("settle"),) * 2
     assert completed.state.completion_route == "settle"
     assert ports.resolve_requests == [request]
     resolved = ports.resolved
@@ -967,7 +952,7 @@ async def test_shared_hook_exports_each_originating_business_node_route(stage: A
     assert result.value is envelope
     assert result.node_id == GraphNodeId(stage.value)
     assert completed.state.completion_route == stage.value
-    assert result.commands == (_Command(stage.value),) * 3
+    assert result.commands == (_Command(stage.value),) * 2
 
 
 @pytest.mark.asyncio
@@ -1126,7 +1111,7 @@ async def test_full_act_deny_stops_without_execute_settle_or_an_extra_hook() -> 
     assert ports.execute_calls == 0
     assert ports.project_calls == 0
     assert ports.write_calls == 0
-    assert len(runtime.calls) == 3
+    assert len(runtime.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -1190,7 +1175,7 @@ async def test_full_act_execute_stop_never_enters_settle_or_its_hook_activation(
         ports.project_calls,
         ports.write_calls,
     ) == (1, 1, 1, 0, 0)
-    assert len(runtime.calls) == 6
+    assert len(runtime.calls) == 4
 
 
 @pytest.mark.asyncio
@@ -1305,7 +1290,7 @@ def test_act_assembly_requires_exact_admission_and_exact_hook_node() -> None:
         _assemble(
             ports,
             cast(
-                HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command],
+                HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command],
                 object(),
             ),
             admission,
@@ -1313,8 +1298,7 @@ def test_act_assembly_requires_exact_admission_and_exact_hook_node() -> None:
 
     subclass = _ActHookSubclass(
         hook.slot,
-        _ConfigSource(),
-        _PlanLoader(),
+        _plan(),
         _HookRuntime(),
         hook.payload_admission,
     )
@@ -1347,18 +1331,15 @@ def test_act_assembly_rejects_wrong_hook_value_state_command_and_transition_cont
         HookStage.AFTER_NODE,
     )
     wrong_value = HookNode[
-        _Config,
         _PriorityConfig,
         _OtherHookValue,
         _State,
         _Command,
     ](
         slot,
-        _ConfigSource(),
-        _PlanLoader(),
+        _plan(),
         _PassThroughHookRuntime[_OtherHookValue, _State, _Command](),
         HookPayloadAdmission(
-            _Config,
             _PriorityConfig,
             _OtherHookValue,
             _State,
@@ -1369,25 +1350,22 @@ def test_act_assembly_rejects_wrong_hook_value_state_command_and_transition_cont
         _assemble(
             ports,
             cast(
-                HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command],
+                HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command],
                 wrong_value,
             ),
             admission,
         )
 
     wrong_state = HookNode[
-        _Config,
         _PriorityConfig,
         ActHookEnvelope,
         _OtherState,
         _Command,
     ](
         slot,
-        _ConfigSource(),
-        _PlanLoader(),
+        _plan(),
         _PassThroughHookRuntime[ActHookEnvelope, _OtherState, _Command](),
         HookPayloadAdmission(
-            _Config,
             _PriorityConfig,
             ActHookEnvelope,
             _OtherState,
@@ -1398,25 +1376,22 @@ def test_act_assembly_rejects_wrong_hook_value_state_command_and_transition_cont
         _assemble(
             ports,
             cast(
-                HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command],
+                HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command],
                 wrong_state,
             ),
             admission,
         )
 
     wrong_command = HookNode[
-        _Config,
         _PriorityConfig,
         ActHookEnvelope,
         _State,
         _OtherCommand,
     ](
         slot,
-        _ConfigSource(),
-        _PlanLoader(),
+        _plan(),
         _PassThroughHookRuntime[ActHookEnvelope, _State, _OtherCommand](),
         HookPayloadAdmission(
-            _Config,
             _PriorityConfig,
             ActHookEnvelope,
             _State,
@@ -1427,14 +1402,13 @@ def test_act_assembly_rejects_wrong_hook_value_state_command_and_transition_cont
         _assemble(
             ports,
             cast(
-                HookNode[_Config, _PriorityConfig, ActHookEnvelope, _State, _Command],
+                HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command],
                 wrong_command,
             ),
             admission,
         )
 
     no_transition = HookPayloadAdmission(
-        _Config,
         _PriorityConfig,
         ActHookEnvelope,
         _State,
@@ -1724,7 +1698,7 @@ async def test_two_concurrent_act_runs_keep_authorization_and_results_isolated()
         ports.project_calls,
         ports.write_calls,
     ) == (2, 2, 2, 2, 2)
-    assert len(runtime.calls) == 24
+    assert len(runtime.calls) == 16
     assert {call.request.state.turn for call in runtime.calls} == {11, 22}
 
 
@@ -1758,7 +1732,7 @@ async def test_caller_cancellation_while_execute_is_waiting_never_reaches_settle
     assert ports.execute_calls == 1
     assert ports.project_calls == 0
     assert ports.write_calls == 0
-    assert len(runtime.calls) == 6
+    assert len(runtime.calls) == 4
 
 
 @pytest.mark.asyncio
@@ -1864,10 +1838,10 @@ async def test_shared_hook_cannot_rewrite_any_act_stage_fact(
     ("stage", "expected_hook_calls", "expected_port_calls"),
     [
         ("resolve", 0, (1, 0, 0, 0, 0)),
-        ("authorize", 3, (1, 1, 0, 0, 0)),
-        ("execute", 6, (1, 1, 1, 0, 0)),
-        ("project", 9, (1, 1, 1, 1, 0)),
-        ("write", 9, (1, 1, 1, 1, 1)),
+        ("authorize", 2, (1, 1, 0, 0, 0)),
+        ("execute", 4, (1, 1, 1, 0, 0)),
+        ("project", 6, (1, 1, 1, 1, 0)),
+        ("write", 6, (1, 1, 1, 1, 1)),
     ],
 )
 async def test_full_act_port_failure_stops_before_every_later_stage(
@@ -1924,9 +1898,9 @@ async def test_full_act_port_failure_stops_before_every_later_stage(
     ("target", "expected_hook_calls", "expected_port_calls"),
     [
         (ActHookStage.RESOLVE, 1, (1, 0, 0, 0, 0)),
-        (ActHookStage.AUTHORIZE, 4, (1, 1, 0, 0, 0)),
-        (ActHookStage.EXECUTE, 7, (1, 1, 1, 0, 0)),
-        (ActHookStage.SETTLE, 10, (1, 1, 1, 1, 1)),
+        (ActHookStage.AUTHORIZE, 3, (1, 1, 0, 0, 0)),
+        (ActHookStage.EXECUTE, 5, (1, 1, 1, 0, 0)),
+        (ActHookStage.SETTLE, 7, (1, 1, 1, 1, 1)),
     ],
 )
 async def test_full_act_hook_failure_stops_before_the_next_business_stage(
