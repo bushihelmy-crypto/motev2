@@ -34,9 +34,12 @@ from mote_kernel.think.contract import (
     InferenceRequest,
     InferenceResult,
     InferenceStep,
-    ModelBinding,
     PromptPort,
     PromptStep,
+    RouterNodeInput,
+    RouterPort,
+    RouterRequest,
+    RouterStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
@@ -45,6 +48,7 @@ from mote_kernel.think.contract import (
 )
 from mote_kernel.think.inference import InferenceNode
 from mote_kernel.think.prompt import PromptNode
+from mote_kernel.think.router import RouterNode
 
 ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
@@ -64,10 +68,10 @@ class ThinkNode(
     Graph[HookGraphValue],
     Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
 ):
-    """The public five-stage Think graph with one shared Hook child.
+    """The public six-stage Think graph with one shared Hook child.
 
     ``Graph`` remains the sole execution engine.  This class only performs
-    assembly: the five stage callables and one real ``HookNode`` are declared
+    assembly: the six stage callables and one real ``HookNode`` are declared
     as a single nested-graph boundary.  The Hook returns the identity of the
     business stage it processed; the static conditional edges below choose the
     next stage directly.
@@ -89,12 +93,12 @@ class ThinkNode(
             CompactRequest[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
             CompactedContext[CompactedSnapshotT],
         ],
+        router_port: RouterPort[RouterRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT]],
         inference_port: InferencePort[
             InferenceRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
             InferenceResult[ModelOutputT],
         ],
         command_port: CommandPort[InferenceResult[ModelOutputT], ThinkCoreResult[CommandT]],
-        model_binding: ModelBinding,
         hook_state_type: type[HookStateT],
         hook: HookNode[
             ConfigT,
@@ -125,7 +129,7 @@ class ThinkNode(
         if hook_admission.state_type is not hook_state_type:
             raise ThinkContractError("ThinkNode shared Hook state type does not match Think admission")
 
-        # Constructing stage callables performs all capability/model checks;
+        # Constructing stage callables performs all capability checks;
         # no Graph.add_node call happens until every one has succeeded.
         prompt = PromptNode[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT](prompt_port)
         context = ContextNode[PayloadT, HookStateT, SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT](
@@ -139,6 +143,14 @@ class ThinkNode(
             ContextSnapshotT,
             CompactedSnapshotT,
         ](compact_port)
+        router = RouterNode[
+            HookStateT,
+            SystemPromptT,
+            PlaceholderT,
+            UserPromptT,
+            ContextSnapshotT,
+            CompactedSnapshotT,
+        ](router_port)
         inference = InferenceNode[
             HookStateT,
             SystemPromptT,
@@ -146,7 +158,7 @@ class ThinkNode(
             UserPromptT,
             CompactedSnapshotT,
             ModelOutputT,
-        ](inference_port, model_binding)
+        ](inference_port)
         command = CommandNode[
             HookStateT,
             SystemPromptT,
@@ -204,7 +216,7 @@ class ThinkNode(
             ],
             Graph.bind("hook_result", hook_result_source),
         )
-        inference_hook_binding = cast(
+        router_hook_binding = cast(
             TypedInputBinding[
                 HookResult[
                     ThinkFrame[
@@ -213,6 +225,23 @@ class ThinkNode(
                             PlaceholderT,
                             UserPromptT,
                             ContextSnapshotT,
+                            CompactedSnapshotT,
+                        ],
+                        HookStateT,
+                    ],
+                    HookGraphValue,
+                ]
+            ],
+            Graph.bind("hook_result", hook_result_source),
+        )
+        inference_hook_binding = cast(
+            TypedInputBinding[
+                HookResult[
+                    ThinkFrame[
+                        RouterStep[
+                            SystemPromptT,
+                            PlaceholderT,
+                            UserPromptT,
                             CompactedSnapshotT,
                         ],
                         HookStateT,
@@ -262,6 +291,15 @@ class ThinkNode(
             output_type=HookRequest,
         )
         self.add_node(
+            "router",
+            router,
+            inputs=(router_hook_binding,),
+            input_type=RouterNodeInput,
+            materialize=lambda values: RouterNodeInput(values.get(router_hook_binding)),
+            output_name="hook_request",
+            output_type=HookRequest,
+        )
+        self.add_node(
             "inference",
             inference,
             inputs=(inference_hook_binding,),
@@ -279,13 +317,14 @@ class ThinkNode(
             output_name="hook_request",
             output_type=HookRequest,
         )
-        for business_node in ("prompt", "context", "compact", "inference", "command"):
+        for business_node in ("prompt", "context", "compact", "router", "inference", "command"):
             self.add_edge(business_node, "hook")
         # The shared Hook returns the current business node identity as its
         # terminal route.  This graph decides what each identity means.
         self.add_edge("hook", "prompt", "context")
         self.add_edge("hook", "context", "compact")
-        self.add_edge("hook", "compact", "inference")
+        self.add_edge("hook", "compact", "router")
+        self.add_edge("hook", "router", "inference")
         self.add_edge("hook", "inference", "command")
         self.add_edge("hook", "command", Graph.END)
         self.set_outputs({"result": hook_result_ref})

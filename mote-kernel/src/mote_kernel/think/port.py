@@ -10,7 +10,7 @@ parameters are erased before a network result returns.
 
 ``PromptPort`` is one capability with three operations.  It therefore keeps
 three invocation bindings on one immutable object instead of exposing three
-independent Port objects.  The other four stages each have one invocation.
+independent Port objects.  The other five stages each have one invocation.
 The classes live in this implementation module and are not re-exported from
 ``mote_kernel.think``; the public graph entry point remains ``ThinkNode``.
 """
@@ -26,7 +26,7 @@ from mote_kernel.invocation import (
     InvocationTypeContract,
     invoke_typed,
 )
-from mote_kernel.think.contract import ThinkContractError
+from mote_kernel.think.contract import ModelBinding, ThinkContractError
 
 PayloadT = TypeVar("PayloadT")
 SystemPromptT = TypeVar("SystemPromptT")
@@ -141,6 +141,23 @@ class CompactPort(Generic[RequestT, ResultT]):
 
 
 @dataclass(frozen=True, slots=True)
+class RouterPort(Generic[RequestT]):
+    """Adapt one model-routing request to one strict invocation."""
+
+    invocation: Invocation[RequestT, ModelBinding]
+    contract: InvocationTypeContract[RequestT, ModelBinding]
+
+    def __post_init__(self) -> None:
+        _validate_invocation(self.invocation, "RouterPort.invocation")
+        _validate_contract(self.contract, "RouterPort.contract")
+
+    async def route_model(self, request: RequestT, /) -> ModelBinding:
+        """Return the model binding selected for one inference request."""
+
+        return await _invoke_typed(self.invocation, request, self.contract)
+
+
+@dataclass(frozen=True, slots=True)
 class InferencePort(Generic[RequestT, ResultT]):
     """Adapt one model request to one strict invocation."""
 
@@ -174,4 +191,4 @@ class CommandPort(Generic[RequestT, ResultT]):
         return await _invoke_typed(self.invocation, request, self.contract)
 
 
-__all__ = ["CommandPort", "CompactPort", "ContextPort", "InferencePort", "PromptPort"]
+__all__ = ["CommandPort", "CompactPort", "ContextPort", "InferencePort", "PromptPort", "RouterPort"]

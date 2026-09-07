@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **Breaking:** Think now resolves its model through a required typed `RouterPort` stage immediately before inference;
+  the former assembly-time `model_binding` argument is removed.
 - **Breaking:** Logging and Observability now expose only two-stage diagnostic decorators:
   `LoggedNode(sink, ...)(inner)`, `ObservedNode(port, span_factory)(inner)`, and
   `LoggedGraphCommit(sink, ...)(inner)`. The former inner-first constructors, public generic subscripts, and

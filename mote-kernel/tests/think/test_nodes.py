@@ -30,6 +30,9 @@ from mote_kernel.think.contract import (
     ModelBinding,
     PromptFrame,
     PromptStep,
+    RouterNodeInput,
+    RouterRequest,
+    RouterStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
@@ -37,6 +40,7 @@ from mote_kernel.think.contract import (
     ThinkStep,
 )
 from mote_kernel.think.inference import InferenceNode
+from mote_kernel.think.router import RouterNode
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,15 +85,26 @@ def _compact_input(
     )
 
 
-def _inference_input(
+def _router_input(
     result: object,
-) -> InferenceNodeInput[State, str, str, str, tuple[str, ...], tuple[str, ...], HookGraphValue]:
-    return InferenceNodeInput(
+) -> RouterNodeInput[State, str, str, str, tuple[str, ...], tuple[str, ...], HookGraphValue]:
+    return RouterNodeInput(
         cast(
             HookResult[
                 ThinkFrame[CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], State],
                 HookGraphValue,
             ],
+            result,
+        )
+    )
+
+
+def _inference_input(
+    result: object,
+) -> InferenceNodeInput[State, str, str, str, tuple[str, ...], HookGraphValue]:
+    return InferenceNodeInput(
+        cast(
+            HookResult[ThinkFrame[RouterStep[str, str, str, tuple[str, ...]], State], HookGraphValue],
             result,
         )
     )
@@ -110,6 +125,7 @@ class StagePorts:
     def __init__(self) -> None:
         self.context_requests: list[ContextRequest[Payload, State, str, str, str]] = []
         self.compact_requests: list[CompactRequest[str, str, str, tuple[str, ...]]] = []
+        self.router_requests: list[RouterRequest[str, str, str, tuple[str, ...]]] = []
         self.inference_requests: list[InferenceRequest[str, str, str, tuple[str, ...]]] = []
         self.command_requests: list[InferenceResult[str]] = []
 
@@ -128,6 +144,14 @@ class StagePorts:
     ) -> CompactedContext[tuple[str, ...]]:
         self.compact_requests.append(request)
         return COMPACTED
+
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        self.router_requests.append(request)
+        return MODEL
 
     async def infer(
         self,
@@ -152,6 +176,14 @@ class BadResultPorts(StagePorts):
         request: ContextRequest[Payload, State, str, str, str],
         /,
     ) -> ContextFrame[tuple[str, ...]]:
+        del request
+        return cast(Never, object())
+
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
         del request
         return cast(Never, object())
 
@@ -192,6 +224,10 @@ class MissingInferencePort:
     pass
 
 
+class MissingRouterPort:
+    pass
+
+
 class MissingCommandPort:
     pass
 
@@ -208,6 +244,10 @@ class NonCallableInferencePort:
     infer = None
 
 
+class NonCallableRouterPort:
+    route_model = None
+
+
 class NonCallableCommandPort:
     build_command = None
 
@@ -220,8 +260,12 @@ def _compact_node(port: object = StagePorts()) -> CompactNode[State, str, str, s
     return CompactNode(cast(Never, port))
 
 
+def _router_node(port: object = StagePorts()) -> RouterNode[State, str, str, str, tuple[str, ...], tuple[str, ...]]:
+    return RouterNode(cast(Never, port))
+
+
 def _inference_node(port: object = StagePorts()) -> InferenceNode[State, str, str, str, tuple[str, ...], str]:
-    return InferenceNode(cast(Never, port), MODEL)
+    return InferenceNode(cast(Never, port))
 
 
 def _command_node(port: object = StagePorts()) -> CommandNode[State, str, str, str, tuple[str, ...], str, str]:
@@ -262,17 +306,35 @@ async def test_compact_node_builds_one_request_and_next_frame() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inference_node_captures_the_exact_model_binding() -> None:
+async def test_router_node_selects_one_model_binding() -> None:
     ports = StagePorts()
-    node = _inference_node(ports)
+    node = _router_node(ports)
     compact_step = CompactStep(PROMPT, CONTEXT, COMPACTED)
 
-    output = await node(_inference_input(_result(compact_step)))
+    output = await node(_router_input(_result(compact_step)))
+
+    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    assert hook_request.node_id == GraphNodeId("router")
+    step = cast(RouterStep[str, str, str, tuple[str, ...]], hook_request.value.step)
+    assert step.model is MODEL
+    assert step.compacted is COMPACTED
+    assert hook_request.value.hook_state is REQUEST.hook_state
+    assert ports.router_requests == [RouterRequest(PROMPT, COMPACTED)]
+
+
+@pytest.mark.asyncio
+async def test_inference_node_uses_the_routed_model_binding() -> None:
+    ports = StagePorts()
+    node = _inference_node(ports)
+    router_step = RouterStep(PROMPT, COMPACTED, MODEL)
+
+    output = await node(_inference_input(_result(router_step)))
 
     hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("inference")
     step = cast(InferenceStep[str, str, str, tuple[str, ...], str], hook_request.value.step)
     assert step.inference is INFERENCE
+    assert step.model is MODEL
     assert hook_request.value.hook_state is REQUEST.hook_state
     assert len(ports.inference_requests) == 1
     assert ports.inference_requests[0].model is MODEL
@@ -284,7 +346,7 @@ async def test_inference_node_captures_the_exact_model_binding() -> None:
 async def test_command_node_only_structures_the_inference_result() -> None:
     ports = StagePorts()
     node = _command_node(ports)
-    inference_step = InferenceStep(PROMPT, COMPACTED, INFERENCE)
+    inference_step = InferenceStep(PROMPT, COMPACTED, MODEL, INFERENCE)
 
     output = await node(_command_input(_result(inference_step)))
 
@@ -294,6 +356,7 @@ async def test_command_node_only_structures_the_inference_result() -> None:
     assert type(hook_request.value.step) is not PromptStep
     step = cast(CommandStep[str, str, str, tuple[str, ...], str, str], hook_request.value.step)
     assert step.core is CORE
+    assert step.model is MODEL
     assert hook_request.value.hook_state is REQUEST.hook_state
     assert ports.command_requests == [INFERENCE]
 
@@ -322,20 +385,28 @@ def _bad_compact_non_callable() -> object:
     return CompactNode[State, str, str, str, tuple[str, ...], tuple[str, ...]](cast(Never, NonCallableCompactPort()))
 
 
+def _bad_router_none() -> object:
+    return RouterNode[State, str, str, str, tuple[str, ...], tuple[str, ...]](cast(Never, None))
+
+
+def _bad_router_missing() -> object:
+    return RouterNode[State, str, str, str, tuple[str, ...], tuple[str, ...]](cast(Never, MissingRouterPort()))
+
+
+def _bad_router_non_callable() -> object:
+    return RouterNode[State, str, str, str, tuple[str, ...], tuple[str, ...]](cast(Never, NonCallableRouterPort()))
+
+
 def _bad_inference_none() -> object:
-    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, None), MODEL)
+    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, None))
 
 
 def _bad_inference_missing() -> object:
-    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, MissingInferencePort()), MODEL)
+    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, MissingInferencePort()))
 
 
 def _bad_inference_non_callable() -> object:
-    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, NonCallableInferencePort()), MODEL)
-
-
-def _bad_inference_model() -> object:
-    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, StagePorts()), cast(Never, object()))
+    return InferenceNode[State, str, str, str, tuple[str, ...], str](cast(Never, NonCallableInferencePort()))
 
 
 def _bad_command_none() -> object:
@@ -359,10 +430,12 @@ def _bad_command_non_callable() -> object:
         (_bad_compact_none, "compact requires"),
         (_bad_compact_missing, "compact requires"),
         (_bad_compact_non_callable, "compact"),
+        (_bad_router_none, "router requires"),
+        (_bad_router_missing, "router requires"),
+        (_bad_router_non_callable, "route_model"),
         (_bad_inference_none, "inference requires"),
         (_bad_inference_missing, "inference requires"),
         (_bad_inference_non_callable, "infer"),
-        (_bad_inference_model, "exact ModelBinding"),
         (_bad_command_none, "command requires"),
         (_bad_command_missing, "command requires"),
         (_bad_command_non_callable, "build_command"),
@@ -381,6 +454,10 @@ def _compact_factory() -> object:
     return _compact_node()
 
 
+def _router_factory() -> object:
+    return _router_node()
+
+
 def _inference_factory() -> object:
     return _inference_node()
 
@@ -391,6 +468,10 @@ def _command_factory() -> object:
 
 def _compact_with_port(port: object) -> object:
     return _compact_node(port)
+
+
+def _router_with_port(port: object) -> object:
+    return _router_node(port)
 
 
 def _inference_with_port(port: object) -> object:
@@ -413,6 +494,7 @@ def _operation(node: object) -> NodeOperation:
     [
         _context_input,
         _compact_input,
+        _router_input,
         _inference_input,
         _command_input,
     ],
@@ -443,8 +525,9 @@ async def test_context_node_rejects_wrong_request_frame_and_state() -> None:
     ("node_factory", "input_factory", "step", "message"),
     [
         (_compact_factory, _compact_input, PromptStep(PROMPT), "ContextStep"),
-        (_inference_factory, _inference_input, ContextStep(PROMPT, CONTEXT), "CompactStep"),
-        (_command_factory, _command_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceStep"),
+        (_router_factory, _router_input, ContextStep(PROMPT, CONTEXT), "CompactStep"),
+        (_inference_factory, _inference_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "RouterStep"),
+        (_command_factory, _command_input, RouterStep(PROMPT, COMPACTED, MODEL), "InferenceStep"),
     ],
 )
 async def test_later_stage_nodes_reject_wrong_step(
@@ -463,8 +546,9 @@ async def test_later_stage_nodes_reject_wrong_step(
     [
         (_context_factory, _context_input, PromptStep(PROMPT), "prompt"),
         (_compact_factory, _compact_input, ContextStep(PROMPT, CONTEXT), "context"),
-        (_inference_factory, _inference_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "compact"),
-        (_command_factory, _command_input, InferenceStep(PROMPT, COMPACTED, INFERENCE), "inference"),
+        (_router_factory, _router_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "compact"),
+        (_inference_factory, _inference_input, RouterStep(PROMPT, COMPACTED, MODEL), "router"),
+        (_command_factory, _command_input, InferenceStep(PROMPT, COMPACTED, MODEL, INFERENCE), "inference"),
     ],
 )
 async def test_stage_nodes_reject_a_hook_result_from_the_wrong_producer(
@@ -487,6 +571,7 @@ async def test_stage_nodes_reject_a_hook_result_from_the_wrong_producer(
     ("node_factory", "input_factory", "message"),
     [
         (_compact_factory, _compact_input, "ThinkFrame"),
+        (_router_factory, _router_input, "ThinkFrame"),
         (_inference_factory, _inference_input, "ThinkFrame"),
         (_command_factory, _command_input, "ThinkFrame"),
     ],
@@ -506,8 +591,9 @@ async def test_later_stage_nodes_reject_a_hook_result_without_a_frame(
     ("node_factory", "input_factory", "step", "message"),
     [
         (_compact_with_port, _compact_input, ContextStep(PROMPT, CONTEXT), "CompactedContext"),
-        (_inference_with_port, _inference_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "InferenceResult"),
-        (_command_with_port, _command_input, InferenceStep(PROMPT, COMPACTED, INFERENCE), "ThinkCoreResult"),
+        (_router_with_port, _router_input, CompactStep(PROMPT, CONTEXT, COMPACTED), "ModelBinding"),
+        (_inference_with_port, _inference_input, RouterStep(PROMPT, COMPACTED, MODEL), "InferenceResult"),
+        (_command_with_port, _command_input, InferenceStep(PROMPT, COMPACTED, MODEL, INFERENCE), "ThinkCoreResult"),
     ],
 )
 async def test_later_stage_nodes_reject_wrong_port_results(
@@ -540,7 +626,7 @@ async def test_stage_cancellation_is_not_converted_to_a_value() -> None:
 
     node = _inference_node(CancellingInferencePort())
     with pytest.raises(asyncio.CancelledError):
-        await node(_inference_input(_result(CompactStep(PROMPT, CONTEXT, COMPACTED))))
+        await node(_inference_input(_result(RouterStep(PROMPT, COMPACTED, MODEL))))
 
 
 @pytest.mark.parametrize("token_count", [-1, True, 1.5])

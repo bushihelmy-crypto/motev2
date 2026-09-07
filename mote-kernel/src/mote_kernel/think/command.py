@@ -87,7 +87,7 @@ class CommandNode(
             raise ThinkContractError("CommandPort.build_command must return a ThinkCoreResult")
         core = core_value
         next_frame = ThinkFrame(
-            CommandStep(step.prompt, step.compacted, step.inference, core),
+            CommandStep(step.prompt, step.compacted, step.model, step.inference, core),
             frame.hook_state,
         )
         return HookRequest(next_frame, frame.hook_state, GraphNodeId("command"))

@@ -14,10 +14,9 @@ from mote_kernel.think.contract import (
     InferenceRequest,
     InferenceResult,
     InferenceStep,
-    ModelBinding,
     ThinkContractError,
     ThinkFrame,
-    admit_compact_frame,
+    admit_router_frame,
 )
 
 HookStateT = TypeVar("HookStateT")
@@ -25,7 +24,6 @@ SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
 CompactedSnapshotT = TypeVar("CompactedSnapshotT")
-ContextSnapshotT = TypeVar("ContextSnapshotT")
 ModelOutputT = TypeVar("ModelOutputT")
 
 
@@ -46,7 +44,6 @@ class InferenceNode(
         InferenceRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
         InferenceResult[ModelOutputT],
     ]
-    model_binding: ModelBinding
 
     def __post_init__(self) -> None:
         if operator.is_(self.inference_port, None):
@@ -57,8 +54,6 @@ class InferenceNode(
             raise ThinkContractError("inference requires an InferencePort") from error
         if not callable(method):
             raise ThinkContractError("InferencePort.infer must be callable")
-        if type(self.model_binding) is not ModelBinding:
-            raise ThinkContractError("inference requires an exact ModelBinding")
 
     async def __call__(
         self,
@@ -67,7 +62,6 @@ class InferenceNode(
             SystemPromptT,
             PlaceholderT,
             UserPromptT,
-            ContextSnapshotT,
             CompactedSnapshotT,
             HookGraphValue,
         ],
@@ -79,17 +73,18 @@ class InferenceNode(
         ],
         HookStateT,
     ]:
-        frame = admit_compact_frame(value.hook_result)
+        frame = admit_router_frame(value.hook_result)
         step = frame.step
         compacted = step.compacted
         prompt = step.prompt
-        request = InferenceRequest(prompt, compacted, self.model_binding)
+        model = step.model
+        request = InferenceRequest(prompt, compacted, model)
 
         result_value = await self.inference_port.infer(request)
         if type(result_value) is not InferenceResult:
             raise ThinkContractError("InferencePort.infer must return an InferenceResult")
         result = result_value
-        next_frame = ThinkFrame(InferenceStep(prompt, compacted, result), frame.hook_state)
+        next_frame = ThinkFrame(InferenceStep(prompt, compacted, model, result), frame.hook_state)
         return HookRequest(next_frame, frame.hook_state, GraphNodeId("inference"))
 
 

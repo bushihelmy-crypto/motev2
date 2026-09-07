@@ -36,13 +36,15 @@ from mote_kernel.think.contract import (
     ModelBinding,
     PromptFrame,
     PromptStep,
+    RouterRequest,
+    RouterStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
     ThinkRequest,
     ThinkStep,
 )
-from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort
+from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort, RouterPort
 
 InvocationRequestT = TypeVar("InvocationRequestT")
 InvocationResultT = TypeVar("InvocationResultT")
@@ -124,6 +126,14 @@ class Ports:
         self.calls.append("compact")
         return CompactedContext(request.context.snapshot, 1)
 
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        self.calls.append("router")
+        return ModelBinding("provider", "model", 1)
+
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         self.calls.append("inference")
         return InferenceResult(request.prompt.user)
@@ -187,6 +197,15 @@ class StageFailurePorts(Ports):
         self._maybe_fail("compact")
         return CompactedContext(request.context.snapshot, 1)
 
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        self.calls.append("router")
+        self._maybe_fail("router")
+        return ModelBinding("provider", "model", 1)
+
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         self.calls.append("inference")
         self._maybe_fail("inference")
@@ -239,6 +258,16 @@ class IsolatedPorts(Ports):
         payload = request.context.snapshot[0].split(":", 1)[1]
         self.events.append(("compact", payload))
         return CompactedContext(request.context.snapshot, 1)
+
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        await asyncio.sleep(0)
+        payload = request.prompt.user.split(":", 1)[1]
+        self.events.append(("router", payload))
+        return ModelBinding("provider", f"model-{payload}", 1)
 
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         await asyncio.sleep(0)
@@ -350,9 +379,9 @@ def make_think(runtime: HookRuntime, ports: Ports) -> ThinkNode[Config, Priority
         prompt_port=ports,
         context_port=ports,
         compact_port=ports,
+        router_port=ports,
         inference_port=ports,
         command_port=ports,
-        model_binding=ModelBinding("provider", "model", 1),
         hook_state_type=State,
         hook=hook,
     )
@@ -366,12 +395,13 @@ async def test_full_graph() -> None:
     request = ThinkRequest(Payload("hello"), State(1))
     result = await think.run(Graph.values(request=request))
     assert isinstance(result, Graph.CompletedResult)
-    assert ports.calls == ["system", "placeholder", "user", "context", "compact", "inference", "command"]
-    assert len(runtime.calls) == 15
+    assert ports.calls == ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"]
+    assert len(runtime.calls) == 18
     assert [str(call.request.node_id) for call in runtime.calls] == [
         *(["prompt"] * 3),
         *(["context"] * 3),
         *(["compact"] * 3),
+        *(["router"] * 3),
         *(["inference"] * 3),
         *(["command"] * 3),
     ]
@@ -405,10 +435,19 @@ async def test_full_graph() -> None:
             ),
         ),
         (
+            "router",
+            RouterStep(
+                PromptFrame("system", "placeholder", "user"),
+                CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
+            ),
+        ),
+        (
             "inference",
             InferenceStep(
                 PromptFrame("system", "placeholder", "user"),
                 CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
                 InferenceResult("answer"),
             ),
         ),
@@ -417,6 +456,7 @@ async def test_full_graph() -> None:
             CommandStep(
                 PromptFrame("system", "placeholder", "user"),
                 CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
                 InferenceResult("answer"),
                 ThinkCoreResult("command"),
             ),
@@ -504,9 +544,9 @@ def _think_with_hook(
             prompt_port=ports,
             context_port=ports,
             compact_port=ports,
+            router_port=ports,
             inference_port=ports,
             command_port=ports,
-            model_binding=ModelBinding("provider", "model", 1),
             hook_state_type=hook_state_type,
             hook=cast(Never, hook),
         ),
@@ -614,10 +654,11 @@ async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
             "user",
             "context",
             "compact",
+            "router",
             "inference",
             "command",
         ]
-    assert len(runtime.calls) == 30
+    assert len(runtime.calls) == 36
     assert {call.request.state.turn for call in runtime.calls} == {11, 22}
 
 
@@ -630,11 +671,16 @@ async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
         ("user", ["system", "placeholder", "user"], 0),
         ("context", ["system", "placeholder", "user", "context"], 3),
         ("compact", ["system", "placeholder", "user", "context", "compact"], 6),
-        ("inference", ["system", "placeholder", "user", "context", "compact", "inference"], 9),
+        ("router", ["system", "placeholder", "user", "context", "compact", "router"], 9),
+        (
+            "inference",
+            ["system", "placeholder", "user", "context", "compact", "router", "inference"],
+            12,
+        ),
         (
             "command",
-            ["system", "placeholder", "user", "context", "compact", "inference", "command"],
-            12,
+            ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"],
+            15,
         ),
     ],
 )
@@ -657,7 +703,7 @@ async def test_think_port_failure_stops_at_the_failed_stage(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure_node", "expected_hook_calls"),
-    [("prompt", 1), ("context", 4), ("compact", 7), ("inference", 10), ("command", 13)],
+    [("prompt", 1), ("context", 4), ("compact", 7), ("router", 10), ("inference", 13), ("command", 16)],
 )
 async def test_think_hook_failure_stops_without_advancing_to_a_later_stage(
     failure_node: str,
@@ -675,8 +721,9 @@ async def test_think_hook_failure_stops_without_advancing_to_a_later_stage(
         "prompt": ["system", "placeholder", "user"],
         "context": ["system", "placeholder", "user", "context"],
         "compact": ["system", "placeholder", "user", "context", "compact"],
-        "inference": ["system", "placeholder", "user", "context", "compact", "inference"],
-        "command": ["system", "placeholder", "user", "context", "compact", "inference", "command"],
+        "router": ["system", "placeholder", "user", "context", "compact", "router"],
+        "inference": ["system", "placeholder", "user", "context", "compact", "router", "inference"],
+        "command": ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"],
     }
     assert ports.calls == expected_port_calls[failure_node]
 
@@ -819,6 +866,7 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
     prompt_frame: PromptFrame[str, str, str] = PromptFrame("system-typed", "placeholder-typed", "user-typed")
     context_frame: ContextFrame[tuple[str, ...]] = ContextFrame(("history-typed",))
     compacted: CompactedContext[tuple[str, ...]] = CompactedContext(("compacted-typed",), 2)
+    model = ModelBinding("provider", "typed-model", 1)
     inference_result: InferenceResult[str] = InferenceResult("answer-typed")
     core_result: ThinkCoreResult[str] = ThinkCoreResult("command-typed")
 
@@ -833,6 +881,10 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
         compacted,
         [],
     )
+    router = RecordingInvocation[
+        RouterRequest[str, str, str, tuple[str, ...]],
+        ModelBinding,
+    ](model, [])
     inference = RecordingInvocation[
         InferenceRequest[str, str, str, tuple[str, ...]],
         InferenceResult[str],
@@ -867,6 +919,13 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
             CompactedContext,
         ),
     )
+    router_port: RouterPort[RouterRequest[str, str, str, tuple[str, ...]]] = RouterPort(
+        router,
+        InvocationTypeContract[RouterRequest[str, str, str, tuple[str, ...]], ModelBinding](
+            RouterRequest,
+            ModelBinding,
+        ),
+    )
     inference_port: InferencePort[
         InferenceRequest[str, str, str, tuple[str, ...]],
         InferenceResult[str],
@@ -887,9 +946,9 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
         prompt_port=prompt_port,
         context_port=context_port,
         compact_port=compact_port,
+        router_port=router_port,
         inference_port=inference_port,
         command_port=command_port,
-        model_binding=ModelBinding("provider", "typed-model", 1),
         hook_state_type=State,
         hook=make_hook(runtime, definition_id="think.typed"),
     )
@@ -902,7 +961,8 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
     assert user.calls == [payload]
     assert context.calls == [ContextRequest(request, prompt_frame)]
     assert compact.calls == [CompactRequest(prompt_frame, context_frame)]
-    assert inference.calls == [InferenceRequest(prompt_frame, compacted, ModelBinding("provider", "typed-model", 1))]
+    assert router.calls == [RouterRequest(prompt_frame, compacted)]
+    assert inference.calls == [InferenceRequest(prompt_frame, compacted, model)]
     assert command.calls == [inference_result]
     output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], result.outputs["result"])
     raw_step = output.value.step
