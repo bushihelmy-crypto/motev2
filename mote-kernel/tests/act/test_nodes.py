@@ -71,7 +71,7 @@ from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
+from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef, PredecessorOutputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
     HookGraphValue,
@@ -761,12 +761,16 @@ def test_all_act_business_nodes_use_typed_graph_contracts() -> None:
     assert type(resolve_source) is GraphInputRef
     assert resolve_source.descriptor.value_type is ActRequest
 
-    for candidate in candidates[1:]:
+    # Only Authorize keeps a fixed source for its resume override.  Execute
+    # and Settle consume the Hook publication that caused their activation.
+    for candidate, source_type in zip(
+        candidates[1:],
+        (NodeOutputRef, PredecessorOutputRef, PredecessorOutputRef),
+        strict=True,
+    ):
         source = candidate.inputs.entries[0].source
-        # Authorize must be absolute so a resume override is legal.  Execute
-        # and Settle deliberately use the same latest-Hook publication rule.
-        assert type(source) is NodeOutputRef
-        assert source.node_id == GraphNodeId("hook")
+        assert type(source) is source_type
+        assert isinstance(source, NodeOutputRef | PredecessorOutputRef)
         assert source.output_name == "result"
         assert source.descriptor is not None
         assert source.descriptor.value_type is HookResult

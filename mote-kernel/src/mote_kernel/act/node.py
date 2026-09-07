@@ -36,7 +36,7 @@ from mote_kernel.act.port import (
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.ports import TypedInputBinding
+from mote_kernel.execution.graph.ports import NodeOutputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
@@ -123,11 +123,8 @@ class ActNode(
         ):
             raise ActContractError("ActNode shared HookSlotId does not match its definition")
 
-        slots = tuple(
-            ActSlotId(definition_id, version, node_id) for node_id in ("resolve", "authorize", "execute", "settle")
-        )
-        for slot in slots:
-            admission.admit_act_slot(slot)
+        for stage in ActHookStage:
+            admission.admit_act_slot(ActSlotId(definition_id, version, stage.value))
 
         # Construct every callable before touching the Graph builder so a
         # failed capability assembly cannot leave a partial definition.
@@ -173,11 +170,12 @@ class ActNode(
         # Resolve the nested Hook's declared boundary through the generic
         # Graph API.  This preserves the child descriptor identity for every
         # downstream typed binding and for this graph's public output.
-        hook_result_ref = self.output_ref("hook", "result")
-        hook_result_binding = cast(
-            TypedInputBinding[HookResult[ActHookEnvelope, HookCommandT]],
-            Graph.bind("hook_result", hook_result_ref),
+        hook_result_ref = cast(
+            NodeOutputRef[HookResult[ActHookEnvelope, HookCommandT]],
+            self.output_ref("hook", "result"),
         )
+        authorize_hook_result_binding = Graph.bind("hook_result", hook_result_ref)
+        stage_hook_result_binding = Graph.bind("hook_result", Graph.node_output(hook_result_ref))
         self.add_node(
             "authorize",
             authorize,
@@ -186,27 +184,27 @@ class ActNode(
             # selected by the compiler.  A predecessor-only binding cannot be
             # resumed with an override, so the fixed Hook source is required
             # for this interruptible stage.
-            inputs=(hook_result_binding,),
+            inputs=(authorize_hook_result_binding,),
             input_type=AuthorizeNodeInput,
-            materialize=lambda values: AuthorizeNodeInput(values.get(hook_result_binding)),
+            materialize=lambda values: AuthorizeNodeInput(values.get(authorize_hook_result_binding)),
             output_name="hook_request",
             output_type=HookRequest,
         )
         self.add_node(
             "execute",
             execute,
-            inputs=(hook_result_binding,),
+            inputs=(stage_hook_result_binding,),
             input_type=ExecuteNodeInput,
-            materialize=lambda values: ExecuteNodeInput(values.get(hook_result_binding)),
+            materialize=lambda values: ExecuteNodeInput(values.get(stage_hook_result_binding)),
             output_name="hook_request",
             output_type=HookRequest,
         )
         self.add_node(
             "settle",
             settle,
-            inputs=(hook_result_binding,),
+            inputs=(stage_hook_result_binding,),
             input_type=SettleNodeInput,
-            materialize=lambda values: SettleNodeInput(values.get(hook_result_binding)),
+            materialize=lambda values: SettleNodeInput(values.get(stage_hook_result_binding)),
             output_name="hook_request",
             output_type=HookRequest,
         )
