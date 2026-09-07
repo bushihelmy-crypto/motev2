@@ -1,0 +1,483 @@
+"""Three-node ReAct loop assembled from canonical nested Graphs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Generic, TypeVar, cast
+
+from mote_kernel.act.admission import ActPayloadAdmission
+from mote_kernel.act.contract import (
+    ActHookCommand,
+    ActHookEnvelope,
+    ActRequest,
+)
+from mote_kernel.act.contract import (
+    HookStateProjection as ActHookStateProjection,
+)
+from mote_kernel.act.node import ActNode
+from mote_kernel.config import Config
+from mote_kernel.execution import Graph
+from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
+from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookResult
+from mote_kernel.loop.admission import ReActPayloadAdmission
+from mote_kernel.loop.config import ReActBinding
+from mote_kernel.loop.contract import (
+    ActToObserveProjector,
+    ObserveRoutePolicy,
+    ObserveToActProjector,
+    ObserveToThinkProjector,
+    ReActContractError,
+    ReActRoute,
+    ThinkToObserveProjector,
+)
+from mote_kernel.observe.admission import ObservePayloadAdmission
+from mote_kernel.observe.contract import (
+    HookStateProjection as ObserveHookStateProjection,
+)
+from mote_kernel.observe.contract import (
+    ObserveHookCommand,
+    ObserveHookEnvelope,
+    ObserveRequest,
+)
+from mote_kernel.observe.node import ObserveNode
+from mote_kernel.think.contract import ThinkFrame, ThinkRequest, ThinkStep
+from mote_kernel.think.node import ThinkNode
+
+ObservePriorityConfigT = TypeVar("ObservePriorityConfigT")
+ObserveStateT = TypeVar("ObserveStateT", bound=ObserveHookStateProjection)
+ObserveHookCommandT = TypeVar("ObserveHookCommandT", bound=ObserveHookCommand)
+ThinkPriorityConfigT = TypeVar("ThinkPriorityConfigT")
+ThinkPayloadT = TypeVar("ThinkPayloadT")
+ThinkStateT = TypeVar("ThinkStateT", bound=HookGraphValue)
+ThinkHookCommandT = TypeVar("ThinkHookCommandT", bound=HookGraphValue)
+ActPriorityConfigT = TypeVar("ActPriorityConfigT")
+ActStateT = TypeVar("ActStateT", bound=ActHookStateProjection)
+ActHookCommandT = TypeVar("ActHookCommandT", bound=ActHookCommand)
+
+_OBSERVE_COMPLETION_ROUTE = "write_observation"
+_THINK_COMPLETION_ROUTE = "command"
+_ACT_COMPLETION_ROUTE = "settle"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReActOperations(
+    Generic[
+        ObserveStateT,
+        ObserveHookCommandT,
+        ThinkPayloadT,
+        ThinkStateT,
+        ThinkHookCommandT,
+        ActStateT,
+        ActHookCommandT,
+    ]
+):
+    admission: ReActPayloadAdmission[
+        ObserveStateT,
+        ObserveHookCommandT,
+        ThinkStateT,
+        ThinkHookCommandT,
+        ActStateT,
+        ActHookCommandT,
+    ]
+    route_policy: ObserveRoutePolicy
+    observe_to_act: ObserveToActProjector[ObserveHookCommandT]
+    observe_to_think: ObserveToThinkProjector[ObserveHookCommandT, ThinkPayloadT, ThinkStateT]
+    think_to_observe: ThinkToObserveProjector[ThinkStateT, ThinkHookCommandT, ObserveStateT]
+    act_to_observe: ActToObserveProjector[ActHookCommandT, ObserveStateT]
+
+    async def route_observe(
+        self,
+        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        /,
+    ) -> Graph.SuccessOutcome[HookResult[ObserveHookEnvelope, ObserveHookCommandT]]:
+        route = self.admission.select_route(self.route_policy, result)
+        return Graph.success(Graph.values(result=result), route=route.value)
+
+    async def prepare_observe(
+        self,
+        request: ObserveRequest[ObserveStateT],
+        /,
+    ) -> ObserveRequest[ObserveStateT]:
+        """Admit the phase input before starting the nested Observe graph.
+
+        Keeping one callable boundary ahead of the nested child is important
+        for recovery: a newly activated phase can be proven from its graph
+        input before its nested Observe activation is materialized.
+        """
+
+        return self.admission.observe.admit_request(request)
+
+    async def project_observe_to_act(
+        self,
+        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        /,
+    ) -> ActRequest:
+        return self.admission.project_observe_to_act(self.observe_to_act, result)
+
+    async def project_observe_to_think(
+        self,
+        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        /,
+    ) -> ThinkRequest[ThinkPayloadT, ThinkStateT]:
+        return self.admission.project_observe_to_think(self.observe_to_think, result)
+
+    async def project_think_to_observe(
+        self,
+        result: HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT],
+        /,
+    ) -> ObserveRequest[ObserveStateT]:
+        return self.admission.project_think_to_observe(self.think_to_observe, result)
+
+    async def project_act_to_observe(
+        self,
+        result: HookResult[ActHookEnvelope, ActHookCommandT],
+        /,
+    ) -> ObserveRequest[ObserveStateT]:
+        return self.admission.project_act_to_observe(self.act_to_observe, result)
+
+
+def _observe_phase(
+    definition_id: str,
+    version: int,
+    observe: ObserveNode[ObservePriorityConfigT, ObserveStateT, ObserveHookCommandT],
+    operations: _ReActOperations[
+        ObserveStateT,
+        ObserveHookCommandT,
+        ThinkPayloadT,
+        ThinkStateT,
+        ThinkHookCommandT,
+        ActStateT,
+        ActHookCommandT,
+    ],
+) -> tuple[
+    Graph[HookGraphValue],
+    NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+]:
+    phase = Graph[HookGraphValue](f"{definition_id}.observe-phase", version=version)
+    request_input = cast(
+        GraphInputRef[ObserveRequest[ObserveStateT]],
+        Graph.graph_input("request", ObserveRequest),
+    )
+    request_binding = Graph.bind("request", request_input)
+    prepared_request = phase.add_node(
+        "prepare",
+        operations.prepare_observe,
+        inputs=(request_binding,),
+        input_type=ObserveRequest,
+        materialize=lambda values: values.get(request_binding),
+        output_name="request",
+        output_type=ObserveRequest,
+    )
+    phase.add_node("run", observe, inputs={"request": prepared_request})
+    result_ref = cast(
+        NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+        phase.output_ref("run", "result"),
+    )
+    route_binding = Graph.bind("result", result_ref)
+    routed_result = phase.add_node(
+        "route",
+        operations.route_observe,
+        inputs=(route_binding,),
+        input_type=HookResult,
+        materialize=lambda values: values.get(route_binding),
+        output_name="result",
+        output_type=HookResult,
+    )
+    phase.add_edge(Graph.START, "prepare")
+    phase.add_edge("prepare", "run")
+    phase.add_edge("run", _OBSERVE_COMPLETION_ROUTE, "route")
+    for route in (ReActRoute.CONFIG, ReActRoute.ASSISTANT, ReActRoute.THINK, ReActRoute.ACT):
+        phase.add_edge("route", route.value, Graph.END)
+    phase.set_outputs({"result": routed_result})
+    return phase, routed_result
+
+
+def _think_phase(
+    definition_id: str,
+    version: int,
+    think: ThinkNode[ThinkPriorityConfigT, ThinkStateT, ThinkHookCommandT],
+    operations: _ReActOperations[
+        ObserveStateT,
+        ObserveHookCommandT,
+        ThinkPayloadT,
+        ThinkStateT,
+        ThinkHookCommandT,
+        ActStateT,
+        ActHookCommandT,
+    ],
+) -> tuple[Graph[HookGraphValue], NodeOutputRef[ObserveRequest[ObserveStateT]]]:
+    phase = Graph[HookGraphValue](f"{definition_id}.think-phase", version=version)
+    result_input = cast(
+        GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+        Graph.graph_input("result", HookResult),
+    )
+    result_binding = Graph.bind("result", result_input)
+    request = phase.add_node(
+        "project",
+        operations.project_observe_to_think,
+        inputs=(result_binding,),
+        input_type=HookResult,
+        materialize=lambda values: values.get(result_binding),
+        output_name="request",
+        output_type=ThinkRequest,
+    )
+    phase.add_node("run", think, inputs={"request": request})
+    think_result_ref = cast(
+        NodeOutputRef[HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT]],
+        phase.output_ref("run", "result"),
+    )
+    think_result_binding = Graph.bind("result", Graph.node_output(think_result_ref))
+    next_request = phase.add_node(
+        "next_observe",
+        operations.project_think_to_observe,
+        inputs=(think_result_binding,),
+        input_type=HookResult,
+        materialize=lambda values: values.get(think_result_binding),
+        output_name="request",
+        output_type=ObserveRequest,
+    )
+    phase.add_edge("project", "run")
+    phase.add_edge("run", _THINK_COMPLETION_ROUTE, "next_observe")
+    phase.add_edge("next_observe", Graph.END)
+    phase.set_outputs({"request": next_request})
+    return phase, next_request
+
+
+def _act_phase(
+    definition_id: str,
+    version: int,
+    act: ActNode[ActPriorityConfigT, ActStateT, ActHookCommandT],
+    operations: _ReActOperations[
+        ObserveStateT,
+        ObserveHookCommandT,
+        ThinkPayloadT,
+        ThinkStateT,
+        ThinkHookCommandT,
+        ActStateT,
+        ActHookCommandT,
+    ],
+) -> tuple[Graph[HookGraphValue], NodeOutputRef[ObserveRequest[ObserveStateT]]]:
+    phase = Graph[HookGraphValue](f"{definition_id}.act-phase", version=version)
+    result_input = cast(
+        GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+        Graph.graph_input("result", HookResult),
+    )
+    result_binding = Graph.bind("result", result_input)
+    request = phase.add_node(
+        "project",
+        operations.project_observe_to_act,
+        inputs=(result_binding,),
+        input_type=HookResult,
+        materialize=lambda values: values.get(result_binding),
+        output_name="request",
+        output_type=ActRequest,
+    )
+    phase.add_node("run", act, inputs={"request": request})
+    act_result_ref = cast(
+        NodeOutputRef[HookResult[ActHookEnvelope, ActHookCommandT]],
+        phase.output_ref("run", "result"),
+    )
+    act_result_binding = Graph.bind("result", Graph.node_output(act_result_ref))
+    next_request = phase.add_node(
+        "next_observe",
+        operations.project_act_to_observe,
+        inputs=(act_result_binding,),
+        input_type=HookResult,
+        materialize=lambda values: values.get(act_result_binding),
+        output_name="request",
+        output_type=ObserveRequest,
+    )
+    phase.add_edge("project", "run")
+    phase.add_edge("run", _ACT_COMPLETION_ROUTE, "next_observe")
+    phase.add_edge("next_observe", Graph.END)
+    phase.set_outputs({"request": next_request})
+    return phase, next_request
+
+
+class ReActNode(
+    Graph[HookGraphValue],
+    Generic[ObserveStateT, ThinkPayloadT, ThinkStateT, ActStateT],
+):
+    """Compose one durable Observe/Think/Act loop with three direct nodes."""
+
+    __slots__ = ()
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+    ) -> ReActNode[ObserveStateT, ThinkPayloadT, ThinkStateT, ActStateT]:
+        """Assemble the loop from one complete config snapshot.
+
+        The same complete object is deliberately forwarded to each child.  A
+        child then performs its own domain-owned projection (and its Hook does
+        the same for its slot); no parent extracts or re-wraps a child's
+        capabilities.
+        """
+
+        selected = config.bind(
+            ReActBinding[
+                ObserveStateT,
+                ObserveHookCommand,
+                ThinkPayloadT,
+                ThinkStateT,
+                HookGraphValue,
+                ActStateT,
+                ActHookCommand,
+            ]()
+        )
+        observe = ObserveNode[
+            object,
+            ObserveStateT,
+            ObserveHookCommand,
+        ].from_config(config)
+        think = ThinkNode[
+            object,
+            ThinkStateT,
+            HookGraphValue,
+        ].from_config(config)
+        act = ActNode[
+            object,
+            ActStateT,
+            ActHookCommand,
+        ].from_config(config)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            observe=observe,
+            think=think,
+            act=act,
+            route_policy=selected.route_policy,
+            observe_to_act=selected.observe_to_act,
+            observe_to_think=selected.observe_to_think,
+            think_to_observe=selected.think_to_observe,
+            act_to_observe=selected.act_to_observe,
+        )
+
+    def __init__(
+        self,
+        definition_id: str,
+        *,
+        version: int = 1,
+        observe: ObserveNode[ObservePriorityConfigT, ObserveStateT, ObserveHookCommandT],
+        think: ThinkNode[ThinkPriorityConfigT, ThinkStateT, ThinkHookCommandT],
+        act: ActNode[ActPriorityConfigT, ActStateT, ActHookCommandT],
+        route_policy: ObserveRoutePolicy,
+        observe_to_act: ObserveToActProjector[ObserveHookCommandT],
+        observe_to_think: ObserveToThinkProjector[ObserveHookCommandT, ThinkPayloadT, ThinkStateT],
+        think_to_observe: ThinkToObserveProjector[ThinkStateT, ThinkHookCommandT, ObserveStateT],
+        act_to_observe: ActToObserveProjector[ActHookCommandT, ObserveStateT],
+    ) -> None:
+        if type(observe) is not ObserveNode:
+            raise ReActContractError("ReActNode requires an ObserveNode")
+        if type(think) is not ThinkNode:
+            raise ReActContractError("ReActNode requires a ThinkNode")
+        if type(act) is not ActNode:
+            raise ReActContractError("ReActNode requires an ActNode")
+        if not callable(route_policy):
+            raise ReActContractError("ReActNode requires a synchronous route policy")
+        if not callable(observe_to_act):
+            raise ReActContractError("ReActNode requires a synchronous Observe-to-Act projector")
+        if not callable(observe_to_think):
+            raise ReActContractError("ReActNode requires a synchronous Observe-to-Think projector")
+        if not callable(think_to_observe):
+            raise ReActContractError("ReActNode requires a synchronous Think-to-Observe projector")
+        if not callable(act_to_observe):
+            raise ReActContractError("ReActNode requires a synchronous Act-to-Observe projector")
+
+        observe_hook_admission = observe.hook.payload_admission
+        if type(observe_hook_admission) is not HookPayloadAdmission:
+            raise ReActContractError("ObserveNode must expose a HookPayloadAdmission")
+        if observe_hook_admission.value_type is not ObserveHookEnvelope:
+            raise ReActContractError("ObserveNode Hook must carry ObserveHookEnvelope values")
+        observe_admission = observe_hook_admission.transition_admission
+        if type(observe_admission) is not ObservePayloadAdmission:
+            raise ReActContractError("ObserveNode must expose its Observe payload admission")
+        if observe_hook_admission.state_type is not observe_admission.hook_state_type:
+            raise ReActContractError("ObserveNode Hook state type does not match Observe admission")
+        if observe_hook_admission.command_type is not observe_admission.hook_command_type:
+            raise ReActContractError("ObserveNode Hook command type does not match Observe admission")
+        think_hook_admission = think.hook.payload_admission
+        if type(think_hook_admission) is not HookPayloadAdmission:
+            raise ReActContractError("ThinkNode must expose a HookPayloadAdmission")
+        if think_hook_admission.value_type is not ThinkFrame:
+            raise ReActContractError("ThinkNode must expose a ThinkFrame Hook admission")
+        act_hook_admission = act.hook.payload_admission
+        if type(act_hook_admission) is not HookPayloadAdmission:
+            raise ReActContractError("ActNode must expose a HookPayloadAdmission")
+        if act_hook_admission.value_type is not ActHookEnvelope:
+            raise ReActContractError("ActNode Hook must carry ActHookEnvelope values")
+        act_admission = act_hook_admission.transition_admission
+        if type(act_admission) is not ActPayloadAdmission:
+            raise ReActContractError("ActNode must expose its Act payload admission")
+        if act_hook_admission.state_type is not act_admission.hook_state_type:
+            raise ReActContractError("ActNode Hook state type does not match Act admission")
+        if act_hook_admission.command_type is not act_admission.hook_command_type:
+            raise ReActContractError("ActNode Hook command type does not match Act admission")
+
+        admission = ReActPayloadAdmission[
+            ObserveStateT,
+            ObserveHookCommandT,
+            ThinkStateT,
+            ThinkHookCommandT,
+            ActStateT,
+            ActHookCommandT,
+        ](
+            observe_admission,
+            think_hook_admission.state_type,
+            think_hook_admission.command_type,
+            act_admission,
+        )
+        operations = _ReActOperations[
+            ObserveStateT,
+            ObserveHookCommandT,
+            ThinkPayloadT,
+            ThinkStateT,
+            ThinkHookCommandT,
+            ActStateT,
+            ActHookCommandT,
+        ](
+            admission,
+            route_policy,
+            observe_to_act,
+            observe_to_think,
+            think_to_observe,
+            act_to_observe,
+        )
+        observe_phase, observe_result = _observe_phase(
+            definition_id,
+            version,
+            observe,
+            operations,
+        )
+        think_phase, _think_request = _think_phase(definition_id, version, think, operations)
+        act_phase, _act_request = _act_phase(definition_id, version, act, operations)
+
+        super().__init__(definition_id, version=version)
+        self.add_node(
+            "observe",
+            observe_phase,
+            inputs={"request": Graph.node_output("request")},
+        )
+        self.add_node(
+            "think",
+            think_phase,
+            inputs={"result": Graph.node_output(observe_result)},
+        )
+        self.add_node(
+            "act",
+            act_phase,
+            inputs={"result": Graph.node_output(observe_result)},
+        )
+        self.add_edge(Graph.START, "observe")
+        self.add_edge("think", "observe")
+        self.add_edge("act", "observe")
+        self.add_edge("observe", ReActRoute.CONFIG.value, Graph.END)
+        self.add_edge("observe", ReActRoute.ASSISTANT.value, Graph.END)
+        self.add_edge("observe", ReActRoute.THINK.value, "act")
+        self.add_edge("observe", ReActRoute.ACT.value, "think")
+        self.set_outputs({"result": self.output_ref("observe", "result")})
+
+
+__all__ = ["ReActNode"]
