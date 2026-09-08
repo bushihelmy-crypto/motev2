@@ -7,21 +7,22 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.config import ConfigActivation
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.config import InferenceBinding
 from mote_kernel.think.contract import (
-    InferenceNodeInput,
     InferencePort,
     InferenceRequest,
     InferenceResult,
     InferenceStep,
+    RouterStep,
     ThinkContractError,
     ThinkFrame,
     admit_router_frame,
 )
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -60,13 +61,17 @@ class InferenceNode(
     async def __call__(
         self,
         activation: ConfigActivation[
-            InferenceNodeInput[
-                HookStateT,
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                CompactedSnapshotT,
-                HookGraphValue,
+            HookResult[
+                ThinkFrame[
+                    RouterStep[
+                        SystemPromptT,
+                        PlaceholderT,
+                        UserPromptT,
+                        CompactedSnapshotT,
+                    ],
+                    HookStateT,
+                ],
+                HookCommandT,
             ]
         ],
         /,
@@ -77,8 +82,7 @@ class InferenceNode(
         ],
         HookStateT,
     ]:
-        value = activation.value
-        frame = admit_router_frame(value.hook_result)
+        frame = admit_router_frame(activation.value)
         config = activation.activation_config
         step = frame.step
         compacted = step.compacted

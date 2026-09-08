@@ -15,14 +15,11 @@ from mote_kernel.act.contract import (
     Allow,
     AuthorizationDecision,
     AuthorizationInterruptView,
-    AuthorizeNodeInput,
     Deny,
-    ExecuteNodeInput,
     HookStateProjection,
     OpaqueGraphFailureReason,
     ResolveStageValue,
     ResumedAuthorization,
-    SettleNodeInput,
 )
 from mote_kernel.act.execute import ExecuteNode
 from mote_kernel.act.identity import ActHookStage, ActSlotId
@@ -219,7 +216,7 @@ class ActNode(
             inputs=(authorize_hook_result_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                AuthorizeNodeInput(values.get(authorize_hook_result_binding)),
+                values.get(authorize_hook_result_binding),
                 values.activation_config,
             ),
             output_name="hook_request",
@@ -231,7 +228,7 @@ class ActNode(
             inputs=(stage_hook_result_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                ExecuteNodeInput(values.get(stage_hook_result_binding)),
+                values.get(stage_hook_result_binding),
                 values.activation_config,
             ),
             output_name="hook_request",
@@ -243,7 +240,7 @@ class ActNode(
             inputs=(stage_hook_result_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                SettleNodeInput(values.get(stage_hook_result_binding)),
+                values.get(stage_hook_result_binding),
                 values.activation_config,
             ),
             output_name="hook_request",

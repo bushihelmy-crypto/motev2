@@ -12,7 +12,6 @@ from mote_kernel.act.contract import (
     ActHookCommand,
     ActHookEnvelope,
     AuthorizedInvocation,
-    AuthorizeNodeInput,
     AuthorizeStageValue,
     Deny,
     HookStateProjection,
@@ -24,7 +23,7 @@ from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason
 from mote_kernel.act.port import AuthorizePort
 from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
@@ -41,11 +40,10 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        activation: ConfigActivation[AuthorizeNodeInput[HookCommandT]],
+        activation: ConfigActivation[HookResult[ActHookEnvelope, HookCommandT]],
         /,
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
-        value = activation.value
-        hook_result = self.admission.admit_hook_result(value.hook_result)
+        hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
         authorize_port = self.authorize_port
         failure_reason = self.failure_reason

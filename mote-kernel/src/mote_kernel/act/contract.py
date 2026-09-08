@@ -8,7 +8,7 @@ provider, protocol, or authorization owner.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from mote_kernel.act.identity import (
     ActHookStage,
@@ -63,9 +63,6 @@ class ActHookCommand(HookGraphValue):
     """Nominal base for the owner-provided shared-Hook command class."""
 
     __slots__ = ()
-
-
-HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
 
 
 def _require_exact(value: ContractValueT, expected: type[ContractValueT], field: str, /) -> None:
@@ -354,36 +351,6 @@ class ActHookEnvelope(HookGraphValue):
             raise ActContractError("Act Hook envelope stage must be an ActHookStage")
         _require_stage_value(self.payload, "Act Hook envelope payload")
         _require_hook_state(self.hook_state, "Act Hook envelope hook_state")
-
-
-@dataclass(frozen=True, slots=True)
-class AuthorizeNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Authorize node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "authorize node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecuteNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Execute node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "execute node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class SettleNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Settle node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "settle node HookResult")
 
 
 @dataclass(frozen=True, slots=True)

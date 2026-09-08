@@ -19,10 +19,8 @@ from mote_kernel.think.compact import CompactNode
 from mote_kernel.think.config import ThinkBinding
 from mote_kernel.think.context import ContextNode
 from mote_kernel.think.contract import (
-    CommandNodeInput,
     CommandPort,
     CompactedContext,
-    CompactNodeInput,
     CompactPort,
     CompactRequest,
     CompactStep,
@@ -31,14 +29,12 @@ from mote_kernel.think.contract import (
     ContextPort,
     ContextRequest,
     ContextStep,
-    InferenceNodeInput,
     InferencePort,
     InferenceRequest,
     InferenceResult,
     InferenceStep,
     PromptPort,
     PromptStep,
-    RouterNodeInput,
     RouterPort,
     RouterRequest,
     RouterStep,
@@ -250,7 +246,7 @@ class ThinkNode(
             TypedInputBinding[
                 HookResult[
                     ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
-                    HookGraphValue,
+                    HookCommandT,
                 ]
             ],
             Graph.bind("hook_result", hook_result_source),
@@ -262,7 +258,7 @@ class ThinkNode(
                         ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
                         HookStateT,
                     ],
-                    HookGraphValue,
+                    HookCommandT,
                 ]
             ],
             Graph.bind("hook_result", hook_result_source),
@@ -280,7 +276,7 @@ class ThinkNode(
                         ],
                         HookStateT,
                     ],
-                    HookGraphValue,
+                    HookCommandT,
                 ]
             ],
             Graph.bind("hook_result", hook_result_source),
@@ -297,7 +293,7 @@ class ThinkNode(
                         ],
                         HookStateT,
                     ],
-                    HookGraphValue,
+                    HookCommandT,
                 ]
             ],
             Graph.bind("hook_result", hook_result_source),
@@ -315,7 +311,7 @@ class ThinkNode(
                         ],
                         HookStateT,
                     ],
-                    HookGraphValue,
+                    HookCommandT,
                 ]
             ],
             Graph.bind("hook_result", hook_result_source),
@@ -341,7 +337,7 @@ class ThinkNode(
             inputs=(compact_hook_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                CompactNodeInput(values.get(compact_hook_binding)),
+                values.get(compact_hook_binding),
                 values.activation_config,
             ),
             output_name="hook_request",
@@ -353,7 +349,7 @@ class ThinkNode(
             inputs=(router_hook_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                RouterNodeInput(values.get(router_hook_binding)),
+                values.get(router_hook_binding),
                 values.activation_config,
             ),
             output_name="hook_request",
@@ -365,7 +361,7 @@ class ThinkNode(
             inputs=(inference_hook_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                InferenceNodeInput(values.get(inference_hook_binding)),
+                values.get(inference_hook_binding),
                 values.activation_config,
             ),
             output_name="hook_request",
@@ -377,7 +373,7 @@ class ThinkNode(
             inputs=(command_hook_binding,),
             input_type=ConfigActivation,
             materialize=lambda values: ConfigActivation(
-                CommandNodeInput(values.get(command_hook_binding)),
+                values.get(command_hook_binding),
                 values.activation_config,
             ),
             output_name="hook_request",

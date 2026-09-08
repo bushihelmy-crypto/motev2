@@ -7,30 +7,27 @@ from typing import Never, TypeVar, cast
 
 import pytest
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
 from mote_kernel.think.context import ContextNode
 from mote_kernel.think.contract import (
-    CommandNodeInput,
     CommandStep,
     CompactedContext,
-    CompactNodeInput,
     CompactRequest,
     CompactStep,
     ContextFrame,
     ContextNodeInput,
     ContextRequest,
     ContextStep,
-    InferenceNodeInput,
     InferenceRequest,
     InferenceResult,
     InferenceStep,
     ModelBinding,
     PromptFrame,
     PromptStep,
-    RouterNodeInput,
     RouterRequest,
     RouterStep,
     ThinkContractError,
@@ -67,17 +64,21 @@ def _result(step: StepT) -> HookResult[ThinkFrame[StepT, State], HookGraphValue]
     return HookResult(ThinkFrame(step, REQUEST.hook_state), ())
 
 
-def _context_input(result: object) -> ContextNodeInput[Payload, State, str, str, str, HookGraphValue]:
-    return ContextNodeInput(
-        REQUEST,
-        cast(HookResult[ThinkFrame[PromptStep[str, str, str], State], HookGraphValue], result),
+def _context_input(
+    result: object,
+) -> ConfigActivation[ContextNodeInput[Payload, State, str, str, str, HookGraphValue]]:
+    return ConfigActivation(
+        ContextNodeInput(
+            REQUEST,
+            cast(HookResult[ThinkFrame[PromptStep[str, str, str], State], HookGraphValue], result),
+        )
     )
 
 
 def _compact_input(
     result: object,
-) -> CompactNodeInput[State, str, str, str, tuple[str, ...], HookGraphValue]:
-    return CompactNodeInput(
+) -> ConfigActivation[HookResult[ThinkFrame[ContextStep[str, str, str, tuple[str, ...]], State], HookGraphValue]]:
+    return ConfigActivation(
         cast(
             HookResult[ThinkFrame[ContextStep[str, str, str, tuple[str, ...]], State], HookGraphValue],
             result,
@@ -87,8 +88,13 @@ def _compact_input(
 
 def _router_input(
     result: object,
-) -> RouterNodeInput[State, str, str, str, tuple[str, ...], tuple[str, ...], HookGraphValue]:
-    return RouterNodeInput(
+) -> ConfigActivation[
+    HookResult[
+        ThinkFrame[CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], State],
+        HookGraphValue,
+    ]
+]:
+    return ConfigActivation(
         cast(
             HookResult[
                 ThinkFrame[CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], State],
@@ -101,8 +107,8 @@ def _router_input(
 
 def _inference_input(
     result: object,
-) -> InferenceNodeInput[State, str, str, str, tuple[str, ...], HookGraphValue]:
-    return InferenceNodeInput(
+) -> ConfigActivation[HookResult[ThinkFrame[RouterStep[str, str, str, tuple[str, ...]], State], HookGraphValue]]:
+    return ConfigActivation(
         cast(
             HookResult[ThinkFrame[RouterStep[str, str, str, tuple[str, ...]], State], HookGraphValue],
             result,
@@ -112,8 +118,10 @@ def _inference_input(
 
 def _command_input(
     result: object,
-) -> CommandNodeInput[State, str, str, str, tuple[str, ...], str, HookGraphValue]:
-    return CommandNodeInput(
+) -> ConfigActivation[
+    HookResult[ThinkFrame[InferenceStep[str, str, str, tuple[str, ...], str], State], HookGraphValue]
+]:
+    return ConfigActivation(
         cast(
             HookResult[ThinkFrame[InferenceStep[str, str, str, tuple[str, ...], str], State], HookGraphValue],
             result,
@@ -280,7 +288,7 @@ async def test_context_node_builds_one_request_and_next_frame() -> None:
 
     output = await node(_context_input(_result(prompt_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    hook_request = cast(HookActivationRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.state is REQUEST.hook_state
     assert hook_request.node_id == GraphNodeId("context")
     step = cast(ContextStep[str, str, str, tuple[str, ...]], hook_request.value.step)
@@ -297,7 +305,7 @@ async def test_compact_node_builds_one_request_and_next_frame() -> None:
 
     output = await node(_compact_input(_result(context_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    hook_request = cast(HookActivationRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("compact")
     step = cast(CompactStep[str, str, str, tuple[str, ...], tuple[str, ...]], hook_request.value.step)
     assert step.compacted is COMPACTED
@@ -313,7 +321,7 @@ async def test_router_node_selects_one_model_binding() -> None:
 
     output = await node(_router_input(_result(compact_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    hook_request = cast(HookActivationRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("router")
     step = cast(RouterStep[str, str, str, tuple[str, ...]], hook_request.value.step)
     assert step.model is MODEL
@@ -330,7 +338,7 @@ async def test_inference_node_uses_the_routed_model_binding() -> None:
 
     output = await node(_inference_input(_result(router_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    hook_request = cast(HookActivationRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("inference")
     step = cast(InferenceStep[str, str, str, tuple[str, ...], str], hook_request.value.step)
     assert step.inference is INFERENCE
@@ -350,7 +358,7 @@ async def test_command_node_only_structures_the_inference_result() -> None:
 
     output = await node(_command_input(_result(inference_step)))
 
-    hook_request = cast(HookRequest[ThinkFrame[ThinkStep, State], State], output)
+    hook_request = cast(HookActivationRequest[ThinkFrame[ThinkStep, State], State], output)
     assert hook_request.node_id == GraphNodeId("command")
     assert type(hook_request.value.step) is not InferenceStep
     assert type(hook_request.value.step) is not PromptStep
@@ -489,19 +497,23 @@ def _operation(node: object) -> NodeOperation:
     return cast(NodeOperation, node)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "input_factory",
+    ("node_factory", "input_factory"),
     [
-        _context_input,
-        _compact_input,
-        _router_input,
-        _inference_input,
-        _command_input,
+        (_context_factory, _context_input),
+        (_compact_factory, _compact_input),
+        (_router_factory, _router_input),
+        (_inference_factory, _inference_input),
+        (_command_factory, _command_input),
     ],
 )
-def test_non_prompt_stage_inputs_reject_non_hook_results(input_factory: Callable[[object], object]) -> None:
+async def test_non_prompt_stage_inputs_reject_non_hook_results(
+    node_factory: Callable[[], object],
+    input_factory: Callable[[object], object],
+) -> None:
     with pytest.raises(ThinkContractError, match="HookResult"):
-        input_factory(object())
+        await _operation(node_factory())(input_factory(object()))
 
 
 @pytest.mark.asyncio

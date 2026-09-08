@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.config import ConfigActivation
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.config import CommandBinding
 from mote_kernel.think.contract import (
-    CommandNodeInput,
     CommandPort,
     CommandStep,
     InferenceResult,
+    InferenceStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
@@ -22,6 +22,7 @@ from mote_kernel.think.contract import (
 )
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -59,14 +60,18 @@ class CommandNode(
     async def __call__(
         self,
         activation: ConfigActivation[
-            CommandNodeInput[
-                HookStateT,
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                CompactedSnapshotT,
-                ModelOutputT,
-                HookGraphValue,
+            HookResult[
+                ThinkFrame[
+                    InferenceStep[
+                        SystemPromptT,
+                        PlaceholderT,
+                        UserPromptT,
+                        CompactedSnapshotT,
+                        ModelOutputT,
+                    ],
+                    HookStateT,
+                ],
+                HookCommandT,
             ]
         ],
         /,
@@ -84,8 +89,7 @@ class CommandNode(
         ],
         HookStateT,
     ]:
-        value = activation.value
-        frame = admit_inference_frame(value.hook_result)
+        frame = admit_inference_frame(activation.value)
         config = activation.activation_config
         step = frame.step
         command_port = self.command_port

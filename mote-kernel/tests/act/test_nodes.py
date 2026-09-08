@@ -29,12 +29,10 @@ from mote_kernel.act.contract import (
     AuthorizationInterruptView,
     AuthorizationRequestRef,
     AuthorizedInvocation,
-    AuthorizeNodeInput,
     AuthorizeStageValue,
     CallerIdentityRef,
     CanonicalArguments,
     Deny,
-    ExecuteNodeInput,
     ExecutePortResult,
     ExecuteStageValue,
     ExecutionStopped,
@@ -53,7 +51,6 @@ from mote_kernel.act.contract import (
     ResolveStageValue,
     SettledActResult,
     SettlementProjection,
-    SettleNodeInput,
     SettleStageValue,
     ToolBindingRef,
     ToolCallId,
@@ -69,15 +66,16 @@ from mote_kernel.act.execute import ExecuteNode
 from mote_kernel.act.identity import ActHookStage, ActInvocationKey
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef, PredecessorOutputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
+    HookActivationRequest,
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookRequest,
     HookResult,
     HookStageResult,
 )
@@ -583,23 +581,23 @@ def _hook_result(
     )
 
 
-def _authorize_node_input(envelope: ActHookEnvelope) -> AuthorizeNodeInput[_Command]:
-    return AuthorizeNodeInput(_hook_result(envelope))
+def _authorize_node_input(envelope: ActHookEnvelope) -> ConfigActivation[HookResult[ActHookEnvelope, _Command]]:
+    return ConfigActivation(_hook_result(envelope))
 
 
-def _execute_node_input(envelope: ActHookEnvelope) -> ExecuteNodeInput[_Command]:
-    return ExecuteNodeInput(_hook_result(envelope))
+def _execute_node_input(envelope: ActHookEnvelope) -> ConfigActivation[HookResult[ActHookEnvelope, _Command]]:
+    return ConfigActivation(_hook_result(envelope))
 
 
-def _settle_node_input(envelope: ActHookEnvelope) -> SettleNodeInput[_Command]:
-    return SettleNodeInput(_hook_result(envelope))
+def _settle_node_input(envelope: ActHookEnvelope) -> ConfigActivation[HookResult[ActHookEnvelope, _Command]]:
+    return ConfigActivation(_hook_result(envelope))
 
 
 async def _invoke_external_stage(stage: str, ports: _Ports) -> None:
     admission = ActPayloadAdmission(_State, _Command)
     resolved = _resolved()
     if stage == "resolve":
-        await ResolveNode(ports, admission)(resolved.request)
+        await ResolveNode(ports, admission)(ConfigActivation(resolved.request))
         return
     if stage == "authorize":
         envelope = ActHookEnvelope(
@@ -740,7 +738,7 @@ def test_all_act_business_nodes_use_typed_graph_contracts() -> None:
         assert isinstance(candidate, CallableNodeDefinition)
         assert callable(candidate.invoker)
         assert tuple(output.name for output in candidate.outputs.entries) == ("hook_request",)
-        assert candidate.outputs.entries[0].descriptor.value_type is HookRequest
+        assert candidate.outputs.entries[0].descriptor.value_type is HookActivationRequest
 
     resolve_source = candidates[0].inputs.entries[0].source
     assert type(resolve_source) is GraphInputRef
@@ -776,8 +774,8 @@ async def test_business_nodes_accept_and_return_only_their_typed_stage_dtos() ->
     ports = _Ports()
     request = _request()
 
-    resolve_output = await ResolveNode(ports, admission)(request)
-    assert type(resolve_output) is HookRequest
+    resolve_output = await ResolveNode(ports, admission)(ConfigActivation(request))
+    assert type(resolve_output) is HookActivationRequest
     resolve_request = resolve_output
     assert resolve_request.node_id == GraphNodeId("resolve")
     assert resolve_request.value.stage is ActHookStage.RESOLVE
@@ -798,19 +796,19 @@ async def test_business_nodes_accept_and_return_only_their_typed_stage_dtos() ->
         OpaqueGraphFailureReason("denied"),
         admission,
     )(_authorize_node_input(authorize_envelope))
-    assert type(authorize_output) is HookRequest
+    assert type(authorize_output) is HookActivationRequest
     authorize_request = authorize_output
     assert authorize_request.node_id == GraphNodeId("authorize")
     assert authorize_request.value.stage is ActHookStage.AUTHORIZE
 
     execute_output = await ExecuteNode(ports, admission)(_execute_node_input(authorize_request.value))
-    assert type(execute_output) is HookRequest
+    assert type(execute_output) is HookActivationRequest
     execute_request = execute_output
     assert execute_request.node_id == GraphNodeId("execute")
     assert execute_request.value.stage is ActHookStage.EXECUTE
 
     settle_output = await SettleNode(ports, ports, admission)(_settle_node_input(execute_request.value))
-    assert type(settle_output) is HookRequest
+    assert type(settle_output) is HookActivationRequest
     assert settle_output.node_id == GraphNodeId("settle")
     assert settle_output.value.stage is ActHookStage.SETTLE
     assert (
@@ -822,15 +820,18 @@ async def test_business_nodes_accept_and_return_only_their_typed_stage_dtos() ->
     ) == (1, 0, 1, 1, 1)
 
 
-def test_later_business_node_inputs_reject_a_non_hook_result() -> None:
+@pytest.mark.asyncio
+async def test_later_business_node_inputs_reject_a_non_hook_result() -> None:
     wrong = cast(HookResult[ActHookEnvelope, _Command], OpaqueArguments(b"not-a-hook-result"))
+    admission = ActPayloadAdmission(_State, _Command)
+    ports = _Ports()
 
-    with pytest.raises(ActContractError, match="authorize node HookResult"):
-        AuthorizeNodeInput(wrong)
-    with pytest.raises(ActContractError, match="execute node HookResult"):
-        ExecuteNodeInput(wrong)
-    with pytest.raises(ActContractError, match="settle node HookResult"):
-        SettleNodeInput(wrong)
+    with pytest.raises(ActContractError, match="HookResult"):
+        await AuthorizeNode(ports, OpaqueGraphFailureReason("denied"), admission)(ConfigActivation(wrong))
+    with pytest.raises(ActContractError, match="HookResult"):
+        await ExecuteNode(ports, admission)(ConfigActivation(wrong))
+    with pytest.raises(ActContractError, match="HookResult"):
+        await SettleNode(ports, ports, admission)(ConfigActivation(wrong))
 
 
 @pytest.mark.asyncio
@@ -856,13 +857,13 @@ async def test_later_business_nodes_reject_a_hook_result_from_the_wrong_producer
 
     with pytest.raises(ActContractError, match="node_id"):
         await AuthorizeNode(ports, OpaqueGraphFailureReason("denied"), admission)(
-            AuthorizeNodeInput(_hook_result(resolve_envelope, GraphNodeId("execute")))
+            ConfigActivation(_hook_result(resolve_envelope, GraphNodeId("execute")))
         )
     with pytest.raises(ActContractError, match="node_id"):
-        await ExecuteNode(ports, admission)(ExecuteNodeInput(_hook_result(authorize_envelope, GraphNodeId("resolve"))))
+        await ExecuteNode(ports, admission)(ConfigActivation(_hook_result(authorize_envelope, GraphNodeId("resolve"))))
     with pytest.raises(ActContractError, match="node_id"):
         await SettleNode(ports, ports, admission)(
-            SettleNodeInput(_hook_result(execute_envelope, GraphNodeId("authorize")))
+            ConfigActivation(_hook_result(execute_envelope, GraphNodeId("authorize")))
         )
 
     assert ports.request_authorization_calls == 0
@@ -939,7 +940,7 @@ async def test_shared_hook_exports_each_originating_business_node_route(stage: A
     hook = _hook("act.test", _HookRuntime(), admission)
     resolved = _resolved()
     envelope = _stage_envelope(stage, resolved)
-    request = HookRequest(
+    request = HookActivationRequest(
         envelope,
         resolved.request.hook_state,
         GraphNodeId(stage.value),

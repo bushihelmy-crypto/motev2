@@ -14,14 +14,13 @@ from mote_kernel.act.contract import (
     ExecuteStageValue,
     HookStateProjection,
     SettledActResult,
-    SettleNodeInput,
     SettleStageValue,
     ToolExchangeWriteRequest,
 )
 from mote_kernel.act.identity import ActHookStage
 from mote_kernel.act.port import SettlementPort, ToolExchangeWriter
 from mote_kernel.config import ConfigActivation
-from mote_kernel.hooks.contract import HookActivationRequest
+from mote_kernel.hooks.contract import HookActivationRequest, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
@@ -38,11 +37,10 @@ class SettleNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        activation: ConfigActivation[SettleNodeInput[HookCommandT]],
+        activation: ConfigActivation[HookResult[ActHookEnvelope, HookCommandT]],
         /,
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT]:
-        value = activation.value
-        hook_result = self.admission.admit_hook_result(value.hook_result)
+        hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
         settlement_port = self.settlement_port
         exchange_writer = self.exchange_writer

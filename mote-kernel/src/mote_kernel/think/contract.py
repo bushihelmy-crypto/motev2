@@ -249,129 +249,6 @@ class ContextNodeInput(
         _require_exact(self.hook_result, HookResult, "context node HookResult")
 
 
-@dataclass(frozen=True, slots=True)
-class CompactNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        ContextSnapshotT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Compact node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "compact node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class RouterNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        ContextSnapshotT,
-        CompactedSnapshotT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Router node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            CompactStep[
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                ContextSnapshotT,
-                CompactedSnapshotT,
-            ],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "router node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class InferenceNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        CompactedSnapshotT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Inference node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            RouterStep[
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                CompactedSnapshotT,
-            ],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "inference node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class CommandNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        CompactedSnapshotT,
-        ModelOutputT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Command node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            InferenceStep[
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                CompactedSnapshotT,
-                ModelOutputT,
-            ],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "command node HookResult")
-
-
 class ThinkStep(HookGraphValue):
     """Nominal base for the closed set of Think stage values."""
 
@@ -628,6 +505,7 @@ def _admit_stage_frame(
     recover a type from a ``Graph.Values`` mapping.
     """
 
+    _require_exact(result, HookResult, f"{stage} node HookResult")
     raw_frame = result.value
     if type(raw_frame) is not ThinkFrame:
         raise ThinkContractError(f"{stage} HookResult must contain a ThinkFrame")

@@ -12,7 +12,6 @@ from mote_kernel.act.contract import (
     ActHookCommand,
     ActHookEnvelope,
     AuthorizeStageValue,
-    ExecuteNodeInput,
     ExecuteStageValue,
     ExecutionStopped,
     HookStateProjection,
@@ -22,7 +21,7 @@ from mote_kernel.act.identity import ActHookStage
 from mote_kernel.act.port import ExecutePort
 from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
@@ -38,11 +37,10 @@ class ExecuteNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        activation: ConfigActivation[ExecuteNodeInput[HookCommandT]],
+        activation: ConfigActivation[HookResult[ActHookEnvelope, HookCommandT]],
         /,
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
-        value = activation.value
-        hook_result = self.admission.admit_hook_result(value.hook_result)
+        hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
         execute_port = self.execute_port
         if config is not None:

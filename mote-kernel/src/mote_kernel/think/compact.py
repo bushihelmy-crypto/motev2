@@ -7,21 +7,22 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.config import ConfigActivation
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.config import CompactBinding
 from mote_kernel.think.contract import (
     CompactedContext,
-    CompactNodeInput,
     CompactPort,
     CompactRequest,
     CompactStep,
+    ContextStep,
     ThinkContractError,
     ThinkFrame,
     admit_context_frame,
 )
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -60,13 +61,12 @@ class CompactNode(
     async def __call__(
         self,
         activation: ConfigActivation[
-            CompactNodeInput[
-                HookStateT,
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                ContextSnapshotT,
-                HookGraphValue,
+            HookResult[
+                ThinkFrame[
+                    ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
+                    HookStateT,
+                ],
+                HookCommandT,
             ]
         ],
         /,
@@ -77,8 +77,7 @@ class CompactNode(
         ],
         HookStateT,
     ]:
-        value = activation.value
-        frame = admit_context_frame(value.hook_result)
+        frame = admit_context_frame(activation.value)
         config = activation.activation_config
         step = frame.step
         request = CompactRequest(step.prompt, step.context)

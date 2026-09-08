@@ -23,6 +23,7 @@ from mote_kernel.think.contract import (
 
 PayloadT = TypeVar("PayloadT")
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -59,7 +60,7 @@ class ContextNode(
                 SystemPromptT,
                 PlaceholderT,
                 UserPromptT,
-                HookGraphValue,
+                HookCommandT,
             ]
         ],
         /,

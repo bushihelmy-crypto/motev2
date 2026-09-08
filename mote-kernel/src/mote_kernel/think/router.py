@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.config import ConfigActivation
-from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.config import RouterBinding
 from mote_kernel.think.contract import (
+    CompactStep,
     ModelBinding,
-    RouterNodeInput,
     RouterPort,
     RouterRequest,
     RouterStep,
@@ -22,6 +22,7 @@ from mote_kernel.think.contract import (
 )
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -57,14 +58,18 @@ class RouterNode(
     async def __call__(
         self,
         activation: ConfigActivation[
-            RouterNodeInput[
-                HookStateT,
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                ContextSnapshotT,
-                CompactedSnapshotT,
-                HookGraphValue,
+            HookResult[
+                ThinkFrame[
+                    CompactStep[
+                        SystemPromptT,
+                        PlaceholderT,
+                        UserPromptT,
+                        ContextSnapshotT,
+                        CompactedSnapshotT,
+                    ],
+                    HookStateT,
+                ],
+                HookCommandT,
             ]
         ],
         /,
@@ -75,8 +80,7 @@ class RouterNode(
         ],
         HookStateT,
     ]:
-        value = activation.value
-        frame = admit_compact_frame(value.hook_result)
+        frame = admit_compact_frame(activation.value)
         config = activation.activation_config
         step = frame.step
         request = RouterRequest(step.prompt, step.compacted)
