@@ -404,6 +404,21 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     ) -> Graph[HookGraphValue]:
         _require_capability(port, SingleAttempt, "failover decorator requires one single-attempt Port")
 
+        observe = _ObserveCall[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            self.config,
+            self.plan_binding,
+        )
+        invoke = _InvokeOnce[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            port,
+            self.config,
+            self.plan_binding,
+        )
+        prepare = _PrepareNextAttempt[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            self.preparation,
+            self.config,
+            self.prepare_binding,
+        )
+
         graph = Graph[HookGraphValue](_definition_id(self.config.port_id), version=2)
         request_type = cast(type[HookGraphValue], FailoverCall)
         frame_type = cast(type[HookGraphValue], _FailoverFrame)
@@ -412,30 +427,19 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 
         graph.add_node(
             "observe",
-            _ObserveCall[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-                self.config,
-                self.plan_binding,
-            ),
+            observe,
             inputs={"request": request},
             outputs={"frame": frame_type},
         )
         graph.add_node(
             "invoke",
-            _InvokeOnce[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-                port,
-                self.config,
-                self.plan_binding,
-            ),
+            invoke,
             inputs={"frame": graph.node_output("frame")},
             outputs={"frame": frame_type},
         )
         graph.add_node(
             "prepare",
-            _PrepareNextAttempt[RequestT, ResultT, ReceiptT, HandleT, TransformT](
-                self.preparation,
-                self.config,
-                self.prepare_binding,
-            ),
+            prepare,
             inputs={"frame": graph.node_output("invoke", "frame")},
             outputs={"frame": frame_type, "result": result_type},
         )
