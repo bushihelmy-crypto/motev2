@@ -14,11 +14,13 @@ from mote_kernel.loop.admission import ReActPayloadAdmission
 from mote_kernel.loop.contract import ReActContractError, ReActRoute
 from mote_kernel.loop.node import ReActNode
 from mote_kernel.observe.contract import (
+    BackgroundTaskSnapshot,
     GetObservationStageValue,
     ObserveFrame,
     ObserveHookEnvelope,
     ObserveRequest,
     ObserveResult,
+    UserObservation,
     WriteObservationStageValue,
 )
 from mote_kernel.observe.contract import (
@@ -29,10 +31,13 @@ from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import ThinkFrame, ThinkRequest, ThinkStep
 
 from .support import (
+    ObservationText,
     SharedState,
     ThinkCommand,
     ThinkPayload,
     act_admission,
+    available,
+    delivery,
     next_state,
     react_admission,
     valid_act_boundary,
@@ -54,9 +59,12 @@ class _OtherCommand(HookGraphValue):
 
 
 def _get_observation_boundary() -> HookResult[ObserveHookEnvelope, object]:
-    result = valid_observe_result()
-    read_boundary = result.observation_receipt.read_boundary
-    frame = ObserveFrame(result.batch, read_boundary, result.background_task_snapshot)
+    read = available(delivery(0, UserObservation(ObservationText("hello")), "delivery-0"))
+    frame = ObserveFrame(
+        read.batch,
+        read.boundary,
+        BackgroundTaskSnapshot(read.boundary.observation_revision, ()),
+    )
     envelope = ObserveHookEnvelope(
         ObserveHookStage.AFTER_GET_OBSERVATION,
         GetObservationStageValue(frame),

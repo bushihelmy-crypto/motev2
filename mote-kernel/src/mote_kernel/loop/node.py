@@ -246,182 +246,6 @@ class _ReActOperations(
         return self.admission.project_act_to_observe(projector, admitted)
 
 
-def _observe_phase(
-    definition_id: str,
-    version: int,
-    observe: ObserveNode[ObservePriorityConfigT, ObserveStateT, ObserveHookCommandT],
-    operations: _ReActOperations[
-        ObserveStateT,
-        ObserveHookCommandT,
-        ThinkPayloadT,
-        ThinkStateT,
-        ThinkHookCommandT,
-        ActStateT,
-        ActHookCommandT,
-    ],
-) -> tuple[
-    Graph[HookGraphValue],
-    NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-]:
-    phase = Graph[HookGraphValue](f"{definition_id}.observe-phase", version=version)
-    request_input = cast(
-        GraphInputRef[ObserveRequest[ObserveStateT]],
-        Graph.graph_input("request", ObserveRequest),
-    )
-    request_binding = Graph.bind("request", request_input)
-    prepared_request = phase.add_node(
-        "prepare",
-        operations.prepare_observe,
-        inputs=(request_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(request_binding),
-            values.activation_config,
-        ),
-        output_name="request",
-        output_type=ObserveRequest,
-    )
-    phase.add_node("run", observe, inputs={"request": prepared_request})
-    result_ref = cast(
-        NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-        phase.output_ref("run", "result"),
-    )
-    route_binding = Graph.bind("result", result_ref)
-    routed_result = phase.add_node(
-        "route",
-        operations.route_observe,
-        inputs=(route_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(route_binding),
-            values.activation_config,
-        ),
-        output_name="result",
-        output_type=HookResult,
-    )
-    phase.add_edge(Graph.START, "prepare")
-    phase.add_edge("prepare", "run")
-    phase.add_edge("run", _OBSERVE_COMPLETION_ROUTE, "route")
-    for route in (ReActRoute.CONFIG, ReActRoute.ASSISTANT, ReActRoute.THINK, ReActRoute.ACT):
-        phase.add_edge("route", route.value, Graph.END)
-    phase.set_outputs({"result": routed_result})
-    return phase, routed_result
-
-
-def _think_phase(
-    definition_id: str,
-    version: int,
-    think: ThinkNode[ThinkPriorityConfigT, ThinkStateT, ThinkHookCommandT],
-    operations: _ReActOperations[
-        ObserveStateT,
-        ObserveHookCommandT,
-        ThinkPayloadT,
-        ThinkStateT,
-        ThinkHookCommandT,
-        ActStateT,
-        ActHookCommandT,
-    ],
-) -> tuple[Graph[HookGraphValue], NodeOutputRef[ObserveRequest[ObserveStateT]]]:
-    phase = Graph[HookGraphValue](f"{definition_id}.think-phase", version=version)
-    result_input = cast(
-        GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-        Graph.graph_input("result", HookResult),
-    )
-    result_binding = Graph.bind("result", result_input)
-    request = phase.add_node(
-        "project",
-        operations.project_observe_to_think,
-        inputs=(result_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(result_binding),
-            values.activation_config,
-        ),
-        output_name="request",
-        output_type=ThinkRequest,
-    )
-    phase.add_node("run", think, inputs={"request": request})
-    think_result_ref = cast(
-        NodeOutputRef[HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT]],
-        phase.output_ref("run", "result"),
-    )
-    think_result_binding = Graph.bind("result", Graph.node_output(think_result_ref))
-    next_request = phase.add_node(
-        "next_observe",
-        operations.project_think_to_observe,
-        inputs=(think_result_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(think_result_binding),
-            values.activation_config,
-        ),
-        output_name="request",
-        output_type=ObserveRequest,
-    )
-    phase.add_edge("project", "run")
-    phase.add_edge("run", _THINK_COMPLETION_ROUTE, "next_observe")
-    phase.add_edge("next_observe", Graph.END)
-    phase.set_outputs({"request": next_request})
-    return phase, next_request
-
-
-def _act_phase(
-    definition_id: str,
-    version: int,
-    act: ActNode[ActPriorityConfigT, ActStateT, ActHookCommandT],
-    operations: _ReActOperations[
-        ObserveStateT,
-        ObserveHookCommandT,
-        ThinkPayloadT,
-        ThinkStateT,
-        ThinkHookCommandT,
-        ActStateT,
-        ActHookCommandT,
-    ],
-) -> tuple[Graph[HookGraphValue], NodeOutputRef[ObserveRequest[ObserveStateT]]]:
-    phase = Graph[HookGraphValue](f"{definition_id}.act-phase", version=version)
-    result_input = cast(
-        GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-        Graph.graph_input("result", HookResult),
-    )
-    result_binding = Graph.bind("result", result_input)
-    request = phase.add_node(
-        "project",
-        operations.project_observe_to_act,
-        inputs=(result_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(result_binding),
-            values.activation_config,
-        ),
-        output_name="request",
-        output_type=ActRequest,
-    )
-    phase.add_node("run", act, inputs={"request": request})
-    act_result_ref = cast(
-        NodeOutputRef[HookResult[ActHookEnvelope, ActHookCommandT]],
-        phase.output_ref("run", "result"),
-    )
-    act_result_binding = Graph.bind("result", Graph.node_output(act_result_ref))
-    next_request = phase.add_node(
-        "next_observe",
-        operations.project_act_to_observe,
-        inputs=(act_result_binding,),
-        input_type=ConfigActivation,
-        materialize=lambda values: ConfigActivation(
-            values.get(act_result_binding),
-            values.activation_config,
-        ),
-        output_name="request",
-        output_type=ObserveRequest,
-    )
-    phase.add_edge("project", "run")
-    phase.add_edge("run", _ACT_COMPLETION_ROUTE, "next_observe")
-    phase.add_edge("next_observe", Graph.END)
-    phase.set_outputs({"request": next_request})
-    return phase, next_request
-
-
 class ReActNode(
     Graph[HookGraphValue],
     Generic[ObserveStateT, ThinkPayloadT, ThinkStateT, ActStateT],
@@ -576,14 +400,142 @@ class ReActNode(
             definition_id=definition_id,
             definition_version=version,
         )
-        observe_phase, observe_result = _observe_phase(
-            definition_id,
-            version,
-            observe,
-            operations,
+        observe_phase = Graph[HookGraphValue](f"{definition_id}.observe-phase", version=version)
+        observe_request_input = cast(
+            GraphInputRef[ObserveRequest[ObserveStateT]],
+            Graph.graph_input("request", ObserveRequest),
         )
-        think_phase, _think_request = _think_phase(definition_id, version, think, operations)
-        act_phase, _act_request = _act_phase(definition_id, version, act, operations)
+        observe_request_binding = Graph.bind("request", observe_request_input)
+        prepared_request = observe_phase.add_node(
+            "prepare",
+            operations.prepare_observe,
+            inputs=(observe_request_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(observe_request_binding),
+                values.activation_config,
+            ),
+            output_name="request",
+            output_type=ObserveRequest,
+        )
+        observe_phase.add_node(
+            "run",
+            observe,
+            inputs={"request": prepared_request},
+        )
+        observe_result = cast(
+            NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+            observe_phase.output_ref("run", "result"),
+        )
+        route_binding = Graph.bind("result", observe_result)
+        routed_result = observe_phase.add_node(
+            "route",
+            operations.route_observe,
+            inputs=(route_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(route_binding),
+                values.activation_config,
+            ),
+            output_name="result",
+            output_type=HookResult,
+        )
+        observe_phase.add_edge(Graph.START, "prepare")
+        observe_phase.add_edge("prepare", "run")
+        observe_phase.add_edge("run", _OBSERVE_COMPLETION_ROUTE, "route")
+        for route in (ReActRoute.CONFIG, ReActRoute.ASSISTANT, ReActRoute.THINK, ReActRoute.ACT):
+            observe_phase.add_edge("route", route.value, Graph.END)
+        observe_phase.set_outputs({"result": routed_result})
+
+        think_phase = Graph[HookGraphValue](f"{definition_id}.think-phase", version=version)
+        think_result_input = cast(
+            GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+            Graph.graph_input("result", HookResult),
+        )
+        observe_to_think_binding = Graph.bind("result", think_result_input)
+        think_request = think_phase.add_node(
+            "project",
+            operations.project_observe_to_think,
+            inputs=(observe_to_think_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(observe_to_think_binding),
+                values.activation_config,
+            ),
+            output_name="request",
+            output_type=ThinkRequest,
+        )
+        think_phase.add_node(
+            "run",
+            think,
+            inputs={"request": think_request},
+        )
+        think_result = cast(
+            NodeOutputRef[HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT]],
+            think_phase.output_ref("run", "result"),
+        )
+        think_result_binding = Graph.bind("result", Graph.node_output(think_result))
+        next_think_request = think_phase.add_node(
+            "next_observe",
+            operations.project_think_to_observe,
+            inputs=(think_result_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(think_result_binding),
+                values.activation_config,
+            ),
+            output_name="request",
+            output_type=ObserveRequest,
+        )
+        think_phase.add_edge("project", "run")
+        think_phase.add_edge("run", _THINK_COMPLETION_ROUTE, "next_observe")
+        think_phase.add_edge("next_observe", Graph.END)
+        think_phase.set_outputs({"request": next_think_request})
+
+        act_phase = Graph[HookGraphValue](f"{definition_id}.act-phase", version=version)
+        act_result_input = cast(
+            GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
+            Graph.graph_input("result", HookResult),
+        )
+        observe_to_act_binding = Graph.bind("result", act_result_input)
+        act_request = act_phase.add_node(
+            "project",
+            operations.project_observe_to_act,
+            inputs=(observe_to_act_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(observe_to_act_binding),
+                values.activation_config,
+            ),
+            output_name="request",
+            output_type=ActRequest,
+        )
+        act_phase.add_node(
+            "run",
+            act,
+            inputs={"request": act_request},
+        )
+        act_result = cast(
+            NodeOutputRef[HookResult[ActHookEnvelope, ActHookCommandT]],
+            act_phase.output_ref("run", "result"),
+        )
+        act_result_binding = Graph.bind("result", Graph.node_output(act_result))
+        next_act_request = act_phase.add_node(
+            "next_observe",
+            operations.project_act_to_observe,
+            inputs=(act_result_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(act_result_binding),
+                values.activation_config,
+            ),
+            output_name="request",
+            output_type=ObserveRequest,
+        )
+        act_phase.add_edge("project", "run")
+        act_phase.add_edge("run", _ACT_COMPLETION_ROUTE, "next_observe")
+        act_phase.add_edge("next_observe", Graph.END)
+        act_phase.set_outputs({"request": next_act_request})
 
         super().__init__(definition_id, version=version)
         self.add_node(
