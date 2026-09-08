@@ -13,7 +13,8 @@ import mote_kernel.think.context as context_package
 import mote_kernel.think.inference as inference_package
 import mote_kernel.think.node as think_assembly_package
 import mote_kernel.think.prompt as prompt_package
-from mote_kernel.hooks.contract import HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.think import ThinkNode
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
@@ -36,7 +37,7 @@ class Payload:
 
 
 @dataclass(frozen=True, slots=True)
-class HookState:
+class HookState(HookGraphValue):
     turn: int
 
 
@@ -85,9 +86,9 @@ async def test_prompt_loads_system_placeholder_and_user_in_order_once() -> None:
     state = HookState(3)
     request = ThinkRequest(payload, state)
 
-    output = await _node(port)(request)
+    output = await _node(port)(ConfigActivation(request))
 
-    assert type(output) is HookRequest
+    assert type(output) is HookActivationRequest
     assert port.calls == [
         ("system", payload),
         ("placeholder", payload),
@@ -107,7 +108,7 @@ async def test_prompt_passes_the_exact_payload_to_each_port_operation() -> None:
     port = RecordingPromptPort()
     payload = Payload("same object")
 
-    await _node(port)(ThinkRequest(payload, HookState(1)))
+    await _node(port)(ConfigActivation(ThinkRequest(payload, HookState(1))))
 
     assert all(seen_payload is payload for _operation, seen_payload in port.calls)
 
@@ -123,7 +124,7 @@ async def test_prompt_does_not_call_later_port_operations_after_an_error() -> No
     port = _FailingPromptPort()
 
     with pytest.raises(RuntimeError, match="placeholder unavailable"):
-        await _node(port)(ThinkRequest(Payload("text"), HookState(1)))
+        await _node(port)(ConfigActivation(ThinkRequest(Payload("text"), HookState(1))))
 
     assert [operation for operation, _payload in port.calls] == ["system", "placeholder"]
 
@@ -161,7 +162,7 @@ async def test_prompt_propagates_cancellation_without_running_later_port_operati
     )
 
     with pytest.raises(asyncio.CancelledError):
-        await node(ThinkRequest(Payload("text"), HookState(1)))
+        await node(ConfigActivation(ThinkRequest(Payload("text"), HookState(1))))
 
 
 def test_prompt_rejects_a_port_with_non_callable_methods_at_assembly() -> None:

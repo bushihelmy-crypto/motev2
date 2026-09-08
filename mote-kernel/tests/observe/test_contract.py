@@ -8,7 +8,7 @@ from typing import Never, cast
 
 import pytest
 
-from mote_kernel.hooks.contract import HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.contract import (
@@ -334,8 +334,8 @@ def test_hook_admission_keeps_the_predecessor_identity_outside_script_output() -
     admission = _admission()
 
     request = cast(
-        HookRequest[ObserveHookEnvelope, HookStateProjection],
-        HookRequest(envelope, _State(), GraphNodeId("write_observation")),
+        HookActivationRequest[ObserveHookEnvelope, HookStateProjection],
+        HookActivationRequest(envelope, _State(), GraphNodeId("write_observation")),
     )
     with pytest.raises(ObserveContractError, match="node_id"):
         admission.admit_hook_request(request)

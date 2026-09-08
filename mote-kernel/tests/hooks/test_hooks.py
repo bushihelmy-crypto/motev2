@@ -14,11 +14,11 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
+    HookActivationRequest,
     HookContractError,
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookRequest,
     HookResult,
     HookStageResult,
     HookTransitionAdmission,
@@ -54,12 +54,12 @@ class Increment:
 @dataclass(frozen=True, slots=True)
 class InvocationCall:
     config: PriorityConfig
-    request: HookRequest[str, Counter]
+    request: str
 
 
 @dataclass(frozen=True, slots=True)
 class TransitionCall:
-    request: HookRequest[str, Counter]
+    request: HookActivationRequest[str, Counter]
     result: HookStageResult[str, Increment]
 
 
@@ -71,7 +71,7 @@ class RecordingTransitionAdmission:
 
     def admit_transition(
         self,
-        request: HookRequest[str, Counter],
+        request: HookActivationRequest[str, Counter],
         result: HookStageResult[str, Increment],
         /,
     ) -> None:
@@ -90,13 +90,13 @@ class SerialRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
-        value = request.value
+        value = request
         for fragment in config.fragments:
             value = f"{value}{fragment}"
         commands = (Increment(config.rank),) if config.fragments else ()
@@ -114,15 +114,15 @@ class ParallelRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         fragments = await asyncio.gather(*(self._fragment(fragment) for fragment in config.fragments))
         commands = (Increment(config.rank),) if fragments else ()
-        return HookStageResult(f"{request.value}{''.join(fragments)}", commands)
+        return HookStageResult(f"{request}{''.join(fragments)}", commands)
 
 
 class FailingRuntime:
@@ -132,15 +132,15 @@ class FailingRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         if config.rank == self.failure_rank:
             raise RuntimeError("invocation failed")
-        return HookStageResult(f"{request.value}{''.join(config.fragments)}")
+        return HookStageResult(f"{request}{''.join(config.fragments)}")
 
 
 class CancellingRuntime:
@@ -149,11 +149,11 @@ class CancellingRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         raise asyncio.CancelledError("invocation cancelled")
 
@@ -166,10 +166,10 @@ class RaisingTypeErrorRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
+        self.calls.append(InvocationCall(invocation_request.hook_config, invocation_request.payload))
         raise self.error from self.cause
 
 
@@ -180,10 +180,10 @@ class RaisingBoundaryErrorRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
+        self.calls.append(InvocationCall(invocation_request.hook_config, invocation_request.payload))
         raise self.error
 
 
@@ -194,15 +194,15 @@ class InvalidResultRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         if config.rank == self.invalid_rank:
             return cast(HookStageResult[str, Increment], object())
-        return HookStageResult(f"{request.value}{''.join(config.fragments)}")
+        return HookStageResult(f"{request}{''.join(config.fragments)}")
 
 
 class FinalResultRuntime:
@@ -211,13 +211,13 @@ class FinalResultRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
-        return cast(HookStageResult[str, Increment], HookResult(request.value))
+        return cast(HookStageResult[str, Increment], HookResult(request))
 
 
 class DuplicateCommandRuntime:
@@ -226,14 +226,14 @@ class DuplicateCommandRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         command = Increment(config.rank)
-        return HookStageResult(request.value, (command, command))
+        return HookStageResult(request, (command, command))
 
 
 class InvalidStageValueRuntime:
@@ -243,15 +243,15 @@ class InvalidStageValueRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         if config.rank == self.invalid_rank:
             return HookStageResult(cast(str, object()))
-        return HookStageResult(request.value)
+        return HookStageResult(request)
 
 
 class InvalidStageCommandRuntime:
@@ -261,15 +261,15 @@ class InvalidStageCommandRuntime:
 
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        config = invocation_request.config
-        request = invocation_request.request
+        config = invocation_request.hook_config
+        request = invocation_request.payload
         self.calls.append(InvocationCall(config, request))
         if config.rank == self.invalid_rank:
-            return HookStageResult(request.value, (cast(Increment, object()),))
-        return HookStageResult(request.value)
+            return HookStageResult(request, (cast(Increment, object()),))
+        return HookStageResult(request)
 
 
 class NonCallableInvocation:
@@ -284,11 +284,11 @@ class PriorityPlanSubclass(HookPriorityPlan[PriorityConfig]):
     pass
 
 
-class RequestSubclass(HookRequest[str, Counter]):
+class RequestSubclass(HookActivationRequest[str, Counter]):
     pass
 
 
-class InvocationRequestSubclass(HookInvocationRequest[PriorityConfig, str, Counter]):
+class InvocationRequestSubclass(HookInvocationRequest[PriorityConfig, str]):
     pass
 
 
@@ -306,17 +306,17 @@ class SyncRuntime:
 
     def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
-        self.calls.append(InvocationCall(invocation_request.config, invocation_request.request))
-        return HookStageResult(invocation_request.request.value)
+        self.calls.append(InvocationCall(invocation_request.hook_config, invocation_request.payload))
+        return HookStageResult(invocation_request.payload)
 
 
 class YieldingRuntime(SerialRuntime):
     async def invoke(
         self,
-        invocation_request: HookInvocationRequest[PriorityConfig, str, Counter],
+        invocation_request: HookInvocationRequest[PriorityConfig, str],
         /,
     ) -> HookStageResult[str, Increment]:
         await asyncio.sleep(0)
@@ -340,7 +340,7 @@ def _plan(prefix: str = "") -> HookPlan[PriorityConfig]:
 
 def _node(
     invocation: Invocation[
-        HookInvocationRequest[PriorityConfig, str, Counter],
+        HookInvocationRequest[PriorityConfig, str],
         HookStageResult[str, Increment],
     ],
     plan: HookPlan[PriorityConfig] | None = None,
@@ -360,8 +360,8 @@ def _admission(
     )
 
 
-def _request(value: str = "x") -> HookRequest[str, Counter]:
-    return HookRequest(value, Counter(7))
+def _request(value: str = "x") -> HookActivationRequest[str, Counter]:
+    return HookActivationRequest(value, Counter(7))
 
 
 def _completion(result: Graph.Result[HookGraphValue]) -> HookResult[str, Increment]:
@@ -386,11 +386,9 @@ async def test_hook_node_uses_the_assembly_plan_and_invokes_priorities_in_order(
     )
     assert tuple(call.config.rank for call in runtime.calls) == (1, 2)
     assert tuple(
-        call.config is config
-        for call, config in zip(runtime.calls, (plan.p1.config, plan.p2.config), strict=True)
+        call.config is config for call, config in zip(runtime.calls, (plan.p1.config, plan.p2.config), strict=True)
     ) == (True, True)
-    assert tuple(call.request.value for call in runtime.calls) == ("x", "x1a")
-    assert all(call.request.state is request.state for call in runtime.calls)
+    assert tuple(call.request for call in runtime.calls) == ("x", "x1a")
 
 
 @pytest.mark.asyncio
@@ -575,12 +573,12 @@ def test_hook_node_rejects_an_invalid_direct_plan_before_graph_assembly() -> Non
 @pytest.mark.parametrize(
     ("input_request", "field"),
     [
-        (HookRequest(cast(str, object()), Counter(7)), "value"),
-        (HookRequest("x", cast(Counter, object())), "state"),
+        (HookActivationRequest(cast(str, object()), Counter(7)), "value"),
+        (HookActivationRequest("x", cast(Counter, object())), "state"),
     ],
 )
 async def test_hook_node_rejects_invalid_initial_request_payloads_before_invocation(
-    input_request: HookRequest[str, Counter],
+    input_request: HookActivationRequest[str, Counter],
     field: str,
 ) -> None:
     runtime = SerialRuntime()
@@ -660,7 +658,7 @@ async def test_hook_node_composes_as_a_nested_graph() -> None:
     assert result_ref.node_id == GraphNodeId("p2")
     assert result_ref.output_name == "result"
     parent = Graph[HookGraphValue]("react.parent")
-    request_type = cast(type[HookGraphValue], HookRequest)
+    request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node(
         "hook",
         hook,
@@ -681,7 +679,7 @@ async def test_hook_node_composes_as_a_nested_graph() -> None:
 async def test_hook_completion_exports_the_originating_node_route() -> None:
     hook = _node(SerialRuntime())
     parent = Graph[HookGraphValue]("hook.route.parent")
-    request_type = cast(type[HookGraphValue], HookRequest)
+    request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node(
         "hook",
         hook,
@@ -690,7 +688,7 @@ async def test_hook_completion_exports_the_originating_node_route() -> None:
     parent.add_edge("hook", "origin", Graph.END)
     parent.set_outputs({"result": Graph.node_output("hook", "result")})
 
-    request = HookRequest("x", Counter(1), GraphNodeId("origin"))
+    request = HookActivationRequest("x", Counter(1), GraphNodeId("origin"))
     result = await parent.run(Graph.values(request=request))
     assert isinstance(result, Graph.CompletedResult)
     completion = _completion(result)
@@ -716,7 +714,7 @@ async def test_parent_can_embed_hooks_whose_legacy_ids_would_collide() -> None:
         _admission(),
     )
     parent = Graph[HookGraphValue]("collision.parent")
-    request_type = cast(type[HookGraphValue], HookRequest)
+    request_type = cast(type[HookGraphValue], HookActivationRequest)
     request_input = Graph.graph_input("request", request_type)
     parent.add_node("left", left, inputs={"request": request_input})
     parent.add_node("right", right, inputs={"request": request_input})
@@ -740,9 +738,7 @@ def test_hook_node_rejects_missing_required_assembly_capabilities() -> None:
     runtime = SerialRuntime()
 
     with pytest.raises(HookContractError, match="HookSlotId"):
-        HookNode[PriorityConfig, str, Counter, Increment](
-            cast(HookSlotId, object()), plan, runtime, _admission()
-        )
+        HookNode[PriorityConfig, str, Counter, Increment](cast(HookSlotId, object()), plan, runtime, _admission())
     with pytest.raises(HookContractError, match="HookPlan"):
         HookNode[PriorityConfig, str, Counter, Increment](_slot(), None, runtime, _admission())
     with pytest.raises(HookContractError, match="invocation capability"):
@@ -756,7 +752,7 @@ def test_hook_node_rejects_non_callable_invocation_capabilities() -> None:
             _plan(),
             cast(
                 Invocation[
-                    HookInvocationRequest[PriorityConfig, str, Counter],
+                    HookInvocationRequest[PriorityConfig, str],
                     HookStageResult[str, Increment],
                 ],
                 object(),
@@ -769,7 +765,7 @@ def test_hook_node_rejects_non_callable_invocation_capabilities() -> None:
             _plan(),
             cast(
                 Invocation[
-                    HookInvocationRequest[PriorityConfig, str, Counter],
+                    HookInvocationRequest[PriorityConfig, str],
                     HookStageResult[str, Increment],
                 ],
                 NonCallableInvocation(),
@@ -803,11 +799,9 @@ def test_plan_and_result_validate_their_minimal_nominal_boundaries() -> None:
         plan.p1 = priority  # type: ignore[misc]
     with pytest.raises(TypeError, match="HookPriorityPlan"):
         HookPlan(cast(HookPriorityPlan[PriorityConfig], object()), priority)
-    with pytest.raises(TypeError, match="HookRequest"):
-        HookInvocationRequest(
-            PriorityConfig(1, ()),
-            cast(HookRequest[str, Counter], object()),
-        )
+    invocation = HookInvocationRequest(PriorityConfig(1, ()), "payload")
+    assert invocation.hook_config.rank == 1
+    assert invocation.payload == "payload"
     with pytest.raises(FrozenInstanceError):
         stage.value = "replacement"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
@@ -821,7 +815,7 @@ def test_plan_and_result_validate_their_minimal_nominal_boundaries() -> None:
 def test_request_and_result_reject_noncanonical_node_ids() -> None:
     invalid_node_id = cast(GraphNodeId, "bad\nnode")
     with pytest.raises(HookContractError, match="canonical GraphNodeId"):
-        HookRequest("value", Counter(1), invalid_node_id)
+        HookActivationRequest("value", Counter(1), invalid_node_id)
     with pytest.raises(HookContractError, match="canonical GraphNodeId"):
         HookResult("value", node_id=invalid_node_id)
 
@@ -874,10 +868,10 @@ def test_payload_admission_rejects_malformed_nominal_result_objects() -> None:
 def test_payload_admission_rejects_wrong_nominal_wrappers() -> None:
     admission = _admission()
 
-    with pytest.raises(HookContractError, match="HookRequest"):
-        admission.admit_request(cast(HookRequest[str, Counter], object()))
+    with pytest.raises(HookContractError, match="HookActivationRequest"):
+        admission.admit_request(cast(HookActivationRequest[str, Counter], object()))
     with pytest.raises(HookContractError, match="HookInvocationRequest"):
-        admission.admit_invocation_request(cast(HookInvocationRequest[PriorityConfig, str, Counter], object()))
+        admission.admit_invocation_request(cast(HookInvocationRequest[PriorityConfig, str], object()))
     with pytest.raises(HookContractError, match="HookStageResult"):
         admission.admit_stage_result(cast(HookStageResult[str, Increment], object()))
     with pytest.raises(HookContractError, match="HookResult"):
@@ -1059,29 +1053,29 @@ def test_payload_admission_checks_each_priority_wrapper_and_config(
 def test_payload_admission_checks_exact_request_and_invocation_request_boundaries() -> None:
     admission = _admission()
     request = _request()
-    invocation_request = HookInvocationRequest(PriorityConfig(1, ()), request)
+    invocation_request = HookInvocationRequest(PriorityConfig(1, ()), "payload")
 
     assert admission.admit_request(request) is request
     assert admission.admit_invocation_request(invocation_request) is invocation_request
 
-    with pytest.raises(HookContractError, match="HookRequest"):
-        admission.admit_request(cast(HookRequest[str, Counter], object()))
-    with pytest.raises(HookContractError, match="HookRequest"):
+    with pytest.raises(HookContractError, match="HookActivationRequest"):
+        admission.admit_request(cast(HookActivationRequest[str, Counter], object()))
+    with pytest.raises(HookContractError, match="HookActivationRequest"):
         admission.admit_request(RequestSubclass("x", Counter(1)))
     with pytest.raises(HookContractError, match="hook value has an unexpected"):
-        admission.admit_request(HookRequest(cast(str, object()), Counter(1)))
+        admission.admit_request(HookActivationRequest(cast(str, object()), Counter(1)))
     with pytest.raises(HookContractError, match="hook state has an unexpected"):
-        admission.admit_request(HookRequest("x", cast(Counter, object())))
+        admission.admit_request(HookActivationRequest("x", cast(Counter, object())))
     with pytest.raises(HookContractError, match="HookInvocationRequest"):
-        admission.admit_invocation_request(cast(HookInvocationRequest[PriorityConfig, str, Counter], object()))
+        admission.admit_invocation_request(cast(HookInvocationRequest[PriorityConfig, str], object()))
     with pytest.raises(HookContractError, match="HookInvocationRequest"):
-        admission.admit_invocation_request(InvocationRequestSubclass(PriorityConfig(1, ()), request))
+        admission.admit_invocation_request(InvocationRequestSubclass(PriorityConfig(1, ()), "payload"))
     with pytest.raises(HookContractError, match="priority config has an unexpected"):
-        admission.admit_invocation_request(HookInvocationRequest(cast(PriorityConfig, object()), request))
-    with pytest.raises(HookContractError, match="hook value has an unexpected"):
         admission.admit_invocation_request(
-            HookInvocationRequest(PriorityConfig(1, ()), HookRequest(cast(str, object()), Counter(1)))
+            HookInvocationRequest(cast(PriorityConfig, object()), cast(str, request.value))
         )
+    with pytest.raises(HookContractError, match="hook payload has an unexpected"):
+        admission.admit_invocation_request(HookInvocationRequest(PriorityConfig(1, ()), cast(str, object())))
 
 
 @pytest.mark.parametrize("command_index", [0, 1, 2])
@@ -1158,11 +1152,11 @@ async def test_hook_port_forwards_exact_plan_request_and_transition_objects() ->
     )
     port = HookPort(_admission(transition), runtime)
 
-    result = await port.execute(plan.p1, request)
+    result = await port.execute(plan.p1, request, None)
 
     assert result is not None
     assert runtime.calls[0].config is plan.p1.config
-    assert runtime.calls[0].request is request
+    assert runtime.calls[0].request == request.value
     assert transition.calls[0].request is request
     assert transition.calls[0].result is result
 
@@ -1174,9 +1168,13 @@ async def test_hook_port_rejects_invalid_plan_or_request_before_invocation() -> 
     valid_request = _request()
 
     with pytest.raises(HookContractError, match="priority config has an unexpected"):
-        await port.execute(HookPriorityPlan(cast(PriorityConfig, object())), valid_request)
+        await port.execute(HookPriorityPlan(cast(PriorityConfig, object())), valid_request, None)
     with pytest.raises(HookContractError, match="hook value has an unexpected"):
-        await port.execute(HookPriorityPlan(PriorityConfig(1, ())), HookRequest(cast(str, object()), Counter(1)))
+        await port.execute(
+            HookPriorityPlan(PriorityConfig(1, ())),
+            HookActivationRequest(cast(str, object()), Counter(1)),
+            None,
+        )
 
     assert runtime.calls == []
 
@@ -1187,7 +1185,7 @@ async def test_hook_port_marks_invocation_result_admission_failures_without_retr
     port = HookPort(_admission(), runtime)
 
     with pytest.raises(HookContractError, match="HookStageResult") as raised:
-        await port.execute(HookPriorityPlan(PriorityConfig(1, ())), _request())
+        await port.execute(HookPriorityPlan(PriorityConfig(1, ())), _request(), None)
 
     assert isinstance(raised.value.__cause__, InvocationBoundaryAdmissionError)
     assert len(runtime.calls) == 1
@@ -1198,7 +1196,7 @@ async def test_sync_invocation_capability_fails_at_the_async_boundary() -> None:
     runtime = SyncRuntime()
     invocation = cast(
         Invocation[
-            HookInvocationRequest[PriorityConfig, str, Counter],
+            HookInvocationRequest[PriorityConfig, str],
             HookStageResult[str, Increment],
         ],
         runtime,
@@ -1214,8 +1212,8 @@ async def test_sync_invocation_capability_fails_at_the_async_boundary() -> None:
 async def test_concurrent_hook_runs_keep_progress_and_state_isolated() -> None:
     runtime = YieldingRuntime()
     node = _node(runtime)
-    first_request = HookRequest("first", Counter(1), GraphNodeId("first"))
-    second_request = HookRequest("second", Counter(2), GraphNodeId("second"))
+    first_request = HookActivationRequest("first", Counter(1), GraphNodeId("first"))
+    second_request = HookActivationRequest("second", Counter(2), GraphNodeId("second"))
 
     first_result, second_result = await asyncio.gather(
         node.run(Graph.values(request=first_request)),
@@ -1226,8 +1224,7 @@ async def test_concurrent_hook_runs_keep_progress_and_state_isolated() -> None:
     second = _completion(second_result)
     assert first == HookResult("first1a2b", (Increment(1), Increment(2)), GraphNodeId("first"))
     assert second == HookResult("second1a2b", (Increment(1), Increment(2)), GraphNodeId("second"))
-    assert all(call.request.state is first_request.state for call in runtime.calls if call.request.node_id == "first")
-    assert all(call.request.state is second_request.state for call in runtime.calls if call.request.node_id == "second")
+    assert {call.request for call in runtime.calls} == {"first", "first1a", "second", "second1a"}
 
 
 @pytest.mark.asyncio
@@ -1245,7 +1242,7 @@ async def test_hook_without_origin_node_id_completes_without_an_exported_route()
 async def test_hook_nested_completion_route_selects_the_parent_declared_branch() -> None:
     hook = _node(SerialRuntime())
     parent = Graph[HookGraphValue]("hook.route.conditional")
-    request_type = cast(type[HookGraphValue], HookRequest)
+    request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
     visited: list[str] = []
 
@@ -1265,7 +1262,7 @@ async def test_hook_nested_completion_route_selects_the_parent_declared_branch()
     parent.add_edge("right", Graph.END)
     parent.set_outputs({"result": parent.output_ref("hook", "result")})
 
-    result = await parent.run(Graph.values(request=HookRequest("x", Counter(1), GraphNodeId("right"))))
+    result = await parent.run(Graph.values(request=HookActivationRequest("x", Counter(1), GraphNodeId("right"))))
 
     assert isinstance(result, Graph.CompletedResult)
     assert visited == ["right"]
@@ -1276,13 +1273,13 @@ async def test_hook_nested_completion_route_selects_the_parent_declared_branch()
 async def test_hook_nested_completion_rejects_an_undeclared_route() -> None:
     hook = _node(SerialRuntime())
     parent = Graph[HookGraphValue]("hook.route.unknown")
-    request_type = cast(type[HookGraphValue], HookRequest)
+    request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
     parent.add_edge("hook", "known", Graph.END)
     parent.set_outputs({"result": parent.output_ref("hook", "result")})
 
     with pytest.raises(Graph.RoutingError, match="unknown conditional route"):
-        await parent.run(Graph.values(request=HookRequest("x", Counter(1), GraphNodeId("unknown"))))
+        await parent.run(Graph.values(request=HookActivationRequest("x", Counter(1), GraphNodeId("unknown"))))
 
 
 def test_hook_graph_contains_only_p1_and_p2_and_exports_the_p2_result() -> None:

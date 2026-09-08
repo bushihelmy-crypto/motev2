@@ -11,8 +11,8 @@ from mote_kernel.hooks.contract import HookGraphValue
 from mote_kernel.observe.contract import (
     AssistantBatch,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
-    ConfigSettlementReceipt,
     ContextAppendReceipt,
     DeliveryAck,
     ObservationBatchReceipt,
@@ -51,7 +51,7 @@ class _CompleteBundle:
         del boundary
         raise NotImplementedError
 
-    async def apply(self, batch: ConfigBatch, /) -> ConfigSettlementReceipt:
+    async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
         del batch
         raise NotImplementedError
 

@@ -10,10 +10,10 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
+    HookActivationRequest,
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookRequest,
     HookResult,
     HookStageResult,
 )
@@ -76,15 +76,15 @@ def make_plan() -> HookPlan[Priority]:
 
 class HookRuntime:
     def __init__(self) -> None:
-        self.calls: list[HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State]] = []
+        self.calls: list[HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]]] = []
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 class Ports:
@@ -295,13 +295,14 @@ class FailingHookRuntime(HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
-        if request.request.node_id == GraphNodeId(self.failure_node):
+        step_name = type(request.payload.step).__name__.removesuffix("Step").lower()
+        if step_name == self.failure_node:
             raise RuntimeError(f"{self.failure_node} hook failure")
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 class BlockingHookRuntime(HookRuntime):
@@ -312,13 +313,13 @@ class BlockingHookRuntime(HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
         self.entered.set()
         await self.release.wait()
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,7 +385,7 @@ async def test_full_graph() -> None:
     assert isinstance(result, Graph.CompletedResult)
     assert ports.calls == ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"]
     assert len(runtime.calls) == 12
-    assert [str(call.request.node_id) for call in runtime.calls] == [
+    assert [type(call.payload.step).__name__.removesuffix("Step").lower() for call in runtime.calls] == [
         *(["prompt"] * 2),
         *(["context"] * 2),
         *(["compact"] * 2),
@@ -457,7 +458,7 @@ async def test_shared_hook_exports_the_originating_node_route(node_id: str, step
     hook = make_hook(runtime)
     state = State(1)
     frame = ThinkFrame(step, state)
-    request = HookRequest(frame, state, GraphNodeId(node_id))
+    request = HookActivationRequest(frame, state, GraphNodeId(node_id))
 
     result = await hook.run(Graph.values(request=request))
 
@@ -646,7 +647,7 @@ async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
             "command",
         ]
     assert len(runtime.calls) == 24
-    assert {call.request.state.turn for call in runtime.calls} == {11, 22}
+    assert {call.payload.hook_state.turn for call in runtime.calls} == {11, 22}
 
 
 @pytest.mark.asyncio

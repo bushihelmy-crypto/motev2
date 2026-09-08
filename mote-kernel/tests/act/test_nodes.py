@@ -155,15 +155,15 @@ def _plan() -> HookPlan[_PriorityConfig]:
 
 class _HookRuntime:
     def __init__(self) -> None:
-        self.calls: list[HookInvocationRequest[_PriorityConfig, ActHookEnvelope, _State]] = []
+        self.calls: list[HookInvocationRequest[_PriorityConfig, ActHookEnvelope]] = []
 
     async def invoke(
         self,
-        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope, _State],
+        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope],
         /,
     ) -> HookStageResult[ActHookEnvelope, _Command]:
         self.calls.append(request)
-        return HookStageResult(request.request.value, (_Command(request.request.value.stage.value),))
+        return HookStageResult(request.payload, (_Command(request.payload.stage.value),))
 
 
 class _MutatingHookRuntime(_HookRuntime):
@@ -174,14 +174,14 @@ class _MutatingHookRuntime(_HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope, _State],
+        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope],
         /,
     ) -> HookStageResult[ActHookEnvelope, _Command]:
         self.calls.append(request)
-        envelope = request.request.value
+        envelope = request.payload
         if envelope.stage is self.target:
             envelope = self._mutate(envelope)
-        return HookStageResult(envelope, (_Command(request.request.value.stage.value),))
+        return HookStageResult(envelope, (_Command(request.payload.stage.value),))
 
     def _mutate(self, envelope: ActHookEnvelope) -> ActHookEnvelope:
         if self.mutation == "phase":
@@ -273,13 +273,13 @@ class _FailingHookRuntime(_HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope, _State],
+        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope],
         /,
     ) -> HookStageResult[ActHookEnvelope, _Command]:
         self.calls.append(request)
-        if request.request.value.stage is self.target:
+        if request.payload.stage is self.target:
             raise self.failure
-        return HookStageResult(request.request.value, (_Command(request.request.value.stage.value),))
+        return HookStageResult(request.payload, (_Command(request.payload.stage.value),))
 
 
 class _BlockingHookRuntime(_HookRuntime):
@@ -290,13 +290,13 @@ class _BlockingHookRuntime(_HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope, _State],
+        request: HookInvocationRequest[_PriorityConfig, ActHookEnvelope],
         /,
     ) -> HookStageResult[ActHookEnvelope, _Command]:
         self.calls.append(request)
         self.entered.set()
         await self.release.wait()
-        return HookStageResult(request.request.value, (_Command(request.request.value.stage.value),))
+        return HookStageResult(request.payload, (_Command(request.payload.stage.value),))
 
 
 class _BlockingExecuteCall:
@@ -313,10 +313,10 @@ class _BlockingExecuteCall:
 class _PassThroughHookRuntime(Generic[HookValueT, HookRuntimeStateT, HookRuntimeCommandT]):
     async def invoke(
         self,
-        request: HookInvocationRequest[_PriorityConfig, HookValueT, HookRuntimeStateT],
+        request: HookInvocationRequest[_PriorityConfig, HookValueT],
         /,
     ) -> HookStageResult[HookValueT, HookRuntimeCommandT]:
-        return HookStageResult(request.request.value)
+        return HookStageResult(request.payload)
 
 
 class _ActHookSubclass(HookNode[_PriorityConfig, ActHookEnvelope, _State, _Command]):
@@ -905,11 +905,11 @@ async def test_act_uses_one_shared_hook_for_each_stage_and_executes_once() -> No
     assert ports.project_calls == 1
     assert ports.write_calls == 1
     assert len(runtime.calls) == 8
-    assert tuple(call.request.node_id for call in runtime.calls) == (
-        *(GraphNodeId("resolve") for _ in range(2)),
-        *(GraphNodeId("authorize") for _ in range(2)),
-        *(GraphNodeId("execute") for _ in range(2)),
-        *(GraphNodeId("settle") for _ in range(2)),
+    assert tuple(call.payload.stage for call in runtime.calls) == (
+        *(ActHookStage.RESOLVE for _ in range(2)),
+        *(ActHookStage.AUTHORIZE for _ in range(2)),
+        *(ActHookStage.EXECUTE for _ in range(2)),
+        *(ActHookStage.SETTLE for _ in range(2)),
     )
     result = cast(HookResult[ActHookEnvelope, _Command], completed.outputs["result"])
     assert result.node_id == GraphNodeId("settle")
@@ -963,13 +963,13 @@ async def test_resolve_rejects_wrong_input_stops_and_mismatched_resolution() -> 
     node = ResolveNode(ports, admission)
 
     with pytest.raises(ActContractError, match="Act request"):
-        await node(cast(ActRequest, OpaqueArguments(b"wrong")))
+        await node(ConfigActivation(cast(ActRequest, OpaqueArguments(b"wrong"))))
 
     async def stop(_request: ActRequest, /) -> ResolvePortResult:
         return ResolutionStopped(OpaqueGraphFailureReason("not resolved"))
 
     ports.resolve_override = stop
-    stopped = await node(_request())
+    stopped = await node(ConfigActivation(_request()))
     assert isinstance(stopped, Graph.FailureOutcome)
     assert stopped.failure == "not resolved"
 
@@ -987,7 +987,7 @@ async def test_resolve_rejects_wrong_input_stops_and_mismatched_resolution() -> 
 
     ports.resolve_override = mismatched
     with pytest.raises(ActContractError, match="does not match Act request"):
-        await node(request)
+        await node(ConfigActivation(request))
 
 
 @pytest.mark.asyncio
@@ -1700,7 +1700,7 @@ async def test_two_concurrent_act_runs_keep_authorization_and_results_isolated()
         ports.write_calls,
     ) == (2, 2, 2, 2, 2)
     assert len(runtime.calls) == 16
-    assert {call.request.state.turn for call in runtime.calls} == {11, 22}
+    assert {cast(_State, call.payload.hook_state).turn for call in runtime.calls} == {11, 22}
 
 
 @pytest.mark.asyncio
