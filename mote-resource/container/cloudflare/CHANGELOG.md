@@ -9,7 +9,13 @@ The format follows Keep a Changelog, and the project intends to follow Semantic 
 ### Added
 
 - Initial pure TypeScript Cloudflare Worker and Agent Durable Object scaffold with an optional SQLite storage capability.
+- Co-located the Cloudflare SQLite `Commit` Adapter and its workerd-backed transaction tests in the same deployable Worker project.
 - Persistence-backend selection remains independent of Container selection and belongs to Port configuration.
 - Pinned Node and pnpm requirements, reproducible dependency lock, and project-local quality commands.
 - Strict type checking, formatting, linting, workerd-backed container tests, coverage gates, and Wrangler dry-run builds.
 - Project-local architecture, development, packaging, and licensing guidance.
+
+### Changed
+
+- Flattened the TypeScript project directly under `mote-resource/container/cloudflare`.
+- Removed the duplicate Cloudflare Python Container and Persistence projects and the standalone TypeScript Persistence project.

@@ -1,27 +1,24 @@
 # Mote Infrastructure Persistence
 
-`mote-infra/persistence` is Mote's sole storage infrastructure owner. It contains the concrete backends behind persistence Ports and owns durable storage and transaction mechanisms, while `mote-kernel` owns Agent state-transition semantics and the callable `Commit` contract. Invocation contracts, resolution, and local/RPC implementations live in the parallel `mote-infra/invocation` boundary.
+`mote-infra/persistence` owns Mote's portable local and remote storage implementations. It implements durable storage and transaction mechanisms behind Kernel-owned persistence Ports; it does not own Agent state-transition semantics or invocation transport.
 
 Container and Persistence are independent choices:
 
 ```text
 Container config ──▶ local / Docker / Cloudflare host
 
-Kernel Port config ──▶ local Rust / Cloudflare DO SQLite / remote backend
+Kernel Port config ──▶ local Rust / remote backend / Cloudflare DO SQLite
 ```
 
-A Cloudflare Container can therefore use object-local Durable Object SQLite or a remote store. The Container only exposes runtime capabilities such as `ctx.storage`; Port configuration selects the backend and supplies the selected implementation's constructor inputs.
+A Cloudflare Container can use object-local Durable Object SQLite or a remote store. Port configuration still makes that choice.
 
-Dependency direction stays one-way. Persistence implementations do not import Kernel, Container, Control, Product, or Runtime packages. The Cloudflare Python and TypeScript packages expose only `Commit` and accept the Durable Object storage handle when that backend is selected.
+Cloudflare object-local persistence is the platform-bound exception to this directory layout. Its TypeScript Adapter is co-located at `mote-resource/container/cloudflare/src/persistence.ts`, in the same deployed Worker project as the Durable Object that receives `ctx.storage`. The handle stays inside that project and never crosses the Kernel Port or Invocation contract. There is no separate Cloudflare Persistence project and no Python Cloudflare implementation.
 
 Current layout:
 
 ```text
 mote-infra/persistence/
-├── local/                 Rust local and host-native implementation
-└── cloudflare/
-    ├── python/            Python Durable Object SQLite `Commit`
-    └── ts/                TypeScript Durable Object SQLite `Commit`
+└── local/                 Rust local and host-native implementation
 ```
 
 All projects are pre-alpha. Each child project owns its dependencies, lockfiles, tests, and release artifact.

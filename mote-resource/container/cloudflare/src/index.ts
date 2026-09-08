@@ -1,5 +1,11 @@
 import { DurableObject } from 'cloudflare:workers'
 
+// The Cloudflare Durable Object is the composition root for both hosting and
+// object-local persistence.  `Commit` stays implemented in its focused module,
+// but is shipped from this same Worker bundle so it can be constructed with
+// this object's `ctx.storage` when the Agent protocol is wired.
+export { Commit } from './persistence.ts'
+
 /**
  * Cloudflare container for one logical Mote Agent.
  *

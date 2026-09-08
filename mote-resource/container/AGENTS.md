@@ -8,14 +8,16 @@
   identities and decisions.
 - `mote-kernel` owns Agent creation and flow semantics. Containers host Kernel without copying or reinterpreting its contracts.
 - `mote-infra/invocation` is the sole owner of invocation contracts, resolution, and local/RPC implementations. Container code exposes host capabilities but does not implement a parallel invoker.
-- Concrete persistence and transaction mechanisms belong to
-  `mote-infra/persistence`; Container code must not own SQL schemas,
-  transaction code, backend-specific state semantics, or persistence-backend
-  selection.
+- Portable persistence and transaction mechanisms belong to
+  `mote-infra/persistence`. Cloudflare Durable Object SQLite is the narrow
+  platform exception: its SQL and transaction Adapter is co-located in
+  `cloudflare/src/persistence.ts` because `ctx.storage` exists only inside the
+  deployed Durable Object. Other Container code must not own persistence
+  semantics or persistence-backend selection.
 - Container selection and persistence selection are independent. Kernel Port configuration selects the `Commit` backend; a Container may expose optional platform capabilities such as Durable Object storage without requiring that they be used.
 - Platform implementations may contain the minimum entry point, deployment
-  binding, and Kernel-hosting glue required by their runtime, but invocation
-  composition, persistence composition, Product routing, and presentation do
+  binding, Kernel-hosting glue, and inseparable platform Adapter required by
+  their runtime. Invocation composition, Product routing, and presentation do
   not belong here.
 - Container and Embodiment are parallel resource kinds. Co-location of a
   Container and an Embodiment is a Control placement constraint, not a

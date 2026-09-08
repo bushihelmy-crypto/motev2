@@ -251,9 +251,7 @@ motev2/
 │   ├── container/     Agent/Kernel hosting providers
 │   │   ├── local/     reserved local Container implementation
 │   │   ├── docker/    reserved Docker Container implementation
-│   │   └── cloudflare/ Cloudflare Worker and Durable Object Containers
-│   │       ├── python/ Python Worker and Durable Object implementation
-│   │       └── ts/      TypeScript Worker and Durable Object implementation
+│   │   └── cloudflare/ Cloudflare TypeScript Worker/DO Container and object-local SQLite
 │   └── embodiment/    physical-body capability providers (robot, etc.)
 ├── mote-infra/        infrastructure adapters
 │   ├── invocation/    sole invocation infrastructure boundary
@@ -264,11 +262,8 @@ motev2/
 │   │       ├── http/
 │   │       ├── grpc/
 │   │       └── websocket/
-│   ├── persistence/   deployment-specific persistence and transaction mechanisms
-│   │   ├── local/     local Rust implementation
-│   │   └── cloudflare/ Cloudflare SQLite persistence Adapters
-│   │       ├── python/ Python Adapter
-│   │       └── ts/      TypeScript Adapter
+│   ├── persistence/   portable persistence and transaction mechanisms
+│   │   └── local/     local Rust implementation
 ├── mote-runtime/      planned Runtime Port implementations
 │   ├── control-plane/
 │   ├── model-gateway/
@@ -280,7 +275,7 @@ motev2/
     └── ui/
 ```
 
-At present, `mote-kernel`, the conformance bootstrap, `mote-infra/persistence`, and the Cloudflare Container scaffolds contain the substantive project structure. `mote-infra/invocation`, `mote-control`, `mote-runtime`, and `mote-product` are reserved ownership boundaries and do not yet represent delivered components.
+At present, `mote-kernel`, the conformance bootstrap, local Persistence, and the flattened Cloudflare Container/SQLite deployment contain the substantive project structure. `mote-infra/invocation`, `mote-control`, `mote-runtime`, and `mote-product` are reserved ownership boundaries and do not yet represent delivered components.
 
 Each child project owns its implementation, dependencies, build configuration, local tests, and release artifact. The repository root owns coordinated architecture, conformance contracts, and cross-project CI. Nested Git repositories are not permitted.
 

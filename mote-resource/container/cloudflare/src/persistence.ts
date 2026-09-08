@@ -78,13 +78,8 @@ export function Commit<State>(
             const previousRunId = access.runId(previous)
             const previousRevision = access.revision(previous)
             const row = rows[0]
-            if (
-                row?.run_id !== previousRunId ||
-                row.revision !== previousRevision
-            ) {
-                throw new ConflictError(
-                    'transition is based on a stale durable revision',
-                )
+            if (row?.run_id !== previousRunId || row.revision !== previousRevision) {
+                throw new ConflictError('transition is based on a stale durable revision')
             }
             const updated = storage.sql.exec(
                 UPDATE,
@@ -96,9 +91,7 @@ export function Commit<State>(
                 previousRevision,
             )
             if (updated.rowsWritten !== 1) {
-                throw new ConflictError(
-                    'transition lost its durable compare-and-swap',
-                )
+                throw new ConflictError('transition lost its durable compare-and-swap')
             }
         })
 
@@ -110,10 +103,7 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
     if (!(bytes instanceof Uint8Array)) {
         throw new TypeError('Commit encode must return Uint8Array')
     }
-    return bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-    ) as ArrayBuffer
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
 }
 
 function scopeKey(scope: readonly string[]): string {
@@ -139,8 +129,6 @@ function validateTransition<State>(
         throw new ConflictError('a transition cannot replace its run identity')
     }
     if (candidateRevision !== access.revision(previous) + 1) {
-        throw new ConflictError(
-            'a transition must advance exactly one revision',
-        )
+        throw new ConflictError('a transition must advance exactly one revision')
     }
 }
