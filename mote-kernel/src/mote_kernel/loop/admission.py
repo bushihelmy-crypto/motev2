@@ -14,7 +14,7 @@ from mote_kernel.act.contract import (
 from mote_kernel.act.contract import (
     HookStateProjection as ActHookStateProjection,
 )
-from mote_kernel.act.identity import ActHookStage
+from mote_kernel.act.identity import ActHookStage, ActNodeId
 from mote_kernel.hooks.contract import HookGraphValue, HookResult
 from mote_kernel.loop.contract import (
     ActToObserveProjector,
@@ -36,9 +36,10 @@ from mote_kernel.observe.contract import (
     ObserveResult,
     WriteObservationStageValue,
 )
-from mote_kernel.observe.identity import ObserveHookStage
+from mote_kernel.observe.identity import ObserveHookStage, ObserveNodeId
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.contract import CommandStep, ThinkFrame, ThinkRequest, ThinkStep
+from mote_kernel.think.identity import ThinkNodeId
 
 ObserveStateT = TypeVar("ObserveStateT", bound=ObserveHookStateProjection)
 ObserveHookCommandT = TypeVar("ObserveHookCommandT", bound=ObserveHookCommand)
@@ -109,7 +110,7 @@ class ReActPayloadAdmission(
         if (
             envelope.stage is not ObserveHookStage.AFTER_WRITE_OBSERVATION
             or type(envelope.payload) is not WriteObservationStageValue
-            or admitted.node_id != GraphNodeId("write_observation")
+            or admitted.node_id != GraphNodeId(str(ObserveNodeId.WRITE_OBSERVATION))
         ):
             raise ReActContractError("Observe completion must be its final write_observation boundary")
         return admitted
@@ -147,7 +148,7 @@ class ReActPayloadAdmission(
             type(command) is not self.think_hook_command_type for command in boundary.commands
         ):
             raise ReActContractError("Think completion has unexpected Hook commands")
-        if boundary.node_id != GraphNodeId("command"):
+        if boundary.node_id != GraphNodeId(str(ThinkNodeId.COMMAND)):
             raise ReActContractError("Think completion must be its final command boundary")
         return boundary
 
@@ -161,7 +162,7 @@ class ReActPayloadAdmission(
         if (
             envelope.stage is not ActHookStage.SETTLE
             or type(envelope.payload) is not SettleStageValue
-            or admitted.node_id != GraphNodeId("settle")
+            or admitted.node_id != GraphNodeId(str(ActNodeId.SETTLE))
         ):
             raise ReActContractError("Act completion must be its final settle boundary")
         return admitted
@@ -185,7 +186,10 @@ class ReActPayloadAdmission(
         /,
     ) -> ActRequest:
         boundary = self.admit_observe_boundary(value)
-        admitted = self.act.admit_request(projector(boundary))
+        projected = projector(boundary)
+        if type(projected) is not ActRequest:
+            raise ReActContractError("Observe-to-Act projection must return an exact ActRequest")
+        admitted = self.act.admit_request(projected)
         if type(admitted.hook_state) is not self.act.hook_state_type:
             raise ReActContractError("Observe-to-Act projection returned the wrong concrete state type")
         return admitted
@@ -219,7 +223,10 @@ class ReActPayloadAdmission(
         /,
     ) -> ObserveRequest[ObserveStateT]:
         boundary = self.admit_think_boundary(value)
-        return self.observe.admit_request(projector(boundary))
+        projected = projector(boundary)
+        if type(projected) is not ObserveRequest:
+            raise ReActContractError("Think-to-Observe projection must return an exact ObserveRequest")
+        return self.observe.admit_request(projected)
 
     def project_act_to_observe(
         self,
@@ -228,7 +235,10 @@ class ReActPayloadAdmission(
         /,
     ) -> ObserveRequest[ObserveStateT]:
         boundary = self.admit_act_boundary(value)
-        return self.observe.admit_request(projector(boundary))
+        projected = projector(boundary)
+        if type(projected) is not ObserveRequest:
+            raise ReActContractError("Act-to-Observe projection must return an exact ObserveRequest")
+        return self.observe.admit_request(projected)
 
 
 __all__: list[str] = []

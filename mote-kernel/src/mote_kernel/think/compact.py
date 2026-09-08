@@ -20,6 +20,7 @@ from mote_kernel.think.contract import (
     ThinkFrame,
     admit_context_frame,
 )
+from mote_kernel.think.identity import ThinkNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
@@ -98,7 +99,11 @@ class CompactNode(
             raise ThinkContractError("CompactPort.compact must return a CompactedContext")
         compacted = compacted_value
         next_frame = ThinkFrame(CompactStep(step.prompt, step.context, compacted), frame.hook_state)
-        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("compact"))
+        return HookActivationRequest(
+            next_frame,
+            frame.hook_state,
+            GraphNodeId(str(ThinkNodeId.COMPACT)),
+        )
 
 
 __all__ = ["CompactNode"]

@@ -35,6 +35,7 @@ from mote_kernel.failover.contract import (
     TransformRequest,
     Unknown,
 )
+from mote_kernel.failover.identity import FailoverNodeId, FailoverRoute, FailoverValueName
 from mote_kernel.failover.plan import FailoverOperationId, FailoverPlan, FailoverPortId, RetryContext
 from mote_kernel.failover.policy import FailoverDecision, ObservationRoute, observe_and_route
 from mote_kernel.hooks.contract import HookGraphValue
@@ -48,7 +49,6 @@ TransformT = TypeVar("TransformT")
 CapabilityT = TypeVar("CapabilityT")
 
 _FAILOVER_DEFINITION_DOMAIN = "mote.failover.v1"
-_FINISH_ROUTE = "finish"
 
 
 def _runtime_plan(
@@ -209,7 +209,7 @@ class _ObserveCall(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     binding: FailoverPlanBinding[TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
-        call = cast(FailoverCall[RequestT], values["request"])
+        call = cast(FailoverCall[RequestT], values[FailoverValueName.REQUEST])
         plan = _runtime_plan(
             values.activation_config,
             self.binding,
@@ -222,7 +222,7 @@ class _ObserveCall(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
             ),
             plan,
         )
-        return Graph.values(frame=frame)
+        return Graph.values(**{FailoverValueName.FRAME: frame})
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +232,10 @@ class _InvokeOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     binding: FailoverPlanBinding[TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
-        frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
+        frame = cast(
+            _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT],
+            values[FailoverValueName.FRAME],
+        )
         candidate = frame.step
         if not isinstance(candidate, _InvokeStep):
             raise FailoverContractError("invoke node requires an invoke step")
@@ -253,7 +256,7 @@ class _InvokeOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
             _ObserveStep[RequestT, ResultT, ReceiptT, HandleT](step.request, step.context, outcome),
             plan,
         )
-        return Graph.values(frame=next_frame)
+        return Graph.values(**{FailoverValueName.FRAME: next_frame})
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,7 +268,10 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
     binding: FailoverPrepareBinding[RequestT, TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Outcome[HookGraphValue]:
-        frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
+        frame = cast(
+            _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT],
+            values[FailoverValueName.FRAME],
+        )
         candidate = frame.step
         if not isinstance(candidate, _ObserveStep):
             raise FailoverContractError("prepare node requires an observe step")
@@ -315,19 +321,22 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
                 prepared.request,
                 next_context,
             )
-            route = ObservationRoute.PREPARE.value
+            route = FailoverRoute.PREPARE
         else:
             next_step = _ObserveStep[RequestT, ResultT, ReceiptT, HandleT](
                 step.request,
                 context,
                 step.outcome,
             )
-            route = _FINISH_ROUTE
+            route = FailoverRoute.FINISH
         next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
             next_step,
             plan,
         )
-        return Graph.success(Graph.values(frame=next_frame, result=result), route=route)
+        return Graph.success(
+            Graph.values(**{FailoverValueName.FRAME: next_frame, FailoverValueName.RESULT: result}),
+            route=route,
+        )
 
 
 def _definition_id(port_id: FailoverPortId) -> str:
@@ -423,32 +432,47 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
         request_type = cast(type[HookGraphValue], FailoverCall)
         frame_type = cast(type[HookGraphValue], _FailoverFrame)
         result_type = cast(type[HookGraphValue], FailoverResult)
-        request = graph.graph_input("request", request_type)
+        request = graph.graph_input(FailoverValueName.REQUEST, request_type)
 
         graph.add_node(
-            "observe",
+            FailoverNodeId.OBSERVE,
             observe,
-            inputs={"request": request},
-            outputs={"frame": frame_type},
+            inputs={FailoverValueName.REQUEST: request},
+            outputs={FailoverValueName.FRAME: frame_type},
         )
         graph.add_node(
-            "invoke",
+            FailoverNodeId.INVOKE,
             invoke,
-            inputs={"frame": graph.node_output("frame")},
-            outputs={"frame": frame_type},
+            inputs={FailoverValueName.FRAME: graph.node_output(FailoverValueName.FRAME)},
+            outputs={FailoverValueName.FRAME: frame_type},
         )
         graph.add_node(
-            "prepare",
+            FailoverNodeId.PREPARE,
             prepare,
-            inputs={"frame": graph.node_output("invoke", "frame")},
-            outputs={"frame": frame_type, "result": result_type},
+            inputs={
+                FailoverValueName.FRAME: graph.node_output(
+                    FailoverNodeId.INVOKE,
+                    FailoverValueName.FRAME,
+                )
+            },
+            outputs={
+                FailoverValueName.FRAME: frame_type,
+                FailoverValueName.RESULT: result_type,
+            },
         )
-        graph.add_edge(Graph.START, "observe")
-        graph.add_edge("observe", "invoke")
-        graph.add_edge("invoke", "prepare")
-        graph.add_edge("prepare", ObservationRoute.PREPARE.value, "invoke")
-        graph.add_edge("prepare", _FINISH_ROUTE, Graph.END)
-        graph.set_outputs({"result": graph.node_output("prepare", "result")})
+        graph.add_edge(Graph.START, FailoverNodeId.OBSERVE)
+        graph.add_edge(FailoverNodeId.OBSERVE, FailoverNodeId.INVOKE)
+        graph.add_edge(FailoverNodeId.INVOKE, FailoverNodeId.PREPARE)
+        graph.add_edge(FailoverNodeId.PREPARE, FailoverRoute.PREPARE, FailoverNodeId.INVOKE)
+        graph.add_edge(FailoverNodeId.PREPARE, FailoverRoute.FINISH, Graph.END)
+        graph.set_outputs(
+            {
+                FailoverValueName.RESULT: graph.node_output(
+                    FailoverNodeId.PREPARE,
+                    FailoverValueName.RESULT,
+                )
+            }
+        )
         return graph
 
 

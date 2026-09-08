@@ -14,6 +14,7 @@ from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from mote_kernel.hooks.contract import HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.identity import ThinkNodeId
 
 PayloadT_contra = TypeVar("PayloadT_contra", contravariant=True)
 SystemPromptT_co = TypeVar("SystemPromptT_co", covariant=True)
@@ -395,8 +396,8 @@ def admit_prompt_frame(
     return _admit_stage_frame(
         result,
         expected_step=PromptStep,
-        expected_node=GraphNodeId("prompt"),
-        stage="context",
+        expected_node=GraphNodeId(str(ThinkNodeId.PROMPT)),
+        stage=ThinkNodeId.CONTEXT,
         expected_state=state,
     )
 
@@ -413,8 +414,8 @@ def admit_context_frame(
     return _admit_stage_frame(
         result,
         expected_step=ContextStep,
-        expected_node=GraphNodeId("context"),
-        stage="compact",
+        expected_node=GraphNodeId(str(ThinkNodeId.CONTEXT)),
+        stage=ThinkNodeId.COMPACT,
     )
 
 
@@ -436,8 +437,8 @@ def admit_compact_frame(
     return _admit_stage_frame(
         result,
         expected_step=CompactStep,
-        expected_node=GraphNodeId("compact"),
-        stage="router",
+        expected_node=GraphNodeId(str(ThinkNodeId.COMPACT)),
+        stage=ThinkNodeId.ROUTER,
     )
 
 
@@ -459,8 +460,8 @@ def admit_router_frame(
     return _admit_stage_frame(
         result,
         expected_step=RouterStep,
-        expected_node=GraphNodeId("router"),
-        stage="inference",
+        expected_node=GraphNodeId(str(ThinkNodeId.ROUTER)),
+        stage=ThinkNodeId.INFERENCE,
     )
 
 
@@ -482,8 +483,8 @@ def admit_inference_frame(
     return _admit_stage_frame(
         result,
         expected_step=InferenceStep,
-        expected_node=GraphNodeId("inference"),
-        stage="command",
+        expected_node=GraphNodeId(str(ThinkNodeId.INFERENCE)),
+        stage=ThinkNodeId.COMMAND,
     )
 
 
@@ -492,7 +493,7 @@ def _admit_stage_frame(
     *,
     expected_step: type[StageT],
     expected_node: GraphNodeId,
-    stage: str,
+    stage: ThinkNodeId,
     expected_state: HookStateT | None = None,
 ) -> ThinkFrame[StageT, HookStateT]:
     """Admit one Hook result at a Think stage boundary.

@@ -18,6 +18,7 @@ from mote_kernel.think.contract import (
     ThinkFrame,
     ThinkRequest,
 )
+from mote_kernel.think.identity import ThinkNodeId
 
 PayloadT = TypeVar("PayloadT")
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
@@ -70,7 +71,11 @@ class PromptNode(
 
         prompt = PromptFrame[SystemPromptT, PlaceholderT, UserPromptT](system, placeholder, user)
         frame = ThinkFrame(PromptStep(prompt), request.hook_state)
-        return HookActivationRequest(frame, request.hook_state, GraphNodeId("prompt"))
+        return HookActivationRequest(
+            frame,
+            request.hook_state,
+            GraphNodeId(str(ThinkNodeId.PROMPT)),
+        )
 
 
 __all__ = ["PromptNode"]

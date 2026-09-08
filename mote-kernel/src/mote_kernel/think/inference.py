@@ -20,6 +20,7 @@ from mote_kernel.think.contract import (
     ThinkFrame,
     admit_router_frame,
 )
+from mote_kernel.think.identity import ThinkNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
@@ -106,7 +107,11 @@ class InferenceNode(
             raise ThinkContractError("InferencePort.infer must return an InferenceResult")
         result = result_value
         next_frame = ThinkFrame(InferenceStep(prompt, compacted, model, result), frame.hook_state)
-        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("inference"))
+        return HookActivationRequest(
+            next_frame,
+            frame.hook_state,
+            GraphNodeId(str(ThinkNodeId.INFERENCE)),
+        )
 
 
 __all__ = ["InferenceNode"]

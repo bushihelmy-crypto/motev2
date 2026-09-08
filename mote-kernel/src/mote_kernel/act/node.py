@@ -22,7 +22,7 @@ from mote_kernel.act.contract import (
     ResumedAuthorization,
 )
 from mote_kernel.act.execute import ExecuteNode
-from mote_kernel.act.identity import ActHookStage, ActSlotId
+from mote_kernel.act.identity import ActHookStage, ActNodeId, ActSlotId, ActValueName
 from mote_kernel.act.port import (
     AuthorizePort,
     ExecutePort,
@@ -144,13 +144,13 @@ class ActNode(
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
-            or hook_slot.node_id != GraphNodeId("hook")
+            or hook_slot.node_id != GraphNodeId(str(ActNodeId.HOOK))
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ActContractError("ActNode shared HookSlotId does not match its definition")
 
         for stage in ActHookStage:
-            admission.admit_act_slot(ActSlotId(definition_id, version, stage.value))
+            admission.admit_act_slot(ActSlotId(definition_id, version, str(ActNodeId(stage))))
 
         # Construct every callable before touching the Graph builder so a
         # failed capability assembly cannot leave a partial definition.
@@ -165,8 +165,8 @@ class ActNode(
         self._admission = admission
 
         request_binding = Graph.bind(
-            "request",
-            Graph.graph_input("request", ActRequest),
+            ActValueName.REQUEST,
+            Graph.graph_input(ActValueName.REQUEST, ActRequest),
         )
 
         # Authorize owns the sole codec/correlation capability.  Install it
@@ -180,7 +180,7 @@ class ActNode(
         )
 
         resolve_output = self.add_node(
-            "resolve",
+            ActNodeId.RESOLVE,
             resolve,
             inputs=(request_binding,),
             input_type=ConfigActivation,
@@ -188,25 +188,28 @@ class ActNode(
                 values.get(request_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ActValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "hook",
+            ActNodeId.HOOK,
             hook,
-            inputs={"request": Graph.node_output(resolve_output)},
+            inputs={ActValueName.REQUEST: Graph.node_output(resolve_output)},
         )
         # Resolve the nested Hook's declared boundary through the generic
         # Graph API.  This preserves the child descriptor identity for every
         # downstream typed binding and for this graph's public output.
         hook_result_ref = cast(
             NodeOutputRef[HookResult[ActHookEnvelope, HookCommandT]],
-            self.output_ref("hook", "result"),
+            self.output_ref(ActNodeId.HOOK, ActValueName.RESULT),
         )
-        authorize_hook_result_binding = Graph.bind("hook_result", hook_result_ref)
-        stage_hook_result_binding = Graph.bind("hook_result", Graph.node_output(hook_result_ref))
+        authorize_hook_result_binding = Graph.bind(ActValueName.HOOK_RESULT, hook_result_ref)
+        stage_hook_result_binding = Graph.bind(
+            ActValueName.HOOK_RESULT,
+            Graph.node_output(hook_result_ref),
+        )
         self.add_node(
-            "authorize",
+            ActNodeId.AUTHORIZE,
             authorize,
             # The resume boundary may provide an explicit authorization input;
             # bind normal activations to the most recent Hook publication
@@ -219,11 +222,11 @@ class ActNode(
                 values.get(authorize_hook_result_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ActValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "execute",
+            ActNodeId.EXECUTE,
             execute,
             inputs=(stage_hook_result_binding,),
             input_type=ConfigActivation,
@@ -231,11 +234,11 @@ class ActNode(
                 values.get(stage_hook_result_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ActValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "settle",
+            ActNodeId.SETTLE,
             settle,
             inputs=(stage_hook_result_binding,),
             input_type=ConfigActivation,
@@ -243,19 +246,24 @@ class ActNode(
                 values.get(stage_hook_result_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ActValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
-        self.add_edge(Graph.START, "resolve")
-        for business_node in ("resolve", "authorize", "execute", "settle"):
-            self.add_edge(business_node, "hook")
+        self.add_edge(Graph.START, ActNodeId.RESOLVE)
+        for business_node in (
+            ActNodeId.RESOLVE,
+            ActNodeId.AUTHORIZE,
+            ActNodeId.EXECUTE,
+            ActNodeId.SETTLE,
+        ):
+            self.add_edge(business_node, ActNodeId.HOOK)
         # Hook returns the current business node identity as its terminal
         # route.  Act owns the mapping from that identity to its next stage.
-        self.add_edge("hook", "resolve", "authorize")
-        self.add_edge("hook", "authorize", "execute")
-        self.add_edge("hook", "execute", "settle")
-        self.add_edge("hook", "settle", Graph.END)
-        self.set_outputs({"result": hook_result_ref})
+        self.add_edge(ActNodeId.HOOK, ActNodeId.RESOLVE, ActNodeId.AUTHORIZE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.AUTHORIZE, ActNodeId.EXECUTE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.EXECUTE, ActNodeId.SETTLE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.SETTLE, Graph.END)
+        self.set_outputs({ActValueName.RESULT: hook_result_ref})
 
     @property
     def hook(
@@ -314,13 +322,13 @@ class ActNode(
         hook_result: HookResult[ActHookEnvelope, HookCommandT] = HookResult(
             envelope,
             (),
-            GraphNodeId("resolve"),
+            GraphNodeId(str(ActNodeId.RESOLVE)),
         )
         self._admission.admit_hook_result(hook_result)
         return self.resume_interrupted(
-            "authorize",
+            ActNodeId.AUTHORIZE,
             str(interrupt.interrupt_id),
-            Graph.values(hook_result=hook_result),
+            Graph.values(**{ActValueName.HOOK_RESULT: hook_result}),
             scope=tuple(str(segment) for segment in interrupt.scope),
         )
 

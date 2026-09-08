@@ -12,6 +12,7 @@ from typing import TypeVar
 
 from mote_kernel.act.identity import (
     ActHookStage,
+    ActNodeId,
     ActSlotId,
     ArgumentsDigest,
     CallerIdentityRef,
@@ -362,7 +363,7 @@ class AuthorizationInterruptView(HookGraphValue):
 
     def __post_init__(self) -> None:
         _require_scope(self.scope)
-        if type(self.node_id) is not str or self.node_id != "authorize":
+        if type(self.node_id) is not str or self.node_id != str(ActNodeId.AUTHORIZE):
             raise ActContractError("authorization interrupt node_id must be authorize")
         if (
             type(self.interrupt_id) is not str

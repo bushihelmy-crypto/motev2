@@ -46,6 +46,31 @@ class ReActRoute(StrEnum):
     ACT = "act"
 
 
+class ReActNodeId(StrEnum):
+    """The closed node identities owned by the top-level ReAct graph."""
+
+    OBSERVE = "observe"
+    THINK = ReActRoute.THINK
+    ACT = ReActRoute.ACT
+
+
+class ReActPhaseNodeId(StrEnum):
+    """The closed callable identities used inside ReAct phase graphs."""
+
+    PREPARE = "prepare"
+    PROJECT = "project"
+    RUN = "run"
+    ROUTE = "route"
+    NEXT_OBSERVE = "next_observe"
+
+
+class ReActValueName(StrEnum):
+    """The closed value-port names owned by ReAct composition."""
+
+    REQUEST = "request"
+    RESULT = "result"
+
+
 ObserveRoutePolicy: TypeAlias = Callable[[ObserveResult], ReActRoute]
 ObserveToActProjector: TypeAlias = Callable[
     [HookResult[ObserveHookEnvelope, ObserveHookCommandT]],

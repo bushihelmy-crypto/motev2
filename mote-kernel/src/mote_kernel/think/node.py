@@ -44,6 +44,7 @@ from mote_kernel.think.contract import (
     ThinkRequest,
     ThinkStep,
 )
+from mote_kernel.think.identity import ThinkNodeId, ThinkValueName
 from mote_kernel.think.inference import InferenceNode
 from mote_kernel.think.prompt import PromptNode
 from mote_kernel.think.router import RouterNode
@@ -165,7 +166,7 @@ class ThinkNode(
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
-            or hook_slot.node_id != GraphNodeId("hook")
+            or hook_slot.node_id != GraphNodeId(str(ThinkNodeId.HOOK))
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ThinkContractError("ThinkNode shared HookSlotId does not match its definition")
@@ -217,11 +218,11 @@ class ThinkNode(
 
         request_input = cast(
             GraphInputRef[ThinkRequest[PayloadT, HookStateT]],
-            Graph.graph_input("request", ThinkRequest),
+            Graph.graph_input(ThinkValueName.REQUEST, ThinkRequest),
         )
-        request_binding = Graph.bind("request", request_input)
+        request_binding = Graph.bind(ThinkValueName.REQUEST, request_input)
         prompt_output = self.add_node(
-            "prompt",
+            ThinkNodeId.PROMPT,
             prompt,
             inputs=(request_binding,),
             input_type=ConfigActivation,
@@ -229,18 +230,18 @@ class ThinkNode(
                 values.get(request_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "hook",
+            ThinkNodeId.HOOK,
             hook,
-            inputs={"request": Graph.node_output(prompt_output)},
+            inputs={ThinkValueName.REQUEST: Graph.node_output(prompt_output)},
         )
         # Resolve the shared nested Hook boundary through Graph's generic
         # output API.  The returned descriptor is the child declaration's
         # identity, so every typed stage binding remains compiler-checked.
-        hook_result_ref = self.output_ref("hook", "result")
+        hook_result_ref = self.output_ref(ThinkNodeId.HOOK, ThinkValueName.RESULT)
         hook_result_source = Graph.node_output(hook_result_ref)
         context_hook_binding = cast(
             TypedInputBinding[
@@ -249,7 +250,7 @@ class ThinkNode(
                     HookCommandT,
                 ]
             ],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ThinkValueName.HOOK_RESULT, hook_result_source),
         )
         compact_hook_binding = cast(
             TypedInputBinding[
@@ -261,7 +262,7 @@ class ThinkNode(
                     HookCommandT,
                 ]
             ],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ThinkValueName.HOOK_RESULT, hook_result_source),
         )
         router_hook_binding = cast(
             TypedInputBinding[
@@ -279,7 +280,7 @@ class ThinkNode(
                     HookCommandT,
                 ]
             ],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ThinkValueName.HOOK_RESULT, hook_result_source),
         )
         inference_hook_binding = cast(
             TypedInputBinding[
@@ -296,7 +297,7 @@ class ThinkNode(
                     HookCommandT,
                 ]
             ],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ThinkValueName.HOOK_RESULT, hook_result_source),
         )
         command_hook_binding = cast(
             TypedInputBinding[
@@ -314,10 +315,10 @@ class ThinkNode(
                     HookCommandT,
                 ]
             ],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ThinkValueName.HOOK_RESULT, hook_result_source),
         )
         self.add_node(
-            "context",
+            ThinkNodeId.CONTEXT,
             context,
             inputs=(request_binding, context_hook_binding),
             input_type=ConfigActivation,
@@ -328,11 +329,11 @@ class ThinkNode(
                 ),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "compact",
+            ThinkNodeId.COMPACT,
             compact,
             inputs=(compact_hook_binding,),
             input_type=ConfigActivation,
@@ -340,11 +341,11 @@ class ThinkNode(
                 values.get(compact_hook_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "router",
+            ThinkNodeId.ROUTER,
             router,
             inputs=(router_hook_binding,),
             input_type=ConfigActivation,
@@ -352,11 +353,11 @@ class ThinkNode(
                 values.get(router_hook_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "inference",
+            ThinkNodeId.INFERENCE,
             inference,
             inputs=(inference_hook_binding,),
             input_type=ConfigActivation,
@@ -364,11 +365,11 @@ class ThinkNode(
                 values.get(inference_hook_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "command",
+            ThinkNodeId.COMMAND,
             command,
             inputs=(command_hook_binding,),
             input_type=ConfigActivation,
@@ -376,21 +377,28 @@ class ThinkNode(
                 values.get(command_hook_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ThinkValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
-        self.add_edge(Graph.START, "prompt")
-        for business_node in ("prompt", "context", "compact", "router", "inference", "command"):
-            self.add_edge(business_node, "hook")
+        self.add_edge(Graph.START, ThinkNodeId.PROMPT)
+        for business_node in (
+            ThinkNodeId.PROMPT,
+            ThinkNodeId.CONTEXT,
+            ThinkNodeId.COMPACT,
+            ThinkNodeId.ROUTER,
+            ThinkNodeId.INFERENCE,
+            ThinkNodeId.COMMAND,
+        ):
+            self.add_edge(business_node, ThinkNodeId.HOOK)
         # The shared Hook returns the current business node identity as its
         # terminal route.  This graph decides what each identity means.
-        self.add_edge("hook", "prompt", "context")
-        self.add_edge("hook", "context", "compact")
-        self.add_edge("hook", "compact", "router")
-        self.add_edge("hook", "router", "inference")
-        self.add_edge("hook", "inference", "command")
-        self.add_edge("hook", "command", Graph.END)
-        self.set_outputs({"result": hook_result_ref})
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.PROMPT, ThinkNodeId.CONTEXT)
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.CONTEXT, ThinkNodeId.COMPACT)
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.COMPACT, ThinkNodeId.ROUTER)
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.ROUTER, ThinkNodeId.INFERENCE)
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.INFERENCE, ThinkNodeId.COMMAND)
+        self.add_edge(ThinkNodeId.HOOK, ThinkNodeId.COMMAND, Graph.END)
+        self.set_outputs({ThinkValueName.RESULT: hook_result_ref})
 
     @property
     def hook(

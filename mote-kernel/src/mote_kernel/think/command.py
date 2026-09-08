@@ -20,6 +20,7 @@ from mote_kernel.think.contract import (
     ThinkFrame,
     admit_inference_frame,
 )
+from mote_kernel.think.identity import ThinkNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
@@ -103,7 +104,11 @@ class CommandNode(
             CommandStep(step.prompt, step.compacted, step.model, step.inference, core),
             frame.hook_state,
         )
-        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("command"))
+        return HookActivationRequest(
+            next_frame,
+            frame.hook_state,
+            GraphNodeId(str(ThinkNodeId.COMMAND)),
+        )
 
 
 __all__ = ["CommandNode"]

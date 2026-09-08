@@ -1,7 +1,7 @@
 """Stable identities owned by the Hooks package."""
 
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import Enum, StrEnum, auto
 
 from mote_kernel.state.graph_state.identity import (
     GraphDefinitionId,
@@ -11,7 +11,7 @@ from mote_kernel.state.graph_state.identity import (
 )
 
 
-class HookStage(Enum):
+class HookStage(StrEnum):
     """The lifecycle boundary currently reserved for a hook node."""
 
     AFTER_NODE = "after_node"
@@ -22,6 +22,21 @@ class HookPriority(Enum):
 
     P1 = auto()
     P2 = auto()
+
+
+class HookNodeId(StrEnum):
+    """The closed node identities inside one shared Hook graph."""
+
+    P1 = "p1"
+    P2 = "p2"
+
+
+class HookValueName(StrEnum):
+    """The closed value-port names owned by one shared Hook graph."""
+
+    REQUEST = "request"
+    PROGRESS = "progress"
+    RESULT = "result"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +71,16 @@ def hook_definition_id(slot: HookSlotId) -> GraphDefinitionId:
         _HOOK_DEFINITION_DOMAIN,
         str(slot.definition_id),
         str(slot.node_id),
-        slot.stage.value,
+        str(slot.stage),
     )
     return GraphDefinitionId("".join(f"{len(field)}:{field}" for field in fields))
 
 
-__all__ = ["HookPriority", "HookSlotId", "HookStage", "hook_definition_id"]
+__all__ = [
+    "HookNodeId",
+    "HookPriority",
+    "HookSlotId",
+    "HookStage",
+    "HookValueName",
+    "hook_definition_id",
+]

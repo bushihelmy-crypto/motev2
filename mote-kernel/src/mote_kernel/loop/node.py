@@ -14,6 +14,7 @@ from mote_kernel.act.contract import (
 from mote_kernel.act.contract import (
     HookStateProjection as ActHookStateProjection,
 )
+from mote_kernel.act.identity import ActNodeId
 from mote_kernel.act.node import ActNode
 from mote_kernel.config import (
     Config,
@@ -43,7 +44,10 @@ from mote_kernel.loop.contract import (
     ObserveToActProjector,
     ObserveToThinkProjector,
     ReActContractError,
+    ReActNodeId,
+    ReActPhaseNodeId,
     ReActRoute,
+    ReActValueName,
     ThinkToObserveProjector,
 )
 from mote_kernel.observe.admission import ObservePayloadAdmission
@@ -55,8 +59,10 @@ from mote_kernel.observe.contract import (
     ObserveHookEnvelope,
     ObserveRequest,
 )
+from mote_kernel.observe.identity import ObserveNodeId
 from mote_kernel.observe.node import ObserveNode
 from mote_kernel.think.contract import ThinkFrame, ThinkRequest, ThinkStep
+from mote_kernel.think.identity import ThinkNodeId
 from mote_kernel.think.node import ThinkNode
 
 ObservePriorityConfigT = TypeVar("ObservePriorityConfigT")
@@ -70,10 +76,6 @@ ActPriorityConfigT = TypeVar("ActPriorityConfigT")
 ActStateT = TypeVar("ActStateT", bound=ActHookStateProjection)
 ActHookCommandT = TypeVar("ActHookCommandT", bound=ActHookCommand)
 _ReActCapabilityT = TypeVar("_ReActCapabilityT")
-
-_OBSERVE_COMPLETION_ROUTE = "write_observation"
-_THINK_COMPLETION_ROUTE = "command"
-_ACT_COMPLETION_ROUTE = "settle"
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +171,7 @@ class _ReActOperations(
             self.route_policy,
         )
         route = self.admission.select_route(route_policy, admitted)
-        return Graph.success(Graph.values(result=admitted), route=route.value)
+        return Graph.success(Graph.values(**{ReActValueName.RESULT: admitted}), route=route)
 
     async def prepare_observe(
         self,
@@ -403,11 +405,11 @@ class ReActNode(
         observe_phase = Graph[HookGraphValue](f"{definition_id}.observe-phase", version=version)
         observe_request_input = cast(
             GraphInputRef[ObserveRequest[ObserveStateT]],
-            Graph.graph_input("request", ObserveRequest),
+            Graph.graph_input(ReActValueName.REQUEST, ObserveRequest),
         )
-        observe_request_binding = Graph.bind("request", observe_request_input)
+        observe_request_binding = Graph.bind(ReActValueName.REQUEST, observe_request_input)
         prepared_request = observe_phase.add_node(
-            "prepare",
+            ReActPhaseNodeId.PREPARE,
             operations.prepare_observe,
             inputs=(observe_request_binding,),
             input_type=ConfigActivation,
@@ -415,21 +417,21 @@ class ReActNode(
                 values.get(observe_request_binding),
                 values.activation_config,
             ),
-            output_name="request",
+            output_name=ReActValueName.REQUEST,
             output_type=ObserveRequest,
         )
         observe_phase.add_node(
-            "run",
+            ReActPhaseNodeId.RUN,
             observe,
-            inputs={"request": prepared_request},
+            inputs={ReActValueName.REQUEST: prepared_request},
         )
         observe_result = cast(
             NodeOutputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-            observe_phase.output_ref("run", "result"),
+            observe_phase.output_ref(ReActPhaseNodeId.RUN, ReActValueName.RESULT),
         )
-        route_binding = Graph.bind("result", observe_result)
+        route_binding = Graph.bind(ReActValueName.RESULT, observe_result)
         routed_result = observe_phase.add_node(
-            "route",
+            ReActPhaseNodeId.ROUTE,
             operations.route_observe,
             inputs=(route_binding,),
             input_type=ConfigActivation,
@@ -437,24 +439,28 @@ class ReActNode(
                 values.get(route_binding),
                 values.activation_config,
             ),
-            output_name="result",
+            output_name=ReActValueName.RESULT,
             output_type=HookResult,
         )
-        observe_phase.add_edge(Graph.START, "prepare")
-        observe_phase.add_edge("prepare", "run")
-        observe_phase.add_edge("run", _OBSERVE_COMPLETION_ROUTE, "route")
+        observe_phase.add_edge(Graph.START, ReActPhaseNodeId.PREPARE)
+        observe_phase.add_edge(ReActPhaseNodeId.PREPARE, ReActPhaseNodeId.RUN)
+        observe_phase.add_edge(
+            ReActPhaseNodeId.RUN,
+            ObserveNodeId.WRITE_OBSERVATION,
+            ReActPhaseNodeId.ROUTE,
+        )
         for route in (ReActRoute.CONFIG, ReActRoute.ASSISTANT, ReActRoute.THINK, ReActRoute.ACT):
-            observe_phase.add_edge("route", route.value, Graph.END)
-        observe_phase.set_outputs({"result": routed_result})
+            observe_phase.add_edge(ReActPhaseNodeId.ROUTE, route, Graph.END)
+        observe_phase.set_outputs({ReActValueName.RESULT: routed_result})
 
         think_phase = Graph[HookGraphValue](f"{definition_id}.think-phase", version=version)
         think_result_input = cast(
             GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-            Graph.graph_input("result", HookResult),
+            Graph.graph_input(ReActValueName.RESULT, HookResult),
         )
-        observe_to_think_binding = Graph.bind("result", think_result_input)
+        observe_to_think_binding = Graph.bind(ReActValueName.RESULT, think_result_input)
         think_request = think_phase.add_node(
-            "project",
+            ReActPhaseNodeId.PROJECT,
             operations.project_observe_to_think,
             inputs=(observe_to_think_binding,),
             input_type=ConfigActivation,
@@ -462,21 +468,24 @@ class ReActNode(
                 values.get(observe_to_think_binding),
                 values.activation_config,
             ),
-            output_name="request",
+            output_name=ReActValueName.REQUEST,
             output_type=ThinkRequest,
         )
         think_phase.add_node(
-            "run",
+            ReActPhaseNodeId.RUN,
             think,
-            inputs={"request": think_request},
+            inputs={ReActValueName.REQUEST: think_request},
         )
         think_result = cast(
             NodeOutputRef[HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT]],
-            think_phase.output_ref("run", "result"),
+            think_phase.output_ref(ReActPhaseNodeId.RUN, ReActValueName.RESULT),
         )
-        think_result_binding = Graph.bind("result", Graph.node_output(think_result))
+        think_result_binding = Graph.bind(
+            ReActValueName.RESULT,
+            Graph.node_output(think_result),
+        )
         next_think_request = think_phase.add_node(
-            "next_observe",
+            ReActPhaseNodeId.NEXT_OBSERVE,
             operations.project_think_to_observe,
             inputs=(think_result_binding,),
             input_type=ConfigActivation,
@@ -484,22 +493,26 @@ class ReActNode(
                 values.get(think_result_binding),
                 values.activation_config,
             ),
-            output_name="request",
+            output_name=ReActValueName.REQUEST,
             output_type=ObserveRequest,
         )
-        think_phase.add_edge("project", "run")
-        think_phase.add_edge("run", _THINK_COMPLETION_ROUTE, "next_observe")
-        think_phase.add_edge("next_observe", Graph.END)
-        think_phase.set_outputs({"request": next_think_request})
+        think_phase.add_edge(ReActPhaseNodeId.PROJECT, ReActPhaseNodeId.RUN)
+        think_phase.add_edge(
+            ReActPhaseNodeId.RUN,
+            ThinkNodeId.COMMAND,
+            ReActPhaseNodeId.NEXT_OBSERVE,
+        )
+        think_phase.add_edge(ReActPhaseNodeId.NEXT_OBSERVE, Graph.END)
+        think_phase.set_outputs({ReActValueName.REQUEST: next_think_request})
 
         act_phase = Graph[HookGraphValue](f"{definition_id}.act-phase", version=version)
         act_result_input = cast(
             GraphInputRef[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
-            Graph.graph_input("result", HookResult),
+            Graph.graph_input(ReActValueName.RESULT, HookResult),
         )
-        observe_to_act_binding = Graph.bind("result", act_result_input)
+        observe_to_act_binding = Graph.bind(ReActValueName.RESULT, act_result_input)
         act_request = act_phase.add_node(
-            "project",
+            ReActPhaseNodeId.PROJECT,
             operations.project_observe_to_act,
             inputs=(observe_to_act_binding,),
             input_type=ConfigActivation,
@@ -507,21 +520,24 @@ class ReActNode(
                 values.get(observe_to_act_binding),
                 values.activation_config,
             ),
-            output_name="request",
+            output_name=ReActValueName.REQUEST,
             output_type=ActRequest,
         )
         act_phase.add_node(
-            "run",
+            ReActPhaseNodeId.RUN,
             act,
-            inputs={"request": act_request},
+            inputs={ReActValueName.REQUEST: act_request},
         )
         act_result = cast(
             NodeOutputRef[HookResult[ActHookEnvelope, ActHookCommandT]],
-            act_phase.output_ref("run", "result"),
+            act_phase.output_ref(ReActPhaseNodeId.RUN, ReActValueName.RESULT),
         )
-        act_result_binding = Graph.bind("result", Graph.node_output(act_result))
+        act_result_binding = Graph.bind(
+            ReActValueName.RESULT,
+            Graph.node_output(act_result),
+        )
         next_act_request = act_phase.add_node(
-            "next_observe",
+            ReActPhaseNodeId.NEXT_OBSERVE,
             operations.project_act_to_observe,
             inputs=(act_result_binding,),
             input_type=ConfigActivation,
@@ -529,38 +545,49 @@ class ReActNode(
                 values.get(act_result_binding),
                 values.activation_config,
             ),
-            output_name="request",
+            output_name=ReActValueName.REQUEST,
             output_type=ObserveRequest,
         )
-        act_phase.add_edge("project", "run")
-        act_phase.add_edge("run", _ACT_COMPLETION_ROUTE, "next_observe")
-        act_phase.add_edge("next_observe", Graph.END)
-        act_phase.set_outputs({"request": next_act_request})
+        act_phase.add_edge(ReActPhaseNodeId.PROJECT, ReActPhaseNodeId.RUN)
+        act_phase.add_edge(
+            ReActPhaseNodeId.RUN,
+            ActNodeId.SETTLE,
+            ReActPhaseNodeId.NEXT_OBSERVE,
+        )
+        act_phase.add_edge(ReActPhaseNodeId.NEXT_OBSERVE, Graph.END)
+        act_phase.set_outputs({ReActValueName.REQUEST: next_act_request})
 
         super().__init__(definition_id, version=version)
         self.add_node(
-            "observe",
+            ReActNodeId.OBSERVE,
             observe_phase,
-            inputs={"request": Graph.node_output("request")},
+            inputs={ReActValueName.REQUEST: Graph.node_output(ReActValueName.REQUEST)},
         )
         self.add_node(
-            "think",
+            ReActNodeId.THINK,
             think_phase,
-            inputs={"result": Graph.node_output(observe_result)},
+            inputs={ReActValueName.RESULT: Graph.node_output(observe_result)},
         )
         self.add_node(
-            "act",
+            ReActNodeId.ACT,
             act_phase,
-            inputs={"result": Graph.node_output(observe_result)},
+            inputs={ReActValueName.RESULT: Graph.node_output(observe_result)},
         )
-        self.add_edge(Graph.START, "observe")
-        self.add_edge("think", "observe")
-        self.add_edge("act", "observe")
-        self.add_edge("observe", ReActRoute.CONFIG.value, Graph.END)
-        self.add_edge("observe", ReActRoute.ASSISTANT.value, Graph.END)
-        self.add_edge("observe", ReActRoute.THINK.value, "act")
-        self.add_edge("observe", ReActRoute.ACT.value, "think")
-        self.set_outputs({"result": self.output_ref("observe", "result")})
+        self.add_edge(Graph.START, ReActNodeId.OBSERVE)
+        self.add_edge(ReActNodeId.THINK, ReActNodeId.OBSERVE)
+        self.add_edge(ReActNodeId.ACT, ReActNodeId.OBSERVE)
+        self.add_edge(ReActNodeId.OBSERVE, ReActRoute.CONFIG, Graph.END)
+        self.add_edge(ReActNodeId.OBSERVE, ReActRoute.ASSISTANT, Graph.END)
+        self.add_edge(ReActNodeId.OBSERVE, ReActRoute.THINK, ReActNodeId.ACT)
+        self.add_edge(ReActNodeId.OBSERVE, ReActRoute.ACT, ReActNodeId.THINK)
+        self.set_outputs(
+            {
+                ReActValueName.RESULT: self.output_ref(
+                    ReActNodeId.OBSERVE,
+                    ReActValueName.RESULT,
+                )
+            }
+        )
 
 
 __all__ = ["ReActNode"]

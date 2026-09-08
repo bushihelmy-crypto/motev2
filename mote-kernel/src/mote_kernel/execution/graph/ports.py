@@ -4,7 +4,7 @@ import operator
 import typing
 from collections.abc import Mapping, MutableMapping, MutableSequence, MutableSet
 from dataclasses import dataclass
-from enum import IntEnum, auto
+from enum import IntEnum, StrEnum, auto
 from inspect import isabstract
 from typing import Generic, Protocol, TypeAlias, TypeVar
 
@@ -34,9 +34,10 @@ def _is_mutable_container_type(value_type: type[ValueT], /) -> bool:
 def canonical_port_name(name: str, *, kind: str = "port") -> str:
     """Return one stable user-facing port name or fail at its call boundary."""
 
-    if not is_canonical_identity(name):
+    canonical = str(name) if isinstance(name, StrEnum) else name
+    if not is_canonical_identity(canonical):
         raise GraphValidationError(f"{kind} name must be a non-empty trimmed string")
-    return name
+    return canonical
 
 
 def canonical_nominal_type(value_type: type[ValueT] | str) -> "NominalTypeDescriptor[ValueT]":
@@ -179,11 +180,20 @@ class PublicationSelection:
 
 @dataclass(frozen=True, slots=True)
 class CompiledPredecessorInput:
-    """Compiler-proved output ports for one control-causal input."""
+    """Compiler-proved cases for one control-causal input.
+
+    ``sources`` is the set of routed predecessors that may supply the value.
+    An entry activation has no predecessor reference, so the compiler records
+    its graph-input case separately in ``start_input``.  Keeping both cases in
+    the immutable binding makes the activation contract explicit; runtime code
+    only selects one of these compiler-proved sources from the State-owned
+    cause.
+    """
 
     target: GraphNodeId
     input_name: str
     sources: tuple[NodeOutputPort, ...]
+    start_input: GraphInputPort | None = None
 
 
 ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledPredecessorInput

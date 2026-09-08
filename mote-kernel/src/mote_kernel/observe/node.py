@@ -50,6 +50,8 @@ from mote_kernel.observe.identity import (
     ObservationWait,
     ObserveHookStage,
     ObserveIdentityError,
+    ObserveNodeId,
+    ObserveValueName,
 )
 from mote_kernel.observe.port import (
     BackgroundTaskPort,
@@ -118,7 +120,7 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
         hook_request = HookActivationRequest(
             envelope,
             request.hook_state,
-            GraphNodeId("get_observation"),
+            GraphNodeId(str(ObserveNodeId.GET_OBSERVATION)),
         )
         self.admission.admit_hook_request(hook_request)
         return hook_request
@@ -276,7 +278,7 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         hook_request = HookActivationRequest(
             next_envelope,
             hook_state,
-            GraphNodeId("write_observation"),
+            GraphNodeId(str(ObserveNodeId.WRITE_OBSERVATION)),
         )
         self.admission.admit_hook_request(hook_request)
         return ConfigActivation(hook_request, successor_config)
@@ -403,7 +405,7 @@ class ObserveNode(
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
-            or hook_slot.node_id != GraphNodeId("hook")
+            or hook_slot.node_id != GraphNodeId(str(ObserveNodeId.HOOK))
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ObserveContractError("Observe shared HookSlotId does not match its definition")
@@ -429,9 +431,9 @@ class ObserveNode(
 
         request_input = cast(
             GraphInputRef[ObserveRequest[HookStateT]],
-            Graph.graph_input("request", ObserveRequest),
+            Graph.graph_input(ObserveValueName.REQUEST, ObserveRequest),
         )
-        request_binding = Graph.bind("request", request_input)
+        request_binding = Graph.bind(ObserveValueName.REQUEST, request_input)
 
         self.set_resume_codec(
             resume_binding.codec_id,
@@ -441,7 +443,7 @@ class ObserveNode(
         )
 
         get_output = self.add_node(
-            "get_observation",
+            ObserveNodeId.GET_OBSERVATION,
             get_node,
             inputs=(request_binding,),
             input_type=ConfigActivation,
@@ -449,22 +451,22 @@ class ObserveNode(
                 values.get(request_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ObserveValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
         self.add_node(
-            "hook",
+            ObserveNodeId.HOOK,
             hook,
-            inputs={"request": Graph.node_output(get_output)},
+            inputs={ObserveValueName.REQUEST: Graph.node_output(get_output)},
         )
-        hook_result_ref = self.output_ref("hook", "result")
+        hook_result_ref = self.output_ref(ObserveNodeId.HOOK, ObserveValueName.RESULT)
         hook_result_source = Graph.node_output(hook_result_ref)
         hook_result_binding = cast(
             TypedInputBinding[HookResult[ObserveHookEnvelope, HookCommandT]],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ObserveValueName.HOOK_RESULT, hook_result_source),
         )
         self.add_node(
-            "write_observation",
+            ObserveNodeId.WRITE_OBSERVATION,
             write_node,
             inputs=(hook_result_binding,),
             input_type=ConfigActivation,
@@ -472,15 +474,19 @@ class ObserveNode(
                 values.get(hook_result_binding),
                 values.activation_config,
             ),
-            output_name="hook_request",
+            output_name=ObserveValueName.HOOK_REQUEST,
             output_type=HookActivationRequest,
         )
-        self.add_edge(Graph.START, "get_observation")
-        self.add_edge("get_observation", "hook")
-        self.add_edge("hook", "get_observation", "write_observation")
-        self.add_edge("write_observation", "hook")
-        self.add_edge("hook", "write_observation", Graph.END)
-        self.set_outputs({"result": hook_result_ref})
+        self.add_edge(Graph.START, ObserveNodeId.GET_OBSERVATION)
+        self.add_edge(ObserveNodeId.GET_OBSERVATION, ObserveNodeId.HOOK)
+        self.add_edge(
+            ObserveNodeId.HOOK,
+            ObserveNodeId.GET_OBSERVATION,
+            ObserveNodeId.WRITE_OBSERVATION,
+        )
+        self.add_edge(ObserveNodeId.WRITE_OBSERVATION, ObserveNodeId.HOOK)
+        self.add_edge(ObserveNodeId.HOOK, ObserveNodeId.WRITE_OBSERVATION, Graph.END)
+        self.set_outputs({ObserveValueName.RESULT: hook_result_ref})
 
     @property
     def hook(
@@ -534,7 +540,7 @@ class ObserveNode(
         matches = tuple(
             interrupt
             for interrupt in awaiting.interrupts
-            if str(interrupt.interrupt_id) == interrupt_id and str(interrupt.node_id) == "get_observation"
+            if str(interrupt.interrupt_id) == interrupt_id and str(interrupt.node_id) == ObserveNodeId.GET_OBSERVATION
         )
         if len(matches) != 1:
             raise ObserveContractError("interrupt_id must identify exactly one Observe get_observation interrupt")
@@ -544,9 +550,9 @@ class ObserveNode(
         except ObserveIdentityError as error:
             raise ObserveContractError("Observe interrupt payload is not a valid ObservationWait") from error
         request = self._admission.admit_request(ObserveRequest(wait.after_cursor, hook_state))
-        values = Graph.values(request=request)
+        values = Graph.values(**{ObserveValueName.REQUEST: request})
         return self.resume_interrupted(
-            "get_observation",
+            ObserveNodeId.GET_OBSERVATION,
             interrupt_id,
             values,
             scope=tuple(str(segment) for segment in interrupt.scope),

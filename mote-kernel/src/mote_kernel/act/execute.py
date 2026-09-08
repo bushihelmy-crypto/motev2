@@ -17,7 +17,7 @@ from mote_kernel.act.contract import (
     HookStateProjection,
     ToolExecutionResult,
 )
-from mote_kernel.act.identity import ActHookStage
+from mote_kernel.act.identity import ActHookStage, ActNodeId
 from mote_kernel.act.port import ExecutePort
 from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
@@ -64,7 +64,11 @@ class ExecuteNode(Generic[HookStateT, HookCommandT]):
             ExecuteStageValue(execution),
             hook_state,
         )
-        hook_request = HookActivationRequest(next_envelope, hook_state, GraphNodeId("execute"))
+        hook_request = HookActivationRequest(
+            next_envelope,
+            hook_state,
+            GraphNodeId(str(ActNodeId.EXECUTE)),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

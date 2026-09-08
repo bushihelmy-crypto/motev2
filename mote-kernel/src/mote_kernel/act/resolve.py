@@ -18,7 +18,7 @@ from mote_kernel.act.contract import (
     ResolvedInvocation,
     ResolveStageValue,
 )
-from mote_kernel.act.identity import ActHookStage
+from mote_kernel.act.identity import ActHookStage, ActNodeId
 from mote_kernel.act.port import ResolvePort
 from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
@@ -66,7 +66,11 @@ class ResolveNode(Generic[HookStateT, HookCommandT]):
             ResolveStageValue(authorization),
             hook_state,
         )
-        hook_request = HookActivationRequest(envelope, hook_state, GraphNodeId("resolve"))
+        hook_request = HookActivationRequest(
+            envelope,
+            hook_state,
+            GraphNodeId(str(ActNodeId.RESOLVE)),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

@@ -21,7 +21,13 @@ from mote_kernel.hooks.contract import (
     HookResult,
     HookStageResult,
 )
-from mote_kernel.hooks.identity import HookPriority, HookSlotId, hook_definition_id
+from mote_kernel.hooks.identity import (
+    HookNodeId,
+    HookPriority,
+    HookSlotId,
+    HookValueName,
+    hook_definition_id,
+)
 from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
 from mote_kernel.hooks.port import HookPort
 from mote_kernel.invocation import Invocation
@@ -72,7 +78,7 @@ class _P1Node(
         values: Graph.Values[HookGraphValue],
         /,
     ) -> Graph.Values[HookGraphValue]:
-        request_value = cast(HookActivationRequest[ValueT, StateT], values["request"])
+        request_value = cast(HookActivationRequest[ValueT, StateT], values[HookValueName.REQUEST])
         config = values.activation_config
         priority_plan, port = self._runtime(config)
         admission = port.admission
@@ -80,14 +86,16 @@ class _P1Node(
         cursor = config.config_cursor if config is not None else None
         result = await port.execute(priority_plan, request, cursor)
         return Graph.values(
-            progress=_HookProgress(
-                HookActivationRequest(
-                    result.value,
-                    request.state,
-                    request.node_id,
-                ),
-                result.commands,
-            )
+            **{
+                HookValueName.PROGRESS: _HookProgress(
+                    HookActivationRequest(
+                        result.value,
+                        request.state,
+                        request.node_id,
+                    ),
+                    result.commands,
+                )
+            }
         )
 
 
@@ -122,7 +130,7 @@ class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
     ) -> Graph.Values[HookGraphValue] | Graph.Outcome[HookGraphValue]:
         progress = cast(
             _HookProgress[ValueT, StateT, CommandT],
-            values["progress"],
+            values[HookValueName.PROGRESS],
         )
         request = progress.request
         config = values.activation_config
@@ -137,7 +145,7 @@ class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
                 request.node_id,
             )
         )
-        output = Graph.values(result=hook_result)
+        output = Graph.values(**{HookValueName.RESULT: hook_result})
         # The shared Hook only reports which business node supplied the
         # request.  It does not know the containing graph's topology.  A
         # parent graph declares the meaning of that opaque node token on
@@ -211,7 +219,7 @@ class HookNode(
         request_type = cast(type[HookGraphValue], HookActivationRequest)
         progress_type = cast(type[HookGraphValue], _HookProgress)
         result_type = cast(type[HookGraphValue], HookResult)
-        request_input = Graph.graph_input("request", request_type)
+        request_input = Graph.graph_input(HookValueName.REQUEST, request_type)
         port = HookPort(payload_admission, invocation)
         p1_binding = HookPriorityBinding[PriorityConfigT, ValueT, StateT, CommandT](
             slot,
@@ -225,22 +233,34 @@ class HookNode(
         p2 = _P2Node[PriorityConfigT, ValueT, StateT, CommandT](plan.p2, port, p2_binding, slot)
 
         self.add_node(
-            "p1",
+            HookNodeId.P1,
             p1,
-            inputs={"request": request_input},
-            outputs={"progress": progress_type},
+            inputs={HookValueName.REQUEST: request_input},
+            outputs={HookValueName.PROGRESS: progress_type},
         )
         self.add_node(
-            "p2",
+            HookNodeId.P2,
             p2,
-            inputs={"progress": Graph.node_output("p1", "progress")},
-            outputs={"result": result_type},
+            inputs={
+                HookValueName.PROGRESS: Graph.node_output(
+                    HookNodeId.P1,
+                    HookValueName.PROGRESS,
+                )
+            },
+            outputs={HookValueName.RESULT: result_type},
         )
-        self.add_edge(Graph.START, "p1")
-        self.add_edge("p1", "p2")
-        self.add_edge("p2", Graph.END)
+        self.add_edge(Graph.START, HookNodeId.P1)
+        self.add_edge(HookNodeId.P1, HookNodeId.P2)
+        self.add_edge(HookNodeId.P2, Graph.END)
         # Graph owns typed output resolution, including nested boundaries.
-        self.set_outputs({"result": self.output_ref("p2", "result")})
+        self.set_outputs(
+            {
+                HookValueName.RESULT: self.output_ref(
+                    HookNodeId.P2,
+                    HookValueName.RESULT,
+                )
+            }
+        )
 
     @property
     def slot(self) -> HookSlotId:

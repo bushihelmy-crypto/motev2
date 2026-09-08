@@ -17,7 +17,7 @@ from mote_kernel.act.contract import (
     SettleStageValue,
     ToolExchangeWriteRequest,
 )
-from mote_kernel.act.identity import ActHookStage
+from mote_kernel.act.identity import ActHookStage, ActNodeId
 from mote_kernel.act.port import SettlementPort, ToolExchangeWriter
 from mote_kernel.config import ConfigActivation
 from mote_kernel.hooks.contract import HookActivationRequest, HookResult
@@ -68,7 +68,11 @@ class SettleNode(Generic[HookStateT, HookCommandT]):
             SettleStageValue(settled),
             hook_state,
         )
-        hook_request = HookActivationRequest(next_envelope, hook_state, GraphNodeId("settle"))
+        hook_request = HookActivationRequest(
+            next_envelope,
+            hook_state,
+            GraphNodeId(str(ActNodeId.SETTLE)),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

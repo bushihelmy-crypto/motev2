@@ -59,6 +59,7 @@ from mote_kernel.observe.identity import (
     ObservationCursor,
     ObservationWait,
     ObserveHookStage,
+    ObserveNodeId,
     WaitRegistration,
 )
 from mote_kernel.state.graph_state import GraphNodeId
@@ -670,9 +671,9 @@ class ObservePayloadAdmission:
     @staticmethod
     def _expected_hook_node(stage: ObserveHookStage, /) -> GraphNodeId:
         if stage is ObserveHookStage.AFTER_GET_OBSERVATION:
-            return GraphNodeId("get_observation")
+            return GraphNodeId(str(ObserveNodeId.GET_OBSERVATION))
         if stage is ObserveHookStage.AFTER_WRITE_OBSERVATION:
-            return GraphNodeId("write_observation")
+            return GraphNodeId(str(ObserveNodeId.WRITE_OBSERVATION))
         raise ObserveContractError("Observe Hook stage is unknown")
 
 

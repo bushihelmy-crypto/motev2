@@ -19,7 +19,7 @@ from mote_kernel.act.contract import (
     ResolveStageValue,
     ResumedAuthorization,
 )
-from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason
+from mote_kernel.act.identity import ActHookStage, ActNodeId, OpaqueGraphFailureReason
 from mote_kernel.act.port import AuthorizePort
 from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
@@ -82,7 +82,11 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
             AuthorizeStageValue(invocation),
             hook_state,
         )
-        hook_request = HookActivationRequest(next_envelope, hook_state, GraphNodeId("authorize"))
+        hook_request = HookActivationRequest(
+            next_envelope,
+            hook_state,
+            GraphNodeId(str(ActNodeId.AUTHORIZE)),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

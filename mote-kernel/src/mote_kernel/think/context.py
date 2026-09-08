@@ -20,6 +20,7 @@ from mote_kernel.think.contract import (
     ThinkFrame,
     admit_prompt_frame,
 )
+from mote_kernel.think.identity import ThinkNodeId
 
 PayloadT = TypeVar("PayloadT")
 HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
@@ -92,7 +93,11 @@ class ContextNode(
             raise ThinkContractError("ContextPort.load_context must return a ContextFrame")
         context = context_value
         next_frame = ThinkFrame(ContextStep(prompt, context), frame.hook_state)
-        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("context"))
+        return HookActivationRequest(
+            next_frame,
+            frame.hook_state,
+            GraphNodeId(str(ThinkNodeId.CONTEXT)),
+        )
 
 
 __all__ = ["ContextNode"]

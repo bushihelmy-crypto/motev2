@@ -38,7 +38,7 @@ from mote_kernel.act.contract import (
     ToolExecutionResult,
     admit_authorization_interrupt_payload,
 )
-from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason
+from mote_kernel.act.identity import ActHookStage, ActNodeId, OpaqueGraphFailureReason
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult, HookStageResult
 from mote_kernel.state.graph_state import GraphNodeId
 
@@ -60,7 +60,7 @@ def _same(left: AdmissionValueT, right: AdmissionValueT, field: str, /) -> None:
 def _stage_node_id(stage: ActHookStage, /) -> GraphNodeId:
     """Map an Act stage to the business node that produced its Hook value."""
 
-    return GraphNodeId(stage.value)
+    return GraphNodeId(str(ActNodeId(stage)))
 
 
 @dataclass(frozen=True, slots=True)
