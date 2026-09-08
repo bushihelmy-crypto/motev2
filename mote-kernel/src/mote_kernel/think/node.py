@@ -4,17 +4,19 @@ from __future__ import annotations
 
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigActivation, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
     TypedInputBinding,
 )
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.hooks.identity import HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 from mote_kernel.think.command import CommandNode
 from mote_kernel.think.compact import CompactNode
+from mote_kernel.think.config import ThinkBinding
 from mote_kernel.think.context import ContextNode
 from mote_kernel.think.contract import (
     CommandNodeInput,
@@ -52,8 +54,8 @@ from mote_kernel.think.router import RouterNode
 
 PriorityConfigT = TypeVar("PriorityConfigT")
 PayloadT = TypeVar("PayloadT")
-HookStateT = TypeVar("HookStateT")
-HookCommandT = TypeVar("HookCommandT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
+HookCommandT = TypeVar("HookCommandT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -77,6 +79,54 @@ class ThinkNode(
     """
 
     __slots__ = ("_hook",)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+    ) -> ThinkNode[PriorityConfigT, HookStateT, HookCommandT]:
+        """Assemble Think from the complete config through its own projection."""
+
+        config = require_config(config)
+        selected = config.bind(
+            ThinkBinding[
+                PriorityConfigT,
+                object,
+                HookStateT,
+                HookCommandT,
+                object,
+                object,
+                object,
+                object,
+                object,
+                object,
+                object,
+            ]()
+        )
+        hook: HookNode[
+            PriorityConfigT,
+            ThinkFrame[ThinkStep, HookStateT],
+            HookStateT,
+            HookCommandT,
+        ] = HookNode[
+            PriorityConfigT,
+            ThinkFrame[ThinkStep, HookStateT],
+            HookStateT,
+            HookCommandT,
+        ].from_config(config, selected.hook_slot)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            prompt_port=selected.prompt_port,
+            context_port=selected.context_port,
+            compact_port=selected.compact_port,
+            router_port=selected.router_port,
+            inference_port=selected.inference_port,
+            command_port=selected.command_port,
+            hook_state_type=selected.hook_state_type,
+            hook=hook,
+        )
 
     def __init__(
         self,
@@ -111,7 +161,7 @@ class ThinkNode(
         # parent builder so a failed assembly leaves no partial definition.
         if type(hook) is not HookNode:
             raise ThinkContractError("ThinkNode requires one shared HookNode")
-        if not issubclass(hook_state_type, HookGraphValue):
+        if not issubclass(cast(type[object], hook_state_type), HookGraphValue):
             raise ThinkContractError("ThinkNode hook_state_type must be a concrete HookGraphValue class")
         if hook_state_type is HookGraphValue:
             raise ThinkContractError("ThinkNode hook_state_type must be a concrete HookGraphValue class")
@@ -178,10 +228,13 @@ class ThinkNode(
             "prompt",
             prompt,
             inputs=(request_binding,),
-            input_type=ThinkRequest,
-            materialize=lambda values: values.get(request_binding),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(request_binding),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "hook",
@@ -271,50 +324,66 @@ class ThinkNode(
             "context",
             context,
             inputs=(request_binding, context_hook_binding),
-            input_type=ContextNodeInput,
-            materialize=lambda values: ContextNodeInput(
-                values.get(request_binding),
-                values.get(context_hook_binding),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                ContextNodeInput(
+                    values.get(request_binding),
+                    values.get(context_hook_binding),
+                ),
+                values.activation_config,
             ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "compact",
             compact,
             inputs=(compact_hook_binding,),
-            input_type=CompactNodeInput,
-            materialize=lambda values: CompactNodeInput(values.get(compact_hook_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                CompactNodeInput(values.get(compact_hook_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "router",
             router,
             inputs=(router_hook_binding,),
-            input_type=RouterNodeInput,
-            materialize=lambda values: RouterNodeInput(values.get(router_hook_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                RouterNodeInput(values.get(router_hook_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "inference",
             inference,
             inputs=(inference_hook_binding,),
-            input_type=InferenceNodeInput,
-            materialize=lambda values: InferenceNodeInput(values.get(inference_hook_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                InferenceNodeInput(values.get(inference_hook_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "command",
             command,
             inputs=(command_hook_binding,),
-            input_type=CommandNodeInput,
-            materialize=lambda values: CommandNodeInput(values.get(command_hook_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                CommandNodeInput(values.get(command_hook_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
+        self.add_edge(Graph.START, "prompt")
         for business_node in ("prompt", "context", "compact", "router", "inference", "command"):
             self.add_edge(business_node, "hook")
         # The shared Hook returns the current business node identity as its

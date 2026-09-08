@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
+from mote_kernel.act.config import ExecuteBinding
 from mote_kernel.act.contract import (
     ActContractError,
     ActHookCommand,
@@ -19,8 +20,9 @@ from mote_kernel.act.contract import (
 )
 from mote_kernel.act.identity import ActHookStage
 from mote_kernel.act.port import ExecutePort
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
@@ -36,15 +38,23 @@ class ExecuteNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        value: ExecuteNodeInput[HookCommandT],
+        activation: ConfigActivation[ExecuteNodeInput[HookCommandT]],
         /,
-    ) -> HookRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
+    ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
+        value = activation.value
         hook_result = self.admission.admit_hook_result(value.hook_result)
+        config = activation.activation_config
+        execute_port = self.execute_port
+        if config is not None:
+            selected = config.bind(ExecuteBinding[HookStateT, HookCommandT]())
+            if selected.admission != self.admission:
+                raise ActContractError("Act config binding changed the compiled payload contract")
+            execute_port = selected.capability
         envelope = hook_result.value
         if envelope.stage is not ActHookStage.AUTHORIZE or type(envelope.payload) is not AuthorizeStageValue:
             raise ActContractError("execute input must be an Authorize Hook envelope")
         invocation = envelope.payload.invocation
-        outcome = self.admission.admit_execution_outcome(await self.execute_port.execute(invocation))
+        outcome = self.admission.admit_execution_outcome(await execute_port.execute(invocation))
         if type(outcome) is ExecutionStopped:
             return Graph.failure(outcome.reason.value)
 
@@ -56,7 +66,7 @@ class ExecuteNode(Generic[HookStateT, HookCommandT]):
             ExecuteStageValue(execution),
             hook_state,
         )
-        hook_request = HookRequest(next_envelope, hook_state, GraphNodeId("execute"))
+        hook_request = HookActivationRequest(next_envelope, hook_state, GraphNodeId("execute"))
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

@@ -290,6 +290,10 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         raise GraphStateTransitionError("graph definition version must be positive")
     if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
         raise GraphStateTransitionError("graph counters cannot be negative")
+    try:
+        _ = state.config_cursor
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphStateTransitionError("graph Config cursor is malformed") from error
     _validate_settled_activations(state)
     if state.completion_route is not None:
         _require_identity(state.completion_route, "graph completion route identity")

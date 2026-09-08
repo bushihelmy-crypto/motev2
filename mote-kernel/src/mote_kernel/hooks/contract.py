@@ -8,7 +8,7 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.ports import canonical_nominal_type
 from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state import GraphConfigCursor, GraphNodeId
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 PriorityConfigT = TypeVar("PriorityConfigT")
@@ -34,7 +34,7 @@ class HookTransitionAdmission(Protocol[ValueT, StateT, CommandT]):
 
     def admit_transition(
         self,
-        request: HookRequest[ValueT, StateT],
+        request: HookActivationRequest[ValueT, StateT],
         result: HookStageResult[ValueT, CommandT],
         /,
     ) -> None: ...
@@ -59,22 +59,20 @@ def _admit_node_id(node_id: GraphNodeId | None, field: str, /) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class HookRequest(HookGraphValue, Generic[ValueT, StateT]):
-    """The current value and owner-provided read-only state for one priority.
+class HookActivationRequest(HookGraphValue, Generic[ValueT, StateT]):
+    """Kernel-only business envelope entering the shared Hook graph.
 
-    The owner supplies an immutable state value or read-only view; freezing this
-    envelope does not deep-freeze the payload.
+    The complete Config lives beside this value in execution activation
+    metadata.  Only the business value, read-only state and parent-owned node
+    identity are present here.
     """
 
     value: ValueT
     state: StateT
-    # Identity of the business node whose result is entering the shared Hook.
-    # Generic callers may omit it; family graphs always provide the canonical
-    # GraphNodeId so the parent graph can route the nested completion.
     node_id: GraphNodeId | None = None
 
     def __post_init__(self) -> None:
-        _admit_node_id(self.node_id, "hook request node_id")
+        _admit_node_id(self.node_id, "hook activation request node_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,23 +116,29 @@ class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
             _admit_exact(priority_plan.config, self.priority_config_type, f"{priority_name} config")
         return plan
 
-    def admit_request(self, request: HookRequest[ValueT, StateT], /) -> HookRequest[ValueT, StateT]:
-        if type(request) is not HookRequest:
-            raise HookContractError("hook invocation must contain a HookRequest")
+    def admit_request(
+        self,
+        request: HookActivationRequest[ValueT, StateT],
+        /,
+    ) -> HookActivationRequest[ValueT, StateT]:
+        if type(request) is not HookActivationRequest:
+            raise HookContractError("hook activation must contain a HookActivationRequest")
         _admit_exact(request.value, self.value_type, "value")
         _admit_exact(request.state, self.state_type, "state")
-        _admit_node_id(request.node_id, "hook request node_id")
+        _admit_node_id(request.node_id, "hook activation request node_id")
         return request
 
     def admit_invocation_request(
         self,
-        request: HookInvocationRequest[PriorityConfigT, ValueT, StateT],
+        request: HookInvocationRequest[PriorityConfigT, ValueT],
         /,
-    ) -> HookInvocationRequest[PriorityConfigT, ValueT, StateT]:
+    ) -> HookInvocationRequest[PriorityConfigT, ValueT]:
         if type(request) is not HookInvocationRequest:
-            raise HookContractError("hook invocation request must be a HookInvocationRequest")
-        _admit_exact(request.config, self.priority_config_type, "priority config")
-        self.admit_request(request.request)
+            raise HookContractError("hook invocation boundary requires a HookInvocationRequest")
+        _admit_exact(request.hook_config, self.priority_config_type, "hook priority config")
+        _admit_exact(request.payload, self.value_type, "hook payload")
+        if request.config_cursor is not None and type(request.config_cursor) is not GraphConfigCursor:
+            raise HookContractError("hook invocation config_cursor must be a GraphConfigCursor or None")
         return request
 
     def admit_stage_result(
@@ -153,7 +157,7 @@ class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
 
     def admit_transition(
         self,
-        request: HookRequest[ValueT, StateT],
+        request: HookActivationRequest[ValueT, StateT],
         result: HookStageResult[ValueT, CommandT],
         /,
     ) -> None:
@@ -174,19 +178,23 @@ class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
 
 
 @dataclass(frozen=True, slots=True)
-class HookInvocationRequest(HookGraphValue, Generic[PriorityConfigT, ValueT, StateT]):
-    """Hook-owned typed envelope passed through the shared Invocation.
+class HookInvocationRequest(HookGraphValue, Generic[PriorityConfigT, ValueT]):
+    """The narrow DTO crossing the Hook ``Invocation`` boundary.
 
-    A concrete invocation adapter admits the config and payload types before
-    constructing the stage result.
+    ``hook_config`` is the current P1 or P2 priority projection.  ``payload``
+    is the business value only; the Kernel activation envelope, state and
+    routing identity are intentionally absent.  ``config_cursor`` lets a
+    local or remote implementation correlate the call with the immutable
+    snapshot without granting it access to the complete Config.
     """
 
-    config: PriorityConfigT
-    request: HookRequest[ValueT, StateT]
+    hook_config: PriorityConfigT
+    payload: ValueT
+    config_cursor: GraphConfigCursor | None = None
 
     def __post_init__(self) -> None:
-        if type(self.request) is not HookRequest:
-            raise TypeError("hook invocation request must contain a HookRequest")
+        if self.config_cursor is not None and type(self.config_cursor) is not GraphConfigCursor:
+            raise TypeError("hook invocation config_cursor must be a GraphConfigCursor or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +231,6 @@ __all__ = [
     "HookGraphValue",
     "HookInvocationRequest",
     "HookPayloadAdmission",
-    "HookRequest",
     "HookResult",
     "HookStageResult",
     "HookTransitionAdmission",

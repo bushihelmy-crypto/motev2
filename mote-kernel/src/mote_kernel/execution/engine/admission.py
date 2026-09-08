@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import TypeVar
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import GraphValueAdmissionError, ResultCollectionError, SnapshotMismatchError
@@ -19,6 +20,7 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _make_graph_input_frame,
     _make_graph_output_view,
+    _require_graph_values,
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
@@ -38,8 +40,20 @@ GraphValueT = TypeVar("GraphValueT")
 def admit_graph_input(
     graph: CompiledGraph[GraphValueT],
     values: _GraphValues[GraphValueT],
+    activation_config: Config | None = None,
 ) -> GraphInputFrame[GraphValueT]:
-    return _make_graph_input_frame(values, graph.graph_input_descriptor.declarations)
+    """Admit fresh input and install the optional Kernel activation Config."""
+
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("activation Config is malformed") from error
+    return _make_graph_input_frame(
+        _require_graph_values(values),
+        graph.graph_input_descriptor.declarations,
+        activation_config=activation_config,
+    )
 
 
 def admit_child_graph_input(
@@ -56,6 +70,7 @@ def project_graph_outputs(
     frames: ScopedFrameIndex[GraphValueT],
 ) -> GraphOutputView[GraphValueT]:
     entries: list[NamedValue[GraphValueT]] = []
+    activation_config: Config | None = None
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         if isinstance(source, GraphInputPort):
@@ -77,8 +92,17 @@ def project_graph_outputs(
                     f"graph output source {source.node_id!r}.{source.output_name!r} is unavailable"
                 ) from error
             value = _frame_value(frame, source.output_name)
+        candidate_config = frame.activation_config
+        if candidate_config is not None:
+            if activation_config is not None and activation_config != candidate_config:
+                raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
+            activation_config = candidate_config
         entries.append(NamedValue(binding.destination.boundary_name, value))
-    return _make_graph_output_view(tuple(entries), graph.graph_output_descriptor.declarations)
+    return _make_graph_output_view(
+        tuple(entries),
+        graph.graph_output_descriptor.declarations,
+        activation_config=activation_config,
+    )
 
 
 def initial_resource_snapshot(graph: CompiledGraph[GraphValueT]) -> ResourceSnapshot:

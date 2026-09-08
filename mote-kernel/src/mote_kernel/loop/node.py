@@ -15,12 +15,28 @@ from mote_kernel.act.contract import (
     HookStateProjection as ActHookStateProjection,
 )
 from mote_kernel.act.node import ActNode
-from mote_kernel.config import Config
+from mote_kernel.config import (
+    Config,
+    ConfigActivation,
+    ConfigContractError,
+    ConfigSelector,
+    require_config,
+)
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
 from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookResult
 from mote_kernel.loop.admission import ReActPayloadAdmission
-from mote_kernel.loop.config import ReActBinding
+from mote_kernel.loop.config import (
+    ActToObserveBinding,
+    ObserveToActBinding,
+    ObserveToThinkBinding,
+    ReActBinding,
+    ReActNodeConfig,
+    ReActPrepareBinding,
+    ReActRouteBinding,
+    ReActRuntimeConfig,
+    ThinkToObserveBinding,
+)
 from mote_kernel.loop.contract import (
     ActToObserveProjector,
     ObserveRoutePolicy,
@@ -53,6 +69,7 @@ ThinkHookCommandT = TypeVar("ThinkHookCommandT", bound=HookGraphValue)
 ActPriorityConfigT = TypeVar("ActPriorityConfigT")
 ActStateT = TypeVar("ActStateT", bound=ActHookStateProjection)
 ActHookCommandT = TypeVar("ActHookCommandT", bound=ActHookCommand)
+_ReActCapabilityT = TypeVar("_ReActCapabilityT")
 
 _OBSERVE_COMPLETION_ROUTE = "write_observation"
 _THINK_COMPLETION_ROUTE = "command"
@@ -84,18 +101,79 @@ class _ReActOperations(
     observe_to_think: ObserveToThinkProjector[ObserveHookCommandT, ThinkPayloadT, ThinkStateT]
     think_to_observe: ThinkToObserveProjector[ThinkStateT, ThinkHookCommandT, ObserveStateT]
     act_to_observe: ActToObserveProjector[ActHookCommandT, ObserveStateT]
+    # The static values above are assembly fallbacks for graphs created
+    # directly without a complete Config. Config-backed activations bind only
+    # the one route/projector used by the current callable.
+    definition_id: str = ""
+    definition_version: int = 1
+
+    def _admit_runtime_identity(
+        self,
+        selected: ReActRuntimeConfig,
+        /,
+    ) -> None:
+        if type(selected) not in (ReActRuntimeConfig, ReActNodeConfig):
+            raise ReActContractError("ReAct config binding returned an invalid projection")
+        if self.definition_id and (
+            str(selected.definition_id) != self.definition_id
+            or int(selected.definition_version) != self.definition_version
+        ):
+            raise ReActContractError("ReAct config binding changed the compiled graph contract")
+
+    def _bind_runtime_capability(
+        self,
+        config: Config | None,
+        selector: ConfigSelector[ReActNodeConfig[_ReActCapabilityT]],
+        fallback: _ReActCapabilityT,
+        /,
+    ) -> _ReActCapabilityT:
+        if config is None:
+            return fallback
+        try:
+            selected = config.bind(selector)
+        except ConfigContractError as error:
+            raise ReActContractError(str(error)) from error
+        if type(selected) is not ReActNodeConfig:
+            raise ReActContractError("ReAct config binding returned an invalid projection")
+        self._admit_runtime_identity(selected)
+        return selected.capability
+
+    def _bind_prepare_identity(self, config: Config | None, /) -> None:
+        if config is None:
+            return
+        try:
+            selected = config.bind(ReActPrepareBinding())
+        except ConfigContractError as error:
+            raise ReActContractError(str(error)) from error
+        self._admit_runtime_identity(selected)
 
     async def route_observe(
         self,
-        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        activation: ConfigActivation[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
         /,
     ) -> Graph.SuccessOutcome[HookResult[ObserveHookEnvelope, ObserveHookCommandT]]:
-        route = self.admission.select_route(self.route_policy, result)
-        return Graph.success(Graph.values(result=result), route=route.value)
+        """Route one admitted Observe completion.
+
+        A Config-only observation keeps the existing ``CONFIG -> END``
+        business route.  Its successor Config remains execution activation
+        metadata; it never changes topology or triggers graph reassembly.
+        Mixed Config/non-Config batches retain their normal business route.
+        """
+
+        result = activation.value
+        admitted = self.admission.admit_observe_boundary(result)
+        config = activation.activation_config
+        route_policy = self._bind_runtime_capability(
+            config,
+            ReActRouteBinding(),
+            self.route_policy,
+        )
+        route = self.admission.select_route(route_policy, admitted)
+        return Graph.success(Graph.values(result=admitted), route=route.value)
 
     async def prepare_observe(
         self,
-        request: ObserveRequest[ObserveStateT],
+        activation: ConfigActivation[ObserveRequest[ObserveStateT]],
         /,
     ) -> ObserveRequest[ObserveStateT]:
         """Admit the phase input before starting the nested Observe graph.
@@ -105,35 +183,67 @@ class _ReActOperations(
         input before its nested Observe activation is materialized.
         """
 
+        request = activation.value
+        self._bind_prepare_identity(activation.activation_config)
         return self.admission.observe.admit_request(request)
 
     async def project_observe_to_act(
         self,
-        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        activation: ConfigActivation[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
         /,
     ) -> ActRequest:
-        return self.admission.project_observe_to_act(self.observe_to_act, result)
+        result = activation.value
+        admitted = self.admission.admit_observe_boundary(result)
+        config = activation.activation_config
+        projector = self._bind_runtime_capability(
+            config,
+            ObserveToActBinding[ObserveHookCommandT](),
+            self.observe_to_act,
+        )
+        return self.admission.project_observe_to_act(projector, admitted)
 
     async def project_observe_to_think(
         self,
-        result: HookResult[ObserveHookEnvelope, ObserveHookCommandT],
+        activation: ConfigActivation[HookResult[ObserveHookEnvelope, ObserveHookCommandT]],
         /,
     ) -> ThinkRequest[ThinkPayloadT, ThinkStateT]:
-        return self.admission.project_observe_to_think(self.observe_to_think, result)
+        result = activation.value
+        admitted = self.admission.admit_observe_boundary(result)
+        config = activation.activation_config
+        projector = self._bind_runtime_capability(
+            config,
+            ObserveToThinkBinding[ObserveHookCommandT, ThinkPayloadT, ThinkStateT](),
+            self.observe_to_think,
+        )
+        return self.admission.project_observe_to_think(projector, admitted)
 
     async def project_think_to_observe(
         self,
-        result: HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT],
+        activation: ConfigActivation[HookResult[ThinkFrame[ThinkStep, ThinkStateT], ThinkHookCommandT]],
         /,
     ) -> ObserveRequest[ObserveStateT]:
-        return self.admission.project_think_to_observe(self.think_to_observe, result)
+        result = activation.value
+        admitted = self.admission.admit_think_boundary(result)
+        projector = self._bind_runtime_capability(
+            activation.activation_config,
+            ThinkToObserveBinding[ThinkStateT, ThinkHookCommandT, ObserveStateT](),
+            self.think_to_observe,
+        )
+        return self.admission.project_think_to_observe(projector, admitted)
 
     async def project_act_to_observe(
         self,
-        result: HookResult[ActHookEnvelope, ActHookCommandT],
+        activation: ConfigActivation[HookResult[ActHookEnvelope, ActHookCommandT]],
         /,
     ) -> ObserveRequest[ObserveStateT]:
-        return self.admission.project_act_to_observe(self.act_to_observe, result)
+        result = activation.value
+        admitted = self.admission.admit_act_boundary(result)
+        projector = self._bind_runtime_capability(
+            activation.activation_config,
+            ActToObserveBinding[ActHookCommandT, ObserveStateT](),
+            self.act_to_observe,
+        )
+        return self.admission.project_act_to_observe(projector, admitted)
 
 
 def _observe_phase(
@@ -163,8 +273,11 @@ def _observe_phase(
         "prepare",
         operations.prepare_observe,
         inputs=(request_binding,),
-        input_type=ObserveRequest,
-        materialize=lambda values: values.get(request_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(request_binding),
+            values.activation_config,
+        ),
         output_name="request",
         output_type=ObserveRequest,
     )
@@ -178,8 +291,11 @@ def _observe_phase(
         "route",
         operations.route_observe,
         inputs=(route_binding,),
-        input_type=HookResult,
-        materialize=lambda values: values.get(route_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(route_binding),
+            values.activation_config,
+        ),
         output_name="result",
         output_type=HookResult,
     )
@@ -216,8 +332,11 @@ def _think_phase(
         "project",
         operations.project_observe_to_think,
         inputs=(result_binding,),
-        input_type=HookResult,
-        materialize=lambda values: values.get(result_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(result_binding),
+            values.activation_config,
+        ),
         output_name="request",
         output_type=ThinkRequest,
     )
@@ -231,8 +350,11 @@ def _think_phase(
         "next_observe",
         operations.project_think_to_observe,
         inputs=(think_result_binding,),
-        input_type=HookResult,
-        materialize=lambda values: values.get(think_result_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(think_result_binding),
+            values.activation_config,
+        ),
         output_name="request",
         output_type=ObserveRequest,
     )
@@ -267,8 +389,11 @@ def _act_phase(
         "project",
         operations.project_observe_to_act,
         inputs=(result_binding,),
-        input_type=HookResult,
-        materialize=lambda values: values.get(result_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(result_binding),
+            values.activation_config,
+        ),
         output_name="request",
         output_type=ActRequest,
     )
@@ -282,8 +407,11 @@ def _act_phase(
         "next_observe",
         operations.project_act_to_observe,
         inputs=(act_result_binding,),
-        input_type=HookResult,
-        materialize=lambda values: values.get(act_result_binding),
+        input_type=ConfigActivation,
+        materialize=lambda values: ConfigActivation(
+            values.get(act_result_binding),
+            values.activation_config,
+        ),
         output_name="request",
         output_type=ObserveRequest,
     )
@@ -316,6 +444,7 @@ class ReActNode(
         capabilities.
         """
 
+        config = require_config(config)
         selected = config.bind(
             ReActBinding[
                 ObserveStateT,
@@ -444,6 +573,8 @@ class ReActNode(
             observe_to_think,
             think_to_observe,
             act_to_observe,
+            definition_id=definition_id,
+            definition_version=version,
         )
         observe_phase, observe_result = _observe_phase(
             definition_id,

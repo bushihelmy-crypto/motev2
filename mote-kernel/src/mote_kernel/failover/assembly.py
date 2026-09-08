@@ -10,7 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Generic, TypeAlias, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution import Graph
+from mote_kernel.failover.config import (
+    FailoverBinding,
+    FailoverPlanBinding,
+    FailoverPlanConfig,
+    FailoverPrepareBinding,
+    FailoverPrepareConfig,
+)
 from mote_kernel.failover.contract import (
     AttemptPreparation,
     Completed,
@@ -41,6 +49,61 @@ CapabilityT = TypeVar("CapabilityT")
 
 _FAILOVER_DEFINITION_DOMAIN = "mote.failover.v1"
 _FINISH_ROUTE = "finish"
+
+
+def _runtime_plan(
+    config: Config | None,
+    binding: FailoverPlanBinding[TransformT] | None,
+    fallback_plan: FailoverPlan[TransformT],
+    /,
+) -> FailoverPlan[TransformT]:
+    """Select the current plan for one failover activation."""
+
+    if config is None:
+        return fallback_plan
+    effective_binding = binding or FailoverPlanBinding[TransformT](fallback_plan.port_id)
+    try:
+        selected = config.bind(effective_binding)
+    except ConfigContractError as error:
+        raise FailoverContractError(str(error)) from error
+    if selected is None:
+        raise FailoverContractError("failover Config binding did not provide the compiled Port projection")
+    if type(selected) is not FailoverPlanConfig:
+        raise FailoverContractError("failover plan binding returned an invalid projection")
+    if selected.plan.port_id != fallback_plan.port_id:
+        raise FailoverContractError("failover Config binding changed the compiled Port contract")
+    return selected.plan
+
+
+def _runtime_config(
+    config: Config | None,
+    binding: FailoverPrepareBinding[RequestT, TransformT] | None,
+    fallback_plan: FailoverPlan[TransformT],
+    fallback_preparation: AttemptPreparation[RequestT, TransformT],
+    /,
+) -> tuple[FailoverPlan[TransformT], AttemptPreparation[RequestT, TransformT]]:
+    """Select the current Port projection for one failover activation.
+
+    The fallback values support the low-level ``Failover(plan, preparation)``
+    constructor used by callers that do not have a complete Config.  A
+    Config-backed decorator always has a binding; missing/invalid projections
+    therefore fail closed instead of silently retaining an old plan.
+    """
+
+    if config is None:
+        return fallback_plan, fallback_preparation
+    effective_binding = binding or FailoverPrepareBinding[RequestT, TransformT](fallback_plan.port_id)
+    try:
+        selected = config.bind(effective_binding)
+    except ConfigContractError as error:
+        raise FailoverContractError(str(error)) from error
+    if selected is None:
+        raise FailoverContractError("failover Config binding did not provide the compiled Port projection")
+    if type(selected) is not FailoverPrepareConfig:
+        raise FailoverContractError("failover prepare binding returned an invalid projection")
+    if selected.plan.port_id != fallback_plan.port_id:
+        raise FailoverContractError("failover Config binding changed the compiled Port contract")
+    return selected.plan, selected.preparation
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,18 +203,24 @@ def _require_capability(
 
 @dataclass(frozen=True, slots=True)
 class _ObserveCall(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
-    """Observe one new call together with its assembly-supplied config."""
+    """Observe one new call and bind its Port projection at activation time."""
 
     config: FailoverPlan[TransformT]
+    binding: FailoverPlanBinding[TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
         call = cast(FailoverCall[RequestT], values["request"])
+        plan = _runtime_plan(
+            values.activation_config,
+            self.binding,
+            self.config,
+        )
         frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
             _InvokeStep[RequestT](
                 call.request,
-                RetryContext(call.operation_id, self.config.plan_revision),
+                RetryContext(call.operation_id, plan.plan_revision),
             ),
-            self.config,
+            plan,
         )
         return Graph.values(frame=frame)
 
@@ -159,6 +228,8 @@ class _ObserveCall(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 @dataclass(frozen=True, slots=True)
 class _InvokeOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
     attempt: SingleAttempt[RequestT, PortOutcome[ResultT, ReceiptT, HandleT]]
+    fallback_plan: FailoverPlan[TransformT] | None = None
+    binding: FailoverPlanBinding[TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Values[HookGraphValue]:
         frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
@@ -166,13 +237,21 @@ class _InvokeOnce(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
         if not isinstance(candidate, _InvokeStep):
             raise FailoverContractError("invoke node requires an invoke step")
         step = candidate
+        fallback_plan = frame.plan if self.fallback_plan is None else self.fallback_plan
+        plan = _runtime_plan(
+            values.activation_config,
+            self.binding,
+            fallback_plan,
+        )
+        if step.context.plan_revision != plan.plan_revision:
+            raise FailoverContractError("failover frame context and bound plan revisions must match")
         outcome = _admit_port_outcome(
             await self.attempt.invoke_once(step.request),
             "single-attempt capability returned an unsupported outcome",
         )
         next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
             _ObserveStep[RequestT, ResultT, ReceiptT, HandleT](step.request, step.context, outcome),
-            frame.plan,
+            plan,
         )
         return Graph.values(frame=next_frame)
 
@@ -182,6 +261,8 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
     """Classify one outcome, finish it, or prepare exactly one next attempt."""
 
     preparation: AttemptPreparation[RequestT, TransformT]
+    fallback_plan: FailoverPlan[TransformT] | None = None
+    binding: FailoverPrepareBinding[RequestT, TransformT] | None = None
 
     async def __call__(self, values: Graph.Values[HookGraphValue], /) -> Graph.Outcome[HookGraphValue]:
         frame = cast(_FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT], values["frame"])
@@ -189,7 +270,16 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
         if not isinstance(candidate, _ObserveStep):
             raise FailoverContractError("prepare node requires an observe step")
         step = candidate
-        decision = observe_and_route(step.outcome, frame.plan, step.context)
+        fallback_plan = frame.plan if self.fallback_plan is None else self.fallback_plan
+        plan, preparation = _runtime_config(
+            values.activation_config,
+            self.binding,
+            fallback_plan,
+            self.preparation,
+        )
+        if step.context.plan_revision != plan.plan_revision:
+            raise FailoverContractError("failover frame context and bound plan revisions must match")
+        decision = observe_and_route(step.outcome, plan, step.context)
         context = step.context
         if isinstance(step.outcome, Rejected) or type(step.outcome) is Unknown:
             context = replace(
@@ -209,7 +299,7 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
         if decision.route is ObservationRoute.PREPARE:
             strategy = cast(FailureStrategy, decision.strategy)
             action = cast(PreparationAction[TransformT], decision.preparation)
-            prepared = await self.preparation.prepare_next(step.request, action)
+            prepared = await preparation.prepare_next(step.request, action)
             if type(prepared) is not PreparedRequest:
                 raise FailoverContractError("preparation capability must return a PreparedRequest")
             next_context = context.with_strategy_use(strategy)
@@ -233,7 +323,10 @@ class _PrepareNextAttempt(Generic[RequestT, ResultT, ReceiptT, HandleT, Transfor
                 step.outcome,
             )
             route = _FINISH_ROUTE
-        next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](next_step, frame.plan)
+        next_frame = _FailoverFrame[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+            next_step,
+            plan,
+        )
         return Graph.success(Graph.values(frame=next_frame, result=result), route=route)
 
 
@@ -255,10 +348,49 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 
     config: FailoverPlan[TransformT]
     preparation: AttemptPreparation[RequestT, TransformT]
+    plan_binding: FailoverPlanBinding[TransformT] | None = None
+    prepare_binding: FailoverPrepareBinding[RequestT, TransformT] | None = None
+
+    @classmethod
+    def bind(
+        cls,
+        config: Config,
+        port_id: FailoverPortId,
+        /,
+        *,
+        required: bool = True,
+    ) -> Failover[RequestT, ResultT, ReceiptT, HandleT, TransformT] | None:
+        """Bind one Port's failover projection from the complete config.
+
+        Optional Port capabilities return ``None`` when no matching projection
+        exists, allowing their graph steps to be omitted during assembly.
+        Duplicate projections always fail closed.
+        """
+
+        config = require_config(config)
+        selected = config.bind(FailoverBinding[RequestT, TransformT](port_id, required))
+        if selected is None:
+            return None
+        return cls(
+            selected.plan,
+            selected.preparation,
+            FailoverPlanBinding[TransformT](port_id, required),
+            FailoverPrepareBinding[RequestT, TransformT](port_id, required),
+        )
 
     def __post_init__(self) -> None:
         if type(self.config) is not FailoverPlan:
             raise FailoverContractError("failover decorator requires a FailoverPlan config")
+        if self.plan_binding is not None:
+            if type(self.plan_binding) is not FailoverPlanBinding:
+                raise FailoverContractError("failover decorator plan binding must be a FailoverPlanBinding")
+            if self.plan_binding.port_id != self.config.port_id:
+                raise FailoverContractError("failover decorator plan binding does not match its Port config")
+        if self.prepare_binding is not None:
+            if type(self.prepare_binding) is not FailoverPrepareBinding:
+                raise FailoverContractError("failover decorator prepare binding must be a FailoverPrepareBinding")
+            if self.prepare_binding.port_id != self.config.port_id:
+                raise FailoverContractError("failover decorator prepare binding does not match its Port config")
         _require_capability(
             self.preparation,
             AttemptPreparation,
@@ -280,23 +412,34 @@ class Failover(Generic[RequestT, ResultT, ReceiptT, HandleT, TransformT]):
 
         graph.add_node(
             "observe",
-            _ObserveCall[RequestT, ResultT, ReceiptT, HandleT, TransformT](self.config),
+            _ObserveCall[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+                self.config,
+                self.plan_binding,
+            ),
             inputs={"request": request},
             outputs={"frame": frame_type},
         )
         graph.add_node(
             "invoke",
-            _InvokeOnce[RequestT, ResultT, ReceiptT, HandleT, TransformT](port),
+            _InvokeOnce[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+                port,
+                self.config,
+                self.plan_binding,
+            ),
             inputs={"frame": graph.node_output("frame")},
             outputs={"frame": frame_type},
         )
         graph.add_node(
             "prepare",
-            _PrepareNextAttempt[RequestT, ResultT, ReceiptT, HandleT, TransformT](self.preparation),
+            _PrepareNextAttempt[RequestT, ResultT, ReceiptT, HandleT, TransformT](
+                self.preparation,
+                self.config,
+                self.prepare_binding,
+            ),
             inputs={"frame": graph.node_output("invoke", "frame")},
             outputs={"frame": frame_type, "result": result_type},
         )
-
+        graph.add_edge(Graph.START, "observe")
         graph.add_edge("observe", "invoke")
         graph.add_edge("invoke", "prepare")
         graph.add_edge("prepare", ObservationRoute.PREPARE.value, "invoke")

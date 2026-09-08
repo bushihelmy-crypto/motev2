@@ -59,7 +59,19 @@ def _project_outcome(
         return TaskFailure(executable.task, outcome.failure)
     else:
         return TaskInterrupt(executable.task, outcome.request_payload)
-    frame = _make_node_output_frame(output, graph.transition.publications[executable.task.node_id].declarations)
+    # Carry the exact activation metadata alongside the published values.  A
+    # domain result may advertise a successor Config in its carrier; the
+    # value factory records that successor and the frame constructor rejects
+    # any disagreement with the incoming activation.
+    frame = _make_node_output_frame(
+        output,
+        graph.transition.publications[executable.task.node_id].declarations,
+        (
+            output.activation_config
+            if output.activation_config is not None
+            else executable.effective_input.activation_config
+        ),
+    )
     routing = ContinueGraphRouting() if route is None else SelectGraphRoute(GraphRouteId(route))
     validate_routing_contribution(graph, executable.task.node_id, routing)
     return TaskSuccess(

@@ -29,7 +29,7 @@ from mote_kernel.act.identity import (
     ToolPairingIdentity,
     ToolSelector,
 )
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookGraphValue, HookResult
 
 _INTERRUPT_PAYLOAD_MAX_BYTES = 65_536
 _SCOPE_MAX_SEGMENTS = 16
@@ -438,7 +438,6 @@ __all__ = [
     "ExecuteStageValue",
     "ExecutionStopped",
     "HookGraphValue",
-    "HookRequest",
     "HookResult",
     "HookStateProjection",
     "InitialAuthorization",

@@ -69,9 +69,9 @@ from mote_kernel.execution.result import (
 )
 from mote_kernel.execution.run_context import (
     ChildBoundaryAvailabilityCoordinate,
-    ChildStateBinding,
     ConfirmedChildBoundary,
     ScopedFrameIndex,
+    ScopedStateBinding,
     _CompiledFamilyIdentity,
     _make_continuation,
 )
@@ -99,9 +99,9 @@ _ChildTerminal: TypeAlias = CompletedChild[GraphValueT] | FailedChild | AbortedC
 _ChildPhase: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminal[GraphValueT]
 _EvidenceReader: TypeAlias = Callable[
     [],
-    tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]],
+    tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]],
 ]
-_EvidencePublisher: TypeAlias = Callable[[ChildStateBinding, ScopedFrameIndex[GraphValueT]], None]
+_EvidencePublisher: TypeAlias = Callable[[ScopedStateBinding, ScopedFrameIndex[GraphValueT]], None]
 
 
 @final
@@ -254,15 +254,18 @@ def _merge_frames(
 
 def _frames_for_owner(
     frames: ScopedFrameIndex[GraphValueT],
-    bindings: tuple[ChildStateBinding, ...],
+    bindings: tuple[ScopedStateBinding, ...],
     owner: ScopeRunCoordinate,
 ) -> ScopedFrameIndex[GraphValueT]:
+    # Preserve the first binding if a malformed direct caller repeats a key.
+    bindings_by_scope = {binding.scope_run: binding for binding in reversed(bindings)}
     child_boundaries: list[ConfirmedChildBoundary[GraphValueT]] = []
     for record in frames.child_boundaries:
-        binding = next((item for item in bindings if item.coordinate == record.coordinate.child_scope_run), None)
+        binding = bindings_by_scope.get(record.coordinate.child_scope_run)
         if binding is None:
             raise SnapshotMismatchError(f"continuation has no child binding at {record.coordinate.child_scope_run!r}")
-        if binding.parent_activation.scope_run == owner:
+        parent_activation = binding.parent_activation
+        if parent_activation is not None and parent_activation.scope_run == owner:
             child_boundaries.append(record)
     return ScopedFrameIndex(
         graph_inputs=tuple(record for record in frames.graph_inputs if record.coordinate.scope_run == owner),
@@ -275,36 +278,25 @@ def _frames_for_owner(
 
 
 def _evidence_adapter(
-    bindings: tuple[ChildStateBinding, ...],
+    bindings: tuple[ScopedStateBinding, ...],
     frames: ScopedFrameIndex[GraphValueT],
 ) -> tuple[_EvidencePublisher[GraphValueT], _EvidenceReader[GraphValueT]]:
-    entries: list[tuple[ChildStateBinding, ScopedFrameIndex[GraphValueT]]] = [
-        (
+    # The coordinate is the evidence identity; lineage admission guarantees
+    # uniqueness and the adapter owns the current binding/frame value.
+    entries: dict[ScopeRunCoordinate, tuple[ScopedStateBinding, ScopedFrameIndex[GraphValueT]]] = {
+        binding.scope_run: (
             binding,
-            _frames_for_owner(frames, bindings, binding.coordinate),
+            _frames_for_owner(frames, bindings, binding.scope_run),
         )
-        for binding in bindings
-    ]
+        for binding in reversed(bindings)
+    }
 
-    def publish(binding: ChildStateBinding, owner_frames: ScopedFrameIndex[GraphValueT]) -> None:
-        index = next(
-            (
-                position
-                for position, (existing, _frames) in enumerate(entries)
-                if existing.coordinate == binding.coordinate
-            ),
-            None,
-        )
-        if index is None:
-            entries.append((binding, owner_frames))
-            return
-        existing, _frames = entries[index]
-        if existing.parent_activation != binding.parent_activation:
-            raise SnapshotMismatchError("child evidence changed its parent activation")
-        entries[index] = (binding, owner_frames)
+    def publish(binding: ScopedStateBinding, owner_frames: ScopedFrameIndex[GraphValueT]) -> None:
+        _ = binding.parent_activation
+        entries[binding.scope_run] = (binding, owner_frames)
 
-    def read() -> tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
-        canonical = tuple(sorted(entries, key=lambda entry: entry[0].coordinate))
+    def read() -> tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
+        canonical = tuple(entries[coordinate] for coordinate in sorted(entries))
         return (
             tuple(binding for binding, _frames in canonical),
             _merge_frames(tuple(owner_frames for _binding, owner_frames in canonical)),
@@ -785,13 +777,13 @@ class _GraphRun(Generic[GraphValueT]):
     def handoff_evidence(self) -> None:
         if self._parent_activation is None:
             raise SnapshotMismatchError("root graph evidence cannot be handed off as a child binding")
-        binding = ChildStateBinding(self._scope_run, self._parent_activation, self._state)
+        binding = ScopedStateBinding(self._scope_run, self._state)
         self._publish_evidence(binding, self._frames)
 
     def freeze_root_evidence(
         self,
         evidence_reader: _EvidenceReader[GraphValueT],
-    ) -> tuple[GraphRunState, tuple[ChildStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
+    ) -> tuple[GraphRunState, tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
         if self._parent_activation is not None:
             raise SnapshotMismatchError("child graph evidence cannot be exported as the root")
         if any(isinstance(call.phase, ActiveChild) for call in self._children):
@@ -922,7 +914,12 @@ def _make_child_constructor(
         coordinate = child_scope_run_for_activation(owner_scope_run, parent)
         activation = stable_activation(owner_scope_run, parent)
         child_commit = scoped_commit(coordinate, commit)
-        command = project_start_graph_command(child_graph, coordinate.graph_run_id, parent)
+        command = project_start_graph_command(
+            child_graph,
+            coordinate.graph_run_id,
+            parent,
+            child_input.activation_config.config_cursor if child_input.activation_config is not None else None,
+        )
         transition = prepare_transition(
             coordinate,
             None,
@@ -971,7 +968,7 @@ def _make_child_constructor(
 async def admit_continued_root(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-    child_states: tuple[ChildStateBinding, ...],
+    child_states: tuple[ScopedStateBinding, ...],
     frames: ScopedFrameIndex[GraphValueT],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
@@ -1061,7 +1058,7 @@ async def admit_continued_root(
 
     async def construct_child(
         parent: GraphActivationIdentity,
-        binding: ChildStateBinding,
+        binding: ScopedStateBinding,
         child_graph: CompiledGraph[GraphValueT],
         position: tuple[int, ...],
         fence: PlannedFence | None,
@@ -1069,25 +1066,28 @@ async def admit_continued_root(
     ) -> _ChildCall[GraphValueT]:
         nonlocal failed_scope
         child: _GraphRun[GraphValueT] | None = None
-        child_commit = scoped_commit(binding.coordinate, commit)
+        child_commit = scoped_commit(binding.scope_run, commit)
         try:
+            parent_activation = binding.parent_activation
+            if parent_activation is None:
+                raise SnapshotMismatchError("nested child binding is missing its parent activation")
             child = build_owner(
                 child_graph,
-                binding.coordinate,
+                binding.scope_run,
                 binding.state,
                 child_commit,
                 position,
-                binding.parent_activation,
+                parent_activation,
             )
-            await apply_admission(child, fence, resume, tuple(binding.coordinate.scope))
-            await admit_children(child, child_graph, binding.coordinate, binding.state)
+            await apply_admission(child, fence, resume, tuple(binding.scope_run.scope))
+            await admit_children(child, child_graph, binding.scope_run, binding.state)
             return _ChildCall(position, parent, ActiveChild(parent), child)
         except BaseException:
             if failed_scope is None:
-                failed_scope = tuple(binding.coordinate.scope)
+                failed_scope = tuple(binding.scope_run.scope)
 
             cleanup_task = asyncio.create_task(
-                cleanup_owner(child, child_graph, binding.coordinate, binding.state, child_commit)
+                cleanup_owner(child, child_graph, binding.scope_run, binding.state, child_commit)
             )
             with suppress(BaseException):
                 await wait_for_owner_task(cleanup_task)
@@ -1103,6 +1103,8 @@ async def admit_continued_root(
         # lineage_states validates coordinate order; filtering preserves child node order for this owner.
         for binding in child_states:
             activation = binding.parent_activation
+            if activation is None:
+                raise SnapshotMismatchError("nested child binding is missing its parent activation")
             if activation.scope_run != owner_scope_run or not is_current_child_activation(owner_state, activation):
                 continue
             parent = GraphActivationIdentity(
@@ -1116,7 +1118,7 @@ async def admit_continued_root(
                 if binding.state.status is GraphRunStatus.COMPLETED:
                     availability: ChildBoundaryAvailabilityCoordinate[GraphValueT] = (
                         ChildBoundaryAvailabilityCoordinate(
-                            binding.coordinate,
+                            binding.scope_run,
                             child_graph.graph_output_descriptor.identity,
                         )
                     )
@@ -1133,13 +1135,13 @@ async def admit_continued_root(
                 owner.accept_child_call(_ChildCall(position, parent, phase, None))
                 continue
 
-            fence = fences_by_scope.get(binding.coordinate)
-            resume = resumes_by_scope.get(binding.coordinate)
+            fence = fences_by_scope.get(binding.scope_run)
+            resume = resumes_by_scope.get(binding.scope_run)
             call = await construct_child(parent, binding, child_graph, position, fence, resume)
             try:
                 owner.accept_child_call(call)
             except BaseException:
-                failed_scope = tuple(binding.coordinate.scope)
+                failed_scope = tuple(binding.scope_run.scope)
                 await _cleanup_unhanded_child(
                     call,
                     GraphAbortReason("continued graph owner handoff failed"),
@@ -1203,7 +1205,13 @@ async def fresh_root(
     evidence_publisher, evidence_reader = _evidence_adapter((), ScopedFrameIndex())
     child_constructor = _make_child_constructor(graph, scope_run, limits, commit, evidence_publisher)
     root_commit = scoped_commit(scope_run, commit)
-    command = project_start_graph_command(graph, scope_run.graph_run_id)
+    command = project_start_graph_command(
+        graph,
+        scope_run.graph_run_id,
+        config_cursor=(
+            input_frame.activation_config.config_cursor if input_frame.activation_config is not None else None
+        ),
+    )
     transition = prepare_transition(
         scope_run,
         None,
@@ -1305,7 +1313,7 @@ def project_graph_result(
         return _aborted_result(state, continuation, GraphAbortView((), state.abort.reason))
     scoped_states = (
         ((), state),
-        *((tuple(binding.coordinate.scope), binding.state) for binding in child_states),
+        *((tuple(binding.scope_run.scope), binding.state) for binding in child_states),
     )
     failures, interrupts = _project_result_views(scoped_states)
     if isinstance(disposition, FailedGraph):

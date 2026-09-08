@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
+from mote_kernel.act.config import ResolveBinding
 from mote_kernel.act.contract import (
     ActContractError,
     ActHookCommand,
@@ -19,8 +20,9 @@ from mote_kernel.act.contract import (
 )
 from mote_kernel.act.identity import ActHookStage
 from mote_kernel.act.port import ResolvePort
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
 
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
@@ -36,12 +38,19 @@ class ResolveNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        value: ActRequest,
+        value: ConfigActivation[ActRequest],
         /,
-    ) -> HookRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
-        request = self.admission.admit_request(value)
+    ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
+        request = self.admission.admit_request(value.value)
+        config = value.activation_config
 
-        result = self.admission.admit_resolution_result(await self.resolve_port.resolve(request))
+        resolve_port = self.resolve_port
+        if config is not None:
+            selected = config.bind(ResolveBinding[HookStateT, HookCommandT]())
+            if selected.admission != self.admission:
+                raise ActContractError("Act config binding changed the compiled payload contract")
+            resolve_port = selected.capability
+        result = self.admission.admit_resolution_result(await resolve_port.resolve(request))
         if type(result) is ResolutionStopped:
             return Graph.failure(result.reason.value)
 
@@ -57,7 +66,7 @@ class ResolveNode(Generic[HookStateT, HookCommandT]):
             ResolveStageValue(authorization),
             hook_state,
         )
-        hook_request = HookRequest(envelope, hook_state, GraphNodeId("resolve"))
+        hook_request = HookActivationRequest(envelope, hook_state, GraphNodeId("resolve"))
         self.admission.admit_hook_request(hook_request)
         return hook_request
 

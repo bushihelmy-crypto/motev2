@@ -66,6 +66,7 @@ from mote_kernel.observe.contract import (
     AssistantBatch,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigSettlementReceipt,
     Conflict,
@@ -172,10 +173,10 @@ class PassThroughInvocation(Generic[ValueT, StateT, CommandT]):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ValueT, StateT],
+        request: HookInvocationRequest[Priority, ValueT],
         /,
     ) -> HookStageResult[ValueT, CommandT]:
-        return HookStageResult(request.request.value)
+        return HookStageResult(request.payload)
 
 
 def hook_plan() -> HookPlan[Priority]:
@@ -312,9 +313,11 @@ class ObservePorts:
     async def snapshot(self, boundary: ObservationBoundary, /) -> BackgroundTaskSnapshot:
         return BackgroundTaskSnapshot(boundary.observation_revision, ())
 
-    async def apply(self, batch: ConfigBatch, /) -> ConfigSettlementReceipt:
+    async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
         boundary = self._require_boundary()
-        return ConfigSettlementReceipt(batch.delivery_ids, boundary, boundary, "config-settlement")
+        return ConfigApplyResult(
+            ConfigSettlementReceipt(batch.delivery_ids, boundary, boundary, "config-settlement")
+        )
 
     async def append(
         self,
@@ -589,7 +592,6 @@ def valid_observe_result(sequence: int = 0) -> ObserveResult:
         DeliveryAckReference("stream", batch.delivery_ids, "batch-settlement"),
     )
     return ObserveResult(
-        batch,
         ObservationKind.USER,
         batch.delivery_ids,
         CursorRange(before, after),

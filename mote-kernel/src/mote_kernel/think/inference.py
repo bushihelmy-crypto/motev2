@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import InferenceBinding
 from mote_kernel.think.contract import (
     InferenceNodeInput,
     InferencePort,
@@ -19,7 +21,7 @@ from mote_kernel.think.contract import (
     admit_router_frame,
 )
 
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -57,35 +59,50 @@ class InferenceNode(
 
     async def __call__(
         self,
-        value: InferenceNodeInput[
-            HookStateT,
-            SystemPromptT,
-            PlaceholderT,
-            UserPromptT,
-            CompactedSnapshotT,
-            HookGraphValue,
+        activation: ConfigActivation[
+            InferenceNodeInput[
+                HookStateT,
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                CompactedSnapshotT,
+                HookGraphValue,
+            ]
         ],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[
             InferenceStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT, ModelOutputT],
             HookStateT,
         ],
         HookStateT,
     ]:
+        value = activation.value
         frame = admit_router_frame(value.hook_result)
+        config = activation.activation_config
         step = frame.step
         compacted = step.compacted
         prompt = step.prompt
         model = step.model
         request = InferenceRequest(prompt, compacted, model)
 
-        result_value = await self.inference_port.infer(request)
+        inference_port = self.inference_port
+        if config is not None:
+            inference_port = config.bind(
+                InferenceBinding[
+                    SystemPromptT,
+                    PlaceholderT,
+                    UserPromptT,
+                    CompactedSnapshotT,
+                    ModelOutputT,
+                ]()
+            ).port
+        result_value = await inference_port.infer(request)
         if type(result_value) is not InferenceResult:
             raise ThinkContractError("InferencePort.infer must return an InferenceResult")
         result = result_value
         next_frame = ThinkFrame(InferenceStep(prompt, compacted, model, result), frame.hook_state)
-        return HookRequest(next_frame, frame.hook_state, GraphNodeId("inference"))
+        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("inference"))
 
 
 __all__ = ["InferenceNode"]

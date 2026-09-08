@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import PromptBinding
 from mote_kernel.think.contract import (
     PromptFrame,
     PromptPort,
@@ -18,7 +20,7 @@ from mote_kernel.think.contract import (
 )
 
 PayloadT = TypeVar("PayloadT")
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -51,20 +53,24 @@ class PromptNode(
 
     async def __call__(
         self,
-        request: ThinkRequest[PayloadT, HookStateT],
+        activation: ConfigActivation[ThinkRequest[PayloadT, HookStateT]],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[PromptStep[SystemPromptT, PlaceholderT, UserPromptT], HookStateT],
         HookStateT,
     ]:
+        request = activation.value
+        config = activation.activation_config
         port = self.prompt_port
+        if config is not None:
+            port = config.bind(PromptBinding[PayloadT, SystemPromptT, PlaceholderT, UserPromptT]()).port
         system = await port.load_system_prompt(request.payload)
         placeholder = await port.load_placeholder(request.payload)
         user = await port.load_user_prompt(request.payload)
 
         prompt = PromptFrame[SystemPromptT, PlaceholderT, UserPromptT](system, placeholder, user)
         frame = ThinkFrame(PromptStep(prompt), request.hook_state)
-        return HookRequest(frame, request.hook_state, GraphNodeId("prompt"))
+        return HookActivationRequest(frame, request.hook_state, GraphNodeId("prompt"))
 
 
 __all__ = ["PromptNode"]

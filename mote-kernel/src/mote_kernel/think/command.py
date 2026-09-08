@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import CommandBinding
 from mote_kernel.think.contract import (
     CommandNodeInput,
     CommandPort,
@@ -19,7 +21,7 @@ from mote_kernel.think.contract import (
     admit_inference_frame,
 )
 
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -56,17 +58,19 @@ class CommandNode(
 
     async def __call__(
         self,
-        value: CommandNodeInput[
-            HookStateT,
-            SystemPromptT,
-            PlaceholderT,
-            UserPromptT,
-            CompactedSnapshotT,
-            ModelOutputT,
-            HookGraphValue,
+        activation: ConfigActivation[
+            CommandNodeInput[
+                HookStateT,
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                CompactedSnapshotT,
+                ModelOutputT,
+                HookGraphValue,
+            ]
         ],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[
             CommandStep[
                 SystemPromptT,
@@ -80,9 +84,14 @@ class CommandNode(
         ],
         HookStateT,
     ]:
+        value = activation.value
         frame = admit_inference_frame(value.hook_result)
+        config = activation.activation_config
         step = frame.step
-        core_value = await self.command_port.build_command(step.inference)
+        command_port = self.command_port
+        if config is not None:
+            command_port = config.bind(CommandBinding[ModelOutputT, CommandT]()).port
+        core_value = await command_port.build_command(step.inference)
         if type(core_value) is not ThinkCoreResult:
             raise ThinkContractError("CommandPort.build_command must return a ThinkCoreResult")
         core = core_value
@@ -90,7 +99,7 @@ class CommandNode(
             CommandStep(step.prompt, step.compacted, step.model, step.inference, core),
             frame.hook_state,
         )
-        return HookRequest(next_frame, frame.hook_state, GraphNodeId("command"))
+        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("command"))
 
 
 __all__ = ["CommandNode"]

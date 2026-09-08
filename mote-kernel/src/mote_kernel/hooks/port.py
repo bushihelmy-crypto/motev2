@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.hooks.contract import (
+    HookActivationRequest,
     HookContractError,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookRequest,
     HookStageResult,
 )
 from mote_kernel.hooks.plan import HookPriorityPlan
@@ -17,6 +17,7 @@ from mote_kernel.invocation import (
     InvocationTypeContract,
     invoke_typed,
 )
+from mote_kernel.state.graph_state import GraphConfigCursor
 
 PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
@@ -34,19 +35,23 @@ class HookPort(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
 
     admission: HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT]
     invocation: Invocation[
-        HookInvocationRequest[PriorityConfigT, ValueT, StateT],
+        HookInvocationRequest[PriorityConfigT, ValueT],
         HookStageResult[ValueT, CommandT],
     ]
 
     async def execute(
         self,
         plan: HookPriorityPlan[PriorityConfigT],
-        request: HookRequest[ValueT, StateT],
+        request: HookActivationRequest[ValueT, StateT],
+        config_cursor: GraphConfigCursor | None,
         /,
     ) -> HookStageResult[ValueT, CommandT]:
-        invocation_request = self.admission.admit_invocation_request(HookInvocationRequest(plan.config, request))
+        admitted_request = self.admission.admit_request(request)
+        invocation_request = self.admission.admit_invocation_request(
+            HookInvocationRequest(plan.config, admitted_request.value, config_cursor)
+        )
         request_type = cast(
-            type[HookInvocationRequest[PriorityConfigT, ValueT, StateT]],
+            type[HookInvocationRequest[PriorityConfigT, ValueT]],
             HookInvocationRequest,
         )
         result_type = cast(type[HookStageResult[ValueT, CommandT]], HookStageResult)
@@ -56,7 +61,7 @@ class HookPort(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
         except InvocationBoundaryAdmissionError as error:
             raise HookContractError(str(error)) from error
         admitted = self.admission.admit_stage_result(result)
-        self.admission.admit_transition(request, admitted)
+        self.admission.admit_transition(admitted_request, admitted)
         return admitted
 
 

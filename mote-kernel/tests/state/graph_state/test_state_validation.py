@@ -155,12 +155,22 @@ def running() -> GraphRunState:
         {"definition_id": GraphDefinitionId(" graph")},
         {"definition_version": GraphDefinitionVersion(0)},
         {"revision": -1},
+        {"config_revision": 0},
+        {"config_revision": True},
         {"parent": GraphActivationIdentity(GraphRunId("run"), 0, A)},
     ],
 )
 def test_invalid_run_identity_version_counter_and_parent_fail_closed(mutation: dict[str, object]) -> None:
     with pytest.raises(GraphStateTransitionError):
         validate_graph_run_state(replace(running(), **mutation))  # type: ignore[arg-type]
+
+
+def test_recovered_state_with_missing_config_identity_fails_closed() -> None:
+    state = running()
+    object.__setattr__(state, "config_definition_id", None)
+
+    with pytest.raises(GraphStateTransitionError, match="Config cursor is malformed"):
+        validate_graph_run_state(state)
 
 
 def test_parent_bearing_recovered_state_requires_deterministic_child_run_identity() -> None:

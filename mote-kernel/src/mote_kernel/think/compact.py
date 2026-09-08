@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import CompactBinding
 from mote_kernel.think.contract import (
     CompactedContext,
     CompactNodeInput,
@@ -19,7 +21,7 @@ from mote_kernel.think.contract import (
     admit_context_frame,
 )
 
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -57,32 +59,47 @@ class CompactNode(
 
     async def __call__(
         self,
-        value: CompactNodeInput[
-            HookStateT,
-            SystemPromptT,
-            PlaceholderT,
-            UserPromptT,
-            ContextSnapshotT,
-            HookGraphValue,
+        activation: ConfigActivation[
+            CompactNodeInput[
+                HookStateT,
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                ContextSnapshotT,
+                HookGraphValue,
+            ]
         ],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[
             CompactStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT, CompactedSnapshotT],
             HookStateT,
         ],
         HookStateT,
     ]:
+        value = activation.value
         frame = admit_context_frame(value.hook_result)
+        config = activation.activation_config
         step = frame.step
         request = CompactRequest(step.prompt, step.context)
 
-        compacted_value = await self.compact_port.compact(request)
+        compact_port = self.compact_port
+        if config is not None:
+            compact_port = config.bind(
+                CompactBinding[
+                    SystemPromptT,
+                    PlaceholderT,
+                    UserPromptT,
+                    ContextSnapshotT,
+                    CompactedSnapshotT,
+                ]()
+            ).port
+        compacted_value = await compact_port.compact(request)
         if type(compacted_value) is not CompactedContext:
             raise ThinkContractError("CompactPort.compact must return a CompactedContext")
         compacted = compacted_value
         next_frame = ThinkFrame(CompactStep(step.prompt, step.context, compacted), frame.hook_state)
-        return HookRequest(next_frame, frame.hook_state, GraphNodeId("compact"))
+        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("compact"))
 
 
 __all__ = ["CompactNode"]

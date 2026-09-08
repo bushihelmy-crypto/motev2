@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import ContextBinding
 from mote_kernel.think.contract import (
     ContextFrame,
     ContextNodeInput,
@@ -20,7 +22,7 @@ from mote_kernel.think.contract import (
 )
 
 PayloadT = TypeVar("PayloadT")
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -50,30 +52,46 @@ class ContextNode(
 
     async def __call__(
         self,
-        value: ContextNodeInput[
-            PayloadT,
-            HookStateT,
-            SystemPromptT,
-            PlaceholderT,
-            UserPromptT,
-            HookGraphValue,
+        activation: ConfigActivation[
+            ContextNodeInput[
+                PayloadT,
+                HookStateT,
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                HookGraphValue,
+            ]
         ],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT], HookStateT],
         HookStateT,
     ]:
+        value = activation.value
         request = value.request
         frame = admit_prompt_frame(value.hook_result, request.hook_state)
+        config = activation.activation_config
         prompt = frame.step.prompt
         context_request = ContextRequest(request, prompt)
 
-        context_value = await self.context_port.load_context(context_request)
+        context_port = self.context_port
+        if config is not None:
+            context_port = config.bind(
+                ContextBinding[
+                    PayloadT,
+                    HookStateT,
+                    SystemPromptT,
+                    PlaceholderT,
+                    UserPromptT,
+                    ContextSnapshotT,
+                ]()
+            ).port
+        context_value = await context_port.load_context(context_request)
         if type(context_value) is not ContextFrame:
             raise ThinkContractError("ContextPort.load_context must return a ContextFrame")
         context = context_value
         next_frame = ThinkFrame(ContextStep(prompt, context), frame.hook_state)
-        return HookRequest(next_frame, frame.hook_state, GraphNodeId("context"))
+        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("context"))
 
 
 __all__ = ["ContextNode"]

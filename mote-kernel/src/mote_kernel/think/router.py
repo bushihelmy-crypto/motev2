@@ -6,8 +6,10 @@ import operator
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest
+from mote_kernel.config import ConfigActivation
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.config import RouterBinding
 from mote_kernel.think.contract import (
     ModelBinding,
     RouterNodeInput,
@@ -19,7 +21,7 @@ from mote_kernel.think.contract import (
     admit_compact_frame,
 )
 
-HookStateT = TypeVar("HookStateT")
+HookStateT = TypeVar("HookStateT", bound=HookGraphValue)
 SystemPromptT = TypeVar("SystemPromptT")
 PlaceholderT = TypeVar("PlaceholderT")
 UserPromptT = TypeVar("UserPromptT")
@@ -54,33 +56,47 @@ class RouterNode(
 
     async def __call__(
         self,
-        value: RouterNodeInput[
-            HookStateT,
-            SystemPromptT,
-            PlaceholderT,
-            UserPromptT,
-            ContextSnapshotT,
-            CompactedSnapshotT,
-            HookGraphValue,
+        activation: ConfigActivation[
+            RouterNodeInput[
+                HookStateT,
+                SystemPromptT,
+                PlaceholderT,
+                UserPromptT,
+                ContextSnapshotT,
+                CompactedSnapshotT,
+                HookGraphValue,
+            ]
         ],
         /,
-    ) -> HookRequest[
+    ) -> HookActivationRequest[
         ThinkFrame[
             RouterStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
             HookStateT,
         ],
         HookStateT,
     ]:
+        value = activation.value
         frame = admit_compact_frame(value.hook_result)
+        config = activation.activation_config
         step = frame.step
         request = RouterRequest(step.prompt, step.compacted)
 
-        model_value = await self.router_port.route_model(request)
+        router_port = self.router_port
+        if config is not None:
+            router_port = config.bind(
+                RouterBinding[
+                    SystemPromptT,
+                    PlaceholderT,
+                    UserPromptT,
+                    CompactedSnapshotT,
+                ]()
+            ).port
+        model_value = await router_port.route_model(request)
         if type(model_value) is not ModelBinding:
             raise ThinkContractError("RouterPort.route_model must return a ModelBinding")
         model = model_value
         next_frame = ThinkFrame(RouterStep(step.prompt, step.compacted, model), frame.hook_state)
-        return HookRequest(next_frame, frame.hook_state, GraphNodeId("router"))
+        return HookActivationRequest(next_frame, frame.hook_state, GraphNodeId("router"))
 
 
 __all__ = ["RouterNode"]

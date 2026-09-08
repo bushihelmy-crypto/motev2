@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import InitVar, dataclass, field
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.errors import GraphValidationError, GraphValueAdmissionError
 from mote_kernel.execution.graph.ports import (
     NominalTypeDescriptor,
@@ -34,11 +35,21 @@ _VALUES_SEAL = _ValuesSeal()
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _GraphValues(Generic[GraphValueT_co]):
     _entries: tuple[NamedValue[GraphValueT_co], ...] = field(repr=False)
+    # The complete activation Config is execution metadata, not a named
+    # business value.  Keeping it beside the values lets every nested graph
+    # inherit the exact same activation without putting Config in Invocation
+    # payloads or changing ordinary Graph value descriptors.
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_ValuesSeal]
 
     def __post_init__(self, _seal: _ValuesSeal) -> None:
         if _seal is not _VALUES_SEAL:
             raise GraphValueAdmissionError("Graph values require their canonical owner construction")
+        if self.activation_config is not None:
+            try:
+                require_config(self.activation_config)
+            except ConfigContractError as error:
+                raise GraphValueAdmissionError("graph values carry a malformed activation Config") from error
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -76,41 +87,65 @@ _FRAME_SEAL = _FrameSeal()
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GraphInputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("graph input frames require their canonical owner")
+        if self.activation_config is not None:
+            try:
+                require_config(self.activation_config)
+            except ConfigContractError as error:
+                raise GraphValueAdmissionError("graph input frame carries a malformed activation Config") from error
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NodeInputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("node input frames require their canonical owner")
+        if self.activation_config is not None:
+            try:
+                require_config(self.activation_config)
+            except ConfigContractError as error:
+                raise GraphValueAdmissionError("node input frame carries a malformed activation Config") from error
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NodeOutputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("node output frames require their canonical owner")
+        if self.activation_config is not None:
+            try:
+                require_config(self.activation_config)
+            except ConfigContractError as error:
+                raise GraphValueAdmissionError("node output frame carries a malformed activation Config") from error
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GraphOutputView(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("graph output views require their canonical owner")
+        if self.activation_config is not None:
+            try:
+                require_config(self.activation_config)
+            except ConfigContractError as error:
+                raise GraphValueAdmissionError("graph output view carries a malformed activation Config") from error
 
 
 def _normalize_mapping(values: Mapping[str, GraphValueT]) -> tuple[NamedValue[GraphValueT], ...]:
@@ -119,12 +154,25 @@ def _normalize_mapping(values: Mapping[str, GraphValueT]) -> tuple[NamedValue[Gr
 
 def _make_graph_values(**values: FactoryValueT) -> _GraphValues[FactoryValueT]:
     entries = _normalize_mapping(values)
-    return _GraphValues(_entries=entries, _seal=_VALUES_SEAL)
+    return _GraphValues(_entries=entries, activation_config=None, _seal=_VALUES_SEAL)
 
 
-def _make_single_graph_value(name: str, value: FactoryValueT) -> _GraphValues[FactoryValueT]:
+def _make_single_graph_value(
+    name: str,
+    value: FactoryValueT,
+    activation_config: Config | None = None,
+) -> _GraphValues[FactoryValueT]:
     entry = NamedValue(canonical_port_name(name, kind="value"), value)
-    return _GraphValues(_entries=(entry,), _seal=_VALUES_SEAL)
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("graph value activation Config is malformed") from error
+    return _GraphValues(
+        _entries=(entry,),
+        activation_config=activation_config,
+        _seal=_VALUES_SEAL,
+    )
 
 
 def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[GraphValueT]:
@@ -236,9 +284,19 @@ def _admit_graph_output_view(
 def _make_graph_input_frame(
     values: _GraphValues[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="graph input")
-    return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
+    inherited = values.activation_config
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("graph input activation Config is malformed") from error
+        if inherited is not None and inherited != activation_config:
+            raise GraphValueAdmissionError("graph input values and activation Config disagree")
+        inherited = activation_config
+    return GraphInputFrame(entries=entries, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _graph_input_from_node_input(
@@ -246,23 +304,44 @@ def _graph_input_from_node_input(
     declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(frame.entries, declarations, kind="nested graph input")
-    return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
+    return GraphInputFrame(entries=entries, activation_config=frame.activation_config, _seal=_FRAME_SEAL)
 
 
 def _make_node_input_frame(
     entries: tuple[NamedValue[GraphValueT], ...],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="node input")
-    return NodeInputFrame(entries=admitted, _seal=_FRAME_SEAL)
+    inherited = activation_config
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("node input activation Config is malformed") from error
+    return NodeInputFrame(entries=admitted, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _make_node_output_frame(
     values: _GraphValues[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="node output")
-    return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
+    discovered = values.activation_config
+    inherited = discovered if activation_config is None else activation_config
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("node output activation Config is malformed") from error
+    if (
+        values.activation_config is not None
+        and activation_config is not None
+        and values.activation_config != activation_config
+    ):
+        raise GraphValueAdmissionError("node output values and activation Config disagree")
+    return NodeOutputFrame(entries=entries, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _node_output_from_view(
@@ -270,21 +349,28 @@ def _node_output_from_view(
     declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(view.entries, declarations, kind="nested node output")
-    return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
+    return NodeOutputFrame(entries=entries, activation_config=view.activation_config, _seal=_FRAME_SEAL)
 
 
 def _make_graph_output_view(
     entries: tuple[NamedValue[GraphValueT], ...],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> GraphOutputView[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="graph output")
-    return GraphOutputView(entries=admitted, _seal=_FRAME_SEAL)
+    inherited = activation_config
+    if activation_config is not None:
+        try:
+            require_config(activation_config)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("graph output activation Config is malformed") from error
+    return GraphOutputView(entries=admitted, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _public_values(
     frame: NodeInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT] | GraphOutputView[GraphValueT],
 ) -> _GraphValues[GraphValueT]:
-    return _GraphValues(_entries=frame.entries, _seal=_VALUES_SEAL)
+    return _GraphValues(_entries=frame.entries, activation_config=frame.activation_config, _seal=_VALUES_SEAL)
 
 
 def _frame_value(

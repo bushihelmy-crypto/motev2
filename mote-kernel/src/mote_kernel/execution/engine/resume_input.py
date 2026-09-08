@@ -2,6 +2,7 @@
 
 from typing import TypeVar, cast
 
+from mote_kernel.config import Config, require_config
 from mote_kernel.execution.engine.routing import (
     _graph_input_coordinate,
     _node_output_coordinate,
@@ -23,8 +24,10 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
+    GraphInputFrame,
     NamedValue,
     NodeInputFrame,
+    NodeOutputFrame,
     _frame_value,
     _GraphValues,
     _make_node_input_frame,
@@ -114,7 +117,26 @@ def decode_resume_input(
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in candidate.items()),
         plan.descriptor.declarations,
+        activation_config=candidate.activation_config,
     )
+
+
+def _activation_config_from_frames(
+    frames: tuple[GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT], ...],
+) -> Config | None:
+    """Require one activation Config across all source frames."""
+
+    selected: Config | None = None
+    for frame in frames:
+        candidate = frame.activation_config
+        if candidate is None:
+            continue
+        require_config(candidate)
+        if selected is None:
+            selected = candidate
+        elif selected != candidate:
+            raise SnapshotMismatchError("node inputs combine different activation Config snapshots")
+    return selected
 
 
 def _binding_source_coordinate(
@@ -261,6 +283,7 @@ def materialize_node_input(
         except SnapshotMismatchError:
             pass
     entries: list[NamedValue[GraphValueT]] = []
+    source_frames: list[GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT]] = []
     for binding in plan.bindings.entries:
         source, coordinate = _binding_source_coordinate(
             graph,
@@ -279,9 +302,14 @@ def materialize_node_input(
             frame = frames.lookup(coordinate).frame
         except SnapshotMismatchError as error:
             raise GraphValueUnavailableError(f"{unavailable} is unavailable at {scope_run!r}") from error
+        source_frames.append(frame)
         value = _frame_value(frame, value_name)
         entries.append(NamedValue(binding.destination.local_name, value))
-    return _make_node_input_frame(tuple(entries), plan.descriptor.declarations)
+    return _make_node_input_frame(
+        tuple(entries),
+        plan.descriptor.declarations,
+        activation_config=_activation_config_from_frames(tuple(source_frames)),
+    )
 
 
 __all__ = ["_require_node_materialization", "_resume_input_coordinate"]

@@ -6,6 +6,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
 from mote_kernel.act.authorize import AuthorizeNode
+from mote_kernel.act.config import ActBinding, AuthorizeBinding
 from mote_kernel.act.contract import (
     ActContractError,
     ActHookCommand,
@@ -35,10 +36,11 @@ from mote_kernel.act.port import (
 )
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
+from mote_kernel.config import Config, ConfigActivation, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import NodeOutputRef
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
@@ -66,6 +68,35 @@ class ActNode(
         "_authorize_port",
         "_hook",
     )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+    ) -> ActNode[PriorityConfigT, HookStateT, HookCommandT]:
+        """Assemble Act from the complete config through its own projection."""
+
+        config = require_config(config)
+        selected = config.bind(ActBinding[HookStateT, HookCommandT]())
+        hook: HookNode[PriorityConfigT, ActHookEnvelope, HookStateT, HookCommandT] = HookNode[
+            PriorityConfigT,
+            ActHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ].from_config(config, selected.hook_slot)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            resolve_port=selected.resolve_port,
+            authorize_port=selected.authorize_port,
+            execute_port=selected.execute_port,
+            settlement_port=selected.settlement_port,
+            exchange_writer=selected.exchange_writer,
+            hook=hook,
+            failure_reason=selected.failure_reason,
+            admission=selected.admission,
+        )
 
     def __init__(
         self,
@@ -155,10 +186,13 @@ class ActNode(
             "resolve",
             resolve,
             inputs=(request_binding,),
-            input_type=ActRequest,
-            materialize=lambda values: values.get(request_binding),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(request_binding),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "hook",
@@ -183,29 +217,39 @@ class ActNode(
             # resumed with an override, so the fixed Hook source is required
             # for this interruptible stage.
             inputs=(authorize_hook_result_binding,),
-            input_type=AuthorizeNodeInput,
-            materialize=lambda values: AuthorizeNodeInput(values.get(authorize_hook_result_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                AuthorizeNodeInput(values.get(authorize_hook_result_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "execute",
             execute,
             inputs=(stage_hook_result_binding,),
-            input_type=ExecuteNodeInput,
-            materialize=lambda values: ExecuteNodeInput(values.get(stage_hook_result_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                ExecuteNodeInput(values.get(stage_hook_result_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "settle",
             settle,
             inputs=(stage_hook_result_binding,),
-            input_type=SettleNodeInput,
-            materialize=lambda values: SettleNodeInput(values.get(stage_hook_result_binding)),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                SettleNodeInput(values.get(stage_hook_result_binding)),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
+        self.add_edge(Graph.START, "resolve")
         for business_node in ("resolve", "authorize", "execute", "settle"):
             self.add_edge(business_node, "hook")
         # Hook returns the current business node identity as its terminal
@@ -235,6 +279,7 @@ class ActNode(
         awaiting: Graph.AwaitingResumeResult[HookGraphValue],
         interrupt_id: str,
         decision: AuthorizationDecision,
+        activation_config: Config | None = None,
     ) -> Graph.ResumeAction[HookGraphValue]:
         """Build the typed Authorize override for a public awaiting result."""
 
@@ -252,7 +297,13 @@ class ActNode(
                 interrupt.request_payload,
             )
         )
-        resumed = self._authorize_port.build_resume_input(view, decision)
+        authorize_port = self._authorize_port
+        if activation_config is not None:
+            selected = activation_config.bind(AuthorizeBinding[HookStateT, HookCommandT]())
+            if selected.admission != self._admission:
+                raise ActContractError("Act config binding changed the compiled payload contract")
+            authorize_port = selected.capability.port
+        resumed = authorize_port.build_resume_input(view, decision)
         resumed = self._admission.admit_authorization_input(resumed)
         if type(resumed.phase) is not ResumedAuthorization:
             raise ActContractError("AuthorizePort resume input must use ResumedAuthorization")

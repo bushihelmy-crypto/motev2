@@ -16,8 +16,8 @@ from mote_kernel.hooks.contract import HookGraphValue
 from mote_kernel.observe.contract import (
     AssistantBatch,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
-    ConfigSettlementReceipt,
     ContextAppendReceipt,
     DeliveryAck,
     ObservationBatchReceipt,
@@ -53,9 +53,9 @@ class BackgroundTaskPort(Protocol):
 
 @runtime_checkable
 class ConfigObservationPort(Protocol):
-    """Apply Config deliveries in FIFO order and return an idempotent receipt."""
+    """Apply Config deliveries and return receipt plus optional successor."""
 
-    async def apply(self, batch: ConfigBatch, /) -> ConfigSettlementReceipt: ...
+    async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult: ...
 
 
 @runtime_checkable

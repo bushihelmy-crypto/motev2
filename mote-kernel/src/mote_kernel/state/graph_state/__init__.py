@@ -64,6 +64,7 @@ from mote_kernel.state.graph_state.identity import (
 from mote_kernel.state.graph_state.model import (
     GraphAbort,
     GraphAbortReason,
+    GraphConfigCursor,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
@@ -96,6 +97,7 @@ __all__ = [
     "GraphAbortReason",
     "GraphActivationCause",
     "GraphActivationIdentity",
+    "GraphConfigCursor",
     "GraphDefinitionId",
     "GraphDefinitionVersion",
     "GraphExecutionAttemptId",

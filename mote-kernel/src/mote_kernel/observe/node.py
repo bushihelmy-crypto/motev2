@@ -5,16 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigActivation, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef, TypedInputBinding
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
+from mote_kernel.observe.config import (
+    AcknowledgeBinding,
+    GetObservationBinding,
+    ObserveBinding,
+    WriteObservationBinding,
+)
 from mote_kernel.observe.contract import (
     AssistantBatch,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigSettlementReceipt,
     Conflict,
     ContextAppendReceipt,
@@ -65,7 +73,7 @@ def _conflict_reason(conflict: Conflict, /) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class GetObservationNode(Generic[HookStateT]):
+class GetObservationNode(Generic[HookStateT, HookCommandT]):
     """Read one complete queue window and publish the first Hook envelope."""
 
     queue_port: ObservationQueuePort
@@ -74,22 +82,31 @@ class GetObservationNode(Generic[HookStateT]):
 
     async def __call__(
         self,
-        value: ObserveRequest[HookStateT],
+        value: ConfigActivation[ObserveRequest[HookStateT]],
         /,
-    ) -> HookRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
-        request = self.admission.admit_request(value)
-        read = self.admission.admit_read_after(await self.queue_port.read_after(request.cursor), request.cursor)
+    ) -> HookActivationRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
+        request = self.admission.admit_request(value.value)
+        activation_config = value.activation_config
+        queue_port = self.queue_port
+        background_task_port = self.background_task_port
+        if activation_config is not None:
+            selected = activation_config.bind(GetObservationBinding())
+            if selected.admission != self.admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            queue_port = selected.capability.queue_port
+            background_task_port = selected.capability.background_task_port
+        read = self.admission.admit_read_after(await queue_port.read_after(request.cursor), request.cursor)
         if type(read) is Empty:
             # The provider performs an atomic recheck/registration.  The
             # registration receipt is intentionally not treated as a message;
             # the durable wait coordinate is the only interrupt payload.
-            registration = await self.queue_port.register_wait(read.wait)
+            registration = await queue_port.register_wait(read.wait)
             self.admission.admit_wait_registration_for(read.wait, registration)
             return Graph.interrupt(read.wait.encode())
         if type(read) is Conflict:
             return Graph.failure(_conflict_reason(read))
         available = cast(Available, read)
-        snapshot = self.admission.admit_task_snapshot(await self.background_task_port.snapshot(available.boundary))
+        snapshot = self.admission.admit_task_snapshot(await background_task_port.snapshot(available.boundary))
         if snapshot.observation_revision != available.boundary.observation_revision:
             raise ObserveContractError("background task snapshot revision does not match observation boundary")
         frame = self.admission.admit_frame(ObserveFrame(available.batch, available.boundary, snapshot))
@@ -98,7 +115,11 @@ class GetObservationNode(Generic[HookStateT]):
             GetObservationStageValue(frame),
             request.hook_state,
         )
-        hook_request = HookRequest(envelope, request.hook_state, GraphNodeId("get_observation"))
+        hook_request = HookActivationRequest(
+            envelope,
+            request.hook_state,
+            GraphNodeId("get_observation"),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 
@@ -151,9 +172,10 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
 
     async def __call__(
         self,
-        value: HookResult[ObserveHookEnvelope, HookCommandT],
+        activation: ConfigActivation[HookResult[ObserveHookEnvelope, HookCommandT]],
         /,
-    ) -> HookRequest[ObserveHookEnvelope, HookStateT]:
+    ) -> ConfigActivation[HookActivationRequest[ObserveHookEnvelope, HookStateT]]:
+        value = activation.value
         hook_result = self.admission.admit_hook_result(value)
         envelope = hook_result.value
         if (
@@ -163,12 +185,23 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             raise ObserveContractError("write_observation input must be an after-get Hook envelope")
         frame = envelope.payload.frame
         batch = frame.batch
+        config_apply_result: ConfigApplyResult | None = None
         config_receipt: ConfigSettlementReceipt | None = None
         context_receipt: ContextAppendReceipt | None = None
+        current_config = activation.activation_config
+        config_port = self.config_port
+        context_port = self.context_port
+        if current_config is not None:
+            selected = current_config.bind(WriteObservationBinding())
+            if selected.admission != self.admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            config_port = selected.capability.config_port
+            context_port = selected.capability.context_port
         config = batch.config
         if config is not None:
             config_batch = self.admission.admit_config_batch(config)
-            config_receipt = self.admission.admit_config_receipt(await self.config_port.apply(config_batch))
+            config_apply_result = self.admission.admit_config_apply_result(await config_port.apply(config_batch))
+            config_receipt = config_apply_result.receipt
             if config_receipt.read_boundary != frame.boundary:
                 raise ObserveContractError("Config settlement receipt read boundary does not match observation frame")
             if config_receipt.delivery_ids != config_batch.delivery_ids:
@@ -176,7 +209,7 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         context_batch = _context_batch(batch)
         if context_batch is not None:
             self.admission.admit_context_batch(context_batch)
-            context_receipt = self.admission.admit_context_receipt(await self.context_port.append(context_batch))
+            context_receipt = self.admission.admit_context_receipt(await context_port.append(context_batch))
             if context_receipt.read_boundary != frame.boundary:
                 raise ObserveContractError("Context settlement receipt read boundary does not match observation frame")
             if context_receipt.delivery_ids != context_batch.delivery_ids:
@@ -212,6 +245,21 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             context_receipt,
             ack_reference,
         )
+        successor_config = current_config
+        if config_apply_result is not None and config_apply_result.successor_config is not None:
+            candidate = config_apply_result.successor_config
+            if current_config is not None:
+                current_key = current_config.snapshot.key
+                candidate_key = candidate.snapshot.key
+                if (
+                    candidate_key.definition_id != current_key.definition_id
+                    or candidate_key.definition_version != current_key.definition_version
+                    or candidate_key.revision != current_key.revision + 1
+                ):
+                    raise ObserveContractError(
+                        "Config successor must preserve graph identity and advance its snapshot revision"
+                    )
+            successor_config = candidate
         result = ObserveResult(
             observation_kind(batch),
             batch.delivery_ids,
@@ -225,9 +273,13 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             WriteObservationStageValue(result),
             hook_state,
         )
-        hook_request = HookRequest(next_envelope, hook_state, GraphNodeId("write_observation"))
+        hook_request = HookActivationRequest(
+            next_envelope,
+            hook_state,
+            GraphNodeId("write_observation"),
+        )
         self.admission.admit_hook_request(hook_request)
-        return hook_request
+        return ConfigActivation(hook_request, successor_config)
 
 
 def _context_batch(batch: ObservationBatch, /) -> ToolBatch | UserBatch | AssistantBatch | None:
@@ -257,6 +309,41 @@ class ObserveNode(
         "_admission",
         "_hook",
     )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+    ) -> ObserveNode[PriorityConfigT, HookStateT, HookCommandT]:
+        """Assemble Observe from the complete config via its own projection.
+
+        Observe receives the complete object only at this assembly boundary;
+        all capabilities retained by the node come from ``ObserveBinding``.
+        Its shared Hook is independently selected by the Hook slot declared in
+        that projection.
+        """
+
+        config = require_config(config)
+        selected = config.bind(ObserveBinding[PriorityConfigT, HookStateT, HookCommandT]())
+        hook: HookNode[PriorityConfigT, ObserveHookEnvelope, HookStateT, HookCommandT] = HookNode[
+            PriorityConfigT,
+            ObserveHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ].from_config(config, selected.hook_slot)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            queue_port=selected.queue_port,
+            background_task_port=selected.background_task_port,
+            config_port=selected.config_port,
+            context_port=selected.context_port,
+            ack_port=selected.ack_port,
+            resume_port=selected.resume_port,
+            hook=hook,
+            admission=selected.admission,
+        )
 
     def __init__(
         self,
@@ -324,12 +411,16 @@ class ObserveNode(
 
         # Build all callable nodes before touching the parent Graph builder;
         # failed capability assembly cannot leave a partial definition.
-        get_node = GetObservationNode[HookStateT](
+        get_node = GetObservationNode[HookStateT, HookCommandT](
             queue_port,
             background_task_port,
             admission,
         )
-        write_node = WriteObservationNode[HookStateT, HookCommandT](config_port, context_port, admission)
+        write_node = WriteObservationNode[HookStateT, HookCommandT](
+            config_port,
+            context_port,
+            admission,
+        )
 
         super().__init__(definition_id, version=version)
         self._ack_port = ack_port
@@ -353,10 +444,13 @@ class ObserveNode(
             "get_observation",
             get_node,
             inputs=(request_binding,),
-            input_type=ObserveRequest,
-            materialize=lambda values: values.get(request_binding),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(request_binding),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
         self.add_node(
             "hook",
@@ -372,18 +466,16 @@ class ObserveNode(
         self.add_node(
             "write_observation",
             write_node,
-            # This is deliberately predecessor-bound.  The same Hook node is
-            # activated twice; a fixed publication reference could otherwise
-            # accidentally read the first activation after a topology change.
-            # The typed predecessor handle reuses the descriptor owned by the
-            # shared Hook's P2 declaration instead of manufacturing a second
-            # HookResult descriptor at this boundary.
             inputs=(hook_result_binding,),
-            input_type=HookResult,
-            materialize=lambda values: values.get(hook_result_binding),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(hook_result_binding),
+                values.activation_config,
+            ),
             output_name="hook_request",
-            output_type=HookRequest,
+            output_type=HookActivationRequest,
         )
+        self.add_edge(Graph.START, "get_observation")
         self.add_edge("get_observation", "hook")
         self.add_edge("hook", "get_observation", "write_observation")
         self.add_edge("write_observation", "hook")
@@ -407,13 +499,19 @@ class ObserveNode(
         self,
         result: ObserveResult,
         /,
+        *,
+        activation_config: Config | None = None,
     ) -> DeliveryAck:
         """Acknowledge a settled result after its enclosing commit succeeds."""
 
         admitted = self._admission.admit_result(result)
-        ack = self._admission.admit_ack(
-            await self._ack_port.acknowledge(admitted.delivery_ids, admitted.observation_receipt)
-        )
+        ack_port = self._ack_port
+        if activation_config is not None:
+            selected = activation_config.bind(AcknowledgeBinding())
+            if selected.admission != self._admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            ack_port = selected.capability
+        ack = self._admission.admit_ack(await ack_port.acknowledge(admitted.delivery_ids, admitted.observation_receipt))
         if ack.reference != admitted.observation_receipt.ack_reference:
             raise ObserveContractError("delivery acknowledgement does not match observation receipt")
         return ack
