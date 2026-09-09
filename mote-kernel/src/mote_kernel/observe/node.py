@@ -42,8 +42,6 @@ from mote_kernel.observe.contract import (
     ToolBatch,
     UserBatch,
     WriteObservationStageValue,
-    observation_kind,
-    validate_settlement_boundary,
 )
 from mote_kernel.observe.failover import (
     FailoverPortDecorator,
@@ -117,7 +115,9 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
         request = self.admission.admit_request(value.value)
         activation_config = value.activation_config
-        decorators = normalize_observe_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; activation-time
+        # Config selection reuses that single admitted owner.
+        decorators = cast(ObserveFailoverDecorators, self.failover)
         queue_port = self.queue_port
         background_task_port = self.background_task_port
         if activation_config is not None:
@@ -242,7 +242,9 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         config_receipt: ConfigSettlementReceipt | None = None
         context_receipt: ContextAppendReceipt | None = None
         current_config = activation.activation_config
-        decorators = normalize_observe_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; activation-time
+        # Config selection reuses that single admitted owner.
+        decorators = cast(ObserveFailoverDecorators, self.failover)
         config_port = self.config_port
         context_port = self.context_port
         if current_config is not None:
@@ -274,10 +276,6 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         settlement_boundaries = tuple(
             receipt.settlement_boundary for receipt in (config_receipt, context_receipt) if receipt is not None
         )
-        for candidate in settlement_boundaries:
-            # Keep the relation in the contract owner so direct receipt
-            # admission and this live write path cannot drift apart.
-            validate_settlement_boundary(frame.boundary, candidate, "observation")
         # Config and Context are separate capability calls, but their receipts
         # describe one Observe activation.  A single successor boundary is
         # therefore required whenever both are present; selecting the newer
@@ -316,7 +314,7 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
                     )
             successor_config = candidate
         result = ObserveResult(
-            observation_kind(batch),
+            receipt.current_state,
             batch.delivery_ids,
             settlement_boundary.cursor_range,
             snapshot,

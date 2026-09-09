@@ -311,7 +311,7 @@ acknowledgement uncertainty；后续是否恢复、重放或 reconcile 由 execu
 
 ### 6.2 Role/Flow 后续计划
 
-当前 `src/mote_kernel/role/` 没有实际 assembly API。本轮不创建临时 assembly owner，也不在测试中伪造公共 Role API。
+当前 `src/mote_kernel/role/` 已移除；本轮不创建临时 assembly owner，也不在测试中伪造公共 Role API。
 
 后续 Role/Flow assembly 负责：
 

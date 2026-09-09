@@ -93,6 +93,43 @@ def apply_port_decorator(
     return cast(PortT, candidate)
 
 
+def require_port_decorator_boundary(
+    value: TypedPortDecorator[DecoratorT] | PortDecorator | None,
+    field: str,
+    error_type: type[ValueError],
+    /,
+) -> None:
+    """Translate only malformed decoration declarations at a domain edge.
+
+    The failover contract owns the callable check.  Domain owners provide
+    their error type so a provider exception raised *by* the decorator still
+    crosses the boundary unchanged.
+    """
+
+    try:
+        require_port_decorator(value, field)
+    except PortDecoratorContractError as error:
+        raise error_type(str(error)) from error
+
+
+def apply_port_decorator_boundary(
+    port: PortT,
+    decorator: TypedPortDecorator[PortT] | PortDecorator | None,
+    expected: type[PortT],
+    field: str,
+    error_type: type[ValueError],
+    /,
+    *,
+    validate: bool = True,
+) -> PortT:
+    """Apply a decorator while translating only contract-owned failures."""
+
+    try:
+        return apply_port_decorator(port, decorator, expected, field, validate=validate)
+    except PortDecoratorContractError as error:
+        raise error_type(str(error)) from error
+
+
 class FailureClass(StrEnum):
     """Coarse facts used for accounting and diagnostics.
 

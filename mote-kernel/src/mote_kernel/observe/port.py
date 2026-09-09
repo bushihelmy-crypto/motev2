@@ -175,15 +175,6 @@ def capture_observation_resume_binding(
     )
 
 
-def capture_observation_resume_port_contract(
-    resume_port: ObservationResumePort | None,
-    /,
-) -> ObservationResumeBinding:
-    """Capture one complete resume codec contract."""
-
-    return capture_observation_resume_binding(resume_port).binding
-
-
 def _reuse_observation_resume_binding(
     resume_port: ObservationResumePort | None,
     binding: ObservationResumeBinding,
@@ -204,6 +195,8 @@ def _require_observation_resume_binding(
 ) -> ObservationResumeCapture:
     """Admit cached metadata only when its provenance matches the Port."""
 
+    if binding is not None and type(binding) is not ObservationResumeBinding:
+        raise ObserveContractError("ObservationResumePort codec binding is malformed")
     if capture is not None:
         if resume_port is None or capture.port is not resume_port:
             raise ObserveContractError("ObservationResumePort codec binding provenance does not match the Port")

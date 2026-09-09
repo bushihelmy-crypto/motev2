@@ -31,10 +31,12 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 执行边，因此每个 node-output consumer 还必须声明 incoming control edge。仅依赖 graph input 或没有输入的 root
 仍是 automatic entry；`set_outputs()` 只投影结果，不激活节点。`Graph.values()` 构造 immutable concrete frame。
 
-`Graph.feedback(initial=..., repeat=...)` 为 callable node 的一个输入显式声明“首轮 graph input、后续紧邻上一轮
-node output”。compiler 当前只准入封闭的直接自反馈形状：一个 callable root target、一条显式 `START` 边、一条
-self route、一条 `END` route，并从 target 的 repeat publication 投影 graph output。这是进程内构图契约，不增加
-跨进程 concrete value recovery。
+`Graph.node_output()` 有两个 typed 重载：`Graph.node_output("producer", "name")` 固定读取某个 producer，
+`Graph.node_output("name")` 读取实际激活本次节点的唯一控制前驱。因果输入节点也可以显式声明为 START entry；
+compiler 会把首轮 graph input case 和后续 routed predecessor cases 一并写入 immutable binding。Join target
+仍不能隐式挑选某一个前驱值；多个入边只有在 control-flow proof 能证明互斥时才会被准入。runtime 只根据
+State-owned activation cause 选择编译好的 graph input 或 exact predecessor publication，不扫描“最新值”。
+这仍是进程内 value contract，不增加跨进程 concrete value recovery。
 
 `Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
 

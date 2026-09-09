@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import operator
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
@@ -70,8 +69,6 @@ class CompactNode(
         object.__setattr__(self, "compact_port", port)
         if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
             raise ThinkContractError("compact assembly snapshot key is malformed")
-        if operator.is_(port, None):
-            raise ThinkContractError("compact requires a CompactPort")
         try:
             method = port.compact
         except AttributeError as error:

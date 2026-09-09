@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import operator
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
@@ -51,8 +50,6 @@ class PromptNode(
         object.__setattr__(self, "prompt_port", port)
         if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
             raise ThinkContractError("prompt assembly snapshot key is malformed")
-        if operator.is_(port, None):
-            raise ThinkContractError("prompt requires a PromptPort")
         try:
             load_system_prompt = port.load_system_prompt
             load_placeholder = port.load_placeholder

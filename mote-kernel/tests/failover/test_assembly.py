@@ -6,15 +6,24 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from typing import Never, Protocol, TypeAlias, cast
+from unittest.mock import Mock
 
 import pytest
 
 import mote_kernel.failover as failover_package
 import mote_kernel.failover.assembly as assembly_module
+from mote_kernel.config import Config, ConfigContractError
 from mote_kernel.execution import Graph
 from mote_kernel.failover import Failover
 from mote_kernel.failover.assembly import FailoverCall, FailoverResult
+from mote_kernel.failover.config import (
+    FailoverPlanBinding,
+    FailoverPlanConfig,
+    FailoverPrepareBinding,
+    FailoverPrepareConfig,
+)
 from mote_kernel.failover.contract import (
+    AttemptPreparation,
     Completed,
     ErrorHint,
     FailoverContractError,
@@ -92,7 +101,7 @@ def _config(
 class _PrivateConstructor(Protocol):
     """Typed test-side access to one owner-internal constructor."""
 
-    def __call__(self, *args: object) -> object: ...
+    def __call__(self, *args: object, **kwargs: object) -> object: ...
 
 
 class _PrivateNode(Protocol):
@@ -153,6 +162,35 @@ class _AssemblyPrivateView(Protocol):
 
 def _private_assembly() -> _AssemblyTestAccess:
     return _AssemblyPrivateView.read(cast(object, assembly_module))
+
+
+class _RuntimePlan(Protocol):
+    def __call__(
+        self,
+        config: Config | None,
+        binding: FailoverPlanBinding[Transform] | None,
+        fallback_plan: FailoverPlan[Transform],
+        /,
+    ) -> FailoverPlan[Transform]: ...
+
+
+class _RuntimeConfig(Protocol):
+    def __call__(
+        self,
+        config: Config | None,
+        binding: FailoverPrepareBinding[Request, Transform] | None,
+        fallback_plan: FailoverPlan[Transform],
+        fallback_preparation: AttemptPreparation[Request, Transform],
+        /,
+    ) -> tuple[FailoverPlan[Transform], AttemptPreparation[Request, Transform]]: ...
+
+
+def _runtime_plan() -> _RuntimePlan:
+    return cast(_RuntimePlan, object.__getattribute__(assembly_module, "_runtime_plan"))
+
+
+def _runtime_config() -> _RuntimeConfig:
+    return cast(_RuntimeConfig, object.__getattribute__(assembly_module, "_runtime_config"))
 
 
 class ScriptedAttempt:
@@ -563,6 +601,83 @@ async def test_internal_frames_and_nodes_reject_impossible_recovery_values() -> 
     await _assert_step_rejected(private.invoke(ScriptedAttempt([])), observe_frame, "invoke step")
     await _assert_step_rejected(private.prepare(RecordingPreparation()), invoke_frame, "observe step")
 
+    # Runtime projection admission is fail-closed even when a persistence or
+    # resolver boundary supplies a structurally plausible but invalid result.
+    bad_config = Mock()
+    bad_config.bind.side_effect = ConfigContractError("broken binding")
+    with pytest.raises(FailoverContractError, match="broken binding"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="broken binding"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    bad_config.bind.side_effect = None
+    bad_config.bind.return_value = None
+    with pytest.raises(FailoverContractError, match="did not provide"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="did not provide"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    bad_config.bind.return_value = object()
+    with pytest.raises(FailoverContractError, match="invalid projection"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="invalid projection"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    forged_plan_projection = cast(
+        FailoverPlanConfig[Transform],
+        object.__new__(FailoverPlanConfig),
+    )
+    object.__setattr__(forged_plan_projection, "plan", replace(plan, port_id=FailoverPortId("other")))
+    bad_config.bind.return_value = forged_plan_projection
+    with pytest.raises(FailoverContractError, match="changed"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+
+    forged_prepare_projection = cast(
+        FailoverPrepareConfig[Request, Transform],
+        object.__new__(FailoverPrepareConfig),
+    )
+    object.__setattr__(forged_prepare_projection, "plan", replace(plan, port_id=FailoverPortId("other")))
+    object.__setattr__(forged_prepare_projection, "preparation", RecordingPreparation())
+    bad_config.bind.return_value = forged_prepare_projection
+    with pytest.raises(FailoverContractError, match="changed"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    other_plan = replace(plan, plan_revision=FailoverConfigRevision(2))
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+
+        def alternate_plan(
+            _config: Config | None,
+            _binding: FailoverPlanBinding[Transform] | None,
+            _fallback_plan: FailoverPlan[Transform],
+            /,
+        ) -> FailoverPlan[Transform]:
+            return other_plan
+
+        def alternate_config(
+            _config: Config | None,
+            _binding: FailoverPrepareBinding[Request, Transform] | None,
+            _fallback_plan: FailoverPlan[Transform],
+            _fallback_preparation: AttemptPreparation[Request, Transform],
+            /,
+        ) -> tuple[FailoverPlan[Transform], AttemptPreparation[Request, Transform]]:
+            return other_plan, RecordingPreparation()
+
+        monkeypatch.setattr(assembly_module, "_runtime_plan", alternate_plan)
+        await _assert_step_rejected(
+            private.invoke(ScriptedAttempt([]), fallback_plan=plan),
+            invoke_frame,
+            "bound plan revisions",
+        )
+        monkeypatch.setattr(assembly_module, "_runtime_config", alternate_config)
+        await _assert_step_rejected(
+            private.prepare(RecordingPreparation(), fallback_plan=plan),
+            observe_frame,
+            "bound plan revisions",
+        )
+    finally:
+        monkeypatch.undo()
+
 
 def test_decorator_rejects_malformed_config_or_capabilities() -> None:
     config = _config()
@@ -582,3 +697,12 @@ def test_decorator_rejects_malformed_config_or_capabilities() -> None:
     decorator: Failover[Request, Response, Receipt, Handle, Transform] = Failover(*arguments)
     with pytest.raises(FailoverContractError, match="single-attempt Port"):
         decorator(cast(Never, object()))
+
+    with pytest.raises(FailoverContractError, match="plan binding must"):
+        Failover(*arguments, plan_binding=cast(FailoverPlanBinding[Transform], object()))
+    with pytest.raises(FailoverContractError, match="plan binding does not"):
+        Failover(*arguments, plan_binding=FailoverPlanBinding(FailoverPortId("other")))
+    with pytest.raises(FailoverContractError, match="prepare binding must"):
+        Failover(*arguments, prepare_binding=cast(FailoverPrepareBinding[Request, Transform], object()))
+    with pytest.raises(FailoverContractError, match="prepare binding does not"):
+        Failover(*arguments, prepare_binding=FailoverPrepareBinding(FailoverPortId("other")))

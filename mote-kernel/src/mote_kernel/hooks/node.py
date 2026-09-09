@@ -53,7 +53,7 @@ class _HookProgress(
 
 
 @dataclass(frozen=True, slots=True)
-class _P1Node(
+class _PriorityNode(
     Generic[PriorityConfigT, ValueT, StateT, CommandT],
 ):
     plan: HookPriorityPlan[PriorityConfigT]
@@ -86,6 +86,11 @@ class _P1Node(
         # prevents activation-time wrapper stacking on every P1/P2 pass.
         return selected.priority_plan, self.port
 
+
+@dataclass(frozen=True, slots=True)
+class _P1Node(
+    _PriorityNode[PriorityConfigT, ValueT, StateT, CommandT],
+):
     async def __call__(
         self,
         values: Graph.Values[HookGraphValue],
@@ -113,36 +118,9 @@ class _P1Node(
 
 
 @dataclass(frozen=True, slots=True)
-class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
-    plan: HookPriorityPlan[PriorityConfigT]
-    port: HookPort[PriorityConfigT, ValueT, StateT, CommandT]
-    binding: HookPriorityBinding[PriorityConfigT, ValueT, StateT, CommandT]
-    slot: HookSlotId
-    failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
-    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
-
-    def _runtime(
-        self,
-        config: Config | None,
-        /,
-    ) -> tuple[
-        HookPriorityPlan[PriorityConfigT],
-        HookPort[PriorityConfigT, ValueT, StateT, CommandT],
-    ]:
-        if config is None:
-            return self.plan, self.port
-        selected = config.bind(self.binding)
-        if type(selected) is not HookPriorityConfig:
-            raise HookContractError("Hook config binding returned an invalid projection")
-        if selected.slot != self.slot or selected.payload_admission != self.port.admission:
-            raise HookContractError("Hook config binding changed the compiled Hook contract")
-        if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
-            invocation = self.failover.decorate(selected.invocation)
-            return selected.priority_plan, HookPort(self.port.admission, invocation)
-        # P1 and P2 intentionally share the same already-decorated
-        # Invocation seam for the assembly snapshot.
-        return selected.priority_plan, self.port
-
+class _P2Node(
+    _PriorityNode[PriorityConfigT, ValueT, StateT, CommandT],
+):
     async def __call__(
         self,
         values: Graph.Values[HookGraphValue],

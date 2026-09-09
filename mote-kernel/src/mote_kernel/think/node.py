@@ -48,7 +48,6 @@ from mote_kernel.think.contract import (
 from mote_kernel.think.failover import (
     FailoverPortDecorator,
     ThinkFailoverDecorators,
-    ThinkPortSet,
     normalize_think_failover_decorators,
 )
 from mote_kernel.think.identity import ThinkNodeId, ThinkValueName
@@ -339,14 +338,6 @@ class ThinkNode(
             ModelOutputT,
             CommandT,
         ](command_port, decorators.command, assembly_snapshot_key=assembly_snapshot_key)
-        ThinkPortSet(
-            prompt.prompt_port,
-            context.context_port,
-            compact.compact_port,
-            router.router_port,
-            inference.inference_port,
-            command.command_port,
-        )
         super().__init__(definition_id, version=version)
         self._failover = decorators
         self._hook = hook

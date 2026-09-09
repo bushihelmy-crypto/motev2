@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass, replace
 from typing import cast
 
@@ -28,16 +29,19 @@ from tests.loop.support import (
     valid_act_request,
 )
 
+import mote_kernel.config as config_module
 from mote_kernel.act.admission import ActPayloadAdmission
 from mote_kernel.act.authorize import AuthorizeNode
 from mote_kernel.act.config import (
     ActConfig,
+    ActNodeConfig,
     AuthorizeBinding,
     ExecuteBinding,
     ResolveBinding,
     SettleBinding,
 )
 from mote_kernel.act.contract import (
+    ActContractError,
     ActHookEnvelope,
     ActRequest,
     Allow,
@@ -46,19 +50,17 @@ from mote_kernel.act.contract import (
     AuthorizationInterruptView,
     AuthorizationRequestRef,
     AuthorizedInvocation,
-    AuthorizeNodeInput,
-    ExecuteNodeInput,
     OpaqueGraphFailureReason,
     ResolvedInvocation,
     ResolvePortResult,
     SettlementProjection,
-    SettleNodeInput,
     ToolExchangeWriteRequest,
     ToolExchangeWriteResult,
     ToolExecutionResult,
 )
 from mote_kernel.act.execute import ExecuteNode
 from mote_kernel.act.node import ActNode
+from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
 from mote_kernel.config import (
     Config,
@@ -85,7 +87,9 @@ from mote_kernel.failover.config import (
     FailoverBinding,
     FailoverConfig,
     FailoverPlanBinding,
+    FailoverPlanConfig,
     FailoverPrepareBinding,
+    FailoverPrepareConfig,
 )
 from mote_kernel.failover.contract import (
     AttemptPreparation,
@@ -106,9 +110,10 @@ from mote_kernel.failover.plan import (
     FailoverProfile,
     FailoverProfileId,
 )
-from mote_kernel.hooks.config import HookBinding, HookConfig, HookPriorityBinding
+from mote_kernel.hooks.config import HookBinding, HookConfig, HookPriorityBinding, HookPriorityConfig
 from mote_kernel.hooks.contract import (
     HookActivationRequest,
+    HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
     HookResult,
@@ -123,8 +128,10 @@ from mote_kernel.loop.config import (
     ObserveToActBinding,
     ObserveToThinkBinding,
     ReActConfig,
+    ReActNodeConfig,
     ReActPrepareBinding,
     ReActRouteBinding,
+    ReActRuntimeConfig,
     ThinkToObserveBinding,
 )
 from mote_kernel.loop.contract import (
@@ -142,6 +149,7 @@ from mote_kernel.observe.config import (
     GetObservationBinding,
     ObserveBinding,
     ObserveConfig,
+    ObserveNodeConfig,
     WriteObservationBinding,
 )
 from mote_kernel.observe.contract import (
@@ -171,6 +179,7 @@ from mote_kernel.think.config import (
     PromptBinding,
     RouterBinding,
     ThinkConfig,
+    ThinkPortConfig,
 )
 from mote_kernel.think.contract import (
     CompactedContext,
@@ -793,6 +802,8 @@ def test_snapshot_identity_and_envelope_admission_fail_closed() -> None:
         _key("")
     with pytest.raises(ConfigContractError, match="definition_version"):
         _key(version=0)
+    with pytest.raises(ConfigContractError, match="revision"):
+        ConfigSnapshotKey(GraphDefinitionId("agent.graph"), GraphDefinitionVersion(1), 0)
     with pytest.raises(ConfigContractError, match="ConfigSnapshotKey"):
         ConfigSnapshot.capture(cast(ConfigSnapshotKey, object()), snapshot.payload)
     with pytest.raises(ConfigContractError, match="ConfigSnapshotKey"):
@@ -812,6 +823,17 @@ def test_snapshot_identity_and_envelope_admission_fail_closed() -> None:
     )
     with pytest.raises(ConfigContractError, match="definition_id"):
         ConfigSnapshotKey.from_state(invalid_state)
+    invalid_version_state = replace(_state(snapshot.key), definition_version=GraphDefinitionVersion(0))
+    with pytest.raises(ConfigContractError, match="topology version"):
+        ConfigSnapshotKey.from_state(invalid_version_state)
+    missing_config_identity = object.__new__(GraphRunState)
+    object.__setattr__(missing_config_identity, "definition_id", snapshot.key.definition_id)
+    object.__setattr__(missing_config_identity, "definition_version", snapshot.key.definition_version)
+    object.__setattr__(missing_config_identity, "config_definition_id", None)
+    object.__setattr__(missing_config_identity, "config_definition_version", None)
+    object.__setattr__(missing_config_identity, "config_revision", 1)
+    with pytest.raises(ConfigContractError, match="config identity is missing"):
+        ConfigSnapshotKey.from_state(missing_config_identity)
 
 
 @pytest.mark.asyncio
@@ -966,6 +988,12 @@ def test_config_bind_revalidates_a_forged_complete_aggregate() -> None:
 async def test_persistence_helpers_reject_missing_store_or_resolver_capabilities() -> None:
     snapshot = _snapshot()
     with pytest.raises(ConfigContractError, match="ConfigSnapshotStore"):
+        await save_config_snapshot(cast(ConfigSnapshotStore, None), snapshot)
+    with pytest.raises(ConfigContractError, match="ConfigSnapshotStore"):
+        await load_config_snapshot(cast(ConfigSnapshotStore, None), snapshot.key)
+    with pytest.raises(ConfigContractError, match="ConfigResolver"):
+        await resolve_config(cast(ConfigResolver, None), snapshot)
+    with pytest.raises(ConfigContractError, match="ConfigSnapshotStore"):
         await save_config_snapshot(cast(ConfigSnapshotStore, object()), snapshot)
     with pytest.raises(ConfigContractError, match="ConfigSnapshotStore"):
         await load_config_snapshot(cast(ConfigSnapshotStore, object()), snapshot.key)
@@ -976,6 +1004,8 @@ async def test_persistence_helpers_reject_missing_store_or_resolver_capabilities
         await save_config_snapshot(cast(ConfigSnapshotStore, _NonCallableStore()), snapshot)
     with pytest.raises(ConfigContractError, match="callable"):
         await resolve_config(cast(ConfigResolver, _NonCallableResolver()), snapshot)
+    with pytest.raises(ConfigContractError, match="activation value"):
+        ConfigActivation(None)
 
 
 @pytest.mark.asyncio
@@ -1067,6 +1097,20 @@ async def test_resolve_and_recover_pass_only_the_authoritative_snapshot() -> Non
         await resolve_config(_Resolver(_config(foreign)), snapshot)
     with pytest.raises(ConfigContractError, match="different config snapshot"):
         _config(snapshot).admit_state(_state(foreign.key))
+    with pytest.raises(ConfigContractError, match="config digest"):
+        _config(snapshot).admit_state(replace(_state(snapshot.key), config_digest="wrong"))
+    assert snapshot.config_cursor.definition_id == snapshot.key.definition_id
+    assert snapshot.config_cursor.revision == snapshot.key.revision
+    assert _config(snapshot).admit_state(replace(_state(snapshot.key), config_digest=str(snapshot.digest)))
+    state_config_digest = cast(
+        Callable[[GraphRunState], str | None],
+        object.__getattribute__(config_module, "_state_config_digest"),
+    )
+    with pytest.raises(ConfigContractError, match="digest is malformed"):
+        state_config_digest(cast(GraphRunState, object()))
+    for malformed_digest in ("", " wrong", 1):
+        with pytest.raises(ConfigContractError, match="digest is malformed"):
+            state_config_digest(replace(_state(snapshot.key), config_digest=malformed_digest))
     with pytest.raises(ConfigContractError, match="exact GraphRunState"):
         ConfigSnapshotKey.from_state(cast(GraphRunState, object()))
     forged_state = object.__new__(GraphRunState)
@@ -1253,6 +1297,19 @@ async def test_think_stages_bind_the_activation_config_without_reassembly() -> N
 
 
 @pytest.mark.asyncio
+async def test_think_stages_reuse_capabilities_from_the_assembly_snapshot() -> None:
+    fixture = _react_config_fixture()
+    think = ThinkNode[Priority, SharedState, ThinkCommand].from_config(fixture.config)
+
+    result = await think.run(
+        Graph.values(request=ThinkRequest(ThinkPayload("assembly"), SharedState())),
+        activation_config=fixture.config,
+    )
+
+    assert isinstance(result, Graph.CompletedResult)
+
+
+@pytest.mark.asyncio
 async def test_act_nodes_bind_the_activation_config_through_authorization_resume() -> None:
     fixture = _react_config_fixture()
     runtime_ports = _RecordingActPorts()
@@ -1287,7 +1344,7 @@ async def test_act_nodes_bind_the_activation_config_through_authorization_resume
         fixture.act.admission,
     )(
         ConfigActivation(
-            AuthorizeNodeInput(resumed_hook_result),
+            resumed_hook_result,
             runtime_config,
         )
     )
@@ -1306,7 +1363,7 @@ async def test_act_nodes_bind_the_activation_config_through_authorization_resume
         fixture.act.admission,
     )(
         ConfigActivation(
-            ExecuteNodeInput(authorize_result),
+            authorize_result,
             runtime_config,
         )
     )
@@ -1326,7 +1383,7 @@ async def test_act_nodes_bind_the_activation_config_through_authorization_resume
         fixture.act.admission,
     )(
         ConfigActivation(
-            SettleNodeInput(execute_result),
+            execute_result,
             runtime_config,
         )
     )
@@ -1350,6 +1407,107 @@ async def test_act_nodes_bind_the_activation_config_through_authorization_resume
     assert assembly_ports.requests == []
     assert len(runtime_invocation.requests) == 8
     assert all(request.config_cursor == runtime_config.config_cursor for request in runtime_invocation.requests)
+
+    # A successor Config may change capabilities, but it cannot silently
+    # change the compiled payload admission owned by the assembled node.
+    wrong_admission = cast(
+        ActPayloadAdmission[SharedState, ActCommand],
+        object.__new__(ActPayloadAdmission),
+    )
+    object.__setattr__(wrong_admission, "hook_state_type", HookGraphValue)
+    object.__setattr__(wrong_admission, "hook_command_type", ActCommand)
+    wrong_act = replace(runtime_config.act, admission=wrong_admission)
+    wrong_config = replace(runtime_config, act=wrong_act)
+
+    with pytest.raises(ActContractError, match="compiled payload contract"):
+        await ResolveNode[SharedState, ActCommand](
+            fixture.act.resolve_port,
+            fixture.act.admission,
+        )(ConfigActivation(valid_act_request(), wrong_config))
+    with pytest.raises(ActContractError, match="compiled payload contract"):
+        await AuthorizeNode[SharedState, ActCommand](
+            fixture.act.authorize_port,
+            fixture.act.failure_reason,
+            fixture.act.admission,
+        )(ConfigActivation(resumed_hook_result, wrong_config))
+    with pytest.raises(ActContractError, match="compiled payload contract"):
+        await ExecuteNode[SharedState, ActCommand](
+            fixture.act.execute_port,
+            fixture.act.admission,
+        )(ConfigActivation(authorize_result, wrong_config))
+    with pytest.raises(ActContractError, match="compiled payload contract"):
+        await SettleNode[SharedState, ActCommand](
+            fixture.act.settlement_port,
+            fixture.act.exchange_writer,
+            fixture.act.admission,
+        )(ConfigActivation(execute_result, wrong_config))
+    with pytest.raises(ActContractError, match="compiled payload contract"):
+        act.resume_authorization(
+            awaiting=awaiting,
+            interrupt_id=str(awaiting.interrupts[0].interrupt_id),
+            decision=Allow(),
+            activation_config=wrong_config,
+        )
+
+
+@pytest.mark.asyncio
+async def test_act_nodes_reuse_capabilities_from_the_assembly_snapshot() -> None:
+    fixture = _react_config_fixture()
+    act = ActNode[Priority, SharedState, ActCommand].from_config(fixture.config)
+    awaiting = await act.run(
+        Graph.values(request=valid_act_request()),
+        activation_config=fixture.config,
+    )
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+
+    action = act.resume_authorization(
+        awaiting=awaiting,
+        interrupt_id=str(awaiting.interrupts[0].interrupt_id),
+        decision=Allow(),
+        activation_config=fixture.config,
+    )
+    resumed_hook_result = cast(
+        HookResult[ActHookEnvelope, ActCommand],
+        action.input.values["hook_result"],
+    )
+
+    authorize_request = await AuthorizeNode[SharedState, ActCommand](
+        fixture.act.authorize_port,
+        fixture.act.failure_reason,
+        fixture.act.admission,
+        assembly_snapshot_key=fixture.config.snapshot.key,
+    )(ConfigActivation(resumed_hook_result, fixture.config))
+    authorize_hook = await act.hook.run(
+        cast(Graph.Values[HookGraphValue], Graph.values(request=authorize_request)),
+        activation_config=fixture.config,
+    )
+    assert isinstance(authorize_hook, Graph.CompletedResult)
+    authorize_result = cast(HookResult[ActHookEnvelope, ActCommand], authorize_hook.outputs["result"])
+
+    execute_request = await ExecuteNode[SharedState, ActCommand](
+        fixture.act.execute_port,
+        fixture.act.admission,
+        assembly_snapshot_key=fixture.config.snapshot.key,
+    )(ConfigActivation(authorize_result, fixture.config))
+    execute_hook = await act.hook.run(
+        cast(Graph.Values[HookGraphValue], Graph.values(request=execute_request)),
+        activation_config=fixture.config,
+    )
+    assert isinstance(execute_hook, Graph.CompletedResult)
+    execute_result = cast(HookResult[ActHookEnvelope, ActCommand], execute_hook.outputs["result"])
+
+    settle_request = await SettleNode[SharedState, ActCommand](
+        fixture.act.settlement_port,
+        fixture.act.exchange_writer,
+        fixture.act.admission,
+        assembly_snapshot_key=fixture.config.snapshot.key,
+    )(ConfigActivation(execute_result, fixture.config))
+    completed = await act.hook.run(
+        cast(Graph.Values[HookGraphValue], Graph.values(request=settle_request)),
+        activation_config=fixture.config,
+    )
+
+    assert isinstance(completed, Graph.CompletedResult)
 
 
 @pytest.mark.asyncio
@@ -1517,6 +1675,8 @@ def test_domain_projection_selection_is_exact_and_optional_failover_is_omitted()
 
     missing = replace(fixture.config, failovers=())
     assert Failover[str, str, str, str, str].bind(missing, fixture.failover.port_id, required=False) is None
+    assert missing.bind(FailoverPlanBinding[str](fixture.failover.port_id, required=False)) is None
+    assert missing.bind(FailoverPrepareBinding[str, str](fixture.failover.port_id, required=False)) is None
     with pytest.raises(ConfigContractError, match="requires a FailoverConfig"):
         Failover[str, str, str, str, str].bind(missing, fixture.failover.port_id)
 
@@ -1562,10 +1722,20 @@ def test_observe_projection_contract_is_revalidated_at_assembly() -> None:
         replace(fixture.observe, hook_slot=cast(HookSlotId, object()))
     with pytest.raises(ConfigContractError, match="does not match"):
         replace(fixture.observe, hook_slot=_slot("foreign.observe"))
+    with pytest.raises(ConfigContractError, match="declared capability"):
+        ObserveNodeConfig(fixture.observe.snapshot_key, None, fixture.observe.admission)
+    with pytest.raises(ConfigContractError, match="ObservePayloadAdmission"):
+        ObserveNodeConfig(
+            fixture.observe.snapshot_key,
+            fixture.observe.queue_port,
+            cast(ObservePayloadAdmission, object()),
+        )
 
 
 def test_think_projection_contract_is_revalidated_at_assembly() -> None:
     fixture = _react_config_fixture()
+    with pytest.raises(ConfigContractError, match="declared Port"):
+        ThinkPortConfig(fixture.config.snapshot.key, None)
     with pytest.raises(ConfigContractError, match="definition_id"):
         replace(fixture.think, definition_id=GraphDefinitionId(""))
     with pytest.raises(ConfigContractError, match="HookSlotId"):
@@ -1584,6 +1754,14 @@ def test_act_projection_contract_is_revalidated_at_assembly() -> None:
         replace(fixture.act, admission=cast(ActPayloadAdmission[SharedState, ActCommand], object()))
     with pytest.raises(ConfigContractError, match="HookSlotId"):
         replace(fixture.act, hook_slot=cast(HookSlotId, object()))
+    with pytest.raises(ConfigContractError, match="declared capability"):
+        ActNodeConfig(fixture.act.snapshot_key, None, fixture.act.admission)
+    with pytest.raises(ConfigContractError, match="ActPayloadAdmission"):
+        ActNodeConfig(
+            fixture.act.snapshot_key,
+            fixture.act.resolve_port,
+            cast(ActPayloadAdmission[SharedState, ActCommand], object()),
+        )
 
 
 def test_react_projection_callable_contract_is_revalidated_at_assembly() -> None:
@@ -1611,6 +1789,13 @@ def test_react_projection_callable_contract_is_revalidated_at_assembly() -> None
             fixture.config.react,
             act_to_observe=cast(ActToObserveProjector[ActCommand, SharedState], object()),
         )
+    key = fixture.config.snapshot.key
+    with pytest.raises(ConfigContractError, match="definition_id"):
+        ReActRuntimeConfig(key, GraphDefinitionId(""), GraphDefinitionVersion(1))
+    with pytest.raises(ConfigContractError, match="definition_version"):
+        ReActRuntimeConfig(key, GraphDefinitionId("loop"), GraphDefinitionVersion(0))
+    with pytest.raises(ConfigContractError, match="callable capability"):
+        ReActNodeConfig(key, GraphDefinitionId("loop"), GraphDefinitionVersion(1), object())
 
 
 def test_hook_and_failover_projection_capabilities_are_checked_at_their_bindings() -> None:
@@ -1664,6 +1849,68 @@ def test_hook_projection_contract_is_revalidated_at_assembly() -> None:
             HookBinding[Priority, ObserveHookEnvelope, SharedState, ObserveCommand](fixture.observe_hook.slot)
         )
 
+    priority = fixture.observe_hook.plan.p1
+    invocation = fixture.observe_hook.invocation
+    admission = fixture.observe_hook.payload_admission
+    with pytest.raises(ConfigContractError, match="HookSlotId"):
+        HookPriorityConfig(
+            fixture.observe_hook.snapshot_key,
+            cast(HookSlotId, object()),
+            priority,
+            invocation,
+            admission,
+        )
+    with pytest.raises(ConfigContractError, match="HookPriorityPlan"):
+        HookPriorityConfig(
+            fixture.observe_hook.snapshot_key,
+            fixture.observe_hook.slot,
+            cast(HookPriorityPlan[Priority], object()),
+            invocation,
+            admission,
+        )
+    with pytest.raises(ConfigContractError, match="Invocation capability"):
+        HookPriorityConfig(
+            fixture.observe_hook.snapshot_key,
+            fixture.observe_hook.slot,
+            priority,
+            cast(
+                Invocation[
+                    HookInvocationRequest[Priority, ObserveHookEnvelope],
+                    HookStageResult[ObserveHookEnvelope, ObserveCommand],
+                ],
+                object(),
+            ),
+            admission,
+        )
+    with pytest.raises(ConfigContractError, match="HookPayloadAdmission"):
+        HookPriorityConfig(
+            fixture.observe_hook.snapshot_key,
+            fixture.observe_hook.slot,
+            priority,
+            invocation,
+            cast(HookPayloadAdmission[Priority, ObserveHookEnvelope, SharedState, ObserveCommand], object()),
+        )
+    malformed_priority = cast(HookPriorityPlan[Priority], object.__new__(HookPriorityPlan))
+    object.__setattr__(malformed_priority, "config", object())
+    with pytest.raises(ConfigContractError, match="does not satisfy"):
+        HookPriorityConfig(
+            fixture.observe_hook.snapshot_key,
+            fixture.observe_hook.slot,
+            malformed_priority,
+            invocation,
+            admission,
+        )
+    with pytest.raises(ConfigContractError, match="HookSlotId"):
+        HookPriorityBinding[Priority, ObserveHookEnvelope, SharedState, ObserveCommand](
+            cast(HookSlotId, object()),
+            HookPriority.P1,
+        )
+    with pytest.raises(ConfigContractError, match="HookPriority"):
+        HookPriorityBinding[Priority, ObserveHookEnvelope, SharedState, ObserveCommand](
+            fixture.observe_hook.slot,
+            cast(HookPriority, object()),
+        )
+
 
 def test_failover_projection_contract_is_revalidated_at_assembly() -> None:
     fixture = _react_config_fixture()
@@ -1684,6 +1931,38 @@ def test_failover_projection_contract_is_revalidated_at_assembly() -> None:
 
     with pytest.raises(ConfigContractError, match="preparation"):
         replace(fixture.failover, preparation=cast(AttemptPreparation[str, str], NonCallablePreparation()))
+    with pytest.raises(ConfigContractError, match="port_id"):
+        FailoverPlanConfig(fixture.failover.snapshot_key, cast(FailoverPortId, ""), fixture.failover.plan)
+    with pytest.raises(ConfigContractError, match="must match"):
+        FailoverPlanConfig(fixture.failover.snapshot_key, other_port, fixture.failover.plan)
+    with pytest.raises(ConfigContractError, match="port_id"):
+        FailoverPrepareConfig(
+            fixture.failover.snapshot_key,
+            cast(FailoverPortId, ""),
+            fixture.failover.plan,
+            fixture.failover.preparation,
+        )
+    with pytest.raises(ConfigContractError, match="must match"):
+        FailoverPrepareConfig(
+            fixture.failover.snapshot_key,
+            other_port,
+            fixture.failover.plan,
+            fixture.failover.preparation,
+        )
+    with pytest.raises(ConfigContractError, match="preparation"):
+        FailoverPrepareConfig(
+            fixture.failover.snapshot_key,
+            fixture.failover.port_id,
+            fixture.failover.plan,
+            cast(AttemptPreparation[str, str], NonCallablePreparation()),
+        )
+    with pytest.raises(ConfigContractError, match="preparation"):
+        FailoverPrepareConfig(
+            fixture.failover.snapshot_key,
+            fixture.failover.port_id,
+            fixture.failover.plan,
+            cast(AttemptPreparation[str, str], object()),
+        )
     with pytest.raises(ConfigContractError, match="port_id"):
         FailoverBinding[str, str](cast(FailoverPortId, ""))
     with pytest.raises(ConfigContractError, match="required"):

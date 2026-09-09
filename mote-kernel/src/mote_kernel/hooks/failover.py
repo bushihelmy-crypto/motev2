@@ -19,10 +19,9 @@ from mote_kernel.failover.contract import (
     PortDecorator as HookFailoverDecorator,
 )
 from mote_kernel.failover.contract import (
-    PortDecoratorContractError,
     TypedPortDecorator,
-    apply_port_decorator,
-    require_port_decorator,
+    apply_port_decorator_boundary,
+    require_port_decorator_boundary,
 )
 from mote_kernel.hooks.contract import (
     HookContractError,
@@ -35,43 +34,6 @@ PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
 CommandT = TypeVar("CommandT")
-PortT = TypeVar("PortT")
-
-
-def _validate_decorator(
-    value: TypedPortDecorator[PortT] | HookFailoverDecorator | None,
-    field: str,
-    /,
-) -> None:
-    try:
-        require_port_decorator(value, field)
-    except PortDecoratorContractError as error:
-        raise HookContractError(str(error)) from error
-
-
-def _apply(
-    invocation: Invocation[
-        HookInvocationRequest[PriorityConfigT, ValueT],
-        HookStageResult[ValueT, CommandT],
-    ],
-    decorator: TypedPortDecorator[
-        Invocation[
-            HookInvocationRequest[PriorityConfigT, ValueT],
-            HookStageResult[ValueT, CommandT],
-        ]
-    ]
-    | HookFailoverDecorator
-    | None,
-    field: str,
-    /,
-) -> Invocation[
-    HookInvocationRequest[PriorityConfigT, ValueT],
-    HookStageResult[ValueT, CommandT],
-]:
-    try:
-        return apply_port_decorator(invocation, decorator, Invocation, field)
-    except PortDecoratorContractError as error:
-        raise HookContractError(str(error)) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +52,7 @@ class HookFailoverDecorators(Generic[PriorityConfigT, ValueT, StateT, CommandT])
     ) = None
 
     def __post_init__(self) -> None:
-        _validate_decorator(self.invocation, "HookFailoverDecorators.invocation")
+        require_port_decorator_boundary(self.invocation, "HookFailoverDecorators.invocation", HookContractError)
 
     @classmethod
     def disabled(cls) -> Self:
@@ -102,7 +64,7 @@ class HookFailoverDecorators(Generic[PriorityConfigT, ValueT, StateT, CommandT])
     def uniform(cls, decorator: HookFailoverDecorator, /) -> Self:
         """Build the single shared Hook binding from one decorator."""
 
-        _validate_decorator(decorator, "HookFailoverDecorators.uniform")
+        require_port_decorator_boundary(decorator, "HookFailoverDecorators.uniform", HookContractError)
         return cls(decorator)
 
     def decorate(
@@ -116,7 +78,9 @@ class HookFailoverDecorators(Generic[PriorityConfigT, ValueT, StateT, CommandT])
         HookInvocationRequest[PriorityConfigT, ValueT],
         HookStageResult[ValueT, CommandT],
     ]:
-        return _apply(invocation, self.invocation, "Hook Invocation")
+        return apply_port_decorator_boundary(
+            invocation, self.invocation, Invocation, "Hook Invocation", HookContractError
+        )
 
 
 def normalize_hook_failover_decorators(
@@ -134,26 +98,8 @@ def normalize_hook_failover_decorators(
     raise HookContractError("Hook failover decoration requires a callable decorator or HookFailoverDecorators")
 
 
-def decorate_hook_invocation(
-    invocation: Invocation[
-        HookInvocationRequest[PriorityConfigT, ValueT],
-        HookStageResult[ValueT, CommandT],
-    ],
-    /,
-    *,
-    failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT] | HookFailoverDecorator | None = None,
-) -> Invocation[
-    HookInvocationRequest[PriorityConfigT, ValueT],
-    HookStageResult[ValueT, CommandT],
-]:
-    """Apply the shared public Failover decorator to one Hook Invocation."""
-
-    return normalize_hook_failover_decorators(failover).decorate(invocation)
-
-
 __all__ = [
     "HookFailoverDecorator",
     "HookFailoverDecorators",
-    "decorate_hook_invocation",
     "normalize_hook_failover_decorators",
 ]

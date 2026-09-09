@@ -7,7 +7,7 @@ from typing import Never, TypeVar, cast
 
 import pytest
 
-from mote_kernel.config import ConfigActivation
+from mote_kernel.config import ConfigActivation, ConfigSnapshotKey
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.command import CommandNode
@@ -37,6 +37,7 @@ from mote_kernel.think.contract import (
     ThinkStep,
 )
 from mote_kernel.think.inference import InferenceNode
+from mote_kernel.think.prompt import PromptNode
 from mote_kernel.think.router import RouterNode
 
 
@@ -452,6 +453,24 @@ def _bad_command_non_callable() -> object:
 def test_non_prompt_stage_capabilities_are_admitted_at_assembly(factory: Callable[[], object], message: str) -> None:
     with pytest.raises(ThinkContractError, match=message):
         factory()
+
+
+def test_every_stage_rejects_a_malformed_assembly_snapshot_key() -> None:
+    malformed_key = cast(ConfigSnapshotKey, object())
+    ports = StagePorts()
+
+    with pytest.raises(ThinkContractError, match="prompt assembly snapshot key"):
+        PromptNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ThinkContractError, match="context assembly snapshot key"):
+        ContextNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ThinkContractError, match="compact assembly snapshot key"):
+        CompactNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ThinkContractError, match="router assembly snapshot key"):
+        RouterNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ThinkContractError, match="inference assembly snapshot key"):
+        InferenceNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ThinkContractError, match="command assembly snapshot key"):
+        CommandNode(cast(Never, ports), assembly_snapshot_key=malformed_key)
 
 
 def _context_factory() -> object:

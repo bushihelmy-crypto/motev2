@@ -315,9 +315,7 @@ class ObservePorts:
 
     async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
         boundary = self._require_boundary()
-        return ConfigApplyResult(
-            ConfigSettlementReceipt(batch.delivery_ids, boundary, boundary, "config-settlement")
-        )
+        return ConfigApplyResult(ConfigSettlementReceipt(batch.delivery_ids, boundary, boundary, "config-settlement"))
 
     async def append(
         self,

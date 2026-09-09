@@ -53,6 +53,13 @@ def _admit_exact(payload: PayloadT, expected: type[PayloadT], field: str, /) -> 
     return payload
 
 
+def _require_tuple(value: tuple[CommandT, ...], field: str, error_type: type[Exception], /) -> None:
+    """Keep tuple-shape admission in the Hook contract owner."""
+
+    if type(value) is not tuple:
+        raise error_type(f"{field} must be a tuple")
+
+
 def _admit_node_id(node_id: GraphNodeId | None, field: str, /) -> None:
     if node_id is not None and not is_canonical_identity(node_id):
         raise HookContractError(f"{field} must be a canonical GraphNodeId or None")
@@ -149,8 +156,7 @@ class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
         if type(result) is not HookStageResult:
             raise HookContractError("hook invocation must return a HookStageResult")
         _admit_exact(result.value, self.value_type, "value")
-        if type(result.commands) is not tuple:
-            raise HookContractError("hook stage result commands must be a tuple")
+        _require_tuple(result.commands, "hook stage result commands", HookContractError)
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
         return result
@@ -169,8 +175,7 @@ class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
         if type(result) is not HookResult:
             raise HookContractError("hook result must be a HookResult")
         _admit_exact(result.value, self.value_type, "value")
-        if type(result.commands) is not tuple:
-            raise HookContractError("hook result commands must be a tuple")
+        _require_tuple(result.commands, "hook result commands", HookContractError)
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
         _admit_node_id(result.node_id, "hook result node_id")
@@ -208,8 +213,7 @@ class HookStageResult(HookGraphValue, Generic[ValueT, CommandT]):
     commands: tuple[CommandT, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.commands) is not tuple:
-            raise TypeError("hook stage result commands must be a tuple")
+        _require_tuple(self.commands, "hook stage result commands", TypeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,8 +225,7 @@ class HookResult(HookGraphValue, Generic[ValueT, CommandT]):
     node_id: GraphNodeId | None = None
 
     def __post_init__(self) -> None:
-        if type(self.commands) is not tuple:
-            raise TypeError("hook result commands must be a tuple")
+        _require_tuple(self.commands, "hook result commands", TypeError)
         _admit_node_id(self.node_id, "hook result node_id")
 
 

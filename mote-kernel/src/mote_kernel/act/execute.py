@@ -59,7 +59,9 @@ class ExecuteNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
         hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
-        decorators = normalize_act_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; do not create a
+        # second normalization path for activation-time rebinding.
+        decorators = cast(ActFailoverDecorators, self.failover)
         execute_port = self.execute_port
         if config is not None:
             selected = config.bind(ExecuteBinding[HookStateT, HookCommandT]())

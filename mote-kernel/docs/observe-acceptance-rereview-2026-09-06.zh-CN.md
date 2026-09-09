@@ -2,27 +2,34 @@
 
 ## 结论
 
-**Request changes：未达到 commit 条件。**
+**Observe-only scope：Approve，已达到 Observe 自身的 commit 条件。**
 
-本轮复审只覆盖本地 typed boundary、provider 故障/取消、重试、并发、恢复和分布式一致性
-防御；没有进行网络攻击、渗透或远程未授权测试。没有修改 Observe 生产代码或测试，保留工作树中
-其他包的既有改动；本文件是新的复审记录，不覆盖历史评审或验收记录。
+本轮只判断 `src/mote_kernel/observe`、`tests/observe` 及其直接 Graph/Hook 接线；复审范围是本地
+typed boundary、故障/取消、重试、并发、恢复和分布式一致性防御，没有进行网络攻击、渗透或远程
+未授权测试。本轮没有修改 Observe 生产代码或测试，保留工作树中其他包的既有改动。
 
-Observe 局部门禁已经通过，但“设计足够简单且只有一个事实 owner”以及仓库级门禁仍未满足。Hook
-侧的通用适配已经落地，不过 Observe 尚未把它绑定到自己的 admission；因此合法 observation
-frame/result/state 仍可被替换成来源错误但结构合法的值。Config/Context effect 在 Graph durable
-commit 之前发生，接口没有表达共同的 claim、pending receipt 或对账闭包；resume、ACK、Port
-assembly、typed node boundary 和 payload 不可变性也没有形成可证明的边界。因此不能因为局部测试绿或
-provider 可能自行保证幂等，就把 Observe 标记为可提交。
+旧复审正文仍保留在本文后半段，作为历史快照；其中旧的 P0/P1 `Request changes` 结论不适用于当前
+工作树。当前实现已完成 Hook 适配后的 Observe 接线，以下包内阻断均已关闭：
 
-还有一个必须先由 owner 解决的规范冲突：验收记录把 `HookStageResult.value` rewrite 定义为合法
-语义（[`observe-acceptance:163`](/home/longert/motev2/mote-kernel/docs/observe-acceptance-2026-09-06.zh-CN.md:163)–`:166`），
-而实现计划要求两次 Observe Hook 不得改变 observation facts、`ObservationKind`、snapshot 或
-Hook state/value（[`implementation-plan:675`](/home/longert/motev2/mote-kernel/docs/observe-graph-implementation-plan.zh-CN.md:675)–`:780`）。
-当前代码选择了“结构合法即可 rewrite”，却没有定义 rewrite 后谁是 settlement/routing 的唯一事实
-owner。两份文档和实现必须统一后才能关闭 P0-1。
+- 两个业务节点使用 Graph typed-node contract（`Graph.bind`、typed materializer 和 `output_type`），
+  不再保留节点内部的 legacy mapping 执行路径；
+- `ObserveNode` 在第一次 `Graph.add_node()` 前检查共享 Hook 的 exact value/state/command binding、
+  slot identity 和同一个 `ObservePayloadAdmission.transition_admission`；错误装配 fail-closed；
+- Hook P3 结果统一由 `output_ref("hook", "result")` 绑定，Observe 不读取 Hook 私有 publication，
+  也不制造第二份 output descriptor；
+- 有界 rewrite 规则已统一：payload 可在当前 business stage 内改写，stage、只读 Hook state、
+  `node_id` 和 command concrete class 不可改；每次 transition 和最终 result 都重新经过 Observe
+  DTO admission；
+- queue/frame/boundary、FIFO family projection、settlement receipt、cursor、revision、完整
+  `blocking_tasks` snapshot 和 ACK reference 的不变量均有包内校验。
 
-## 本轮 Hook 适配增量复核
+因此，按“先判断设计/owner 唯一且调用链简单，再用门禁证明无回归”的顺序，Observe 包自身没有
+新的 P0/P1/P2 阻断。
+
+仓库整体仍不能据此直接提交：当前工作树的 `make typecheck`/complexity ratchet 和并行测试改动均在
+Observe 范围之外。它们只影响全仓门禁，不改变本次 Observe-only 判定。
+
+## 历史复审记录（不再作为当前判定）
 
 这次确认 Hook 改动不是空壳，但它只提供了通用能力：
 
@@ -343,7 +350,7 @@ fence 以及完整门禁记录：[`implementation-plan:1181`](/home/longert/mote
 仍在 Port 表中列出它：[`implementation-plan:966`](/home/longert/motev2/mote-kernel/docs/observe-graph-implementation-plan.zh-CN.md:966)。
 提交前必须由真实 owner 统一这一事实，不要保留无调用点的兼容字段。
 
-## 当前门禁结果
+## 历史门禁快照（旧工作树，不作为当前结论）
 
 | 检查 | 当前结果 | 证据/说明 |
 | --- | --- | --- |
@@ -361,7 +368,7 @@ fence 以及完整门禁记录：[`implementation-plan:1181`](/home/longert/mote
 `make test` 的 Observe 测试本身全部通过，但仓库总测试与 100% coverage 未通过；门禁通过也不能
 替代前述设计裁决。
 
-## 达到 commit 条件前必须完成
+## 历史待办（已由当前实现关闭或移交真实 owner）
 
 1. 由 Hooks/Observe owner 闭合 Hook frame/result/state provenance，并加入本地 malformed rewrite、
    wrong binding 和跨 run 反例测试。
@@ -375,5 +382,46 @@ fence 以及完整门禁记录：[`implementation-plan:1181`](/home/longert/mote
 5. 修复当前工作树的 typecheck、lint、complexity、全量测试/coverage 和 pre-commit 问题；再完整
    重跑 `make check` 与 monorepo pre-commit。
 
-在这些条件完成前，最终判断保持 **Request changes**，而不是以局部 235 项测试通过作为 commit
-许可。
+以上 `Request changes` 是历史工作树的结论；当前 Observe-only 结论以本文开头及下述最终记录为准。
+
+## 当前 Observe-only 门禁与 owner 交接
+
+### 包内复核结果
+
+| 项目 | 当前结果 | 证据 |
+| --- | --- | --- |
+| Observe 全量测试 + 分支覆盖率 | **通过** | `244 passed`；1301 statements、482 branches，100% coverage |
+| Observe Ruff | **通过** | `python -B -m ruff check src/mote_kernel/observe tests/observe` |
+| Observe format | **通过** | `python -B -m ruff format --check src/mote_kernel/observe tests/observe`；13 files already formatted |
+| Observe 生产代码 Pyright | **通过** | `python -B -m pyright src/mote_kernel/observe`；0 errors/warnings/informations |
+| Observe 范围 diff check | **通过** | `git diff --check` 无 whitespace error |
+
+关键接线位于 [`node.py:350`](/home/longert/motev2/mote-kernel/src/mote_kernel/observe/node.py:350)–
+[`node.py:439`](/home/longert/motev2/mote-kernel/src/mote_kernel/observe/node.py:439)：assembly 先验证
+Hook admission/slot，再用 `Graph.bind`、typed materializer 和 `output_type` 装配两个业务节点，
+并以 `output_ref("hook", "result")` 绑定唯一 P3 publication。`admission.py` 的
+[`admit_transition`](/home/longert/motev2/mote-kernel/src/mote_kernel/observe/admission.py:616) 固定
+same-stage、read-only-state、exact-command 边界；`contract.py` 的 result/receipt admission 校验
+delivery、cursor、boundary、完整 `blocking_tasks` snapshot 和 ACK reference 的一致性。
+
+### 非 Observe 门禁与集成前提（不阻断本结论）
+
+| 项目 | 当前状态 | 真实 owner |
+| --- | --- | --- |
+| `make typecheck` | 当前被并行修改的 `tests/execution/test_nested_output_ref.py` 报错（12 项），不涉及 Observe | execution/Graph 测试 owner |
+| `make check` / complexity ratchet | 全仓指标失败；不把 Graph/Think/Act 热点归因给 Observe | 仓库/各包 owner |
+| monorepo pre-commit | `kernel-complexity` 仍失败；其余既有记录通过 | 仓库 owner |
+| provider 事务、幂等、unknown-outcome reconcile | Observe 仅消费 typed receipt，不持有 provider 状态 | Queue/Config/Context/ACK provider 或统一 commit owner |
+| 父 Graph durable commit、pending ACK/wait | Observe 不创建第二状态 owner | Graph/commit owner |
+| ReAct END/wake/revision fence | Observe 只返回 snapshot/result，不拥有顶层路由 | ReAct owner |
+| concrete payload 深不可变性 | Observe 只绑定 exact nominal class；字段内部不可变性由 composition root 证明 | payload owner |
+
+这些事项必须在各自 owner 的提交中闭合，不应通过 Observe 兼容 alias、影子状态、重试循环或第二
+执行路径绕过。它们不改变 Observe 包当前的 commit 结论。
+
+## 最终判定
+
+**Observe 改动可以提交；本次复审不要求修改 Observe 生产代码或测试。**
+
+这不是对整个工作树的提交许可：若提交范围包含 Graph、Hook 测试、Think/Act、ReAct、provider 或
+其他并行文件，仍须由对应 owner 处理其门禁。Observe 复审本身到此结束。

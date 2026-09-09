@@ -70,7 +70,9 @@ class ResolveNode(Generic[HookStateT, HookCommandT]):
         request = self.admission.admit_request(value.value)
         config = value.activation_config
 
-        decorators = normalize_act_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; reuse that single
+        # owner for activation-time rebinding instead of normalizing again.
+        decorators = cast(ActFailoverDecorators, self.failover)
         resolve_port = self.resolve_port
         if config is not None:
             selected = config.bind(ResolveBinding[HookStateT, HookCommandT]())

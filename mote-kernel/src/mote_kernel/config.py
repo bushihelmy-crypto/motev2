@@ -189,10 +189,10 @@ def require_config_projection(
     return cast(ProjectionT, value)
 
 
-def revalidate_config_slice(value: ConfigSlice, field: str, /) -> ConfigSlice:
+def revalidate_config_slice(value: ConfigSlice | None, field: str, /) -> ConfigSlice:
     """Re-run a concrete projection's own invariant checks after decoding."""
 
-    if type(value) is ConfigSlice:
+    if not isinstance(value, ConfigSlice) or type(value) is ConfigSlice:
         raise ConfigContractError(f"{field} must be a concrete config projection")
     try:
         value.__post_init__()
@@ -241,13 +241,10 @@ class Config:
             *self.hooks,
             *self.failovers,
         )
-        candidates = cast(tuple[object, ...], projections)
-        if any(type(projection) is ConfigSlice or not isinstance(projection, ConfigSlice) for projection in candidates):
-            raise ConfigContractError("resolved config domains must be concrete ConfigSlice values")
         for projection in projections:
-            revalidate_config_slice(projection, "resolved config projection")
-            _revalidate_snapshot_key(projection.snapshot_key, "resolved config slice snapshot key")
-            if projection.snapshot_key != self.snapshot.key:
+            admitted = revalidate_config_slice(projection, "resolved config projection")
+            _revalidate_snapshot_key(admitted.snapshot_key, "resolved config slice snapshot key")
+            if admitted.snapshot_key != self.snapshot.key:
                 raise ConfigContractError("every config slice must come from the complete snapshot")
 
     def bind(self, selector: ConfigSelector[BoundT_co], /) -> BoundT_co:
@@ -371,22 +368,31 @@ def require_config(value: Config, /) -> Config:
     return value
 
 
-def _require_snapshot_store(store: object, /) -> ConfigSnapshotStore:
+def _require_snapshot_store(store: ConfigSnapshotStore | None, /) -> ConfigSnapshotStore:
     """Check the two async operations before crossing a persistence Port."""
 
-    if not isinstance(store, ConfigSnapshotStore):
+    if store is None:
         raise ConfigContractError("config persistence requires a ConfigSnapshotStore")
-    if not callable(store.save) or not callable(store.load):
+    try:
+        save = store.save
+        load = store.load
+    except AttributeError as error:
+        raise ConfigContractError("config persistence requires a ConfigSnapshotStore") from error
+    if not callable(save) or not callable(load):
         raise ConfigContractError("config persistence store methods must be callable")
     return store
 
 
-def _require_config_resolver(resolver: object, /) -> ConfigResolver:
+def _require_config_resolver(resolver: ConfigResolver | None, /) -> ConfigResolver:
     """Check the resolver capability before invoking an external provider."""
 
-    if not isinstance(resolver, ConfigResolver):
+    if resolver is None:
         raise ConfigContractError("config resolution requires a ConfigResolver")
-    if not callable(resolver.resolve):
+    try:
+        resolve = resolver.resolve
+    except AttributeError as error:
+        raise ConfigContractError("config resolution requires a ConfigResolver") from error
+    if not callable(resolve):
         raise ConfigContractError("config resolver method must be callable")
     return resolver
 

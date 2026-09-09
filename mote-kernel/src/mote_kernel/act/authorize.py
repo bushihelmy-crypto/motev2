@@ -68,7 +68,9 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
         hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
-        decorators = normalize_act_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; activation only
+        # selects a capability from that already-admitted owner.
+        decorators = cast(ActFailoverDecorators, self.failover)
         authorize_port = self.authorize_port
         failure_reason = self.failure_reason
         if config is not None:

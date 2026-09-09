@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import operator
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
@@ -63,8 +62,6 @@ class ContextNode(
         object.__setattr__(self, "context_port", port)
         if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
             raise ThinkContractError("context assembly snapshot key is malformed")
-        if operator.is_(port, None):
-            raise ThinkContractError("context requires a ContextPort")
         try:
             method = port.load_context
         except AttributeError as error:

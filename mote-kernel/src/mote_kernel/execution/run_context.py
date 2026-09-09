@@ -5,7 +5,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import InitVar, dataclass, field, replace
-from typing import Generic, Never, Protocol, SupportsIndex, TypeAlias, TypeVar, cast, final, overload
+from typing import Generic, Never, Protocol, Self, SupportsIndex, TypeAlias, TypeVar, cast, final, overload
 
 from mote_kernel.execution.errors import (
     GraphValuePublicationError,
@@ -27,9 +27,9 @@ GraphValueT = TypeVar("GraphValueT")
 class _ComparableCoordinate(Protocol):
     """Ordering contract for the homogeneous coordinate partitions."""
 
-    def __lt__(self, other: object, /) -> bool: ...
+    def __lt__(self, other: Self, /) -> bool: ...
 
-    def __gt__(self, other: object, /) -> bool: ...
+    def __gt__(self, other: Self, /) -> bool: ...
 
 
 FrameRecordT = TypeVar("FrameRecordT")

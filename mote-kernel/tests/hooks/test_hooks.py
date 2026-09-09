@@ -1,18 +1,23 @@
 """Deterministic tests for the minimal graph-facing HookNode."""
 
+from __future__ import annotations
+
 import asyncio
 import importlib
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, dataclass
-from typing import cast
+from typing import Protocol, cast
 
 import pytest
 
 import mote_kernel.hooks as hooks_package
 import mote_kernel.hooks.contract as hooks_contract
 import mote_kernel.invocation as invocation_package
+from mote_kernel.config import Config, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.hooks import HookNode
+from mote_kernel.hooks.config import HookPriorityConfig
 from mote_kernel.hooks.contract import (
     HookActivationRequest,
     HookContractError,
@@ -32,7 +37,34 @@ from mote_kernel.invocation import (
     InvocationBoundaryError,
     InvocationTypeError,
 )
-from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
+from mote_kernel.state.graph_state import GraphConfigCursor, GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
+
+
+class _HookBuilderState(Protocol):
+    nodes: tuple[object, ...]
+
+
+class _InspectableHookGraph(Protocol):
+    _builder_state: _HookBuilderState
+
+
+class _HookBuilderNode(Protocol):
+    invoker: object
+
+
+class _HookInvoker(Protocol):
+    operation: object
+
+
+class _PriorityNodeView(Protocol):
+    def _runtime(
+        self,
+        config: Config | None,
+        /,
+    ) -> tuple[
+        HookPriorityPlan[PriorityConfig],
+        HookPort[PriorityConfig, str, Counter, Increment],
+    ]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,6 +806,83 @@ def test_hook_node_rejects_non_callable_invocation_capabilities() -> None:
         )
 
 
+class _BindingConfig:
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    def bind(self, _selector: object, /) -> object:
+        return self.result
+
+
+def _priority_node() -> object:
+    graph = cast(
+        _InspectableHookGraph,
+        _node(
+            cast(
+                Invocation[HookInvocationRequest[PriorityConfig, str], HookStageResult[str, Increment]],
+                SerialRuntime(),
+            )
+        ),
+    )
+    state = cast(_HookBuilderState, object.__getattribute__(graph, "_builder_state"))
+    candidate = cast(_HookBuilderNode, state.nodes[0])
+    invoker = cast(_HookInvoker, candidate.invoker)
+    return invoker.operation
+
+
+def _priority_runtime(
+    node: object,
+    config: Config | None,
+    /,
+) -> tuple[
+    HookPriorityPlan[PriorityConfig],
+    HookPort[PriorityConfig, str, Counter, Increment],
+]:
+    runtime = cast(
+        Callable[
+            [Config | None],
+            tuple[
+                HookPriorityPlan[PriorityConfig],
+                HookPort[PriorityConfig, str, Counter, Increment],
+            ],
+        ],
+        object.__getattribute__(cast(_PriorityNodeView, node), "_runtime"),
+    )
+    return runtime(config)
+
+
+def test_priority_node_runtime_rejects_invalid_projection_and_contract() -> None:
+    node = _priority_node()
+    with pytest.raises(HookContractError, match="invalid projection"):
+        _priority_runtime(node, cast(Config, _BindingConfig(object())))
+
+    wrong_slot = _slot("other")
+    key = ConfigSnapshotKey(GraphDefinitionId("react"), GraphDefinitionVersion(1), 1)
+    wrong = HookPriorityConfig(
+        key,
+        wrong_slot,
+        _plan().p1,
+        cast(
+            Invocation[HookInvocationRequest[PriorityConfig, str], HookStageResult[str, Increment]],
+            SerialRuntime(),
+        ),
+        _admission(),
+    )
+    with pytest.raises(HookContractError, match="compiled Hook contract"):
+        _priority_runtime(node, cast(Config, _BindingConfig(wrong)))
+
+
+def test_hook_node_rejects_a_malformed_assembly_snapshot_key() -> None:
+    with pytest.raises(HookContractError, match="assembly snapshot key"):
+        HookNode(
+            _slot(),
+            _plan(),
+            SerialRuntime(),
+            _admission(),
+            assembly_snapshot_key=cast(ConfigSnapshotKey, object()),
+        )
+
+
 def test_hook_node_rejects_an_invalid_payload_admission() -> None:
     with pytest.raises(HookContractError, match="payload admission contract"):
         HookNode[PriorityConfig, str, Counter, Increment](
@@ -1071,11 +1180,18 @@ def test_payload_admission_checks_exact_request_and_invocation_request_boundarie
     with pytest.raises(HookContractError, match="HookInvocationRequest"):
         admission.admit_invocation_request(InvocationRequestSubclass(PriorityConfig(1, ()), "payload"))
     with pytest.raises(HookContractError, match="priority config has an unexpected"):
-        admission.admit_invocation_request(
-            HookInvocationRequest(cast(PriorityConfig, object()), cast(str, request.value))
-        )
+        admission.admit_invocation_request(HookInvocationRequest(cast(PriorityConfig, object()), request.value))
     with pytest.raises(HookContractError, match="hook payload has an unexpected"):
         admission.admit_invocation_request(HookInvocationRequest(PriorityConfig(1, ()), cast(str, object())))
+
+    malformed = cast(HookInvocationRequest[PriorityConfig, str], object.__new__(HookInvocationRequest))
+    object.__setattr__(malformed, "hook_config", PriorityConfig(1, ()))
+    object.__setattr__(malformed, "payload", "payload")
+    object.__setattr__(malformed, "config_cursor", cast(GraphConfigCursor, object()))
+    with pytest.raises(HookContractError, match="config_cursor"):
+        admission.admit_invocation_request(malformed)
+    with pytest.raises(TypeError, match="config_cursor"):
+        HookInvocationRequest(PriorityConfig(1, ()), "payload", cast(GraphConfigCursor, object()))
 
 
 @pytest.mark.parametrize("command_index", [0, 1, 2])

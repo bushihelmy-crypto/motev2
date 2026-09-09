@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Never, Protocol, cast
+from unittest.mock import Mock
 
 import pytest
 
 import mote_kernel.observe as observe_package
-from mote_kernel.config import ConfigActivation
+from mote_kernel.config import Config, ConfigActivation, ConfigSlice, ConfigSnapshot, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
@@ -24,6 +25,7 @@ from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
 from mote_kernel.observe import ObserveNode
 from mote_kernel.observe.admission import ObservePayloadAdmission
+from mote_kernel.observe.config import ObserveConfig
 from mote_kernel.observe.contract import (
     AssistantBatch,
     AssistantObservation,
@@ -103,6 +105,66 @@ class _AssistantPayload(str, ObservationPayload):
 @dataclass(frozen=True, slots=True)
 class _Priority:
     ordinal: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Slice(ConfigSlice):
+    label: str
+
+
+def _config_for_key(key: ConfigSnapshotKey) -> Config:
+    snapshot = ConfigSnapshot.capture(key, b'{"test":"successor"}')
+
+    def projection(label: str) -> _Slice:
+        return _Slice(snapshot.key, label)
+
+    return Config(
+        snapshot,
+        projection("react"),
+        projection("observe"),
+        projection("think"),
+        projection("act"),
+        (projection("hook"),),
+        (projection("failover"),),
+    )
+
+
+def _observe_config(key: ConfigSnapshotKey, ports: _Ports, admission: ObservePayloadAdmission) -> Config:
+    """Build a complete Config whose Observe projection uses ``ports``."""
+
+    snapshot = ConfigSnapshot.capture(key, b'{"test":"observe"}')
+    hook_slot = HookSlotId(
+        key.definition_id,
+        key.definition_version,
+        GraphNodeId("hook"),
+        HookStage.AFTER_NODE,
+    )
+    observe = ObserveConfig[_Priority, _State, _Command](
+        key,
+        key.definition_id,
+        key.definition_version,
+        ports,
+        ports,
+        ports,
+        ports,
+        ports,
+        ports,
+        admission,
+        hook_slot,
+    )
+
+    def projection(label: str) -> _Slice:
+        return _Slice(key, label)
+
+    return Config(
+        snapshot,
+        projection("react"),
+        observe,
+        projection("think"),
+        projection("act"),
+        (projection("hook"),),
+        (projection("failover"),),
+    )
 
 
 def _plan() -> HookPlan[_Priority]:
@@ -658,6 +720,47 @@ def test_resume_capability_is_required_for_a_durable_observe_graph() -> None:
             admission=_admission(),
         )
 
+    with pytest.raises(ObserveContractError, match="declared Ports"):
+        GetObservationNode(cast(Never, object()), ports, _admission())
+    queue_non_callable = _Ports()
+    queue_non_callable.read_after = None  # type: ignore[method-assign]
+    with pytest.raises(ObserveContractError, match="read/wait methods"):
+        GetObservationNode(queue_non_callable, queue_non_callable, _admission())
+    task_non_callable = _Ports()
+    task_non_callable.snapshot = None  # type: ignore[method-assign]
+    with pytest.raises(ObserveContractError, match="BackgroundTaskPort"):
+        GetObservationNode(task_non_callable, task_non_callable, _admission())
+
+    with pytest.raises(ObserveContractError, match="declared Ports"):
+        WriteObservationNode(cast(Never, object()), ports, _admission())
+    config_non_callable = _Ports()
+    config_non_callable.apply = None  # type: ignore[method-assign]
+    with pytest.raises(ObserveContractError, match="ConfigObservationPort"):
+        WriteObservationNode(config_non_callable, config_non_callable, _admission())
+    context_non_callable = _Ports()
+    context_non_callable.append = None  # type: ignore[method-assign]
+    with pytest.raises(ObserveContractError, match="ContextObservationPort"):
+        WriteObservationNode(context_non_callable, context_non_callable, _admission())
+
+    malformed_key = cast(ConfigSnapshotKey, object())
+    with pytest.raises(ObserveContractError, match="assembly snapshot key"):
+        GetObservationNode(ports, ports, _admission(), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ObserveContractError, match="assembly snapshot key"):
+        WriteObservationNode(ports, ports, _admission(), assembly_snapshot_key=malformed_key)
+    with pytest.raises(ObserveContractError, match="assembly snapshot key"):
+        ObserveNode(
+            "observe.test",
+            queue_port=ports,
+            background_task_port=ports,
+            config_port=ports,
+            context_port=ports,
+            ack_port=ports,
+            resume_port=ports,
+            hook=_hook("observe.test", invocation),
+            admission=_admission(),
+            assembly_snapshot_key=malformed_key,
+        )
+
 
 @pytest.mark.parametrize(
     ("definition_id", "version", "message"),
@@ -803,11 +906,111 @@ def _admission() -> ObservePayloadAdmission:
 
 
 def _get_node(ports: _Ports) -> GetObservationNode[_State, _Command]:
-    return GetObservationNode(ports, ports, _admission())
+    return GetObservationNode[_State, _Command](ports, ports, _admission())
 
 
 def _write_node(ports: _Ports) -> WriteObservationNode[_State, _Command]:
-    return WriteObservationNode(ports, ports, _admission())
+    return WriteObservationNode[_State, _Command](ports, ports, _admission())
+
+
+@pytest.mark.asyncio
+async def test_get_observation_rebinds_ports_for_a_new_activation_snapshot() -> None:
+    assembly_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 1)
+    runtime_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 2)
+    assembly_ports = _Ports()
+    runtime_ports = _Ports()
+    runtime_ports.reads.append(_available(_delivery(0, UserObservation("runtime"), "runtime")))
+    admission = _admission()
+    config = _observe_config(runtime_key, runtime_ports, admission)
+    node = GetObservationNode[_State, _Command](
+        assembly_ports,
+        assembly_ports,
+        admission,
+        assembly_snapshot_key=assembly_key,
+    )
+
+    request = await node(ConfigActivation[ObserveRequest[_State]](_request(), config))
+
+    assert isinstance(request, HookActivationRequest)
+    payload = cast(GetObservationStageValue, request.value.payload)
+    assert payload.frame.batch.delivery_ids == (DeliveryId("runtime"),)
+    assert assembly_ports.reads == []
+    assert runtime_ports.contexts == []
+
+
+@pytest.mark.asyncio
+async def test_write_observation_rebinds_ports_for_a_new_activation_snapshot() -> None:
+    assembly_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 1)
+    runtime_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 2)
+    assembly_ports = _Ports()
+    runtime_ports = _Ports()
+    available = _available(_delivery(0, UserObservation("runtime"), "runtime"))
+    runtime_ports.set_boundary(available.boundary)
+    admission = _admission()
+    config = _observe_config(runtime_key, runtime_ports, admission)
+    node = WriteObservationNode[_State, _Command](
+        assembly_ports,
+        assembly_ports,
+        admission,
+        assembly_snapshot_key=assembly_key,
+    )
+
+    activation = await node(
+        ConfigActivation[HookResult[ObserveHookEnvelope, _Command]](_after_get_result(available), config)
+    )
+
+    assert isinstance(activation, ConfigActivation)
+    assert runtime_ports.contexts == [("runtime",)]
+    assert assembly_ports.contexts == []
+
+
+@pytest.mark.asyncio
+async def test_write_observation_rejects_a_nonsequential_config_successor_revision() -> None:
+    class InvalidSuccessorPorts(_Ports):
+        async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
+            applied = await super().apply(batch)
+            current = self._last_boundary
+            if current is None:
+                raise AssertionError("missing read boundary")
+            key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 3)
+            return ConfigApplyResult(applied.receipt, _config_for_key(key))
+
+    assembly_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 1)
+    ports = InvalidSuccessorPorts()
+    available = _available(_delivery(0, ConfigObservation("config"), "config"))
+    ports.set_boundary(available.boundary)
+    admission = _admission()
+    config = _observe_config(assembly_key, ports, admission)
+    node = WriteObservationNode[_State, _Command](
+        ports,
+        ports,
+        admission,
+        assembly_snapshot_key=assembly_key,
+    )
+
+    with pytest.raises(ObserveContractError, match="advance its snapshot revision"):
+        await node(ConfigActivation[HookResult[ObserveHookEnvelope, _Command]](_after_get_result(available), config))
+
+
+@pytest.mark.asyncio
+async def test_write_observation_can_install_the_first_activation_config() -> None:
+    successor_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1), 1)
+    successor = _config_for_key(successor_key)
+
+    class InitialConfigPorts(_Ports):
+        async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
+            applied = await super().apply(batch)
+            return ConfigApplyResult(applied.receipt, successor)
+
+    ports = InitialConfigPorts()
+    available = _available(_delivery(0, ConfigObservation("config"), "config"))
+    ports.set_boundary(available.boundary)
+
+    activation = await _write_node(ports)(
+        ConfigActivation[HookResult[ObserveHookEnvelope, _Command]](_after_get_result(available))
+    )
+
+    assert activation.activation_config is successor
 
 
 def _after_get_result(available: Available) -> HookResult[ObserveHookEnvelope, _Command]:
@@ -838,6 +1041,17 @@ async def test_get_observation_node_builds_the_first_hook_request() -> None:
     assert request.value.hook_state is request.state
     assert ports.contexts == []
     assert ports.configs == []
+
+    forged_activation = cast(
+        ConfigActivation[ObserveRequest[_State]],
+        object.__new__(ConfigActivation),
+    )
+    object.__setattr__(forged_activation, "value", request_input)
+    fake_config = Mock()
+    fake_config.bind.return_value = Mock(admission=object())
+    object.__setattr__(forged_activation, "activation_config", fake_config)
+    with pytest.raises(ObserveContractError, match="compiled payload contract"):
+        await node(forged_activation)
 
 
 @pytest.mark.asyncio
@@ -894,6 +1108,17 @@ async def test_write_observation_node_builds_the_terminal_hook_request() -> None
     assert request.value.hook_state is envelope.hook_state
     assert ports.contexts == [("assistant",)]
     assert ports.configs == []
+
+    forged_activation = cast(
+        ConfigActivation[HookResult[ObserveHookEnvelope, _Command]],
+        object.__new__(ConfigActivation),
+    )
+    object.__setattr__(forged_activation, "value", hook_result)
+    fake_config = Mock()
+    fake_config.bind.return_value = Mock(admission=object())
+    object.__setattr__(forged_activation, "activation_config", fake_config)
+    with pytest.raises(ObserveContractError, match="compiled payload contract"):
+        await _write_node(ports)(forged_activation)
 
 
 @pytest.mark.asyncio
@@ -1196,6 +1421,28 @@ async def test_observe_acknowledgement_is_explicit_and_validates_provider_refere
     ack = await observe.acknowledge(stage.result)
     assert ack.reference == stage.result.observation_receipt.ack_reference
     assert ports.acknowledgements == [(DeliveryId("user"),)]
+
+    mismatched_config = Mock()
+    mismatched_config.bind.return_value = Mock(admission=object())
+    with pytest.raises(ObserveContractError, match="compiled payload contract"):
+        await observe.acknowledge(stage.result, activation_config=mismatched_config)
+
+    observe_admission = cast(ObservePayloadAdmission, object.__getattribute__(observe, "_admission"))
+    selected = Mock(admission=observe_admission, snapshot_key=object(), capability=ports)
+    rebinding_config = Mock()
+    rebinding_config.bind.return_value = selected
+    await observe.acknowledge(stage.result, activation_config=rebinding_config)
+    assert ports.acknowledgements == [(DeliveryId("user"),), (DeliveryId("user"),)]
+
+    assembly_key = ConfigSnapshotKey(GraphDefinitionId("observe.test"), GraphDefinitionVersion(1))
+    object.__setattr__(observe, "_assembly_snapshot_key", assembly_key)
+    selected.snapshot_key = assembly_key
+    await observe.acknowledge(stage.result, activation_config=rebinding_config)
+    assert ports.acknowledgements == [
+        (DeliveryId("user"),),
+        (DeliveryId("user"),),
+        (DeliveryId("user"),),
+    ]
 
 
 @pytest.mark.asyncio

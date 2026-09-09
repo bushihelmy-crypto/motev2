@@ -9,15 +9,13 @@ decoration; it is not converted into an asynchronous retry operation.
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
-from typing import TypeVar
+from dataclasses import dataclass
 
 from mote_kernel.failover.contract import PortDecorator as FailoverPortDecorator
 from mote_kernel.failover.contract import (
-    PortDecoratorContractError,
     TypedPortDecorator,
-    apply_port_decorator,
-    require_port_decorator,
+    apply_port_decorator_boundary,
+    require_port_decorator_boundary,
 )
 from mote_kernel.observe.contract import ObserveContractError
 from mote_kernel.observe.port import (
@@ -26,90 +24,8 @@ from mote_kernel.observe.port import (
     ContextObservationPort,
     ObservationAckPort,
     ObservationQueuePort,
-    ObservationResumeBinding,
-    ObservationResumeCapture,
     ObservationResumePort,
-    require_observe_port_contracts,
 )
-
-PortT = TypeVar("PortT")
-
-
-def _validate_decorator(
-    value: TypedPortDecorator[PortT] | FailoverPortDecorator | None,
-    field: str,
-    /,
-) -> None:
-    try:
-        require_port_decorator(value, field)
-    except PortDecoratorContractError as error:
-        raise ObserveContractError(str(error)) from error
-
-
-def _apply(
-    port: PortT,
-    decorator: TypedPortDecorator[PortT] | FailoverPortDecorator | None,
-    expected: type[PortT],
-    field: str,
-    /,
-    *,
-    validate: bool = True,
-) -> PortT:
-    try:
-        return apply_port_decorator(port, decorator, expected, field, validate=validate)
-    except PortDecoratorContractError as error:
-        raise ObserveContractError(str(error)) from error
-
-
-@dataclass(frozen=True, slots=True)
-class ObservePortSet:
-    """The complete typed capability set consumed by ``ObserveNode``."""
-
-    queue_port: ObservationQueuePort
-    background_task_port: BackgroundTaskPort
-    config_port: ConfigObservationPort
-    context_port: ContextObservationPort
-    ack_port: ObservationAckPort
-    resume_port: ObservationResumePort
-    _resume_binding: InitVar[ObservationResumeBinding | None] = field(default=None, kw_only=True, repr=False)
-    _resume_capture: InitVar[ObservationResumeCapture | None] = field(default=None, kw_only=True, repr=False)
-    _captured_resume_binding: ObservationResumeBinding = field(init=False, repr=False, compare=False)
-    _captured_resume_capture: ObservationResumeCapture = field(init=False, repr=False, compare=False)
-
-    def __post_init__(
-        self,
-        resume_binding: ObservationResumeBinding | None,
-        resume_capture: ObservationResumeCapture | None,
-    ) -> None:
-        captured = require_observe_port_contracts(
-            self.queue_port,
-            self.background_task_port,
-            self.config_port,
-            self.context_port,
-            self.ack_port,
-            self.resume_port,
-            resume_binding=resume_binding,
-            resume_capture=resume_capture,
-        )
-        object.__setattr__(self, "_captured_resume_binding", captured)
-        if resume_capture is None:
-            # ``require_observe_port_contracts`` has already read metadata
-            # exactly once; retain the admitted value and Port identity for a
-            # later partial-decoration rebuild.
-            resume_capture = ObservationResumeCapture(self.resume_port, captured)
-        object.__setattr__(self, "_captured_resume_capture", resume_capture)
-
-    @property
-    def resume_binding(self) -> ObservationResumeBinding:
-        """Return the immutable codec binding admitted at construction."""
-
-        return self._captured_resume_binding
-
-    @property
-    def resume_capture(self) -> ObservationResumeCapture:
-        """Return the admitted codec provenance for partial decoration."""
-
-        return self._captured_resume_capture
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +44,16 @@ class ObserveFailoverDecorators:
     resume: TypedPortDecorator[ObservationResumePort] | FailoverPortDecorator | None = None
 
     def __post_init__(self) -> None:
-        _validate_decorator(self.queue, "ObserveFailoverDecorators.queue")
-        _validate_decorator(self.background_task, "ObserveFailoverDecorators.background_task")
-        _validate_decorator(self.config, "ObserveFailoverDecorators.config")
-        _validate_decorator(self.context, "ObserveFailoverDecorators.context")
-        _validate_decorator(self.ack, "ObserveFailoverDecorators.ack")
-        _validate_decorator(self.resume, "ObserveFailoverDecorators.resume")
+        require_port_decorator_boundary(self.queue, "ObserveFailoverDecorators.queue", ObserveContractError)
+        require_port_decorator_boundary(
+            self.background_task,
+            "ObserveFailoverDecorators.background_task",
+            ObserveContractError,
+        )
+        require_port_decorator_boundary(self.config, "ObserveFailoverDecorators.config", ObserveContractError)
+        require_port_decorator_boundary(self.context, "ObserveFailoverDecorators.context", ObserveContractError)
+        require_port_decorator_boundary(self.ack, "ObserveFailoverDecorators.ack", ObserveContractError)
+        require_port_decorator_boundary(self.resume, "ObserveFailoverDecorators.resume", ObserveContractError)
 
     @classmethod
     def disabled(cls) -> ObserveFailoverDecorators:
@@ -145,61 +65,56 @@ class ObserveFailoverDecorators:
     def uniform(cls, decorator: FailoverPortDecorator, /) -> ObserveFailoverDecorators:
         """Apply one typed-preserving decorator to all six Observe Ports."""
 
-        _validate_decorator(decorator, "ObserveFailoverDecorators.uniform")
+        require_port_decorator_boundary(decorator, "ObserveFailoverDecorators.uniform", ObserveContractError)
         return cls(decorator, decorator, decorator, decorator, decorator, decorator)
 
     def queue_port(self, port: ObservationQueuePort, /) -> ObservationQueuePort:
-        return _apply(port, self.queue, ObservationQueuePort, "ObservationQueuePort")
+        return apply_port_decorator_boundary(
+            port, self.queue, ObservationQueuePort, "ObservationQueuePort", ObserveContractError
+        )
 
     def background_task_port(self, port: BackgroundTaskPort, /) -> BackgroundTaskPort:
-        return _apply(port, self.background_task, BackgroundTaskPort, "BackgroundTaskPort")
+        return apply_port_decorator_boundary(
+            port,
+            self.background_task,
+            BackgroundTaskPort,
+            "BackgroundTaskPort",
+            ObserveContractError,
+        )
 
     def config_port(self, port: ConfigObservationPort, /) -> ConfigObservationPort:
-        return _apply(port, self.config, ConfigObservationPort, "ConfigObservationPort")
+        return apply_port_decorator_boundary(
+            port,
+            self.config,
+            ConfigObservationPort,
+            "ConfigObservationPort",
+            ObserveContractError,
+        )
 
     def context_port(self, port: ContextObservationPort, /) -> ContextObservationPort:
-        return _apply(port, self.context, ContextObservationPort, "ContextObservationPort")
+        return apply_port_decorator_boundary(
+            port,
+            self.context,
+            ContextObservationPort,
+            "ContextObservationPort",
+            ObserveContractError,
+        )
 
     def ack_port(self, port: ObservationAckPort, /) -> ObservationAckPort:
-        return _apply(port, self.ack, ObservationAckPort, "ObservationAckPort")
+        return apply_port_decorator_boundary(
+            port, self.ack, ObservationAckPort, "ObservationAckPort", ObserveContractError
+        )
 
     def resume_port(self, port: ObservationResumePort, /) -> ObservationResumePort:
         # Codec metadata is exposed by properties and must be captured once
         # by ``require_observe_port_contracts`` after all Port decorations.
-        return _apply(port, self.resume, ObservationResumePort, "ObservationResumePort", validate=False)
-
-    def decorate(self, ports: ObservePortSet, /) -> ObservePortSet:
-        if type(ports) is not ObservePortSet:
-            raise ObserveContractError("Observe failover decoration requires an ObservePortSet")
-        queue_port = self.queue_port(ports.queue_port)
-        background_task_port = self.background_task_port(ports.background_task_port)
-        config_port = self.config_port(ports.config_port)
-        context_port = self.context_port(ports.context_port)
-        ack_port = self.ack_port(ports.ack_port)
-        resume_port = self.resume_port(ports.resume_port)
-        # Preserve a previously validated set when every wrapper keeps the
-        # original object.  In particular this avoids rereading synchronous
-        # resume codec metadata from single-read providers.
-        if (
-            queue_port is ports.queue_port
-            and background_task_port is ports.background_task_port
-            and config_port is ports.config_port
-            and context_port is ports.context_port
-            and ack_port is ports.ack_port
-            and resume_port is ports.resume_port
-        ):
-            return ports
-        cached_binding = ports.resume_binding if resume_port is ports.resume_port else None
-        cached_capture = ports.resume_capture if resume_port is ports.resume_port else None
-        return ObservePortSet(
-            queue_port,
-            background_task_port,
-            config_port,
-            context_port,
-            ack_port,
-            resume_port,
-            _resume_binding=cached_binding,
-            _resume_capture=cached_capture,
+        return apply_port_decorator_boundary(
+            port,
+            self.resume,
+            ObservationResumePort,
+            "ObservationResumePort",
+            ObserveContractError,
+            validate=False,
         )
 
 
@@ -218,36 +133,8 @@ def normalize_observe_failover_decorators(
     raise ObserveContractError("Observe failover decoration requires a callable decorator or ObserveFailoverDecorators")
 
 
-def decorate_observe_ports(
-    queue_port: ObservationQueuePort,
-    background_task_port: BackgroundTaskPort,
-    config_port: ConfigObservationPort,
-    context_port: ContextObservationPort,
-    ack_port: ObservationAckPort,
-    resume_port: ObservationResumePort,
-    /,
-    *,
-    failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None,
-) -> ObservePortSet:
-    """Apply Observe's failover declarations before graph-node assembly."""
-
-    decorators = normalize_observe_failover_decorators(failover)
-    # Apply declarations before constructing the validated set so resume
-    # codec metadata is captured exactly once for single-read providers.
-    return ObservePortSet(
-        decorators.queue_port(queue_port),
-        decorators.background_task_port(background_task_port),
-        decorators.config_port(config_port),
-        decorators.context_port(context_port),
-        decorators.ack_port(ack_port),
-        decorators.resume_port(resume_port),
-    )
-
-
 __all__ = [
     "FailoverPortDecorator",
     "ObserveFailoverDecorators",
-    "ObservePortSet",
-    "decorate_observe_ports",
     "normalize_observe_failover_decorators",
 ]

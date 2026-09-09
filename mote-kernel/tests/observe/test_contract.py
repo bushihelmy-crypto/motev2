@@ -16,6 +16,7 @@ from mote_kernel.observe.contract import (
     AssistantObservation,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigObservation,
     ConfigSettlementReceipt,
@@ -779,6 +780,11 @@ def test_settlement_boundary_validation_accepts_only_same_boundary_or_zero_lengt
     other_stream = ObservationBoundary("other", other_cursor, other_cursor, 2)
     with pytest.raises(ObserveContractError, match="one stream"):
         ConfigSettlementReceipt((DeliveryId("d"),), read, other_stream, "settlement", _snapshot(2))
+
+
+def test_config_apply_result_requires_its_nominal_receipt() -> None:
+    with pytest.raises(ObserveContractError, match="ConfigSettlementReceipt"):
+        ConfigApplyResult(cast(Never, object()))
 
 
 @pytest.mark.parametrize(

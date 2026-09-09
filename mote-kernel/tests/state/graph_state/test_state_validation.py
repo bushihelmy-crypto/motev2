@@ -832,12 +832,43 @@ def test_settled_activation_evidence_rejects_malformed_storage_shapes() -> None:
     with pytest.raises(GraphStateTransitionError, match="invalid reference"):
         validate_graph_run_state(replace(base, settled_activations=cast(tuple[ActivationReference, ...], (object(),))))
 
+    missing_activation = object.__new__(ActivationReference)
+    with pytest.raises(GraphStateTransitionError, match="invalid reference"):
+        validate_graph_run_state(replace(base, settled_activations=(missing_activation,)))
+
+    missing_route = object.__new__(ActivationReference)
+    object.__setattr__(missing_route, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+    with pytest.raises(GraphStateTransitionError, match="invalid activation identity"):
+        validate_graph_run_state(replace(base, settled_activations=(missing_route,)))
+
     unhashable = forged_reference(
         GraphActivationIdentity(GraphRunId("run"), 0, A),
         cast(GraphRouteId, []),
     )
     with pytest.raises(GraphStateTransitionError, match="unhashable value"):
         validate_graph_run_state(replace(base, settled_activations=(unhashable,)))
+
+
+def test_reference_shape_is_rechecked_after_canonical_admission(monkeypatch: pytest.MonkeyPatch) -> None:
+    reference = object.__new__(ActivationReference)
+    object.__setattr__(reference, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+
+    def stable_hash(_reference: ActivationReference) -> int:
+        return 0
+
+    def activation_only_key(
+        admitted: ActivationReference,
+    ) -> tuple[GraphRunId, int, GraphNodeId, bool, str]:
+        activation = admitted.activation
+        return activation.run_id, activation.superstep, activation.node_id, False, ""
+
+    monkeypatch.setattr(ActivationReference, "__hash__", stable_hash)
+    monkeypatch.setattr(ActivationReference, "canonical_key", activation_only_key)
+
+    with pytest.raises(GraphStateTransitionError, match="invalid reference"):
+        validate_graph_run_state(
+            replace(running(), superstep=2, settled_activations=(reference,)),
+        )
 
 
 def test_settled_activation_evidence_must_be_canonical_and_unique() -> None:

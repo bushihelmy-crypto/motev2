@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, Never, TypeVar, cast
 
 from mote_kernel.act.contract import ActHookCommand
 from mote_kernel.act.contract import HookStateProjection as ActHookStateProjection
@@ -81,7 +81,7 @@ def _react_aggregate(
 ) -> ReActConfig[
     ObserveHookStateProjection,
     ObserveHookCommand,
-    object,
+    Never,
     HookGraphValue,
     HookGraphValue,
     ActHookStateProjection,
@@ -91,7 +91,7 @@ def _react_aggregate(
         ReActConfig[
             ObserveHookStateProjection,
             ObserveHookCommand,
-            object,
+            Never,
             HookGraphValue,
             HookGraphValue,
             ActHookStateProjection,

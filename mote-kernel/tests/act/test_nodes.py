@@ -66,7 +66,7 @@ from mote_kernel.act.execute import ExecuteNode
 from mote_kernel.act.identity import ActHookStage, ActInvocationKey
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
-from mote_kernel.config import ConfigActivation
+from mote_kernel.config import ConfigActivation, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef, PredecessorOutputRef
@@ -685,6 +685,7 @@ def _assemble(
     *,
     definition_id: str = "act.test",
     version: int = 1,
+    assembly_snapshot_key: ConfigSnapshotKey | None = None,
 ) -> ActNode[_PriorityConfig, _State, _Command]:
     return ActNode(
         definition_id,
@@ -697,6 +698,7 @@ def _assemble(
         hook=hook,
         failure_reason=OpaqueGraphFailureReason("authorization denied"),
         admission=admission,
+        assembly_snapshot_key=assembly_snapshot_key,
     )
 
 
@@ -1305,6 +1307,43 @@ def test_act_assembly_requires_exact_admission_and_exact_hook_node() -> None:
     )
     with pytest.raises(ActContractError, match="shared HookNode"):
         _assemble(ports, subclass, admission)
+
+    malformed_key = cast(ConfigSnapshotKey, object())
+    with pytest.raises(ActContractError, match="assembly snapshot key"):
+        ResolveNode(ports, admission, assembly_snapshot_key=malformed_key)
+    with pytest.raises(ActContractError, match="assembly snapshot key"):
+        AuthorizeNode(ports, OpaqueGraphFailureReason("denied"), admission, assembly_snapshot_key=malformed_key)
+    with pytest.raises(ActContractError, match="assembly snapshot key"):
+        ExecuteNode(ports, admission, assembly_snapshot_key=malformed_key)
+    with pytest.raises(ActContractError, match="assembly snapshot key"):
+        SettleNode(ports, ports, admission, assembly_snapshot_key=malformed_key)
+    with pytest.raises(ActContractError, match="assembly snapshot key"):
+        _assemble(ports, hook, admission, assembly_snapshot_key=malformed_key)
+
+    with pytest.raises(ActContractError, match="ResolvePort"):
+        ResolveNode(cast(Never, object()), admission)
+    non_callable_resolve = _Ports()
+    non_callable_resolve.resolve = None  # type: ignore[method-assign]
+    with pytest.raises(ActContractError, match="ResolvePort"):
+        ResolveNode(non_callable_resolve, admission)
+    missing_execute = cast(Never, object())
+    with pytest.raises(ActContractError, match="ExecutePort"):
+        ExecuteNode(missing_execute, admission)
+    missing_settlement = cast(Never, object())
+    with pytest.raises(ActContractError, match="SettlementPort"):
+        SettleNode(missing_settlement, ports, admission)
+    with pytest.raises(ActContractError, match="ToolExchangeWriter"):
+        SettleNode(ports, cast(Never, object()), admission)
+
+    ports.execute = None  # type: ignore[method-assign]
+    with pytest.raises(ActContractError, match="ExecutePort"):
+        ExecuteNode(ports, admission)
+    ports.project = None  # type: ignore[method-assign]
+    with pytest.raises(ActContractError, match="SettlementPort"):
+        SettleNode(ports, ports, admission)
+    ports.write = None  # type: ignore[method-assign]
+    with pytest.raises(ActContractError, match="ToolExchangeWriter"):
+        SettleNode(_Ports(), ports, admission)
 
 
 @pytest.mark.parametrize("field", ["payload_admission", "slot"])

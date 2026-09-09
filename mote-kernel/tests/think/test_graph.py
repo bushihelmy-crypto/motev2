@@ -6,6 +6,7 @@ from typing import Generic, Never, TypeVar, cast
 
 import pytest
 
+from mote_kernel.config import ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef
 from mote_kernel.hooks import HookNode
@@ -522,6 +523,7 @@ def _think_with_hook(
     definition_id: str = "think.test",
     version: int = 1,
     hook_state_type: type[State] = State,
+    assembly_snapshot_key: ConfigSnapshotKey | None = None,
 ) -> object:
     ports = Ports()
     return cast(
@@ -537,6 +539,7 @@ def _think_with_hook(
             command_port=ports,
             hook_state_type=hook_state_type,
             hook=cast(Never, hook),
+            assembly_snapshot_key=assembly_snapshot_key,
         ),
     )
 
@@ -553,6 +556,12 @@ def test_think_rejects_non_hook_children_before_graph_assembly() -> None:
 
     with pytest.raises(ThinkContractError, match="shared HookNode"):
         _think_with_hook(not_a_hook)
+
+    with pytest.raises(ThinkContractError, match="assembly snapshot key"):
+        _think_with_hook(
+            make_hook(HookRuntime()),
+            assembly_snapshot_key=cast(ConfigSnapshotKey, object()),
+        )
 
 
 @pytest.mark.parametrize(

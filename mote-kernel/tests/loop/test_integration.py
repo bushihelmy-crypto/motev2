@@ -200,7 +200,7 @@ async def test_act_route_enters_the_nested_authorization_interrupt_with_projecte
     assert action.scope == ("act", "run")
     assert str(action.node_id) == "authorize"
     assert len(act_ports.requests) == 1
-    assert act_ports.requests[0].hook_state.cursor == cursor(1)
+    assert cast(SharedState, act_ports.requests[0].hook_state).cursor == cursor(1)
     assert ports.read_cursors == [cursor(0)]
 
 

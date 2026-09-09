@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import operator
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
@@ -62,8 +61,6 @@ class RouterNode(
         object.__setattr__(self, "router_port", port)
         if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
             raise ThinkContractError("router assembly snapshot key is malformed")
-        if operator.is_(port, None):
-            raise ThinkContractError("router requires a RouterPort")
         try:
             method = port.route_model
         except AttributeError as error:

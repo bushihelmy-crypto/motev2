@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
 from mote_kernel.act.config import SettleBinding
@@ -64,7 +64,9 @@ class SettleNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT]:
         hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
-        decorators = normalize_act_failover_decorators(self.failover)
+        # ``__post_init__`` stores the normalized bundle; reuse it for any
+        # activation-time capability selection.
+        decorators = cast(ActFailoverDecorators, self.failover)
         settlement_port = self.settlement_port
         exchange_writer = self.exchange_writer
         if config is not None:
