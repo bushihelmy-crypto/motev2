@@ -1,0 +1,10 @@
+.git
+.github
+.golangci-cache
+bin
+coverage.out
+docs
+scripts
+*.md
+*.log
+.env*
