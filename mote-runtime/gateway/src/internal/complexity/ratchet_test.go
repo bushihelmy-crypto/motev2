@@ -19,6 +19,7 @@ import (
 // The measured set is explicit. Test infrastructure and the process shell do
 // not inflate the production architecture budget.
 var measuredRoots = map[string]bool{
+	".":   true,
 	"api": true, "internal/application": true, "internal/admission": true,
 	"internal/plan": true, "internal/model": true, "internal/protocol": true,
 	"internal/service": true, "internal/cache": true, "internal/usage": true,
@@ -77,7 +78,7 @@ func measure(t *testing.T) metrics {
 			return err
 		}
 		relativeDir = filepath.ToSlash(relativeDir)
-		if relativeDir == "." || !isMeasured(relativeDir) {
+		if !isMeasured(relativeDir) {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)

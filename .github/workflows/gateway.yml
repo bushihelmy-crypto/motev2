@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - mote-runtime/gateway/**
+      - conformance/**
       - .github/workflows/gateway.yml
   pull_request:
     paths:
       - mote-runtime/gateway/**
+      - conformance/**
       - .github/workflows/gateway.yml
   workflow_dispatch:
 
@@ -46,7 +48,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install secret scanner
-        run: python -m pip install --disable-pip-version-check --no-warn-script-location detect-secrets==1.5.0
+        env:
+          SCANNER_SPEC: "==1.5.0"
+        run: python -m pip install --disable-pip-version-check --no-warn-script-location detect-secrets${SCANNER_SPEC}
 
       - name: Run complete Gateway gate
         run: make check

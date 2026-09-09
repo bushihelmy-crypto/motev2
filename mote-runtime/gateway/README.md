@@ -1,9 +1,12 @@
 # Mote Gateway
 
-`gateway` is the Go implementation boundary for outbound model inference. It
-will execute requests for text, image, audio, music, video, embeddings,
-reranking, and realtime/async model APIs. It is not a model router and it is
-not an MCP or tool-execution runtime.
+`gateway` is the Go implementation boundary for outbound model access. It
+exposes two caller-owned invocation profiles: Kernel `LLMRequest`/
+`LLMResponse` for language and realtime calls, and Execution
+`MediaRequest`/`MediaResponse` for image, audio, music, video, and
+transcription calls. Embeddings and reranking remain reserved for a separately
+versioned profile. It is not a model router and it is not an MCP or
+tool-execution runtime.
 
 The repository is currently at the project-scaffold stage. The package layout
 and quality gates are intentional; protocol and service implementations are
@@ -41,7 +44,8 @@ gateway/
 └── Makefile                     # project commands delegate to src/
 ```
 
-`api/` is the only place for provider-neutral request/result/event shapes. A
+`api/` is the only place for provider-neutral request/result/observation
+shapes. `LLMInput` and `MediaInput` are intentionally different DTOs; a
 protocol or durable cross-language shape is not considered released merely
 because a Go type exists; it must first have an accepted conformance contract
 under the repository's `conformance/` owner.
@@ -86,12 +90,17 @@ The Go baseline is Go 1.26.5 (`src/go.mod`, `toolchain` directive, and
 
 - Router chooses a model; Gateway receives that selection and never chooses a
   fallback model, service, or protocol.
+- Kernel Think uses only `LLMInvocation`; Execution uses `MediaInvocation` for
+  media generation/understanding. The two request and response DTO pairs are
+  not interchangeable.
 - Protocol adapters encode/decode wire payloads and stream events.
 - Service connectors resolve targets and credentials and perform cloud signing.
 - `upstream/` owns outbound network mechanics and connection reuse.
-- Model-native tool calling (definitions, choices, deltas, and results) is part
-  of the inference contract. Tool discovery and tool execution are outside this
-  project; no MCP package belongs here.
+- Model-native tool calling (definitions, choices, complete calls, and results)
+  is part of the inference contract. A live stream may deliver intermediate
+  fragments to its caller, but the Gateway → Kernel DTO contains only the
+  finalized call/result. Tool discovery and execution are outside this project;
+  no MCP package belongs here.
 - Prompt/context-cache accounting is mandatory gateway behavior. Whole-result
   caching is opt-in and exact-match only until a separate contract says more.
 - Receipts use external persistence ports; this project does not own a database.

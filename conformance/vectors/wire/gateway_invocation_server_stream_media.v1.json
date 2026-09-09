@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.server_stream.media",
+  "description": "A media server stream exposes local delivery chunks but returns one finalized artifact result and aggregate timing at the Execution boundary.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {
+    "kind": "media",
+    "schema_version": 1,
+    "operation_id": "op-media-stream-1",
+    "model_id": "model.video",
+    "operation": "video_generation",
+    "modality": "video",
+    "mode": "server_stream",
+    "input": {"kind": "video_generation", "prompt": "A mote crossing a quiet sky.", "duration_ms": 2000, "width": 640, "height": 360, "fps": 24},
+    "features": ["usage"],
+    "trace": {"trace_id": "trace-media-stream-1", "generation_id": "generation-media-stream-1", "model_call_id": "call-media-stream-1"}
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "media_response",
+      "schema_version": 1,
+      "operation_id": "op-media-stream-1",
+      "mode": "server_stream",
+      "terminal": {"outcome": "succeeded", "result": {"kind": "video", "artifacts": [{"artifact_id": "video-stream-1", "revision": 1, "representation": "original", "kind": "video", "mime_type": "video/mp4", "content_ref": "artifact:video-stream-1", "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "size": 2048}]}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-media-stream-1",
+        "operation": "video_generation",
+        "modality": "video",
+        "mode": "server_stream",
+        "correlation": {"trace_id": "trace-media-stream-1", "generation_id": "generation-media-stream-1", "model_call_id": "call-media-stream-1"},
+        "model": {"requested_model_id": "model.video", "provider": "fixture", "protocol": "provider.video.v1"},
+        "input": {"kind": "video_generation", "prompt": "A mote crossing a quiet sky.", "duration_ms": 2000, "width": 640, "height": 360, "fps": 24},
+        "finish": {"reasons": ["completed"]},
+        "usage": {"availability": "reported", "input_text_tokens": 7, "output_video_tokens": 48},
+        "cost": {"currency": "USD", "availability": "estimated", "amount": "0.001200"},
+        "timing": {"latency_ms": 2100, "streamed": true, "chunk_count": 6, "output_event_count": 6, "time_to_first_byte_ms": 120},
+        "cache": {"prompt": {"state": "miss"}, "result": {"state": "not_requested"}},
+        "attempts": []
+      },
+      "receipt": {"receipt_id": "receipt-media-stream-1", "operation_id": "op-media-stream-1", "revision": 1}
+    }
+  }
+}

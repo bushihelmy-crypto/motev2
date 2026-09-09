@@ -9,7 +9,7 @@ conformance/
 ├── manifest.json
 ├── schemas/
 │   ├── case/          # schemas for test vector and scenario envelopes
-│   └── protocol/      # versioned Mote wire schemas
+│   └── protocol/      # versioned Mote wire/observable protocol schemas
 ├── vectors/
 │   ├── state/         # pure state transition vectors
 │   └── wire/          # strict encode/decode vectors
@@ -32,6 +32,14 @@ conformance/
 Runners load `manifest.json`, reject unsupported manifest versions, validate every referenced document against its declared schema, and then execute the selected suites. Paths are relative to this directory and use `/` separators.
 
 No suite is enabled until it has a stable protocol schema and at least one reviewed case. Empty suite arrays are valid during bootstrap.
+
+The first enabled runtime contract is `gateway_invocation` v1. It is the
+provider-neutral model invocation boundary used by the Go Gateway scaffold.
+It has a `kernel_llm` profile for Kernel and a distinct `execution_media`
+profile for Execution; media requests are not admitted as Kernel LLM
+requests. Its schema and normative lifecycle rules live in
+[`spec/gateway-invocation.md`](spec/gateway-invocation.md); the Gateway's Go
+interfaces are an implementation adapter, not a second source of truth.
 
 ## Compatibility
 

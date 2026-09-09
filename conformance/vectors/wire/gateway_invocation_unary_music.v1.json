@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.unary.music",
+  "description": "Music remains a distinct modality and result kind instead of being collapsed into generic audio.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {"kind": "media", "schema_version": 1, "operation_id": "op-music-1", "model_id": "model.music", "operation": "music_generation", "modality": "music", "mode": "unary", "input": {"kind": "music_generation", "prompt": "Short piano motif."}, "features": [], "trace": {"trace_id": "trace-music-1", "generation_id": "generation-music-1", "model_call_id": "call-music-1"}},
+  "expect": {"outcome": "accept", "value": {
+    "kind": "media_response", "schema_version": 1, "operation_id": "op-music-1", "mode": "unary",
+    "terminal": {"outcome": "succeeded", "result": {"kind": "music", "artifacts": [{"artifact_id": "music-1", "revision": 1, "representation": "original", "kind": "music", "mime_type": "audio/mpeg", "content_ref": "artifact:music-1", "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": 512}]}},
+    "observation": {"schema_version": 1, "operation_id": "op-music-1", "operation": "music_generation", "modality": "music", "mode": "unary", "correlation": {"trace_id": "trace-music-1", "generation_id": "generation-music-1", "model_call_id": "call-music-1"}, "model": {"requested_model_id": "model.music", "provider": "fixture", "protocol": "provider.music.v1"}, "input": {"kind": "music_generation", "prompt": "Short piano motif."}, "finish": {"reasons": ["completed"]}, "usage": {"availability": "unavailable"}, "cost": {"currency": "USD", "availability": "unavailable"}, "timing": {"latency_ms": 300, "streamed": false, "chunk_count": 0}, "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}}, "attempts": []},
+    "receipt": {"receipt_id": "receipt-music-1", "operation_id": "op-music-1", "revision": 1}
+  }}
+}

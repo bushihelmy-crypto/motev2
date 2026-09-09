@@ -6,7 +6,11 @@
 
 Model Gateway 不负责选模型，也不负责选服务商。
 
-它接收 Kernel `Think` 阶段通过 `InferencePort` 发来的请求：模型已经由 `RouterPort` 选好，服务商、请求协议和 API Key 已经由用户配置并绑定在 Kernel 侧的 `InferencePort` 上。Gateway 只负责判断这个组合能不能执行，然后完成真实模型调用。
+它接收两个明确的调用边界：Kernel `Think` 阶段通过 `LLMInvocation` 发来的
+`LLMRequest`，以及 Execution 通过 `MediaInvocation` 发来的 `MediaRequest`。
+模型已经由 `RouterPort` 选好，服务商、请求协议和 API Key 已经由用户配置并
+绑定在调用端的配置中。Gateway 只负责判断这个组合能不能执行，然后完成
+真实模型调用。媒体生成不从 Kernel 发起。
 
 ```text
 用户配置
@@ -14,19 +18,17 @@ Model Gateway 不负责选模型，也不负责选服务商。
 ├── 请求协议
 └── API Key / 其他凭据
         │
-        │ Kernel 装配时绑定到 InferencePort
-        ▼
-Kernel Think
-├── RouterNode 通过 RouterPort 只选择模型
-└── InferenceNode 通过 InferencePort 携带已选模型调用 Gateway
-        │
-        ▼
-Model Gateway
-├── 校验 模型 × 协议 × 服务商 是否兼容
-├── 把统一请求转换成上游协议
-├── 处理服务商地址与鉴权
-├── 发起真实模型请求
-└── 返回统一结果并建立 ModelReceipt
+        ├── Kernel 装配 → LLMInvocation
+        └── Execution 装配 → MediaInvocation
+
+Kernel Think ── LLMRequest ────────┐
+                                   ├── Model Gateway
+Execution ──── MediaRequest ───────┘
+                                   ├── 校验 模型 × 协议 × 服务商
+                                   ├── 转换为上游协议
+                                   ├── 处理地址与鉴权
+                                   ├── 发起真实模型请求
+                                   └── 返回 profile-specific response + receipt
 ```
 
 `mote-runtime/router` 是独立的模型选择服务，不是 Model Gateway 的内部组件。Gateway 不调用它，也不实现成本、质量、权重或供应商选择策略。
@@ -36,7 +38,8 @@ Model Gateway
 ```mermaid
 flowchart LR
     U[用户配置<br/>服务商 + 协议 + 凭据] --> K[Kernel 装配]
-    K --> IP[已配置的 InferencePort]
+    K --> LI[LLMInvocation]
+    E[Execution 装配] --> MP[MediaInvocation]
 
     subgraph THINK[Kernel Think]
         RN[RouterNode] --> RP[RouterPort]
@@ -44,9 +47,11 @@ flowchart LR
         M --> IN[InferenceNode]
     end
 
-    IN -->|InferenceRequest| IP
-
-    IP -->|GatewayCall| G[Model Gateway]
+    IN --> LI
+    LI --> LR[LLMRequest]
+    MP --> MR[MediaRequest]
+    LR --> G[Model Gateway]
+    MR --> G
 
     subgraph GATEWAY[Model Gateway 内部]
         A[兼容性校验]
@@ -60,9 +65,10 @@ flowchart LR
 
     G --> A
     X <--> UP[上游模型服务]
-    R --> OUT[InferenceResult]
-    OUT --> IP
-    IP --> IN
+    R --> LOUT[LLMResponse]
+    R --> MOUT[MediaResponse]
+    LOUT --> LI
+    MOUT --> MP
 ```
 
 调用时有两份来源不同的信息：
@@ -70,9 +76,9 @@ flowchart LR
 | 信息 | 来源 | 谁能决定 |
 |---|---|---|
 | 使用哪个模型 | `RouterPort` 的 `ModelSelection` | Router Runtime |
-| 使用哪个服务商 | 用户配置，Kernel 装配到 `InferencePort` | 用户/Product 配置 |
-| 使用哪个请求协议 | 用户配置，Kernel 装配到 `InferencePort` | 用户/Product 配置 |
-| API Key、云凭据、endpoint | 用户配置，Kernel 装配到 `InferencePort` | 用户/Product 配置 |
+| 使用哪个服务商 | 用户配置，装配到调用 Port | 用户/Product 配置 |
+| 使用哪个请求协议 | 用户配置，装配到调用 Port | 用户/Product 配置 |
+| API Key、云凭据、endpoint | 用户配置，装配到调用 Port | 用户/Product 配置 |
 | 这个组合是否能调用 | Gateway 的兼容性校验 | Model Gateway |
 | 调用失败后是否重新选模型 | Kernel Flow / Failover | Kernel |
 
@@ -115,8 +121,8 @@ bedrock.converse.v1
 
 `ProtocolAdapter` 负责：
 
-- 将统一 `InferenceRequest` 编码成该协议的请求；
-- 将上游响应解码成统一 `InferenceResult`；
+- 将 `LLMRequest` 或 `MediaRequest` 编码成该协议的请求；
+- 将上游响应解码成对应的 `LLMResponse` 或 `MediaResponse`；
 - 解析流式事件；
 - 解析协议自己的错误 body；
 - 声明协议能表达哪些 operation 和 feature；
@@ -157,9 +163,9 @@ bedrock.converse.v1
 ```text
 RouterPort 选择的 ModelSelection
         +
-InferencePort 持有的 ServiceConfig
+调用端持有的 ServiceConfig
         +
-InferencePort 持有的 ProtocolId
+调用端持有的 ProtocolId
         =
 GatewayCallPlan
 ```
@@ -270,7 +276,8 @@ Gateway 执行校验，但规则由各自 owner 声明：
 
 ### 6.1 Kernel 侧装配
 
-用户配置由 Kernel 装配阶段验证，并捕获到具体 `InferencePort` 实现中：
+用户配置由调用端装配阶段验证，并捕获到具体 invocation 实现中。Kernel
+只把 Router 选出的模型和 LLM 输入交给 `LLMInvocation`：
 
 ```yaml
 inference:
@@ -290,61 +297,38 @@ inference:
 
 API Key 可以由 Kernel 侧 Port 配置持有，也可以表示为安全的 `SecretRef`。无论采用哪种传递方式，都不能进入 Router 输出、日志、trace、receipt 或可持久化的 Kernel DomainState。
 
-### 6.2 InferencePort 请求
+### 6.2 两个 invocation DTO
 
-逻辑契约如下，具体语言类型另行冻结：
-
-```text
-InferenceRequest
-├── operation_id
-├── selected_model       # RouterPort 的输出
-├── messages / input
-├── tools
-├── response_format
-├── stream
-└── inference options
-
-ConfiguredInferencePort
-├── gateway invocation
-└── InferenceGatewayConfig
-    ├── service config
-    ├── protocol id
-    └── credential / secret reference
-```
-
-调用关系是：
+逻辑契约如下，具体语言类型由 `conformance/` 冻结：
 
 ```text
-InferencePort.infer(InferenceRequest)
-    -> Gateway.invoke(InferenceGatewayConfig, InferenceRequest)
-    -> InferenceResult | GatewayError
+Kernel Think
+  LLMInvocation.Invoke(ctx, LLMRequest) -> LLMResponse
+  LLMInvocation.Stream(ctx, LLMRequest) -> LLMEventStream
+  RealtimeInvocation.OpenDuplex(ctx, LLMRequest) -> DuplexSession
+
+Execution
+  MediaInvocation.InvokeMedia(ctx, MediaRequest) -> MediaResponse
+  MediaInvocation.StreamMedia(ctx, MediaRequest) -> MediaEventStream
+  AsyncMediaInvocation.SubmitMedia(ctx, MediaRequest) -> TaskHandle
 ```
 
-`InferenceRequest` 携带 RouterPort 选出的模型；服务商和凭据来自 `ConfiguredInferencePort`，不是 RouterPort 的输出。
-
-如果现有 Kernel 类型继续使用 `ModelBinding` 这个名字，它在此边界上也只能表达模型选择。当前类型中的 `provider_id` 不能变成 RouterPort 可自由选择的服务商；要么将它移到 `InferenceGatewayConfig`，要么由 Kernel 装配时固定并禁止 RouterPort 覆盖。更直接的目标契约是由 RouterPort 返回只含模型身份与版本的 `ModelSelection`。
+`LLMRequest` 的 operation 只有 `generate` 和 `realtime`；`MediaRequest` 的
+operation 只有图片、音频、音乐、视频生成和音频转写。两个 DTO 共享的是
+终态 observation 原语，不是一个可随意扩展的通用请求。
 
 ### 6.3 Gateway 返回
 
-Gateway 返回 provider-neutral 的 typed result：
-
-```text
-InferenceResult
-├── output
-├── finish reason
-├── usage
-├── model identity
-├── provider request id
-└── receipt reference
-```
-
-Kernel 解释结果并推进 Think Flow。Gateway 不修改 Kernel 状态，也不决定 Think、Act、Failover 或结束。
+`LLMResponse` 或 `MediaResponse` 都包含最终 `terminal`、Langfuse 所需的
+`observation` 和 durable `receipt`。Kernel 解释 `LLMResponse` 并推进 Think
+Flow；Execution 解释 `MediaResponse` 并推进媒体任务。Gateway 不修改
+Kernel/Execution 状态，也不决定 Think、Act、Failover 或结束。
 
 ## 7. Model Gateway 内部结构
 
 ```mermaid
 flowchart TB
-    CALL[Gateway Invocation Boundary]
+    CALL[LLMInvocation / MediaInvocation]
     ADMIT[Admission<br/>结构与兼容性校验]
     PLAN[CallPlan Builder]
     PREG[(Protocol Registry)]
@@ -355,7 +339,8 @@ flowchart TB
     TRANS[Transport<br/>HTTP / SSE / WebSocket / EventStream]
     NORM[Response Normalizer]
     RECEIPT[Receipt Service<br/>经 Persistence Port 持久化]
-    RESULT[InferenceResult]
+    LLMOUT[LLMResponse]
+    MEDIAOUT[MediaResponse]
 
     CALL --> ADMIT
     PREG --> ADMIT
@@ -369,7 +354,8 @@ flowchart TB
     CONN --> PAD
     PAD --> NORM
     NORM --> RECEIPT
-    RECEIPT --> RESULT
+    RECEIPT --> LLMOUT
+    RECEIPT --> MEDIAOUT
 ```
 
 ### 7.1 Admission
@@ -441,8 +427,8 @@ Replicate 的“创建 prediction、轮询状态、连接返回的 stream URL”
 ```text
 ProtocolAdapter
 ├── descriptor() -> ProtocolAdapterDescriptor
-├── encode(request, call_plan) -> WireRequest
-├── decode(response, call_plan) -> InferenceResult
+├── encode(LLMRequest | MediaRequest, call_plan) -> WireRequest
+├── decode(response, call_plan) -> LLMResponse | MediaResponse
 └── decode_stream(events, call_plan) -> Stream<InferenceEvent>
 
 ServiceConnector
@@ -547,12 +533,15 @@ mote-runtime/gateway/
 ## 14. 必须长期保持的约束
 
 1. `RouterPort` 只选择模型，不选择服务商、协议或 API Key。
-2. 服务商、协议和凭据来自用户配置，在 Kernel 装配时绑定到 `InferencePort`。
-3. Gateway 不调用 `mote-runtime/router`，也不拥有模型路由策略。
-4. Gateway 在联网前校验模型、协议、服务商和请求 feature 的完整组合。
-5. 服务商不支持配置协议时，由 Gateway 明确报错；默认不得静默切换协议。
-6. 简单服务商使用通用 Connector 配置，不为每家公司复制实现。
-7. 协议 Adapter 不处理云鉴权，Service Connector 不处理协议 JSON。
-8. Gateway 不自行换模型、换服务商或执行语义 Failover。
-9. Gateway 返回 provider-neutral typed result，并在成功前建立 durable `ModelReceipt`。
-10. 任何日志、错误、trace 和 receipt 都不得泄露用户凭据。
+2. Kernel 只通过 `LLMInvocation` 发送 `LLMRequest`；Execution 通过
+   `MediaInvocation` 发送 `MediaRequest`，媒体生成不从 Kernel 发起。
+3. 服务商、协议和凭据来自用户配置，在调用端装配时绑定到 invocation。
+4. Gateway 不调用 `mote-runtime/router`，也不拥有模型路由策略。
+5. Gateway 在联网前校验模型、协议、服务商和请求 feature 的完整组合。
+6. 服务商不支持配置协议时，由 Gateway 明确报错；默认不得静默切换协议。
+7. 简单服务商使用通用 Connector 配置，不为每家公司复制实现。
+8. 协议 Adapter 不处理云鉴权，Service Connector 不处理协议 JSON。
+9. Gateway 不自行换模型、换服务商或执行语义 Failover。
+10. Gateway 返回 profile-specific typed result，并在成功或提交前建立
+    durable `ModelReceipt`。
+11. 任何日志、错误、trace 和 receipt 都不得泄露用户凭据。

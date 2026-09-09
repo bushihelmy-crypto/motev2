@@ -1,0 +1,60 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.unary.text",
+  "description": "A text generation call returns one finalized result and the facts needed for a Kernel generation observation.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "op-text-1",
+    "model_id": "model.text",
+    "operation": "generate",
+    "modality": "text",
+    "mode": "unary",
+    "input": {
+      "kind": "generate",
+      "messages": [{"role": "user", "content": [{"type": "text", "text": "Say hello."}]}]
+    },
+    "features": ["usage"],
+    "trace": {"trace_id": "trace-text-1", "generation_id": "generation-text-1", "model_call_id": "call-text-1"}
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "schema_version": 1,
+      "operation_id": "op-text-1",
+      "mode": "unary",
+      "kind": "llm_response",
+      "terminal": {"outcome": "succeeded", "result": {"kind": "generate", "text": "Hello."}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-text-1",
+        "operation": "generate",
+        "modality": "text",
+        "mode": "unary",
+        "correlation": {"trace_id": "trace-text-1", "generation_id": "generation-text-1", "model_call_id": "call-text-1"},
+        "model": {"requested_model_id": "model.text", "provider": "fixture", "protocol": "openai.chat_completions.v1"},
+        "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "Say hello."}]}]},
+        "finish": {"reasons": ["stop"]},
+        "usage": {"availability": "reported", "input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000001"},
+        "timing": {"latency_ms": 12.5, "streamed": false, "chunk_count": 0},
+        "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}},
+        "attempts": [{
+          "attempt_id": "attempt-text-1",
+          "ordinal": 1,
+          "resume_generation": 0,
+          "state": "succeeded",
+          "model_id": "model.text",
+          "provider": "fixture",
+          "latency_ms": 12.5,
+          "usage": {"availability": "reported", "input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+          "cost": {"currency": "USD", "availability": "reported", "amount": "0.000001"},
+          "selected": true
+        }]
+      },
+      "receipt": {"receipt_id": "receipt-text-1", "operation_id": "op-text-1", "revision": 1}
+    }
+  }
+}

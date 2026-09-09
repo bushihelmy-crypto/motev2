@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.llm_as_media",
+  "description": "Kernel LLM DTOs are not admitted through the Execution media profile.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {"kind": "llm", "schema_version": 1, "operation_id": "reject-profile-2", "model_id": "model.text", "operation": "generate", "modality": "text", "mode": "unary", "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]}, "features": []},
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}
