@@ -70,14 +70,10 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             config_cursor = GraphConfigCursor(
                 command.definition_id,
                 command.definition_version,
-                command.config_revision,
+                1,
             )
         else:
             config_cursor = GraphConfigCursor.admit(command.config_cursor)
-            if type(command.config_revision) is not int or command.config_revision not in (1, config_cursor.revision):
-                raise GraphStateTransitionError("graph start Config revisions disagree")
-    except GraphStateTransitionError:
-        raise
     except (AttributeError, TypeError, ValueError) as error:
         raise GraphStateTransitionError("graph start Config cursor is malformed") from error
     return validated_graph_run_state(

@@ -1,6 +1,7 @@
 from dataclasses import replace
 from typing import TypeVar
 
+from mote_kernel.config import Config, ConfigSnapshot, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.graph.compiler import GraphCompiler
@@ -16,6 +17,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import NodeOutputFrame, _frame_value, _make_node_output_frame
 from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.result import TaskSuccess
+from mote_kernel.loop.config import ReActRuntimeConfig
 from mote_kernel.state.graph_state import (
     ActivationReference,
     FailedGraphNode,
@@ -46,6 +48,19 @@ from mote_kernel.state.graph_state import (
 )
 
 ValueT = TypeVar("ValueT")
+
+
+def activation_config(revision: int = 1) -> Config:
+    """Build a complete, domain-neutral Config for execution boundary tests."""
+
+    key = ConfigSnapshotKey(
+        GraphDefinitionId(f"test.config.{revision}"),
+        GraphDefinitionVersion(1),
+        revision,
+    )
+    snapshot = ConfigSnapshot.capture(key, f'{{"revision":{revision}}}'.encode())
+    projection = ReActRuntimeConfig(key, key.definition_id, key.definition_version)
+    return Config(snapshot, projection, projection, projection, projection, (projection,))
 
 
 async def identity(values: Graph.Values[str]) -> Graph.Values[str]:

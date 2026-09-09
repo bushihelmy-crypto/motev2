@@ -4,9 +4,8 @@ from typing import TypeVar, cast
 
 from mote_kernel.config import Config, require_config
 from mote_kernel.execution.engine.routing import (
-    _graph_input_coordinate,
-    _node_output_coordinate,
-    causal_input_source_for_cause,
+    binding_source_coordinate,
+    frame_coordinate_available,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -18,9 +17,6 @@ from mote_kernel.execution.graph.ports import (
     CompiledPredecessorInput,
     GraphInputPort,
     MaterializationPlan,
-    ResolvedInputBinding,
-    ResolvedValueSource,
-    require_publication_selection,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
@@ -34,13 +30,12 @@ from mote_kernel.execution.graph.values import (
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, stable_activation
 from mote_kernel.execution.run_context import (
-    GraphInputAvailabilityCoordinate,
-    PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameAvailability,
     ScopedFrameIndex,
 )
 from mote_kernel.state.graph_state import (
+    GraphActivationCause,
     GraphActivationIdentity,
     GraphFrontierNode,
     GraphNodeId,
@@ -139,55 +134,6 @@ def _activation_config_from_frames(
     return selected
 
 
-def _binding_source_coordinate(
-    graph: CompiledGraph[GraphValueT],
-    state: GraphRunState | None,
-    scope_run: ScopeRunCoordinate,
-    activation_superstep: int,
-    binding: ResolvedInputBinding[GraphValueT],
-) -> tuple[
-    ResolvedValueSource,
-    GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
-]:
-    """Resolve one compiled binding to its actual source and frame coordinate.
-
-    Predecessor bindings derive their source from the state-owned activation
-    cause; ordinary bindings use the compiler-provided publication selection.
-    Keeping this coordinate fact in one place prevents availability checks and
-    materialization from drifting while leaving their frame/error policies
-    independent.
-    """
-
-    source = binding.source
-    if isinstance(source, CompiledPredecessorInput):
-        if state is None:
-            raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
-        try:
-            node = frontier_node(state.frontier, source.target)
-            if node is None:
-                raise InvalidRoutingCommandError("predecessor-bound activation is not present in the current frontier")
-            selected = causal_input_source_for_cause(
-                graph,
-                state,
-                state.superstep,
-                node.cause,
-                binding,
-            )
-        except InvalidRoutingCommandError as error:
-            raise SnapshotMismatchError(str(error)) from error
-        if isinstance(selected, GraphInputPort):
-            return selected, _graph_input_coordinate(graph, scope_run)
-        resolved = selected.source
-        return resolved, _node_output_coordinate(graph, scope_run, resolved, selected.predecessor.superstep)
-    if isinstance(source, GraphInputPort):
-        return source, _graph_input_coordinate(graph, scope_run)
-    selection = require_publication_selection(
-        binding.publication,
-        SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
-    )
-    return source, _node_output_coordinate(graph, scope_run, source, selection.resolve(activation_superstep))
-
-
 def node_inputs_available(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
@@ -198,23 +144,32 @@ def node_inputs_available(
 ) -> bool:
     plan = _require_node_materialization(graph, node_id)
     has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
+    cause: GraphActivationCause | None = None
     if state is not None:
         if state.run_id != scope_run.graph_run_id:
             raise SnapshotMismatchError("predecessor input availability scope does not match authoritative state")
         if has_predecessor and activation_superstep != state.superstep:
             raise SnapshotMismatchError("predecessor input availability coordinate does not match authoritative state")
+        if has_predecessor:
+            node = frontier_node(state.frontier, node_id)
+            if node is None:
+                raise SnapshotMismatchError("predecessor-bound activation is not present in the current frontier")
+            cause = node.cause
+    elif has_predecessor:
+        raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
     for binding in plan.bindings.entries:
-        _source, coordinate = _binding_source_coordinate(
-            graph,
-            state,
-            scope_run,
-            activation_superstep,
-            binding,
-        )
-        if isinstance(coordinate, GraphInputAvailabilityCoordinate):
-            if not frames.has_graph_input(coordinate):
-                return False
-        elif not frames.has_publication(coordinate):
+        try:
+            _source, coordinate = binding_source_coordinate(
+                graph,
+                state,
+                scope_run,
+                activation_superstep,
+                binding,
+                cause=cause,
+            )
+        except InvalidRoutingCommandError as error:
+            raise SnapshotMismatchError(str(error)) from error
+        if not frame_coordinate_available(frames, coordinate):
             return False
     return True
 
@@ -285,13 +240,17 @@ def materialize_node_input(
     entries: list[NamedValue[GraphValueT]] = []
     source_frames: list[GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT]] = []
     for binding in plan.bindings.entries:
-        source, coordinate = _binding_source_coordinate(
-            graph,
-            state,
-            scope_run,
-            state.superstep,
-            binding,
-        )
+        try:
+            source, coordinate = binding_source_coordinate(
+                graph,
+                state,
+                scope_run,
+                state.superstep,
+                binding,
+                cause=node.cause,
+            )
+        except InvalidRoutingCommandError as error:
+            raise SnapshotMismatchError(str(error)) from error
         if isinstance(source, GraphInputPort):
             value_name = source.name
             unavailable = f"graph input {source.name!r}"

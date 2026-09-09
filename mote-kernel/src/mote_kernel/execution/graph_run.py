@@ -37,7 +37,6 @@ def project_start_graph_command(
         parent=parent,
         resume_input_codec=(GraphResumeInputCodec(binding.codec_id, binding.version) if binding is not None else None),
         config_cursor=config_cursor,
-        config_revision=1 if config_cursor is None else config_cursor.revision,
     )
 
 

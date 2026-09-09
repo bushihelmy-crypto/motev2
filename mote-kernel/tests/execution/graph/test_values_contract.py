@@ -1,8 +1,10 @@
 from typing import cast
 
 import pytest
+from tests.execution.engine.factories import activation_config
 
 import mote_kernel.execution.graph.values as values_owner
+from mote_kernel.config import Config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValueAdmissionError
 from mote_kernel.execution.graph.ports import NominalTypeDescriptor, normalize_output_declarations
@@ -62,6 +64,21 @@ def test_values_and_frame_admission_rejects_each_malformed_internal_shape() -> N
     malformed_name = NamedValue(cast(str, 1), 1)
     with pytest.raises(GraphValueAdmissionError, match="malformed canonical names"):
         _make_node_input_frame((malformed_name,), declarations)
+
+
+def test_frame_factories_reject_malformed_and_conflicting_activation_configs() -> None:
+    declarations = normalize_output_declarations({"value": int})
+    malformed = cast("Config", object())
+    with pytest.raises(GraphValueAdmissionError, match="activation Config is malformed"):
+        values_owner._make_single_graph_value("value", 1, malformed)
+
+    first = activation_config(1)
+    second = activation_config(2)
+    values = values_owner._make_single_graph_value("value", 1, first)
+    with pytest.raises(GraphValueAdmissionError, match="values and activation Config disagree"):
+        _make_graph_input_frame(values, declarations, second)
+    with pytest.raises(GraphValueAdmissionError, match="values and activation Config disagree"):
+        values_owner._make_node_output_frame(values, declarations, second)
 
 
 def test_each_frame_admission_rejects_a_foreign_nominal_frame() -> None:

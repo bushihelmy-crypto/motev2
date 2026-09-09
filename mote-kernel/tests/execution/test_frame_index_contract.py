@@ -1,4 +1,9 @@
+from typing import cast
+
+import pytest
+
 from mote_kernel.execution import Graph
+from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.execution.graph.ports import FrameDescriptorIdentity, FrameKind, normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     NamedValue,
@@ -13,6 +18,7 @@ from mote_kernel.execution.run_context import (
     ConfirmedChildBoundary,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
+    FrameCoordinate,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
@@ -85,3 +91,10 @@ def test_scoped_frame_index_is_the_single_availability_source_for_all_segments()
             FrameDescriptorIdentity("candidate.graph", 1, FrameKind.GRAPH_OUTPUT, 0),
         )
     )
+
+
+def test_scoped_frame_index_rejects_an_unknown_coordinate_variant() -> None:
+    index: ScopedFrameIndex[str] = ScopedFrameIndex()
+
+    with pytest.raises(SnapshotMismatchError, match="unsupported frame coordinate"):
+        index.lookup(cast(FrameCoordinate[str], object()))

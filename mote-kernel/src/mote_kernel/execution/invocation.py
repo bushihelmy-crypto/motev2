@@ -1,14 +1,13 @@
 """Recovery invocation validation and fence-resume planning."""
 
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import groupby, pairwise
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.engine.recovery import (
     AdmittedResumeFact,
     RecoveryInvocationSeed,
-    RecoveryStateBinding,
 )
 from mote_kernel.execution.engine.resume_admission import (
     prepare_resume,
@@ -17,7 +16,7 @@ from mote_kernel.execution.engine.resume_input import (
     materialize_node_input,
     pending_node_input_available,
 )
-from mote_kernel.execution.engine.routing import graph_outputs_available
+from mote_kernel.execution.engine.routing import graph_outputs_available, publication_availability_coordinate
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import (
     FrameInstallationInvariantError,
@@ -51,7 +50,6 @@ from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
     ChildBoundaryAvailabilityCoordinate,
-    ChildStateBinding,
     ConfirmedChildBoundary,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
@@ -59,6 +57,7 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    ScopedStateBinding,
 )
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
@@ -79,17 +78,10 @@ ValueT = TypeVar("ValueT")
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedState:
-    scope_run: ScopeRunCoordinate
-    state: GraphRunState
-    parent_activation: StableActivation | None
-
-
-@dataclass(frozen=True, slots=True)
 class _PlannedLineage:
     """Immutable lookup index over the canonical planned-state bindings."""
 
-    bindings: tuple[_PlannedState, ...]
+    bindings: tuple[ScopedStateBinding, ...]
 
     def _position(self, coordinate: ScopeRunCoordinate) -> int:
         position = bisect_left(self.bindings, coordinate, key=lambda binding: binding.scope_run)
@@ -97,10 +89,10 @@ class _PlannedLineage:
             raise SnapshotMismatchError(f"lineage does not contain one state at {coordinate!r}")
         return position
 
-    def binding_at(self, coordinate: ScopeRunCoordinate) -> _PlannedState:
+    def binding_at(self, coordinate: ScopeRunCoordinate) -> ScopedStateBinding:
         return self.bindings[self._position(coordinate)]
 
-    def replace(self, replacement: _PlannedState) -> "_PlannedLineage":
+    def replace(self, replacement: ScopedStateBinding) -> "_PlannedLineage":
         position = self._position(replacement.scope_run)
         return _PlannedLineage(
             (*self.bindings[:position], replacement, *self.bindings[position + 1 :]),
@@ -146,24 +138,21 @@ def is_current_child_activation(
 
 def lineage_states(
     root_state: GraphRunState,
-    child_states: tuple[ChildStateBinding, ...],
+    child_states: tuple[ScopedStateBinding, ...],
 ) -> _PlannedLineage:
-    if child_states != tuple(sorted(child_states, key=lambda binding: binding.coordinate)):
+    if child_states != tuple(sorted(child_states, key=lambda binding: binding.scope_run)):
         raise SnapshotMismatchError("continuation child bindings are not in canonical scoped order")
-    child_coordinates = tuple(binding.coordinate for binding in child_states)
+    child_coordinates = tuple(binding.scope_run for binding in child_states)
     if len(child_coordinates) != len(set(child_coordinates)):
         raise SnapshotMismatchError("lineage repeats one scoped graph run")
-    parent_activations = tuple(binding.parent_activation for binding in child_states)
-    if len(parent_activations) != len(set(parent_activations)):
-        raise SnapshotMismatchError("continuation repeats one parent graph activation")
-    values = [_PlannedState(root_scope_run(root_state.run_id), root_state, None)]
-    values.extend(
-        _PlannedState(binding.coordinate, binding.state, binding.parent_activation) for binding in child_states
-    )
+    # A valid parent activation deterministically owns exactly one child
+    # coordinate, so coordinate uniqueness also proves activation uniqueness.
+    for binding in child_states:
+        if not binding.scope_run.scope:
+            raise SnapshotMismatchError("child state binding requires a nested scope")
+        _ = binding.parent_activation
+    values = (ScopedStateBinding(root_scope_run(root_state.run_id), root_state), *child_states)
     canonical = tuple(sorted(values, key=lambda binding: binding.scope_run))
-    coordinates = tuple(binding.scope_run for binding in canonical)
-    if len(coordinates) != len(set(coordinates)):
-        raise SnapshotMismatchError("lineage repeats one scoped graph run")
     return _PlannedLineage(canonical)
 
 
@@ -178,21 +167,6 @@ def plan_fences(
         require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
         activation = binding.parent_activation
         if activation is not None:
-            expected_parent = GraphActivationIdentity(
-                activation.scope_run.graph_run_id,
-                activation.superstep,
-                activation.node_id,
-            )
-            if (
-                not binding.scope_run.scope
-                or binding.state.parent != expected_parent
-                or child_scope_run_for_activation(
-                    activation.scope_run,
-                    expected_parent,
-                )
-                != binding.scope_run
-            ):
-                raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
             parent_state = lineage.binding_at(activation.scope_run).state
             if activation.superstep > parent_state.superstep:
                 raise SnapshotMismatchError("child lineage binding is from a future parent frontier")
@@ -208,7 +182,7 @@ def plan_fences(
         candidate = reduce_graph_run(binding.state, command)
         fences.append(PlannedFence(binding.scope_run, command))
         planned = planned.replace(
-            _PlannedState(binding.scope_run, candidate, binding.parent_activation),
+            replace(binding, state=candidate),
         )
     return planned, tuple(fences)
 
@@ -288,7 +262,7 @@ def plan_resumes(
         plans.append(PlannedResume(scope_run, candidate, prepared))
         facts.extend(action_facts)
         planned_lineage = planned_lineage.replace(
-            _PlannedState(scope_run, candidate, binding.parent_activation),
+            replace(binding, state=candidate),
         )
     return planned_lineage, candidate_frames, tuple(plans), tuple(facts)
 
@@ -302,8 +276,8 @@ def recovery_seed(
     root = lineage.bindings[0]
     children = tuple(binding for binding in lineage.bindings if binding.scope_run.scope)
     return RecoveryInvocationSeed(
-        RecoveryStateBinding(root.scope_run, root.state),
-        tuple(RecoveryStateBinding(binding.scope_run, binding.state) for binding in children),
+        root,
+        children,
         frames,
         limits,
         facts,
@@ -472,12 +446,10 @@ def _validate_complete_context(
         state = binding.state
         for node in state.frontier.nodes:
             if isinstance(node.settlement, SucceededGraphNode):
-                coordinate: PublicationAvailabilityCoordinate[GraphValueT] = PublicationAvailabilityCoordinate(
-                    stable_activation(
-                        binding.scope_run,
-                        GraphActivationIdentity(state.run_id, state.superstep, node.node_id),
-                    ),
-                    scoped_graph.transition.publications[node.node_id].identity,
+                coordinate: PublicationAvailabilityCoordinate[GraphValueT] = publication_availability_coordinate(
+                    scoped_graph,
+                    binding.scope_run,
+                    GraphActivationIdentity(state.run_id, state.superstep, node.node_id),
                 )
                 if not frames.has_publication(coordinate):
                     raise SnapshotMismatchError("complete continuation is missing a current success publication")
@@ -501,7 +473,7 @@ def _validate_complete_context(
             frames,
         ):
             raise SnapshotMismatchError("complete continuation is missing a completed graph output")
-        if binding.parent_activation is not None and state.status is GraphRunStatus.COMPLETED:
+        if binding.scope_run.scope and state.status is GraphRunStatus.COMPLETED:
             boundary: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
                 binding.scope_run,
                 scoped_graph.graph_output_descriptor.identity,

@@ -263,42 +263,6 @@ def test_start_revalidates_the_single_config_cursor_input(cursor: GraphConfigCur
         reduce_graph_run(None, command)
 
 
-def test_start_rejects_disagreeing_legacy_config_revision() -> None:
-    cursor = GraphConfigCursor(
-        GraphDefinitionId("config"),
-        GraphDefinitionVersion(1),
-        7,
-        "config-v7",
-    )
-    command = StartGraphRun(
-        GraphRunId("run"),
-        GraphDefinitionId("graph"),
-        GraphDefinitionVersion(1),
-        (GraphFrontierActivation(A, StartActivationCause()),),
-        config_revision=2,
-        config_cursor=cursor,
-    )
-
-    with pytest.raises(GraphStateTransitionError, match="revisions disagree"):
-        reduce_graph_run(None, command)
-
-
-@pytest.mark.parametrize("legacy_revision", [True, 1.0])
-def test_start_rejects_non_exact_legacy_config_revision(legacy_revision: object) -> None:
-    cursor = GraphConfigCursor(GraphDefinitionId("config"), GraphDefinitionVersion(1), 1)
-    command = StartGraphRun(
-        GraphRunId("run"),
-        GraphDefinitionId("graph"),
-        GraphDefinitionVersion(1),
-        (GraphFrontierActivation(A, StartActivationCause()),),
-        config_revision=cast(int, legacy_revision),
-        config_cursor=cursor,
-    )
-
-    with pytest.raises(GraphStateTransitionError, match="revisions disagree"):
-        reduce_graph_run(None, command)
-
-
 def test_config_cursor_transition_is_monotonic_and_digest_stable() -> None:
     base = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 3)
     assert base.transition_to(GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 3)) is base

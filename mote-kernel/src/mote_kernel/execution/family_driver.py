@@ -28,10 +28,8 @@ from mote_kernel.execution.graph.values import GraphInputFrame, _public_values
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
-    StableActivation,
     child_scope_run_for_activation,
     root_scope_run,
-    stable_activation,
 )
 from mote_kernel.execution.invocation import (
     PlannedFence,
@@ -318,7 +316,6 @@ class _GraphRun(Generic[GraphValueT]):
         "_graph",
         "_limits",
         "_node_origin_cancellation",
-        "_parent_activation",
         "_position",
         "_publish_evidence",
         "_released",
@@ -337,10 +334,13 @@ class _GraphRun(Generic[GraphValueT]):
         commit: GraphCommit[GraphValueT],
         child_constructor: _ChildConstructor[GraphValueT],
         position: tuple[int, ...],
-        parent_activation: StableActivation | None,
         evidence_publisher: _EvidencePublisher[GraphValueT],
     ) -> None:
         require_scoped_snapshot_matches_graph(graph, state, scope_run)
+        # GraphRunState is the sole owner of parent lineage.  Validate its
+        # deterministic projection once at construction, without retaining a
+        # second execution-side copy on the live owner.
+        _ = ScopedStateBinding(scope_run, state).parent_activation
         self._graph = graph
         self._scope_run = scope_run
         self._state = state
@@ -351,7 +351,6 @@ class _GraphRun(Generic[GraphValueT]):
         self._child_constructor = child_constructor
         self._commit_origin_cancellation: asyncio.CancelledError | None = None
         self._position = position
-        self._parent_activation = parent_activation
         self._publish_evidence = evidence_publisher
         self._children: list[_ChildCall[GraphValueT]] = []
         self._session: GraphExecutionSession[GraphValueT] | None = None
@@ -431,13 +430,15 @@ class _GraphRun(Generic[GraphValueT]):
         self._frames = (
             apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
         )
-        if handoff_evidence and self._parent_activation is not None:
+        if handoff_evidence and self._state.parent is not None:
             self.handoff_evidence()
         if cancellation is not None:
             raise cancellation
         return self._state
 
     async def apply_admission_fence(self, command: FenceGraphExecution) -> None:
+        """Commit one planned execution fence before handing off evidence."""
+
         await self._transition(command, handoff_evidence=True)
 
     async def apply_admission_resume(self, planned: PlannedResume[GraphValueT]) -> None:
@@ -594,7 +595,7 @@ class _GraphRun(Generic[GraphValueT]):
                 except asyncio.CancelledError as error:
                     if not consume_node_origin_cancellation(session, error):
                         raise
-                    if self._parent_activation is None:
+                    if self._state.parent is None:
                         self._node_origin_cancellation = error
                         raise
                     await self._fence(execution_token)
@@ -775,7 +776,7 @@ class _GraphRun(Generic[GraphValueT]):
             return disposition
 
     def handoff_evidence(self) -> None:
-        if self._parent_activation is None:
+        if self._state.parent is None:
             raise SnapshotMismatchError("root graph evidence cannot be handed off as a child binding")
         binding = ScopedStateBinding(self._scope_run, self._state)
         self._publish_evidence(binding, self._frames)
@@ -784,7 +785,7 @@ class _GraphRun(Generic[GraphValueT]):
         self,
         evidence_reader: _EvidenceReader[GraphValueT],
     ) -> tuple[GraphRunState, tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
-        if self._parent_activation is not None:
+        if self._state.parent is not None:
             raise SnapshotMismatchError("child graph evidence cannot be exported as the root")
         if any(isinstance(call.phase, ActiveChild) for call in self._children):
             raise SnapshotMismatchError("active child call has no handed-off export evidence")
@@ -820,17 +821,7 @@ class _GraphRun(Generic[GraphValueT]):
         parent: GraphActivationIdentity,
         terminal: _ChildTerminal[GraphValueT],
     ) -> ConfirmedChildBoundary[GraphValueT] | None:
-        activation = self._parent_activation
-        expected_parent = (
-            None
-            if activation is None
-            else GraphActivationIdentity(
-                activation.scope_run.graph_run_id,
-                activation.superstep,
-                activation.node_id,
-            )
-        )
-        if parent != expected_parent:
+        if parent != self._state.parent:
             raise SnapshotMismatchError("child terminal handoff does not match its parent activation")
         if not isinstance(terminal, CompletedChild):
             return None
@@ -912,7 +903,6 @@ def _make_child_constructor(
         if child_graph is not expected_graph:
             raise SnapshotMismatchError("child construction does not match its parent topology")
         coordinate = child_scope_run_for_activation(owner_scope_run, parent)
-        activation = stable_activation(owner_scope_run, parent)
         child_commit = scoped_commit(coordinate, commit)
         command = project_start_graph_command(
             child_graph,
@@ -940,7 +930,6 @@ def _make_child_constructor(
                 child_commit,
                 _make_child_constructor(child_graph, coordinate, limits, commit, evidence_publisher),
                 position,
-                activation,
                 evidence_publisher,
             )
         except BaseException:
@@ -994,7 +983,6 @@ async def admit_continued_root(
         owner_state: GraphRunState,
         owner_commit: GraphCommit[GraphValueT],
         position: tuple[int, ...],
-        parent_activation: StableActivation | None,
     ) -> _GraphRun[GraphValueT]:
         owner_frames = _frames_for_owner(frames, child_states, owner_scope_run)
         return _GraphRun(
@@ -1006,7 +994,6 @@ async def admit_continued_root(
             owner_commit,
             _make_child_constructor(owner_graph, owner_scope_run, limits, commit, evidence_publisher),
             position,
-            parent_activation,
             evidence_publisher,
         )
 
@@ -1068,16 +1055,12 @@ async def admit_continued_root(
         child: _GraphRun[GraphValueT] | None = None
         child_commit = scoped_commit(binding.scope_run, commit)
         try:
-            parent_activation = binding.parent_activation
-            if parent_activation is None:
-                raise SnapshotMismatchError("nested child binding is missing its parent activation")
             child = build_owner(
                 child_graph,
                 binding.scope_run,
                 binding.state,
                 child_commit,
                 position,
-                parent_activation,
             )
             await apply_admission(child, fence, resume, tuple(binding.scope_run.scope))
             await admit_children(child, child_graph, binding.scope_run, binding.state)
@@ -1156,7 +1139,6 @@ async def admit_continued_root(
             state,
             root_commit,
             (),
-            None,
         )
         root_fence = fences_by_scope.get(scope_run)
         root_resume = resumes_by_scope.get(scope_run)
@@ -1231,7 +1213,6 @@ async def fresh_root(
             root_commit,
             child_constructor,
             (),
-            None,
             evidence_publisher,
         )
         return root, evidence_reader

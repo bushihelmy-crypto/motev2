@@ -3,12 +3,12 @@
 from dataclasses import dataclass
 from typing import TypeVar
 
-from mote_kernel.config import Config, ConfigContractError, require_config
-from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
+from mote_kernel.config import Config
+from mote_kernel.execution.engine.routing import source_availability_coordinate
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import GraphValueAdmissionError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.ports import GraphInputPort, require_publication_selection
+from mote_kernel.execution.graph.ports import GraphInputPort
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
@@ -44,11 +44,6 @@ def admit_graph_input(
 ) -> GraphInputFrame[GraphValueT]:
     """Admit fresh input and install the optional Kernel activation Config."""
 
-    if activation_config is not None:
-        try:
-            require_config(activation_config)
-        except ConfigContractError as error:
-            raise GraphValueAdmissionError("activation Config is malformed") from error
     return _make_graph_input_frame(
         _require_graph_values(values),
         graph.graph_input_descriptor.declarations,
@@ -73,25 +68,23 @@ def project_graph_outputs(
     activation_config: Config | None = None
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
-            frame = frames.lookup(graph_input_coordinate).frame
-            value = _frame_value(frame, source.name)
-        else:
-            selection = require_publication_selection(
-                binding.publication,
-                GraphValueAdmissionError("compiled graph output binding lacks its activation selection"),
-            )
-            publication_coordinate = _node_output_coordinate(
-                graph, scope_run, source, selection.resolve(completion_superstep)
-            )
-            try:
-                frame = frames.lookup(publication_coordinate).frame
-            except SnapshotMismatchError as error:
-                raise GraphValueAdmissionError(
-                    f"graph output source {source.node_id!r}.{source.output_name!r} is unavailable"
-                ) from error
-            value = _frame_value(frame, source.output_name)
+        coordinate = source_availability_coordinate(
+            graph,
+            scope_run,
+            source,
+            binding.publication,
+            completion_superstep,
+            GraphValueAdmissionError("compiled graph output binding lacks its activation selection"),
+        )
+        try:
+            frame = frames.lookup(coordinate).frame
+        except SnapshotMismatchError as error:
+            if isinstance(source, GraphInputPort):
+                raise
+            raise GraphValueAdmissionError(
+                f"graph output source {source.node_id!r}.{source.output_name!r} is unavailable"
+            ) from error
+        value = _frame_value(frame, source.name if isinstance(source, GraphInputPort) else source.output_name)
         candidate_config = frame.activation_config
         if candidate_config is not None:
             if activation_config is not None and activation_config != candidate_config:

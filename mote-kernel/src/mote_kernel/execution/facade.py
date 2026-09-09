@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, cast, overload
 from uuid import uuid4
 
-from mote_kernel.config import Config, require_config
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
@@ -751,7 +751,7 @@ class Graph(Generic[GraphValueT]):
             if activation_config is not None:
                 try:
                     require_config(activation_config)
-                except Exception as error:
+                except ConfigContractError as error:
                     raise SnapshotMismatchError("activation Config is malformed") from error
             input_candidate = admit_graph_input(graph, invocation, activation_config)
             root_admission = fresh_root(

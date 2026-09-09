@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
-from tests.execution.engine.factories import running_state
+from tests.execution.engine.factories import activation_config, running_state
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
@@ -317,6 +317,91 @@ def multiple_predecessor_state(
         )
     )
     return state, frames
+
+
+def test_materialization_requires_one_activation_config_across_source_frames() -> None:
+    source = callable_node("source", {"value": Graph.graph_input("left", str)})
+    consumer = callable_node(
+        "consumer",
+        {
+            "left": Graph.graph_input("left", str),
+            "right": Graph.node_output("source", "value"),
+        },
+    )
+    graph = GraphCompiler(
+        GraphDefinition(
+            GraphDefinitionId("test.graph"),
+            GraphDefinitionVersion(1),
+            (source, consumer),
+            (DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),),
+            (),
+            normalize_graph_output_declarations({}),
+        )
+    ).compile()
+    run_id = GraphRunId("run")
+    reference = ActivationReference(GraphActivationIdentity(run_id, 0, GraphNodeId("source")))
+    state = replace(
+        running_state(superstep=1, frontier=("consumer",)),
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("consumer"),
+                    PendingGraphNode(UseStepRequestInput()),
+                    RoutedActivationCause((reference,)),
+                ),
+            )
+        ),
+        settled_activations=(reference,),
+    )
+    scope_run = root_scope_run(run_id)
+    first = activation_config(1)
+    second = activation_config(2)
+    input_frame = admit_graph_input(graph, Graph.values(left="input"), first)
+    source_descriptor = graph.transition.publications[GraphNodeId("source")]
+    output_frame = _make_node_output_frame(
+        Graph.values(value="output"),
+        source_descriptor.declarations,
+        activation_config=first,
+    )
+    frames = (
+        ScopedFrameIndex()
+        .add_graph_input(
+            AdmittedGraphInput(
+                GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+                input_frame,
+            )
+        )
+        .add_publication(
+            ConfirmedPublication(
+                PublicationAvailabilityCoordinate(
+                    StableActivation(scope_run, 0, GraphNodeId("source")),
+                    source_descriptor.identity,
+                ),
+                output_frame,
+                1,
+                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+            )
+        )
+    )
+
+    materialized = materialize_node_input(graph, state, scope_run, frames, GraphNodeId("consumer"))
+    assert materialized.activation_config is first
+
+    conflicting_frames = replace(
+        frames,
+        publications=(
+            replace(
+                frames.publications[0],
+                frame=_make_node_output_frame(
+                    Graph.values(value="output"),
+                    source_descriptor.declarations,
+                    activation_config=second,
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(SnapshotMismatchError, match="different activation Config snapshots"):
+        materialize_node_input(graph, state, scope_run, conflicting_frames, GraphNodeId("consumer"))
 
 
 def test_predecessor_materialization_reads_the_exact_immediate_publication() -> None:

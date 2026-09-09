@@ -18,10 +18,12 @@ import mote_kernel.execution.engine.routing as routing_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.routing import (
+    PredecessorSourceSelection,
     PublicationHistoryWindow,
     RequiredTarget,
+    binding_source_coordinate,
+    causal_input_source_for_cause,
     frontier_admission_error,
-    predecessor_source_for_cause,
     publication_history_window,
     resolve_routing,
     resolve_routing_facts,
@@ -44,7 +46,9 @@ from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
     CompiledPredecessorInput,
+    GraphInputPort,
     NodeOutputPort,
+    ResolvedInputBinding,
     normalize_graph_output_declarations,
     normalize_input_bindings,
     normalize_output_declarations,
@@ -1452,10 +1456,10 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
     )
 
 
-def predecessor_binding(graph: CompiledGraph[int]) -> CompiledPredecessorInput:
-    source = graph.transition.materializations[GraphNodeId("loop")].bindings.entries[0].source
-    assert isinstance(source, CompiledPredecessorInput)
-    return source
+def predecessor_binding(graph: CompiledGraph[int]) -> ResolvedInputBinding[int]:
+    binding = graph.transition.materializations[GraphNodeId("loop")].bindings.entries[0]
+    assert isinstance(binding.source, CompiledPredecessorInput)
+    return binding
 
 
 def test_predecessor_admission_requires_committed_predecessor_evidence() -> None:
@@ -1468,20 +1472,35 @@ def test_predecessor_admission_requires_committed_predecessor_evidence() -> None
     )
 
 
+def test_predecessor_coordinate_requires_state_owned_cause() -> None:
+    graph = predecessor_loop_graph()
+    binding = predecessor_binding(graph)
+    scope_run = root_scope_run(GraphRunId("run"))
+
+    with pytest.raises(InvalidRoutingCommandError, match="authoritative graph state"):
+        binding_source_coordinate(graph, None, scope_run, 1, binding)
+
+    state, _frames = settled_predecessor_loop(graph, "continue")
+    with pytest.raises(InvalidRoutingCommandError, match="authoritative graph state"):
+        binding_source_coordinate(graph, state, root_scope_run(state.run_id), state.superstep, binding)
+
+
 @pytest.mark.parametrize(("field", "match"), [("target", "target input"), ("input", "target input")])
 def test_predecessor_source_rejects_a_binding_for_another_target_input(field: str, match: str) -> None:
     graph = predecessor_loop_graph()
     state, _frames = settled_predecessor_loop(graph, "continue")
     binding = predecessor_binding(graph)
-    mismatched = (
-        replace(binding, target=GraphNodeId("foreign")) if field == "target" else replace(binding, input_name="foreign")
+    source = binding.source
+    assert isinstance(source, CompiledPredecessorInput)
+    mismatched_source = (
+        replace(source, target=GraphNodeId("foreign")) if field == "target" else replace(source, input_name="foreign")
     )
+    mismatched = replace(binding, source=mismatched_source)
 
     with pytest.raises(InvalidRoutingCommandError, match=match):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
             state.superstep,
             state.frontier.nodes[0].cause,
             mismatched,
@@ -1492,15 +1511,15 @@ def test_predecessor_source_selects_the_exact_causal_publication() -> None:
     graph = predecessor_loop_graph()
     state, _frames = settled_predecessor_loop(graph, "continue")
 
-    selected = predecessor_source_for_cause(
+    selected = causal_input_source_for_cause(
+        graph,
         state,
-        GraphNodeId("loop"),
-        "value",
         state.superstep,
         state.frontier.nodes[0].cause,
         predecessor_binding(graph),
     )
 
+    assert isinstance(selected, PredecessorSourceSelection)
     assert selected.source == NodeOutputPort(GraphNodeId("initialize"), "value")
     assert selected.predecessor == GraphActivationIdentity(state.run_id, 0, GraphNodeId("initialize"))
 
@@ -1512,19 +1531,17 @@ def test_predecessor_source_rejects_a_non_immediate_or_uncommitted_reference() -
     binding = predecessor_binding(graph)
 
     with pytest.raises(InvalidRoutingCommandError, match="immediate committed settlement"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             replace(state, superstep=2),
-            GraphNodeId("loop"),
-            "value",
             2,
             cause,
             binding,
         )
     with pytest.raises(InvalidRoutingCommandError, match="immediate committed settlement"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             replace(state, settled_activations=()),
-            GraphNodeId("loop"),
-            "value",
             1,
             cause,
             binding,
@@ -1543,37 +1560,59 @@ def test_predecessor_source_rejects_malformed_causes() -> None:
     assert isinstance(join_cause, RoutedActivationCause)
 
     with pytest.raises(InvalidRoutingCommandError, match="invalid target coordinate"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
-            0,
+            -1,
             StartActivationCause(),
             binding,
         )
-    with pytest.raises(InvalidRoutingCommandError, match="cannot carry the START cause"):
-        predecessor_source_for_cause(
+    with pytest.raises(InvalidRoutingCommandError, match="causal source selection requires"):
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
+            state.superstep,
+            state.frontier.nodes[0].cause,
+            replace(binding, source=NodeOutputPort(GraphNodeId("initialize"), "value")),
+        )
+    with pytest.raises(InvalidRoutingCommandError, match="invalid target coordinate"):
+        causal_input_source_for_cause(
+            graph,
+            state,
+            0,
+            state.frontier.nodes[0].cause,
+            binding,
+        )
+    source = binding.source
+    assert isinstance(source, CompiledPredecessorInput)
+    with pytest.raises(InvalidRoutingCommandError, match="does not belong to an initial graph activation"):
+        causal_input_source_for_cause(
+            graph,
+            state,
+            0,
+            StartActivationCause(),
+            replace(binding, source=replace(source, start_input=GraphInputPort("value"))),
+        )
+    with pytest.raises(InvalidRoutingCommandError, match="cannot carry the START cause"):
+        causal_input_source_for_cause(
+            graph,
+            state,
             1,
             StartActivationCause(),
             binding,
         )
     with pytest.raises(InvalidRoutingCommandError, match="unsupported cause"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
             1,
             cast(StartActivationCause | RoutedActivationCause, object()),
             binding,
         )
     with pytest.raises(InvalidRoutingCommandError, match="one non-Join predecessor"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
             1,
             join_cause,
             binding,
@@ -1583,20 +1622,88 @@ def test_predecessor_source_rejects_malformed_causes() -> None:
 def test_predecessor_source_rejects_an_uncompiled_source() -> None:
     graph = predecessor_loop_graph()
     state, _frames = settled_predecessor_loop(graph, "continue")
+    original = predecessor_binding(graph)
+    source = original.source
+    assert isinstance(source, CompiledPredecessorInput)
     binding = replace(
-        predecessor_binding(graph),
-        sources=(NodeOutputPort(GraphNodeId("other"), "value"),),
+        original,
+        source=replace(source, sources=(NodeOutputPort(GraphNodeId("other"), "value"),)),
     )
 
     with pytest.raises(InvalidRoutingCommandError, match="not an allowed predecessor source"):
-        predecessor_source_for_cause(
+        causal_input_source_for_cause(
+            graph,
             state,
-            GraphNodeId("loop"),
-            "value",
             state.superstep,
             state.frontier.nodes[0].cause,
             binding,
         )
+
+
+def test_required_target_checks_a_compiled_start_causal_graph_input() -> None:
+    async def source_operation(_values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=1)
+
+    async def target_operation(values: Graph.Values[int]) -> Graph.Values[int]:
+        return values
+
+    source = CallableNodeDefinition(
+        GraphNodeId("source"),
+        make_node_invoker(source_operation),
+        normalize_input_bindings({}),
+        normalize_output_declarations({"value": int}),
+    )
+    target = CallableNodeDefinition(
+        GraphNodeId("target"),
+        make_node_invoker(target_operation),
+        normalize_input_bindings({"value": Graph.node_output("value")}),
+        normalize_output_declarations({}),
+    )
+    graph = GraphCompiler(
+        GraphDefinition(
+            GraphDefinitionId("predecessor.required-target-start"),
+            GraphDefinitionVersion(1),
+            (source, target),
+            (DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
+            (GraphNodeId("target"),),
+            normalize_graph_output_declarations({}),
+        )
+    ).compile()
+    state = running_state(frontier=("target",))
+    activation = GraphFrontierActivation(GraphNodeId("target"), StartActivationCause())
+    scope_run = root_scope_run(state.run_id)
+
+    required = _RoutingPrivateView.required_target(
+        routing_module,
+        graph,
+        GraphNodeId("target"),
+        activation,
+        state,
+        scope_run,
+        0,
+        ScopedFrameIndex(),
+    )
+
+    assert required.unavailable_inputs == ("value<-graph-input:value",)
+    input_frame = admit_graph_input(graph, Graph.values(value=10))
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            input_frame,
+        )
+    )
+    available = _RoutingPrivateView.required_target(
+        routing_module,
+        graph,
+        GraphNodeId("target"),
+        activation,
+        state,
+        scope_run,
+        0,
+        frames,
+    )
+
+    assert available.unavailable_inputs == ()
 
 
 def test_required_target_rejects_a_successor_with_a_different_target() -> None:

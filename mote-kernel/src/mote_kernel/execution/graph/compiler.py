@@ -5,7 +5,6 @@ from itertools import combinations
 from typing import Generic, TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
-    DuplicateBoundaryError,
     GraphValidationError,
     MissingEntryError,
     UnknownNodeError,
@@ -17,7 +16,7 @@ from mote_kernel.execution.graph.definition import (
     GraphNode,
     NestedGraphNodeDefinition,
 )
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
+from mote_kernel.execution.graph.edge import DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
@@ -234,8 +233,9 @@ def _resolve_predecessor_output(
     input_name: str,
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
     gates: list[_RawActivationGate],
+    start_input: GraphInputPort | None,
 ) -> tuple[CompiledPredecessorInput, NominalTypeDescriptor[GraphValueT]]:
-    """Resolve one causal input against every routed activation predecessor."""
+    """Resolve one causal input against its compiled activation cases."""
 
     if any(len(gate) != 1 for gate in gates):
         raise GraphValidationError(f"predecessor-bound node {target!r} cannot be activated by a Join")
@@ -263,7 +263,7 @@ def _resolve_predecessor_output(
         raise GraphValidationError(
             f"typed predecessor input {input_name!r} on node {target!r} does not match its declared exact type"
         )
-    return CompiledPredecessorInput(target, input_name, tuple(ports)), descriptor
+    return CompiledPredecessorInput(target, input_name, tuple(ports), start_input), descriptor
 
 
 def _data_cycle(data_dependencies: dict[GraphNodeId, set[GraphNodeId]]) -> bool:
@@ -533,11 +533,7 @@ def _validate_cycle_exits(
     while the definition is still immutable and trusted.
     """
 
-    cyclic = frozenset(
-        node_id
-        for node_id in node_ids
-        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
-    )
+    cyclic = _cycle_nodes(node_ids, successors)
     if not cyclic:
         return
     terminal_sources = tuple(source for gate in terminal_gates for source in gate)
@@ -925,11 +921,7 @@ def _cycle_reachable_nodes(
     node_ids: tuple[GraphNodeId, ...],
     successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> frozenset[GraphNodeId]:
-    cycle_nodes = {
-        node_id
-        for node_id in node_ids
-        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
-    }
+    cycle_nodes = _cycle_nodes(node_ids, successors)
     reached = set(cycle_nodes)
     pending = sorted(cycle_nodes)
     while pending:
@@ -939,6 +931,25 @@ def _cycle_reachable_nodes(
                 reached.add(target)
                 pending.append(target)
     return frozenset(reached)
+
+
+def _cycle_nodes(
+    node_ids: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+) -> frozenset[GraphNodeId]:
+    """Return the nodes that participate in a control cycle.
+
+    Cycle membership is one topology fact used by exit validation, repeatable
+    activation analysis, and absolute-level inference.  Keep its definition
+    in one place; callers decide whether they need only the cycle or its
+    forward-reachable descendants.
+    """
+
+    return frozenset(
+        node_id
+        for node_id in node_ids
+        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
+    )
 
 
 def _absolute_activation_levels(
@@ -1021,21 +1032,29 @@ def _collect_control_topology(
     gates_to_end: list[frozenset[GraphNodeId]] = []
     joins: list[JoinEdge] = []
     for edge in edges:
-        match edge:
-            case JoinEdge(sources=raw_sources, target=target):
-                normalized = JoinEdge(tuple(sorted(raw_sources)), target)
-                joins.append(normalized)
-                sources = normalized.sources
-                gate = tuple((source, None) for source in sources)
-            case DirectEdge(source=source, target=target):
-                sources = (source,)
-                gate = ((source, None),)
-                if target != END:
-                    direct_targets[source].add(target)
-            case ConditionalEdge(source=source, route=route, target=target):
-                sources = (source,)
-                gate = ((source, route),)
-                conditional_targets[source][route] = target
+        if isinstance(edge, JoinEdge):
+            normalized = JoinEdge(tuple(sorted(edge.sources)), edge.target)
+            joins.append(normalized)
+            sources = normalized.sources
+            target = normalized.target
+            gate = tuple((source, None) for source in sources)
+        elif isinstance(edge, DirectEdge):
+            source = edge.source
+            target = edge.target
+            sources = (source,)
+            gate = ((source, None),)
+            if target != END:
+                direct_targets[source].add(target)
+        else:
+            # ``Edge`` is a closed alias, so the remaining variant is
+            # ConditionalEdge.  Keeping this final case explicit avoids a
+            # pattern-match fallthrough that could leave ``target`` unset.
+            source = edge.source
+            route = edge.route
+            target = edge.target
+            sources = (source,)
+            gate = ((source, route),)
+            conditional_targets[source][route] = target
         if target != END:
             activation_gates[target].append(gate)
         else:
@@ -1099,7 +1118,7 @@ def _resolve_entries(
     data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
 ) -> tuple[GraphNodeId, ...]:
-    """Resolve explicit and automatic entries while preserving error order."""
+    """Resolve explicit entries, then fill undeclared roots automatically."""
 
     explicit_entries = tuple(sorted(declared_entries))
     if any(data_dependencies[node_id] for node_id in explicit_entries):
@@ -1111,11 +1130,11 @@ def _resolve_entries(
                 "but has no incoming control edge"
             )
     automatic_entries = tuple(
-        node_id for node_id in node_ids if not data_dependencies[node_id] and not activation_gates[node_id]
+        node_id
+        for node_id in node_ids
+        if node_id not in explicit_entries
+        if not data_dependencies[node_id] and not activation_gates[node_id]
     )
-    duplicates = set(explicit_entries).intersection(automatic_entries)
-    if duplicates:
-        raise DuplicateBoundaryError(f"automatic entry is also declared from START: {tuple(sorted(duplicates))!r}")
     entries = tuple(sorted((*explicit_entries, *automatic_entries)))
     if not entries:
         raise MissingEntryError("graph definition requires at least one automatic or explicit entry")
@@ -1142,14 +1161,16 @@ def _complete_input_bindings(
     for node_id in sorted(completed):
         resolved = list(completed[node_id].entries)
         for input_name, declared_source in predecessor_bindings_by_node[node_id]:
+            start_input = GraphInputPort(input_name) if node_id in entries else None
             source, descriptor = _resolve_predecessor_output(
                 declared_source,
                 target=node_id,
                 input_name=input_name,
                 node_outputs=node_outputs,
                 gates=activation_gates[node_id],
+                start_input=start_input,
             )
-            if node_id in entries:
+            if start_input is not None:
                 entry_descriptor = graph_input_descriptors.get(input_name)
                 if entry_descriptor is not None and entry_descriptor.value_type is not descriptor.value_type:
                     raise GraphValidationError(
@@ -1181,10 +1202,7 @@ def _complete_input_bindings(
                 raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
         completed[node_id] = resolved_bindings
     completed_graph_inputs = OutputDeclarations(
-        tuple(
-            OutputDeclaration(name, descriptor)
-            for name, descriptor in sorted(graph_input_descriptors.items())
-        )
+        tuple(OutputDeclaration(name, descriptor) for name, descriptor in sorted(graph_input_descriptors.items()))
     )
     return completed, completed_graph_inputs
 

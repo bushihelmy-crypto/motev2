@@ -22,9 +22,9 @@ from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.invocation import PlannedResume
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
-    ChildStateBinding,
     ContinuationSnapshot,
     ScopedFrameIndex,
+    ScopedStateBinding,
     _admit_continuation,
     _CompiledFamilyIdentity,
 )
@@ -1198,7 +1198,7 @@ async def test_multi_scope_resume_keeps_first_confirmed_install_when_second_comm
         partial.state,
         partial.continuation,
     )
-    left = next(binding for binding in checkpoint.child_states if binding.coordinate.scope == (GraphNodeId("left"),))
+    left = next(binding for binding in checkpoint.child_states if binding.scope_run.scope == (GraphNodeId("left"),))
     left_input = next(
         record
         for record in checkpoint.frames.resume_inputs
@@ -1384,8 +1384,8 @@ async def test_second_scope_frame_install_failure_hands_off_only_the_first_insta
         record.coordinate.activation.scope_run.scope == (GraphNodeId("right"),)
         for record in handed_off.frames.resume_inputs
     )
-    left = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("left"),))
-    right = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("right"),))
+    left = next(binding for binding in handed_off.child_states if binding.scope_run.scope == (GraphNodeId("left"),))
+    right = next(binding for binding in handed_off.child_states if binding.scope_run.scope == (GraphNodeId("right"),))
     assert left.state == transitions[0].candidate_state
     assert right.state == old_snapshot.child_states[1].state
 
@@ -1462,10 +1462,10 @@ async def test_root_resume_then_child_commit_failure_hands_off_a_pairable_latest
     handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
     assert handed_off.root_state == partial.state
     child_binding = next(
-        binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("child"),)
+        binding for binding in handed_off.child_states if binding.scope_run.scope == (GraphNodeId("child"),)
     )
     old_child = next(
-        binding for binding in old_snapshot.child_states if binding.coordinate.scope == (GraphNodeId("child"),)
+        binding for binding in old_snapshot.child_states if binding.scope_run.scope == (GraphNodeId("child"),)
     )
     assert child_binding.state == old_child.state
 
@@ -1553,7 +1553,7 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
     paused = await graph.run(Graph.values(value="seed"))
     assert isinstance(paused, Graph.AwaitingResumeResult)
     snapshot = _continuation_snapshot(paused.continuation)
-    active_children: list[ChildStateBinding] = []
+    active_children: list[ScopedStateBinding] = []
     for binding in snapshot.child_states:
         pending = replace(
             binding.state,
@@ -1568,7 +1568,7 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
             pending,
             project_claim_command(
                 pending,
-                GraphExecutionAttemptId(f"{binding.coordinate.scope[-1]}-active"),
+                GraphExecutionAttemptId(f"{binding.scope_run.scope[-1]}-active"),
                 None,
             ),
         )
@@ -1599,8 +1599,8 @@ async def test_failure_after_exact_fence_explicitly_hands_off_the_fenced_snapsho
     assert partial.failed_scope == ("right",)
     owner = _require_compiled_owner(graph)
     handed_off = _admit_continuation(owner.family_identity, partial.state, partial.continuation)
-    left = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("left"),))
-    right = next(binding for binding in handed_off.child_states if binding.coordinate.scope == (GraphNodeId("right"),))
+    left = next(binding for binding in handed_off.child_states if binding.scope_run.scope == (GraphNodeId("left"),))
+    right = next(binding for binding in handed_off.child_states if binding.scope_run.scope == (GraphNodeId("right"),))
     assert left.state == transitions[0].candidate_state
     assert right.state == active_children[1].state
 
@@ -1662,7 +1662,7 @@ async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancest
     descendant = next(
         binding
         for binding in snapshot.child_states
-        if binding.coordinate.scope == (GraphNodeId("child"), GraphNodeId("grandchild"))
+        if binding.scope_run.scope == (GraphNodeId("child"), GraphNodeId("grandchild"))
     )
     parent_activation = descendant.state.parent
     assert parent_activation is not None
@@ -1672,7 +1672,7 @@ async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancest
         None,
         project_start_graph_command(
             compiled_grandchild,
-            descendant.coordinate.graph_run_id,
+            descendant.scope_run.graph_run_id,
             parent_activation,
         ),
     )
@@ -1681,7 +1681,7 @@ async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancest
         project_claim_command(running, GraphExecutionAttemptId("orphan-descendant"), None),
     )
     child_states = tuple(
-        replace(binding, state=leased) if binding.coordinate == descendant.coordinate else binding
+        replace(binding, state=leased) if binding.scope_run == descendant.scope_run else binding
         for binding in snapshot.child_states
     )
     frames = replace(
@@ -1689,17 +1689,17 @@ async def test_continuation_rejects_a_running_descendant_below_a_terminal_ancest
         publications=tuple(
             record
             for record in snapshot.frames.publications
-            if record.coordinate.activation.scope_run != descendant.coordinate
+            if record.coordinate.activation.scope_run != descendant.scope_run
         ),
         resume_inputs=tuple(
             record
             for record in snapshot.frames.resume_inputs
-            if record.coordinate.activation.scope_run != descendant.coordinate
+            if record.coordinate.activation.scope_run != descendant.scope_run
         ),
         child_boundaries=tuple(
             record
             for record in snapshot.frames.child_boundaries
-            if record.coordinate.child_scope_run != descendant.coordinate
+            if record.coordinate.child_scope_run != descendant.scope_run
         ),
     )
     object.__setattr__(

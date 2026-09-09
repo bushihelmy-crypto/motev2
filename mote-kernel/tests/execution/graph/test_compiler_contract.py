@@ -8,7 +8,6 @@ from tests.execution.graph.factories import compiled_join
 import mote_kernel.execution.graph.compiler as compiler_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
-    DuplicateBoundaryError,
     GraphValidationError,
     UnknownNodeError,
 )
@@ -283,11 +282,12 @@ def test_compiler_accepts_data_binding_and_direct_control_for_the_same_pair() ->
     assert binding.source == NodeOutputPort(GraphNodeId("source"), "value")
 
 
-def test_compiler_rejects_explicit_start_that_duplicates_automatic_entry() -> None:
+def test_compiler_deduplicates_explicit_start_that_is_an_automatic_entry() -> None:
     entry = node("entry", inputs={}, outputs={})
 
-    with pytest.raises(DuplicateBoundaryError, match="automatic entry"):
-        GraphCompiler(definition((entry,), entries=("entry",))).compile()
+    compiled = GraphCompiler(definition((entry,), entries=("entry",))).compile()
+
+    assert compiled.transition.entries == (GraphNodeId("entry"),)
 
 
 def test_compiler_rejects_explicit_start_target_requiring_node_output() -> None:

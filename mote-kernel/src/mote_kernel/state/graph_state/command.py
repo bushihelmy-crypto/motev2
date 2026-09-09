@@ -87,7 +87,6 @@ class StartGraphRun:
     activations: tuple[GraphFrontierActivation, ...]
     parent: GraphActivationIdentity | None = None
     resume_input_codec: GraphResumeInputCodec | None = None
-    config_revision: int = 1
     config_cursor: GraphConfigCursor | None = None
 
 

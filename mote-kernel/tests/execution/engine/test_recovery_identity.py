@@ -9,14 +9,12 @@ import mote_kernel.execution.engine.recovery as recovery_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.recovery import (
     AdmittedResumeFact,
-    ChildControlStateCoordinate,
     ChildRecoveryDisposition,
+    MissingChildBinding,
     RecoveryAvailabilityCoordinates,
     RecoveryInvocationSeed,
     RecoverySettlementKind,
-    RecoveryStateBinding,
     RecoveryTransferState,
-    ScopeControlStateCoordinate,
     preflight_recovery,
     recovery_traversal_key,
 )
@@ -64,6 +62,7 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    ScopedStateBinding,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -107,7 +106,7 @@ from mote_kernel.state.graph_state import (
 
 
 class _RecoveryWorkItemView(Protocol):
-    state: GraphRunState
+    binding: ScopedStateBinding
     availability: RecoveryAvailabilityCoordinates[str]
     live: tuple[GraphNodeId, ...]
     children: tuple[ChildRecoveryDisposition, ...]
@@ -117,13 +116,14 @@ class _RecoveryWorkItemView(Protocol):
 class _RecoveryBoundaryView(Protocol):
     kind: object
     availability: RecoveryAvailabilityCoordinates[str]
-    control: ScopeControlStateCoordinate
-    state: GraphRunState
+    binding: ScopedStateBinding
 
 
 class _NestedOutcomeView(Protocol):
     node_id: GraphNodeId
     boundary: _RecoveryBoundaryView
+    route: GraphRouteId | None
+    route_known: bool
 
 
 class _NestedCombinationView(Protocol):
@@ -131,18 +131,26 @@ class _NestedCombinationView(Protocol):
     availability: RecoveryAvailabilityCoordinates[str]
 
 
+class _SettlementCoordinateView(Protocol):
+    settlement: RecoverySettlementKind
+    interrupt_id: GraphInterruptId | None
+
+
 class _RecoveryFamilyView(Protocol):
-    bindings: tuple[RecoveryStateBinding, ...]
+    bindings: tuple[ScopedStateBinding, ...]
     limits: ExecutionLimits
     admitted_actions: tuple[AdmittedResumeFact, ...]
 
 
 class _BoundaryKindView(Protocol):
+    COMPLETED: object
     EXECUTION_LIMIT: object
 
 
 class _RecoveryPrivateView(Protocol):
     _boundary: Callable[..., _RecoveryBoundaryView]
+    _completed_child_outcomes: Callable[..., tuple[_NestedOutcomeView, ...]]
+    _settlement_coordinate: Callable[[GraphRunState, GraphFrontierNode], _SettlementCoordinateView]
     _NestedCombination: Callable[..., _NestedCombinationView]
     _NestedOutcome: Callable[..., _NestedOutcomeView]
     _prove_scope: Callable[..., tuple[_RecoveryBoundaryView, ...]]
@@ -157,11 +165,41 @@ class _RecoveryPrivateView(Protocol):
     def boundary(
         module: object,
         kind: object,
-        state: GraphRunState,
-        scope_run: ScopeRunCoordinate,
+        binding: ScopedStateBinding,
         availability: RecoveryAvailabilityCoordinates[str],
+        completion_route_known: bool = True,
     ) -> _RecoveryBoundaryView:
-        return cast(_RecoveryPrivateView, module)._boundary(kind, state, scope_run, availability)
+        return cast(_RecoveryPrivateView, module)._boundary(
+            kind,
+            binding,
+            availability,
+            completion_route_known,
+        )
+
+    @staticmethod
+    def completed_child_outcomes(
+        module: object,
+        parent_graph: CompiledGraph[str],
+        node_id: GraphNodeId,
+        child_graph: CompiledGraph[str],
+        boundary: _RecoveryBoundaryView,
+    ) -> tuple[_NestedOutcomeView, ...]:
+        function = cast(
+            Callable[
+                [CompiledGraph[str], GraphNodeId, CompiledGraph[str], _RecoveryBoundaryView],
+                tuple[_NestedOutcomeView, ...],
+            ],
+            cast(_RecoveryPrivateView, module)._completed_child_outcomes,
+        )
+        return function(parent_graph, node_id, child_graph, boundary)
+
+    @staticmethod
+    def settlement_coordinate(
+        module: object,
+        state: GraphRunState,
+        node: GraphFrontierNode,
+    ) -> _SettlementCoordinateView:
+        return cast(_RecoveryPrivateView, module)._settlement_coordinate(state, node)
 
     @staticmethod
     def combination(module: object, *args: object) -> _NestedCombinationView:
@@ -175,22 +213,20 @@ class _RecoveryPrivateView(Protocol):
     def prove_scope(
         module: object,
         graph: CompiledGraph[str],
-        state: GraphRunState,
-        scope_run: ScopeRunCoordinate,
+        binding: ScopedStateBinding,
         availability: RecoveryAvailabilityCoordinates[str],
         family: _RecoveryFamilyView,
     ) -> tuple[_RecoveryBoundaryView, ...]:
-        return cast(_RecoveryPrivateView, module)._prove_scope(graph, state, scope_run, availability, family)
+        return cast(_RecoveryPrivateView, module)._prove_scope(graph, binding, availability, family)
 
     @staticmethod
     def cycle_signature(
         module: object,
         graph: CompiledGraph[str],
         item: _RecoveryWorkItemView,
-        scope_run: ScopeRunCoordinate,
         window: PublicationHistoryWindow,
     ) -> object | None:
-        return cast(_RecoveryPrivateView, module)._recovery_cycle_signature(graph, item, scope_run, window)
+        return cast(_RecoveryPrivateView, module)._recovery_cycle_signature(graph, item, window)
 
     @staticmethod
     def family(module: object, *args: object) -> _RecoveryFamilyView:
@@ -212,11 +248,10 @@ class _RecoveryPrivateView(Protocol):
     def settle_nested_outcomes(
         module: object,
         graph: CompiledGraph[str],
-        state: GraphRunState,
-        scope_run: ScopeRunCoordinate,
+        binding: ScopedStateBinding,
         combination: _NestedCombinationView,
     ) -> tuple[GraphRunState, RecoveryAvailabilityCoordinates[str]]:
-        return cast(_RecoveryPrivateView, module)._settle_nested_outcomes(graph, state, scope_run, combination)
+        return cast(_RecoveryPrivateView, module)._settle_nested_outcomes(graph, binding, combination)
 
 
 class _CompiledOwnerView(Protocol):
@@ -305,7 +340,7 @@ def baseline_transfer() -> RecoveryTransferState[str]:
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(scope_run, state),
+            ScopedStateBinding(scope_run, state),
             (),
             ScopedFrameIndex(),
             ExecutionLimits(4, 2),
@@ -347,8 +382,11 @@ def _cycle_signature(
     signature = _RecoveryPrivateView.cycle_signature(
         recovery_module,
         graph,
-        _RecoveryPrivateView.work_item(recovery_module, state, availability),
-        root_scope_run(state.run_id),
+        _RecoveryPrivateView.work_item(
+            recovery_module,
+            ScopedStateBinding(root_scope_run(state.run_id), state),
+            availability,
+        ),
         window,
     )
     assert signature is not None
@@ -451,8 +489,11 @@ def test_recovery_cycle_signature_never_merges_an_active_resource_state() -> Non
         _RecoveryPrivateView.cycle_signature(
             recovery_module,
             graph,
-            _RecoveryPrivateView.work_item(recovery_module, claimed, RecoveryAvailabilityCoordinates()),
-            root_scope_run(claimed.run_id),
+            _RecoveryPrivateView.work_item(
+                recovery_module,
+                ScopedStateBinding(root_scope_run(claimed.run_id), claimed),
+                RecoveryAvailabilityCoordinates(),
+            ),
             PublicationHistoryWindow((), 0),
         )
         is None
@@ -480,7 +521,7 @@ def test_recovery_preflight_rejects_a_running_state_with_a_terminal_failed_front
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 ScopedFrameIndex(),
                 ExecutionLimits(2, 1),
@@ -523,14 +564,19 @@ def test_recovery_control_identity_preserves_an_interrupted_settlement() -> None
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope_run(interrupted.run_id), interrupted),
+            ScopedStateBinding(root_scope_run(interrupted.run_id), interrupted),
             (),
             ScopedFrameIndex(),
             ExecutionLimits(2, 1),
         ),
     )
 
-    assert boundaries[0].control.frontier[0].interrupt_id == graph_interrupt_id(
+    projected = _RecoveryPrivateView.settlement_coordinate(
+        recovery_module,
+        boundaries[0].binding.state,
+        boundaries[0].binding.state.frontier.nodes[0],
+    )
+    assert projected.interrupt_id == graph_interrupt_id(
         identity.run_id,
         identity.superstep,
         identity.node_id,
@@ -540,7 +586,7 @@ def test_recovery_control_identity_preserves_an_interrupted_settlement() -> None
 
 def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -> None:
     baseline = baseline_transfer()
-    root = baseline.control.scope_run
+    root = baseline.binding.scope_run
     child = ScopeRunCoordinate((GraphNodeId("child"),), GraphRunId("child-run"))
     activation = StableActivation(root, 2, GraphNodeId("node"))
     graph_input: GraphInputAvailabilityCoordinate[str] = GraphInputAvailabilityCoordinate(
@@ -575,26 +621,13 @@ def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -
     assert availability.has_child_boundary(child_boundary)
 
     parent = GraphActivationIdentity(root.graph_run_id, 2, GraphNodeId("child"))
-    control = baseline.control
-    child_control = ChildControlStateCoordinate(
-        control.definition_id,
-        control.definition_version,
-        control.status,
-        control.superstep,
-        control.execution_sequence,
-        control.frontier,
-        control.join_progress,
-        control.resources,
-        control.execution,
-        GraphResumeInputCodecId("codec"),
-        1,
-        parent,
-        control.revision,
+    binding = baseline.binding
+    child_state = replace(
+        binding.state,
+        run_id=child.graph_run_id,
+        parent=parent,
     )
-    child_disposition = ChildRecoveryDisposition(
-        child,
-        child_control,
-    )
+    child_disposition: ChildRecoveryDisposition = ScopedStateBinding(child, child_state)
     resumed = AdmittedResumeFact(
         activation,
         GraphInterruptId("interrupt"),
@@ -614,12 +647,15 @@ def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -
     assert rich.availability.has_child_boundary(child_boundary)
     assert recovery_traversal_key(rich).parts
 
-    missing_child = replace(child_disposition, control=None)
+    missing_child: ChildRecoveryDisposition = MissingChildBinding(child)
     assert recovery_traversal_key(replace(rich, children=(missing_child,))).parts
 
     collision = replace(
         rich,
-        control=replace(rich.control, definition_id=GraphDefinitionId("different-definition")),
+        binding=replace(
+            rich.binding,
+            state=replace(rich.binding.state, definition_id=GraphDefinitionId("different-definition")),
+        ),
     )
     assert collision != rich
     assert recovery_traversal_key(collision) == recovery_traversal_key(rich)
@@ -627,9 +663,12 @@ def test_recovery_identity_keeps_every_availability_and_admitted_action_fact() -
 
     different_sequence = replace(
         rich,
-        control=replace(
-            rich.control,
-            execution_sequence=rich.control.execution_sequence + 1,
+        binding=replace(
+            rich.binding,
+            state=replace(
+                rich.binding.state,
+                execution_sequence=rich.binding.state.execution_sequence + 1,
+            ),
         ),
     )
     assert different_sequence != rich
@@ -644,8 +683,8 @@ def test_recovery_valid_domain_equality_uses_availability_and_interrupt_identity
     graph = empty_graph()
     baseline = baseline_transfer()
     activation = StableActivation(
-        baseline.control.scope_run,
-        baseline.control.superstep,
+        baseline.binding.scope_run,
+        baseline.binding.state.superstep,
         GraphNodeId("node"),
     )
     exact: ResumeInputAvailabilityCoordinate[str] = ResumeInputAvailabilityCoordinate(
@@ -732,7 +771,7 @@ def test_recovery_preflight_never_hashes_orders_or_renders_concrete_frame_values
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(scope_run, state),
+            ScopedStateBinding(scope_run, state),
             (),
             frames,
             ExecutionLimits(2, 1),
@@ -749,7 +788,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     limits = ExecutionLimits(2, 1)
 
     invalid_root = RecoveryInvocationSeed(
-        RecoveryStateBinding(ScopeRunCoordinate((GraphNodeId("nested"),), state.run_id), state),
+        ScopedStateBinding(ScopeRunCoordinate((GraphNodeId("nested"),), state.run_id), state),
         (),
         ScopedFrameIndex(),
         limits,
@@ -757,7 +796,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     with pytest.raises(SnapshotMismatchError, match="root binding"):
         preflight_recovery(graph, invalid_root)
 
-    duplicate = RecoveryStateBinding(scope_run, state)
+    duplicate = ScopedStateBinding(scope_run, state)
     duplicate_bindings = RecoveryInvocationSeed(
         duplicate,
         (duplicate,),
@@ -775,7 +814,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 ScopedFrameIndex(),
                 limits,
@@ -791,7 +830,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 ScopedFrameIndex(),
                 limits,
@@ -807,7 +846,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 ScopedFrameIndex(),
                 limits,
@@ -832,7 +871,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, settled_state),
+                ScopedStateBinding(scope_run, settled_state),
                 (),
                 ScopedFrameIndex(),
                 limits,
@@ -848,7 +887,7 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, active),
+                ScopedStateBinding(scope_run, active),
                 (),
                 ScopedFrameIndex(),
                 limits,
@@ -864,15 +903,15 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     terminal = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(scope_run, completed),
+            ScopedStateBinding(scope_run, completed),
             (),
             ScopedFrameIndex(),
             limits,
         ),
     )
     assert len(terminal) == 1
-    assert terminal[0].control.status is GraphRunStatus.COMPLETED
-    assert terminal[0].control.execution_sequence == completed.execution_sequence
+    assert terminal[0].binding.state.status is GraphRunStatus.COMPLETED
+    assert terminal[0].binding.state.execution_sequence == completed.execution_sequence
     assert terminal[0].completion_route_known is True
 
 
@@ -897,7 +936,7 @@ def test_recovery_preflight_requires_exact_resume_input_availability_for_each_in
     )
     limits = ExecutionLimits(2, 1)
     base_seed: RecoveryInvocationSeed[str] = RecoveryInvocationSeed(
-        RecoveryStateBinding(root_scope, root_state),
+        ScopedStateBinding(root_scope, root_state),
         (),
         ScopedFrameIndex(resume_inputs=(exact_record,)),
         limits,
@@ -937,8 +976,8 @@ def test_recovery_preflight_requires_exact_resume_input_availability_for_each_in
         target=StableActivation(unknown_scope, unknown_state.superstep, node_id),
     )
     unknown_seed: RecoveryInvocationSeed[str] = RecoveryInvocationSeed(
-        RecoveryStateBinding(root_scope, root_state),
-        (RecoveryStateBinding(unknown_scope, unknown_state),),
+        ScopedStateBinding(root_scope, root_state),
+        (ScopedStateBinding(unknown_scope, unknown_state),),
         ScopedFrameIndex(),
         limits,
         (unknown_action,),
@@ -1028,7 +1067,7 @@ def test_recovery_preflight_has_a_bounded_transfer_state_budget() -> None:
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(root_scope_run(state.run_id), state),
+                ScopedStateBinding(root_scope_run(state.run_id), state),
                 (),
                 ScopedFrameIndex(),
                 ExecutionLimits(100_000, len(node_ids)),
@@ -1063,14 +1102,14 @@ def test_recovery_preflight_closes_a_conditional_cycle_at_its_availability_fixpo
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope_run(state.run_id), state),
+            ScopedStateBinding(root_scope_run(state.run_id), state),
             (),
             ScopedFrameIndex(),
             ExecutionLimits(100_000, 1),
         ),
     )
 
-    assert {boundary.control.status for boundary in boundaries} == {
+    assert {boundary.binding.state.status for boundary in boundaries} == {
         GraphRunStatus.RUNNING,
         GraphRunStatus.COMPLETED,
     }
@@ -1101,7 +1140,7 @@ def test_recovery_preflight_uses_one_canonical_completion_order_for_plain_nodes(
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope_run(state.run_id), state),
+            ScopedStateBinding(root_scope_run(state.run_id), state),
             (),
             ScopedFrameIndex(),
             ExecutionLimits(2, len(nodes)),
@@ -1109,7 +1148,7 @@ def test_recovery_preflight_uses_one_canonical_completion_order_for_plain_nodes(
     )
 
     assert len(boundaries) == 1
-    assert boundaries[0].control.status is GraphRunStatus.COMPLETED
+    assert boundaries[0].binding.state.status is GraphRunStatus.COMPLETED
 
 
 def test_recovery_preflight_deduplicates_routes_with_the_same_successor_state() -> None:
@@ -1159,7 +1198,7 @@ def test_recovery_preflight_deduplicates_routes_with_the_same_successor_state() 
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope_run(state.run_id), state),
+            ScopedStateBinding(root_scope_run(state.run_id), state),
             (),
             ScopedFrameIndex(),
             ExecutionLimits(4, 1),
@@ -1167,7 +1206,7 @@ def test_recovery_preflight_deduplicates_routes_with_the_same_successor_state() 
     )
 
     assert len(boundaries) == 1
-    assert boundaries[0].control.status is GraphRunStatus.COMPLETED
+    assert boundaries[0].binding.state.status is GraphRunStatus.COMPLETED
 
 
 def test_recovery_worklist_skips_a_duplicate_transfer_state(
@@ -1187,7 +1226,6 @@ def test_recovery_worklist_skips_a_duplicate_transfer_state(
     def duplicate(
         _graph: CompiledGraph[str],
         item: _RecoveryWorkItemView,
-        _scope: ScopeRunCoordinate,
         _family: _RecoveryFamilyView,
     ) -> tuple[_RecoveryWorkItemView, ...]:
         return (item, item)
@@ -1198,8 +1236,7 @@ def test_recovery_worklist_skips_a_duplicate_transfer_state(
         _RecoveryPrivateView.prove_scope(
             recovery_module,
             graph,
-            state,
-            scope_run,
+            ScopedStateBinding(scope_run, state),
             _EMPTY_RECOVERY_AVAILABILITY,
             family,
         )
@@ -1265,6 +1302,62 @@ def nested_graph(*, child_output: bool = False, ordinary_sibling: bool = False) 
     ).compile()
 
 
+def conditional_nested_graph() -> tuple[CompiledGraph[str], CompiledGraph[str]]:
+    child = Graph[str]("recovery.route-projection.child")
+    child.add_node("leaf", empty_node, inputs={}, outputs={})
+    child.set_outputs({})
+
+    parent = Graph[str]("recovery.route-projection.parent")
+    parent.add_node("child", child, inputs={})
+    parent.add_node("left", empty_node, inputs={}, outputs={})
+    parent.add_node("right", empty_node, inputs={}, outputs={})
+    parent.add_edge("child", "left", "left")
+    parent.add_edge("child", "right", "right")
+    parent.add_edge("left", Graph.END)
+    parent.add_edge("right", Graph.END)
+    parent.set_outputs({})
+
+    compiled_parent = _GraphPrivateView.compile(parent).graph
+    return compiled_parent, compiled_parent.nested_graphs[GraphNodeId("child")]
+
+
+def test_recovery_expands_an_unknown_completed_child_route_over_the_parent_domain() -> None:
+    parent_graph, child_graph = conditional_nested_graph()
+    parent_state = reduce_graph_run(
+        None,
+        project_start_graph_command(parent_graph, GraphRunId("route-projection-parent")),
+    )
+    parent_scope = root_scope_run(parent_state.run_id)
+    parent_activation = GraphActivationIdentity(parent_state.run_id, 0, GraphNodeId("child"))
+    child_scope = child_scope_run_for_activation(parent_scope, parent_activation)
+    child_state = reduce_graph_run(
+        None,
+        project_start_graph_command(child_graph, child_scope.graph_run_id, parent_activation),
+    )
+    completed_child = replace(child_state, status=GraphRunStatus.COMPLETED, frontier=GraphFrontierState(()))
+    boundary = _RecoveryPrivateView.boundary(
+        recovery_module,
+        _RecoveryPrivateView.boundary_kind(recovery_module).COMPLETED,
+        ScopedStateBinding(child_scope, completed_child),
+        RecoveryAvailabilityCoordinates(),
+        completion_route_known=False,
+    )
+
+    outcomes = _RecoveryPrivateView.completed_child_outcomes(
+        recovery_module,
+        parent_graph,
+        GraphNodeId("child"),
+        child_graph,
+        boundary,
+    )
+
+    assert tuple(outcome.route for outcome in outcomes) == (
+        GraphRouteId("left"),
+        GraphRouteId("right"),
+    )
+    assert all(outcome.route_known for outcome in outcomes)
+
+
 def test_recovery_cycle_signature_keeps_a_current_child_boundary() -> None:
     graph = nested_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("cycle-child-boundary")))
@@ -1292,8 +1385,7 @@ def test_nested_settlement_rejects_a_nonterminal_child_outcome() -> None:
     boundary = _RecoveryPrivateView.boundary(
         recovery_module,
         _RecoveryPrivateView.boundary_kind(recovery_module).EXECUTION_LIMIT,
-        state,
-        scope_run,
+        ScopedStateBinding(scope_run, state),
         availability,
     )
     combination = _RecoveryPrivateView.combination(
@@ -1303,7 +1395,12 @@ def test_nested_settlement_rejects_a_nonterminal_child_outcome() -> None:
     )
 
     with pytest.raises(SnapshotMismatchError, match="non-terminal child outcome"):
-        _RecoveryPrivateView.settle_nested_outcomes(recovery_module, graph, state, scope_run, combination)
+        _RecoveryPrivateView.settle_nested_outcomes(
+            recovery_module,
+            graph,
+            ScopedStateBinding(scope_run, state),
+            combination,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1345,15 +1442,15 @@ def test_recovery_preflight_projects_existing_terminal_children(child_status: Gr
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope, root_state),
-            (RecoveryStateBinding(child_scope, child_state),),
+            ScopedStateBinding(root_scope, root_state),
+            (ScopedStateBinding(child_scope, child_state),),
             ScopedFrameIndex(),
             ExecutionLimits(2, 1),
         ),
     )
 
     expected = GraphRunStatus.COMPLETED if child_status is GraphRunStatus.COMPLETED else GraphRunStatus.FAILED
-    assert any(boundary.control.status is expected for boundary in boundaries)
+    assert any(boundary.binding.state.status is expected for boundary in boundaries)
 
 
 def test_recovery_preflight_propagates_an_awaiting_child_boundary() -> None:
@@ -1398,17 +1495,22 @@ def test_recovery_preflight_propagates_an_awaiting_child_boundary() -> None:
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope, root_state),
-            (RecoveryStateBinding(child_scope, awaiting),),
+            ScopedStateBinding(root_scope, root_state),
+            (ScopedStateBinding(child_scope, awaiting),),
             ScopedFrameIndex(),
             ExecutionLimits(2, 1),
         ),
     )
 
     assert len(boundaries) == 1
-    assert boundaries[0].control.scope_run == root_scope
-    assert boundaries[0].control.status is GraphRunStatus.RUNNING
-    settlements = {node.node_id: node.settlement for node in boundaries[0].control.frontier}
+    assert boundaries[0].binding.scope_run == root_scope
+    assert boundaries[0].binding.state.status is GraphRunStatus.RUNNING
+    settlements = {
+        node.node_id: _RecoveryPrivateView.settlement_coordinate(
+            recovery_module, boundaries[0].binding.state, node
+        ).settlement
+        for node in boundaries[0].binding.state.frontier.nodes
+    }
     assert settlements == {
         GraphNodeId("child"): RecoverySettlementKind.PENDING_MATERIALIZED,
         GraphNodeId("ordinary"): RecoverySettlementKind.SUCCEEDED_CONTINUE,
@@ -1478,7 +1580,7 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
     ).compile()
     root_state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("child-priority-parent")))
     root_scope = root_scope_run(root_state.run_id)
-    child_bindings: list[RecoveryStateBinding] = []
+    child_bindings: list[ScopedStateBinding] = []
     for node_id in (GraphNodeId("failed"), GraphNodeId("waiting")):
         parent = GraphActivationIdentity(root_state.run_id, root_state.superstep, node_id)
         child_scope = child_scope_run_for_activation(root_scope, parent)
@@ -1515,12 +1617,12 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
             claimed,
             SettleGraphNode(claimed.revision, execution.token, outcome),
         )
-        child_bindings.append(RecoveryStateBinding(child_scope, settled))
+        child_bindings.append(ScopedStateBinding(child_scope, settled))
 
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope, root_state),
+            ScopedStateBinding(root_scope, root_state),
             tuple(child_bindings),
             ScopedFrameIndex(),
             ExecutionLimits(2, 1),
@@ -1528,8 +1630,13 @@ def test_recovery_preflight_settles_pending_siblings_before_failed_child_cleanup
     )
 
     assert len(boundaries) == 1
-    assert boundaries[0].control.status is GraphRunStatus.FAILED
-    settlements = {node.node_id: node.settlement for node in boundaries[0].control.frontier}
+    assert boundaries[0].binding.state.status is GraphRunStatus.FAILED
+    settlements = {
+        node.node_id: _RecoveryPrivateView.settlement_coordinate(
+            recovery_module, boundaries[0].binding.state, node
+        ).settlement
+        for node in boundaries[0].binding.state.frontier.nodes
+    }
     assert settlements == {
         GraphNodeId("failed"): RecoverySettlementKind.FAILED,
         GraphNodeId("ordinary"): RecoverySettlementKind.SUCCEEDED_CONTINUE,
@@ -1603,16 +1710,21 @@ def test_recovery_preflight_cleans_up_awaiting_child_after_ordinary_failure() ->
     boundaries = preflight_recovery(
         graph,
         RecoveryInvocationSeed(
-            RecoveryStateBinding(root_scope, root_state),
-            (RecoveryStateBinding(child_scope, child_state),),
+            ScopedStateBinding(root_scope, root_state),
+            (ScopedStateBinding(child_scope, child_state),),
             ScopedFrameIndex(),
             ExecutionLimits(2, 1),
         ),
     )
 
     assert len(boundaries) == 1
-    assert boundaries[0].control.status is GraphRunStatus.FAILED
-    settlements = {node.node_id: node.settlement for node in boundaries[0].control.frontier}
+    assert boundaries[0].binding.state.status is GraphRunStatus.FAILED
+    settlements = {
+        node.node_id: _RecoveryPrivateView.settlement_coordinate(
+            recovery_module, boundaries[0].binding.state, node
+        ).settlement
+        for node in boundaries[0].binding.state.frontier.nodes
+    }
     assert settlements == {
         GraphNodeId("ordinary"): RecoverySettlementKind.FAILED,
         GraphNodeId("waiting"): RecoverySettlementKind.FAILED,
@@ -1636,9 +1748,9 @@ def test_recovery_preflight_rejects_completed_child_without_output_history() -> 
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(root_scope, root_state),
+                ScopedStateBinding(root_scope, root_state),
                 (
-                    RecoveryStateBinding(
+                    ScopedStateBinding(
                         child_scope,
                         child_state,
                     ),
@@ -1687,9 +1799,9 @@ def test_recovery_preflight_rejects_each_malformed_child_control_binding(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(root_scope, root_state),
+                ScopedStateBinding(root_scope, root_state),
                 (
-                    RecoveryStateBinding(
+                    ScopedStateBinding(
                         child_scope,
                         child_state,
                     ),
@@ -1834,7 +1946,7 @@ def test_recovery_historical_target_scan_retains_present_inputs_before_the_gap()
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 frames,
                 ExecutionLimits(4, 2),
@@ -1884,7 +1996,7 @@ def test_recovery_historical_output_scan_retains_present_outputs_before_the_gap(
         preflight_recovery(
             graph,
             RecoveryInvocationSeed(
-                RecoveryStateBinding(scope_run, state),
+                ScopedStateBinding(scope_run, state),
                 (),
                 frames,
                 ExecutionLimits(4, 2),
