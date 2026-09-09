@@ -1,4 +1,8 @@
 # Dependency policy for cargo-deny.
+#
+# The package is intentionally dependency-free today. Keeping this policy in
+# place means the first runtime dependency is reviewed for advisories, source,
+# license, and duplicate-version risk before it lands.
 
 [graph]
 all-features = true
