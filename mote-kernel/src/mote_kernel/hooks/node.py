@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
-from mote_kernel.config import Config, require_config
+from mote_kernel.config import Config, ConfigSnapshotKey, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.config import (
     HookBinding,
@@ -20,6 +20,11 @@ from mote_kernel.hooks.contract import (
     HookPayloadAdmission,
     HookResult,
     HookStageResult,
+)
+from mote_kernel.hooks.failover import (
+    HookFailoverDecorator,
+    HookFailoverDecorators,
+    normalize_hook_failover_decorators,
 )
 from mote_kernel.hooks.identity import (
     HookNodeId,
@@ -55,6 +60,8 @@ class _P1Node(
     port: HookPort[PriorityConfigT, ValueT, StateT, CommandT]
     binding: HookPriorityBinding[PriorityConfigT, ValueT, StateT, CommandT]
     slot: HookSlotId
+    failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def _runtime(
         self,
@@ -71,7 +78,13 @@ class _P1Node(
             raise HookContractError("Hook config binding returned an invalid projection")
         if selected.slot != self.slot or selected.payload_admission != self.port.admission:
             raise HookContractError("Hook config binding changed the compiled Hook contract")
-        return selected.priority_plan, HookPort(self.port.admission, selected.invocation)
+        if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+            invocation = self.failover.decorate(selected.invocation)
+            return selected.priority_plan, HookPort(self.port.admission, invocation)
+        # The invocation captured during assembly already carries the
+        # decorator for this exact immutable Config snapshot.  Reusing it
+        # prevents activation-time wrapper stacking on every P1/P2 pass.
+        return selected.priority_plan, self.port
 
     async def __call__(
         self,
@@ -105,6 +118,8 @@ class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
     port: HookPort[PriorityConfigT, ValueT, StateT, CommandT]
     binding: HookPriorityBinding[PriorityConfigT, ValueT, StateT, CommandT]
     slot: HookSlotId
+    failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def _runtime(
         self,
@@ -121,7 +136,12 @@ class _P2Node(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
             raise HookContractError("Hook config binding returned an invalid projection")
         if selected.slot != self.slot or selected.payload_admission != self.port.admission:
             raise HookContractError("Hook config binding changed the compiled Hook contract")
-        return selected.priority_plan, HookPort(self.port.admission, selected.invocation)
+        if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+            invocation = self.failover.decorate(selected.invocation)
+            return selected.priority_plan, HookPort(self.port.admission, invocation)
+        # P1 and P2 intentionally share the same already-decorated
+        # Invocation seam for the assembly snapshot.
+        return selected.priority_plan, self.port
 
     async def __call__(
         self,
@@ -162,7 +182,7 @@ class HookNode(
 ):
     """A typed P1 -> P2 Graph using one assembly-time plan."""
 
-    __slots__ = ("_payload_admission", "_slot")
+    __slots__ = ("_assembly_snapshot_key", "_failover", "_payload_admission", "_slot")
 
     @classmethod
     def from_config(
@@ -170,6 +190,10 @@ class HookNode(
         config: Config,
         slot: HookSlotId,
         /,
+        *,
+        failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
+        | HookFailoverDecorator
+        | None = None,
     ) -> HookNode[PriorityConfigT, ValueT, StateT, CommandT]:
         """Assemble one Hook from the complete config and its declared slot.
 
@@ -186,6 +210,8 @@ class HookNode(
             selected.plan,
             selected.invocation,
             selected.payload_admission,
+            failover=failover,
+            assembly_snapshot_key=config.snapshot.key,
         )
 
     def __init__(
@@ -198,6 +224,11 @@ class HookNode(
         ]
         | None,
         payload_admission: HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT] | None,
+        *,
+        failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
+        | HookFailoverDecorator
+        | None = None,
+        assembly_snapshot_key: ConfigSnapshotKey | None = None,
     ) -> None:
         if type(slot) is not HookSlotId:
             raise HookContractError("hook node requires a HookSlotId")
@@ -205,9 +236,14 @@ class HookNode(
             raise HookContractError("hook node requires an invocation capability")
         if type(payload_admission) is not HookPayloadAdmission:
             raise HookContractError("hook node requires a payload admission contract")
+        if assembly_snapshot_key is not None and type(assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise HookContractError("hook assembly snapshot key is malformed")
         if type(plan) is not HookPlan:
             raise HookContractError("hook node requires a HookPlan")
         plan = payload_admission.admit_plan(plan)
+
+        failover_decorators = normalize_hook_failover_decorators(failover)
+        decorated_invocation = failover_decorators.decorate(invocation)
 
         super().__init__(
             hook_definition_id(slot),
@@ -215,12 +251,14 @@ class HookNode(
         )
         self._payload_admission = payload_admission
         self._slot = slot
+        self._assembly_snapshot_key = assembly_snapshot_key
+        self._failover = failover_decorators
 
         request_type = cast(type[HookGraphValue], HookActivationRequest)
         progress_type = cast(type[HookGraphValue], _HookProgress)
         result_type = cast(type[HookGraphValue], HookResult)
         request_input = Graph.graph_input(HookValueName.REQUEST, request_type)
-        port = HookPort(payload_admission, invocation)
+        port = HookPort(payload_admission, decorated_invocation)
         p1_binding = HookPriorityBinding[PriorityConfigT, ValueT, StateT, CommandT](
             slot,
             HookPriority.P1,
@@ -229,8 +267,22 @@ class HookNode(
             slot,
             HookPriority.P2,
         )
-        p1 = _P1Node[PriorityConfigT, ValueT, StateT, CommandT](plan.p1, port, p1_binding, slot)
-        p2 = _P2Node[PriorityConfigT, ValueT, StateT, CommandT](plan.p2, port, p2_binding, slot)
+        p1 = _P1Node[PriorityConfigT, ValueT, StateT, CommandT](
+            plan.p1,
+            port,
+            p1_binding,
+            slot,
+            failover_decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        p2 = _P2Node[PriorityConfigT, ValueT, StateT, CommandT](
+            plan.p2,
+            port,
+            p2_binding,
+            slot,
+            failover_decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
 
         self.add_node(
             HookNodeId.P1,

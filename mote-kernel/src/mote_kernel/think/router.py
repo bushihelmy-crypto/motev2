@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import operator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from mote_kernel.config import ConfigActivation
+from mote_kernel.config import ConfigActivation, ConfigSnapshotKey
+from mote_kernel.failover.contract import TypedPortDecorator
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 from mote_kernel.think.config import RouterBinding
@@ -19,6 +20,10 @@ from mote_kernel.think.contract import (
     ThinkContractError,
     ThinkFrame,
     admit_compact_frame,
+)
+from mote_kernel.think.failover import (
+    FailoverPortDecorator,
+    apply_think_port_decorator,
 )
 from mote_kernel.think.identity import ThinkNodeId
 
@@ -45,12 +50,22 @@ class RouterNode(
     """Select the model binding immediately before model inference."""
 
     router_port: RouterPort[RouterRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT]]
+    failover: (
+        TypedPortDecorator[RouterPort[RouterRequest[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT]]]
+        | FailoverPortDecorator
+        | None
+    ) = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if operator.is_(self.router_port, None):
+        port = apply_think_port_decorator(self.router_port, self.failover, RouterPort, "RouterPort")
+        object.__setattr__(self, "router_port", port)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ThinkContractError("router assembly snapshot key is malformed")
+        if operator.is_(port, None):
             raise ThinkContractError("router requires a RouterPort")
         try:
-            method = self.router_port.route_model
+            method = port.route_model
         except AttributeError as error:
             raise ThinkContractError("router requires a RouterPort") from error
         if not callable(method):
@@ -88,14 +103,16 @@ class RouterNode(
 
         router_port = self.router_port
         if config is not None:
-            router_port = config.bind(
+            selected = config.bind(
                 RouterBinding[
                     SystemPromptT,
                     PlaceholderT,
                     UserPromptT,
                     CompactedSnapshotT,
                 ]()
-            ).port
+            )
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                router_port = apply_think_port_decorator(selected.port, self.failover, RouterPort, "RouterPort")
         model_value = await router_port.route_model(request)
         if type(model_value) is not ModelBinding:
             raise ThinkContractError("RouterPort.route_model must return a ModelBinding")

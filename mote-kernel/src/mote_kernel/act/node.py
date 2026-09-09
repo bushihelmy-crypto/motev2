@@ -22,6 +22,11 @@ from mote_kernel.act.contract import (
     ResumedAuthorization,
 )
 from mote_kernel.act.execute import ExecuteNode
+from mote_kernel.act.failover import (
+    ActFailoverDecorators,
+    FailoverPortDecorator,
+    normalize_act_failover_decorators,
+)
 from mote_kernel.act.identity import ActHookStage, ActNodeId, ActSlotId, ActValueName
 from mote_kernel.act.port import (
     AuthorizePort,
@@ -29,15 +34,17 @@ from mote_kernel.act.port import (
     ResolvePort,
     SettlementPort,
     ToolExchangeWriter,
+    capture_authorize_port_contract,
     require_act_port_contracts,
 )
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
-from mote_kernel.config import Config, ConfigActivation, require_config
+from mote_kernel.config import Config, ConfigActivation, ConfigSnapshotKey, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import NodeOutputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
+from mote_kernel.hooks.failover import HookFailoverDecorator, HookFailoverDecorators
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
@@ -62,7 +69,9 @@ class ActNode(
 
     __slots__ = (
         "_admission",
+        "_assembly_snapshot_key",
         "_authorize_port",
+        "_failover",
         "_hook",
     )
 
@@ -71,6 +80,16 @@ class ActNode(
         cls,
         config: Config,
         /,
+        *,
+        failover: ActFailoverDecorators | FailoverPortDecorator | None = None,
+        hook_failover: HookFailoverDecorators[
+            PriorityConfigT,
+            ActHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ]
+        | HookFailoverDecorator
+        | None = None,
     ) -> ActNode[PriorityConfigT, HookStateT, HookCommandT]:
         """Assemble Act from the complete config through its own projection."""
 
@@ -81,7 +100,7 @@ class ActNode(
             ActHookEnvelope,
             HookStateT,
             HookCommandT,
-        ].from_config(config, selected.hook_slot)
+        ].from_config(config, selected.hook_slot, failover=hook_failover)
         return cls(
             str(selected.definition_id),
             version=int(selected.definition_version),
@@ -93,6 +112,8 @@ class ActNode(
             hook=hook,
             failure_reason=selected.failure_reason,
             admission=selected.admission,
+            failover=failover,
+            assembly_snapshot_key=config.snapshot.key,
         )
 
     def __init__(
@@ -113,17 +134,15 @@ class ActNode(
         ],
         failure_reason: OpaqueGraphFailureReason,
         admission: ActPayloadAdmission[HookStateT, HookCommandT],
+        failover: ActFailoverDecorators | FailoverPortDecorator | None = None,
+        assembly_snapshot_key: ConfigSnapshotKey | None = None,
     ) -> None:
         if type(admission) is not ActPayloadAdmission:
             raise ActContractError("ActNode requires an ActPayloadAdmission")
+        if assembly_snapshot_key is not None and type(assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ActContractError("ActNode assembly snapshot key is malformed")
         admission.admit_graph_failure_reason(failure_reason)
-        codec_id, codec_version = require_act_port_contracts(
-            resolve_port,
-            authorize_port,
-            execute_port,
-            settlement_port,
-            exchange_writer,
-        )
+        decorators = normalize_act_failover_decorators(failover)
 
         if type(hook) is not HookNode:
             raise ActContractError("ActNode requires one shared HookNode")
@@ -154,13 +173,54 @@ class ActNode(
 
         # Construct every callable before touching the Graph builder so a
         # failed capability assembly cannot leave a partial definition.
-        resolve = ResolveNode[HookStateT, HookCommandT](resolve_port, admission)
-        authorize = AuthorizeNode[HookStateT, HookCommandT](authorize_port, failure_reason, admission)
-        execute = ExecuteNode[HookStateT, HookCommandT](execute_port, admission)
-        settle = SettleNode[HookStateT, HookCommandT](settlement_port, exchange_writer, admission)
+        # Each stage owns the one assembly-time decoration of its initial Port;
+        # this also keeps direct stage construction equivalent to parent-graph
+        # construction and prevents a wrapper from being applied twice.
+        resolve = ResolveNode[HookStateT, HookCommandT](
+            resolve_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        authorize = AuthorizeNode[HookStateT, HookCommandT](
+            authorize_port,
+            failure_reason,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        execute = ExecuteNode[HookStateT, HookCommandT](
+            execute_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        settle = SettleNode[HookStateT, HookCommandT](
+            settlement_port,
+            exchange_writer,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        decorated_resolve_port = resolve.resolve_port
+        decorated_authorize_port = authorize.authorize_port
+        decorated_execute_port = execute.execute_port
+        decorated_settlement_port = settle.settlement_port
+        decorated_exchange_writer = settle.exchange_writer
+        codec_id, codec_version = require_act_port_contracts(
+            decorated_resolve_port,
+            decorated_authorize_port,
+            decorated_execute_port,
+            decorated_settlement_port,
+            decorated_exchange_writer,
+            authorize_codec_binding=authorize.codec_binding,
+            authorize_codec_capture=authorize.codec_capture,
+        )
 
         super().__init__(definition_id, version=version)
-        self._authorize_port = authorize_port
+        self._assembly_snapshot_key = assembly_snapshot_key
+        self._authorize_port = decorated_authorize_port
+        self._failover = decorators
         self._hook = hook
         self._admission = admission
 
@@ -175,8 +235,8 @@ class ActNode(
         self.set_resume_codec(
             codec_id,
             codec_version,
-            authorize_port.encode_graph_input,
-            authorize_port.decode_graph_input,
+            decorated_authorize_port.encode_graph_input,
+            decorated_authorize_port.decode_graph_input,
         )
 
         resolve_output = self.add_node(
@@ -307,7 +367,9 @@ class ActNode(
             selected = activation_config.bind(AuthorizeBinding[HookStateT, HookCommandT]())
             if selected.admission != self._admission:
                 raise ActContractError("Act config binding changed the compiled payload contract")
-            authorize_port = selected.capability.port
+            if self._assembly_snapshot_key is None or selected.snapshot_key != self._assembly_snapshot_key:
+                authorize_port = self._failover.authorize_port(selected.capability.port)
+                capture_authorize_port_contract(authorize_port)
         resumed = authorize_port.build_resume_input(view, decision)
         resumed = self._admission.admit_authorization_input(resumed)
         if type(resumed.phase) is not ResumedAuthorization:

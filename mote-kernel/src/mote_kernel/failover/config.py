@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, Never, TypeVar, cast
 
 from mote_kernel.config import Config, ConfigContractError, ConfigSlice, revalidate_config_slice
 from mote_kernel.failover.contract import AttemptPreparation
@@ -19,12 +19,12 @@ def _failover_config_for_port(
     port_id: FailoverPortId,
     required: bool,
     /,
-) -> FailoverConfig[object, object] | None:
-    matches: list[FailoverConfig[object, object]] = []
+) -> FailoverConfig[Never, Never] | None:
+    matches: list[FailoverConfig[Never, Never]] = []
     for projection in config.failovers:
         if type(projection) is not FailoverConfig:
             raise ConfigContractError("Config.failovers contains a non-FailoverConfig projection")
-        candidate = cast(FailoverConfig[object, object], projection)
+        candidate = cast(FailoverConfig[Never, Never], projection)
         revalidate_config_slice(candidate, "Config.failovers FailoverConfig")
         if candidate.port_id == port_id:
             matches.append(candidate)

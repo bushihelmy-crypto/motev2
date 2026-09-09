@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, Never, TypeVar, cast
 
 from mote_kernel.config import Config, ConfigContractError, ConfigSlice, revalidate_config_slice
 from mote_kernel.hooks.contract import HookInvocationRequest, HookPayloadAdmission, HookStageResult
@@ -42,12 +42,12 @@ def _hook_config_for_slot(
     config: Config,
     slot: HookSlotId,
     /,
-) -> HookConfig[object, object, object, object]:
-    matches: list[HookConfig[object, object, object, object]] = []
+) -> HookConfig[Never, Never, Never, Never]:
+    matches: list[HookConfig[Never, Never, Never, Never]] = []
     for projection in config.hooks:
         if type(projection) is not HookConfig:
             raise ConfigContractError("Config.hooks contains a non-HookConfig projection")
-        candidate = cast(HookConfig[object, object, object, object], projection)
+        candidate = cast(HookConfig[Never, Never, Never, Never], projection)
         revalidate_config_slice(candidate, "Config.hooks HookConfig")
         if candidate.slot == slot:
             matches.append(candidate)

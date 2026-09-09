@@ -12,11 +12,85 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Generic, NewType, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import Generic, NewType, Protocol, TypeAlias, TypeVar, cast, runtime_checkable
 
 
 class FailoverContractError(ValueError):
     """Raised when a value does not satisfy a failover contract."""
+
+
+class PortDecoratorContractError(FailoverContractError):
+    """Internal marker for a malformed Port-decoration declaration/result.
+
+    Domain assembly translates this marker to its own contract error.  A
+    ``FailoverContractError`` raised *by the caller's decorator* is not this
+    marker and therefore crosses the seam unchanged.
+    """
+
+
+PortT = TypeVar("PortT")
+
+
+class TypedPortDecorator(Protocol[PortT]):
+    """Type-preserving callable for one concrete Port contract.
+
+    A decorator normally knows the exact Port it wraps (for example an
+    ``AuthorizePort`` adapter).  Parameterising this protocol lets strict
+    type checkers verify that relationship instead of requiring callers to
+    cast every concrete decorator to a rank-2 callable.
+    """
+
+    def __call__(self, port: PortT, /) -> PortT: ...
+
+
+class PortDecorator(Protocol):
+    """Uniform decorator that can preserve *any* Port contract.
+
+    This rank-2 protocol is intentionally narrower than
+    :class:`TypedPortDecorator`: it is used only by the ``uniform``
+    convenience binding, where one implementation is deliberately applied to
+    unrelated Port protocols.  A decorator for one concrete Port should use
+    ``TypedPortDecorator[ThatPort]`` instead.
+    """
+
+    def __call__(self, port: PortT, /) -> PortT: ...
+
+
+DecoratorT = TypeVar("DecoratorT")
+
+
+def require_port_decorator(
+    value: TypedPortDecorator[DecoratorT] | PortDecorator | None,
+    field: str,
+    /,
+) -> None:
+    """Reject a missing or non-callable composition decorator declaration."""
+
+    if value is not None and not callable(value):
+        raise PortDecoratorContractError(f"{field} must be a callable Port decorator")
+
+
+def apply_port_decorator(
+    port: PortT,
+    decorator: TypedPortDecorator[PortT] | PortDecorator | None,
+    expected: type[PortT],
+    field: str,
+    /,
+    *,
+    validate: bool = True,
+) -> PortT:
+    """Apply one decorator and fail closed if its typed surface is lost."""
+
+    if decorator is None:
+        # The owner validates the raw Port once after all decorations are
+        # applied.  Skipping a second structural check here is important for
+        # synchronous codec properties whose provider contract allows a
+        # single metadata read during assembly.
+        return port
+    candidate = decorator(port)
+    if validate and not isinstance(candidate, expected):
+        raise PortDecoratorContractError(f"{field} decoration changed the Port contract")
+    return cast(PortT, candidate)
 
 
 class FailureClass(StrEnum):

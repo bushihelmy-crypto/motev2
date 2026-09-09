@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
 from mote_kernel.act.admission import ActPayloadAdmission
@@ -17,9 +17,10 @@ from mote_kernel.act.contract import (
     SettleStageValue,
     ToolExchangeWriteRequest,
 )
+from mote_kernel.act.failover import ActFailoverDecorators, FailoverPortDecorator, normalize_act_failover_decorators
 from mote_kernel.act.identity import ActHookStage, ActNodeId
 from mote_kernel.act.port import SettlementPort, ToolExchangeWriter
-from mote_kernel.config import ConfigActivation
+from mote_kernel.config import ConfigActivation, ConfigSnapshotKey
 from mote_kernel.hooks.contract import HookActivationRequest, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
 
@@ -34,6 +35,27 @@ class SettleNode(Generic[HookStateT, HookCommandT]):
     settlement_port: SettlementPort
     exchange_writer: ToolExchangeWriter
     admission: ActPayloadAdmission[HookStateT, HookCommandT]
+    failover: ActFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_act_failover_decorators(self.failover)
+        settlement_port = decorators.settlement_port(self.settlement_port)
+        exchange_writer = decorators.exchange_writer_port(self.exchange_writer)
+        try:
+            settlement_method = settlement_port.project
+            writer_method = exchange_writer.write
+        except AttributeError as error:
+            raise ActContractError("SettleNode requires a SettlementPort and ToolExchangeWriter") from error
+        if not callable(settlement_method):
+            raise ActContractError("SettleNode requires a SettlementPort")
+        if not callable(writer_method):
+            raise ActContractError("SettleNode requires a ToolExchangeWriter")
+        object.__setattr__(self, "settlement_port", settlement_port)
+        object.__setattr__(self, "exchange_writer", exchange_writer)
+        object.__setattr__(self, "failover", decorators)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ActContractError("settle assembly snapshot key is malformed")
 
     async def __call__(
         self,
@@ -42,14 +64,16 @@ class SettleNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT]:
         hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
+        decorators = normalize_act_failover_decorators(self.failover)
         settlement_port = self.settlement_port
         exchange_writer = self.exchange_writer
         if config is not None:
             selected = config.bind(SettleBinding[HookStateT, HookCommandT]())
             if selected.admission != self.admission:
                 raise ActContractError("Act config binding changed the compiled payload contract")
-            settlement_port = selected.capability.settlement_port
-            exchange_writer = selected.capability.exchange_writer
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                settlement_port = decorators.settlement_port(selected.capability.settlement_port)
+                exchange_writer = decorators.exchange_writer_port(selected.capability.exchange_writer)
         envelope = hook_result.value
         if envelope.stage is not ActHookStage.EXECUTE or type(envelope.payload) is not ExecuteStageValue:
             raise ActContractError("settle input must be an Execute Hook envelope")

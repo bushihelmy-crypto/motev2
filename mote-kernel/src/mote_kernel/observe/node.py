@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
-from mote_kernel.config import Config, ConfigActivation, require_config
+from mote_kernel.config import Config, ConfigActivation, ConfigSnapshotKey, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef, TypedInputBinding
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
+from mote_kernel.hooks.failover import HookFailoverDecorator, HookFailoverDecorators
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.config import (
@@ -43,6 +44,11 @@ from mote_kernel.observe.contract import (
     WriteObservationStageValue,
     observation_kind,
     validate_settlement_boundary,
+)
+from mote_kernel.observe.failover import (
+    FailoverPortDecorator,
+    ObserveFailoverDecorators,
+    normalize_observe_failover_decorators,
 )
 from mote_kernel.observe.identity import (
     DeliveryAckReference,
@@ -81,6 +87,28 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
     queue_port: ObservationQueuePort
     background_task_port: BackgroundTaskPort
     admission: ObservePayloadAdmission
+    failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_observe_failover_decorators(self.failover)
+        queue_port = decorators.queue_port(self.queue_port)
+        background_task_port = decorators.background_task_port(self.background_task_port)
+        try:
+            read_after = queue_port.read_after
+            register_wait = queue_port.register_wait
+            snapshot = background_task_port.snapshot
+        except AttributeError as error:
+            raise ObserveContractError("GetObservationNode requires its declared Ports") from error
+        if not callable(read_after) or not callable(register_wait):
+            raise ObserveContractError("ObservationQueuePort read/wait methods must be callable")
+        if not callable(snapshot):
+            raise ObserveContractError("GetObservationNode requires a BackgroundTaskPort")
+        object.__setattr__(self, "queue_port", queue_port)
+        object.__setattr__(self, "background_task_port", background_task_port)
+        object.__setattr__(self, "failover", decorators)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("get_observation assembly snapshot key is malformed")
 
     async def __call__(
         self,
@@ -89,14 +117,16 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
         request = self.admission.admit_request(value.value)
         activation_config = value.activation_config
+        decorators = normalize_observe_failover_decorators(self.failover)
         queue_port = self.queue_port
         background_task_port = self.background_task_port
         if activation_config is not None:
             selected = activation_config.bind(GetObservationBinding())
             if selected.admission != self.admission:
                 raise ObserveContractError("Observe config binding changed the compiled payload contract")
-            queue_port = selected.capability.queue_port
-            background_task_port = selected.capability.background_task_port
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                queue_port = decorators.queue_port(selected.capability.queue_port)
+                background_task_port = decorators.background_task_port(selected.capability.background_task_port)
         read = self.admission.admit_read_after(await queue_port.read_after(request.cursor), request.cursor)
         if type(read) is Empty:
             # The provider performs an atomic recheck/registration.  The
@@ -171,6 +201,27 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
     config_port: ConfigObservationPort
     context_port: ContextObservationPort
     admission: ObservePayloadAdmission
+    failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_observe_failover_decorators(self.failover)
+        config_port = decorators.config_port(self.config_port)
+        context_port = decorators.context_port(self.context_port)
+        try:
+            apply = config_port.apply
+            append = context_port.append
+        except AttributeError as error:
+            raise ObserveContractError("WriteObservationNode requires its declared Ports") from error
+        if not callable(apply):
+            raise ObserveContractError("ConfigObservationPort.apply must be callable")
+        if not callable(append):
+            raise ObserveContractError("ContextObservationPort.append must be callable")
+        object.__setattr__(self, "config_port", config_port)
+        object.__setattr__(self, "context_port", context_port)
+        object.__setattr__(self, "failover", decorators)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("write_observation assembly snapshot key is malformed")
 
     async def __call__(
         self,
@@ -191,14 +242,16 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         config_receipt: ConfigSettlementReceipt | None = None
         context_receipt: ContextAppendReceipt | None = None
         current_config = activation.activation_config
+        decorators = normalize_observe_failover_decorators(self.failover)
         config_port = self.config_port
         context_port = self.context_port
         if current_config is not None:
             selected = current_config.bind(WriteObservationBinding())
             if selected.admission != self.admission:
                 raise ObserveContractError("Observe config binding changed the compiled payload contract")
-            config_port = selected.capability.config_port
-            context_port = selected.capability.context_port
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                config_port = decorators.config_port(selected.capability.config_port)
+                context_port = decorators.context_port(selected.capability.context_port)
         config = batch.config
         if config is not None:
             config_batch = self.admission.admit_config_batch(config)
@@ -309,6 +362,8 @@ class ObserveNode(
     __slots__ = (
         "_ack_port",
         "_admission",
+        "_assembly_snapshot_key",
+        "_failover",
         "_hook",
     )
 
@@ -317,6 +372,16 @@ class ObserveNode(
         cls,
         config: Config,
         /,
+        *,
+        failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None,
+        hook_failover: HookFailoverDecorators[
+            PriorityConfigT,
+            ObserveHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ]
+        | HookFailoverDecorator
+        | None = None,
     ) -> ObserveNode[PriorityConfigT, HookStateT, HookCommandT]:
         """Assemble Observe from the complete config via its own projection.
 
@@ -333,7 +398,7 @@ class ObserveNode(
             ObserveHookEnvelope,
             HookStateT,
             HookCommandT,
-        ].from_config(config, selected.hook_slot)
+        ].from_config(config, selected.hook_slot, failover=hook_failover)
         return cls(
             str(selected.definition_id),
             version=int(selected.definition_version),
@@ -345,6 +410,8 @@ class ObserveNode(
             resume_port=selected.resume_port,
             hook=hook,
             admission=selected.admission,
+            failover=failover,
+            assembly_snapshot_key=config.snapshot.key,
         )
 
     def __init__(
@@ -365,6 +432,8 @@ class ObserveNode(
             HookCommandT,
         ],
         admission: ObservePayloadAdmission,
+        failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None,
+        assembly_snapshot_key: ConfigSnapshotKey | None = None,
     ) -> None:
         if type(admission) is not ObservePayloadAdmission:
             raise ObserveContractError("ObserveNode requires an ObservePayloadAdmission")
@@ -378,14 +447,41 @@ class ObserveNode(
             raise ObserveContractError("ObserveNode definition_id must be a canonical string")
         if type(version) is not int or version < 1:
             raise ObserveContractError("ObserveNode version must be a positive integer")
-        resume_binding = require_observe_port_contracts(
+        decorators = normalize_observe_failover_decorators(failover)
+        if assembly_snapshot_key is not None and type(assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("ObserveNode assembly snapshot key is malformed")
+
+        # Build all callable nodes before touching the parent Graph builder;
+        # failed capability assembly cannot leave a partial definition.
+        get_node = GetObservationNode[HookStateT, HookCommandT](
             queue_port,
             background_task_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        write_node = WriteObservationNode[HookStateT, HookCommandT](
             config_port,
             context_port,
-            ack_port,
-            resume_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
         )
+        decorated_queue_port = get_node.queue_port
+        decorated_background_task_port = get_node.background_task_port
+        decorated_config_port = write_node.config_port
+        decorated_context_port = write_node.context_port
+        decorated_ack_port = decorators.ack_port(ack_port)
+        decorated_resume_port = decorators.resume_port(resume_port)
+        resume_binding = require_observe_port_contracts(
+            decorated_queue_port,
+            decorated_background_task_port,
+            decorated_config_port,
+            decorated_context_port,
+            decorated_ack_port,
+            decorated_resume_port,
+        )
+
         if type(hook) is not HookNode:
             raise ObserveContractError("ObserveNode requires one shared HookNode")
         hook_admission = hook.payload_admission
@@ -411,21 +507,10 @@ class ObserveNode(
             raise ObserveContractError("Observe shared HookSlotId does not match its definition")
         admission.admit_observe_slot(hook_slot)
 
-        # Build all callable nodes before touching the parent Graph builder;
-        # failed capability assembly cannot leave a partial definition.
-        get_node = GetObservationNode[HookStateT, HookCommandT](
-            queue_port,
-            background_task_port,
-            admission,
-        )
-        write_node = WriteObservationNode[HookStateT, HookCommandT](
-            config_port,
-            context_port,
-            admission,
-        )
-
         super().__init__(definition_id, version=version)
-        self._ack_port = ack_port
+        self._assembly_snapshot_key = assembly_snapshot_key
+        self._ack_port = decorated_ack_port
+        self._failover = decorators
         self._hook = hook
         self._admission = admission
 
@@ -511,12 +596,22 @@ class ObserveNode(
         """Acknowledge a settled result after its enclosing commit succeeds."""
 
         admitted = self._admission.admit_result(result)
+        # ``_ack_port`` was decorated once during assembly.  Re-decoration
+        # here would stack wrappers for the no-config/public acknowledgement
+        # path; only a newly selected activation-time capability needs the
+        # failover seam applied again.
         ack_port = self._ack_port
         if activation_config is not None:
             selected = activation_config.bind(AcknowledgeBinding())
             if selected.admission != self._admission:
                 raise ObserveContractError("Observe config binding changed the compiled payload contract")
-            ack_port = selected.capability
+            if self._assembly_snapshot_key is None or selected.snapshot_key != self._assembly_snapshot_key:
+                ack_port = self._failover.ack_port(selected.capability)
+            else:
+                # The assembly-time Port already carries the decorator for
+                # this immutable snapshot.  Reusing it avoids stacking the
+                # same wrapper on post-commit acknowledgement.
+                ack_port = self._ack_port
         ack = self._admission.admit_ack(await ack_port.acknowledge(admitted.delivery_ids, admitted.observation_receipt))
         if ack.reference != admitted.observation_receipt.ack_reference:
             raise ObserveContractError("delivery acknowledgement does not match observation receipt")

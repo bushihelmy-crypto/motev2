@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
@@ -19,9 +19,16 @@ from mote_kernel.act.contract import (
     ResolveStageValue,
     ResumedAuthorization,
 )
+from mote_kernel.act.failover import ActFailoverDecorators, FailoverPortDecorator, normalize_act_failover_decorators
 from mote_kernel.act.identity import ActHookStage, ActNodeId, OpaqueGraphFailureReason
-from mote_kernel.act.port import AuthorizePort
-from mote_kernel.config import ConfigActivation
+from mote_kernel.act.port import (
+    AuthorizeCodecBinding,
+    AuthorizeCodecCapture,
+    AuthorizePort,
+    capture_authorize_port_binding,
+    capture_authorize_port_contract,
+)
+from mote_kernel.config import ConfigActivation, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
@@ -37,6 +44,22 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
     authorize_port: AuthorizePort
     failure_reason: OpaqueGraphFailureReason
     admission: ActPayloadAdmission[HookStateT, HookCommandT]
+    failover: ActFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+    _codec_binding: AuthorizeCodecBinding = field(init=False, repr=False, compare=False)
+    _codec_capture: AuthorizeCodecCapture = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_act_failover_decorators(self.failover)
+        port = decorators.authorize_port(self.authorize_port)
+        codec_capture = capture_authorize_port_binding(port)
+        codec_binding = codec_capture.binding
+        object.__setattr__(self, "authorize_port", port)
+        object.__setattr__(self, "failover", decorators)
+        object.__setattr__(self, "_codec_binding", codec_binding)
+        object.__setattr__(self, "_codec_capture", codec_capture)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ActContractError("authorize assembly snapshot key is malformed")
 
     async def __call__(
         self,
@@ -45,13 +68,18 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
     ) -> HookActivationRequest[ActHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
         hook_result = self.admission.admit_hook_result(activation.value)
         config = activation.activation_config
+        decorators = normalize_act_failover_decorators(self.failover)
         authorize_port = self.authorize_port
         failure_reason = self.failure_reason
         if config is not None:
             selected = config.bind(AuthorizeBinding[HookStateT, HookCommandT]())
             if selected.admission != self.admission:
                 raise ActContractError("Act config binding changed the compiled payload contract")
-            authorize_port = selected.capability.port
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                authorize_port = decorators.authorize_port(selected.capability.port)
+                # A newly selected revision may replace the codec provider;
+                # admit its complete surface once before using it.
+                capture_authorize_port_contract(authorize_port)
             failure_reason = selected.capability.failure_reason
         envelope = hook_result.value
         if envelope.stage is not ActHookStage.RESOLVE or type(envelope.payload) is not ResolveStageValue:
@@ -89,6 +117,18 @@ class AuthorizeNode(Generic[HookStateT, HookCommandT]):
         )
         self.admission.admit_hook_request(hook_request)
         return hook_request
+
+    @property
+    def codec_binding(self) -> AuthorizeCodecBinding:
+        """Return the codec identity captured for this stage's Port."""
+
+        return self._codec_binding
+
+    @property
+    def codec_capture(self) -> AuthorizeCodecCapture:
+        """Return the provenance used to avoid a second metadata read."""
+
+        return self._codec_capture
 
 
 __all__ = ["AuthorizeNode"]
