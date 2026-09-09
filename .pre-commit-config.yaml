@@ -32,6 +32,18 @@ repos:
         language: system
         pass_filenames: false
         files: ^mote-infra/persistence/local/.*\.rs$
+      - id: execution-local-rustfmt
+        name: Local Execution rustfmt
+        entry: cargo fmt --manifest-path mote-runtime/execution/local/Cargo.toml --all -- --check
+        language: system
+        pass_filenames: false
+        files: ^mote-runtime/execution/local/.*\.rs$
+      - id: execution-local-complexity
+        name: Local Execution complexity ratchet
+        entry: make -C mote-runtime/execution/local complexity
+        language: system
+        pass_filenames: false
+        files: ^mote-runtime/execution/local/(src|quality)/.*\.(rs|json)$
       - id: container-cloudflare-static
         name: Cloudflare Container static checks
         entry: pnpm --dir mote-resource/container/cloudflare run check:static
@@ -43,4 +55,4 @@ repos:
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-resource/container/cloudflare/pnpm-lock\.yaml)
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-runtime/execution/local/third_party_licenses/|mote-resource/container/cloudflare/pnpm-lock\.yaml)

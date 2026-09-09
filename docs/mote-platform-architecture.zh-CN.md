@@ -45,7 +45,7 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
                  conformance/ 横跨所有语言边界
 ```
 
-这不是一条强制的同步调用链。Control、Resource、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。所有具体调用基础设施统一归 `mote-infra/invocation`，所有具体存储基础设施统一归 `mote-infra/persistence`。
+这不是一条强制的同步调用链。Control、Resource、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。所有具体调用基础设施统一归 `mote-infra/invocation`，所有具体存储基础设施统一归 `mote-infra/persistence`。工具执行的固定入口是 `Kernel → mote-infra/invocation → execution/local`；Local Execution 按不可变路由配置决定本地执行或沿 `local → remote` 转发，远端 transport 和目标解析仍由 Invocation 基础设施承接。
 
 ## 2. 设计目标
 
@@ -695,7 +695,10 @@ motev2/
 │   ├── gateway/
 │   ├── approval/
 │   ├── eventbus/
-│   └── terminal/          Rust 为主，可含 provider adapters
+│   ├── terminal/          Rust 为主，可含 provider adapters
+│   └── execution/
+│       ├── local/         Kernel 经 Invocation 进入的本地执行策略边界
+│       └── remote/        Local 选择远端分支后的执行实现
 ├── mote-infra/            基础设施适配器
 │   ├── invocation/        唯一调用基础设施
 │   │   ├── contract/      窄类型调用契约

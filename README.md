@@ -219,6 +219,7 @@ The monorepo is designed to support multiple languages without duplicating autho
   such as a robot. Both consume Control-issued bindings without interpreting
   Agent Flow; Control records any required Container/Embodiment co-location.
 - **Infrastructure has two sole owners.** `mote-infra/invocation` owns typed invocation contracts, resolution, and local or RPC implementations; `mote-infra/persistence` owns deployment-specific durable state and transaction mechanisms. Neither decides what the Agent should do.
+- **Tool execution has one fixed ingress.** Kernel calls `mote-infra/invocation`, which delivers the request to `mote-runtime/execution/local`; Local Execution uses immutable route configuration to choose a local handler or the `local -> remote` branch, while Invocation owns transport and endpoint mechanics.
 - **`conformance/` owns shared observable contracts.** No language implementation may privately reinterpret a released cross-language behavior.
 
 Control, Resource providers, and deployment-specific Infrastructure implementations therefore extend placement, hosting, invocation, communication, and persistence choices; they do not become co-owners of the Agent flow. Container/Embodiment placement and persistence placement are orthogonal: Kernel Port configuration selects `Commit`, while a Container only exposes optional platform capabilities such as Durable Object storage.
@@ -268,6 +269,9 @@ motev2/
 │   ├── control-plane/
 │   ├── model-gateway/
 │   ├── router/
+│   ├── execution/
+│   │   ├── local/     Invocation delivers the local execution policy boundary
+│   │   └── remote/    remote branch selected by Local Execution
 │   ├── rust/
 │   └── sandbox/
 └── mote-product/      planned product application and UI

@@ -2,6 +2,12 @@
 
 `mote-infra` has two parallel infrastructure boundaries. `invocation/` is the only place for invocation contracts, resolution, and local or remote implementations; `persistence/` owns portable local and remote storage implementations. Neither owns Kernel flow semantics or Resource facts.
 
+Tool execution follows one fixed ingress: Kernel calls `invocation/`, which
+delivers the request to `mote-runtime/execution/local`. Local Execution chooses
+local handling or the `local -> remote` branch from immutable route
+configuration; Invocation continues to own the target resolution and
+transport mechanics for that branch.
+
 Cloudflare Durable Object SQLite is the deliberate platform-bound exception: its Adapter lives in `mote-resource/container/cloudflare` because only that deployed Durable Object receives `ctx.storage`. It still satisfies the same Kernel-owned persistence Port and is selected independently from Container hosting.
 
 ```text
