@@ -25,6 +25,8 @@ No model wire protocol or durable DTO is released by this scaffold.
   model defaults, validated Kernel overrides, and deterministic filtering of
   known optional generation parameters unsupported by the selected model.
   Supported numeric request parameters are clamped to model-owned bounds.
+- Unified the generated `max_output_tokens` target default at 4096; models with
+  a known smaller output ceiling use that ceiling as the effective default.
 - Added built-in Embedding model capabilities with text/image/audio/video
   input declarations, fixed and adjustable vector dimensions, and the same
   deterministic filtering and clamping rules. This does not publish an

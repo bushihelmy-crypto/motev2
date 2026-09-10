@@ -25,6 +25,11 @@ import (
 
 const catalogSchemaVersion = 1
 
+// defaultMaxOutputTokens is the Gateway-wide target default for generated
+// text output. compileModel clamps it to a model's known token limits so the
+// effective default remains valid for models with a smaller ceiling.
+const defaultMaxOutputTokens int64 = 4096
+
 var supportedModes = map[string]string{
 	"chat":                "generate",
 	"completion":          "generate",
@@ -465,9 +470,13 @@ func compileModel(
 	compiledOperation := compileOperation(operation, primary.record.Mode, supplemental, primary)
 	if compiledOperation.Generation != nil && compiledOperation.Generation.MaxOutputTokens != nil {
 		defaultValue := compiledOperation.Generation.MaxOutputTokens.Default
-		if defaultValue != nil && ((limits.MinOutputTokens > 0 && *defaultValue < limits.MinOutputTokens) ||
-			(limits.MaxOutputTokens > 0 && *defaultValue > limits.MaxOutputTokens)) {
-			compiledOperation.Generation.MaxOutputTokens.Default = nil
+		if defaultValue != nil {
+			if limits.MinOutputTokens > 0 && *defaultValue < limits.MinOutputTokens {
+				*defaultValue = limits.MinOutputTokens
+			}
+			if limits.MaxOutputTokens > 0 && *defaultValue > limits.MaxOutputTokens {
+				*defaultValue = limits.MaxOutputTokens
+			}
 		}
 	}
 	lifecycle := "active"
@@ -696,12 +705,16 @@ func compileTokenLimits(operation string, primary recordRef) tokenLimits {
 	if maxOutput == 0 {
 		maxOutput, _ = positiveInteger(primary.record.MaxTokens)
 	}
+	parameter, parameterFound := findParameter([]recordRef{primary}, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens")
+	if maxOutput == 0 && parameterFound && parameter.Range != nil {
+		maxOutput, _ = positiveInteger(parameter.Range.Maximum)
+	}
 	limits.MaxOutputTokens = maxOutput
 	if maxOutput == 0 {
 		return limits
 	}
 	limits.MinOutputTokens = 1
-	if parameter, ok := findParameter([]recordRef{primary}, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens"); ok && parameter.Range != nil {
+	if parameterFound && parameter.Range != nil {
 		if minimum, valid := positiveInteger(parameter.Range.Minimum); valid {
 			limits.MinOutputTokens = minimum
 		}
@@ -893,10 +906,11 @@ func compileGenerationPolicy(records []recordRef, primary recordRef) *generation
 			policy.Seed = integerPolicy(parameter)
 		}
 	}
-	if parameter, ok := findParameter(records, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens"); ok {
-		policy.MaxOutputTokens = &outputTokenParameter{Default: rawInteger(parameter.Default)}
-	} else if maximum, valid := positiveInteger(primary.record.MaxOutputTokens); valid && maximum > 0 {
-		policy.MaxOutputTokens = &outputTokenParameter{}
+	_, parameterFound := findParameter(records, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens")
+	_, maximumKnown := positiveInteger(primary.record.MaxOutputTokens)
+	if parameterFound || maximumKnown {
+		defaultValue := defaultMaxOutputTokens
+		policy.MaxOutputTokens = &outputTokenParameter{Default: &defaultValue}
 	}
 	if parameter, ok := findParameter(records, "stop", "stop_sequences", "stopsequences"); ok {
 		policy.Stop = &stopParameter{Default: rawStrings(parameter.Default)}

@@ -93,6 +93,8 @@ Protocol adapter encodes the resolved neutral request
 
 - 解析顺序必须是：模型默认值 → Kernel 显式值；显式值存在时覆盖默认值，显式空
   列表可以清空默认 stop。
+- 生成目录的 `max_output_tokens` 目标默认值统一为 4096；如果模型已知最大输出小于
+  4096，目录中的有效默认值必须被夹到该模型上限，不能生成越界默认值。
 - 模型明确不支持的、但已经存在于中立 DTO 的可选字段，结果中应为 nil/缺省，
   不得传给 protocol adapter。
 - 已知 minimum/maximum 时，低于 minimum 映射到 minimum，高于 maximum 映射到

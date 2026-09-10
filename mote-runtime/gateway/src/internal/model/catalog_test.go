@@ -333,6 +333,30 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 			t.Errorf("operation %q count = %d, want %d", operation, gotOperations[operation], want)
 		}
 	}
+	for _, definition := range catalog.definitions {
+		operation := definition.config.Operations[0]
+		if operation.Operation != api.OperationGenerate && operation.Operation != api.OperationRealtime {
+			continue
+		}
+		if operation.Generation == nil {
+			continue
+		}
+		if operation.Generation.MaxOutputTokens == nil || operation.Generation.MaxOutputTokens.Default == nil {
+			t.Errorf("generated model %q is missing the unified max_output_tokens default", definition.ID())
+			continue
+		}
+		wantDefault := int64(4096)
+		limits := definition.TokenLimits()
+		if limits.MinOutputTokens > wantDefault {
+			wantDefault = limits.MinOutputTokens
+		}
+		if limits.MaxOutputTokens > 0 && limits.MaxOutputTokens < wantDefault {
+			wantDefault = limits.MaxOutputTokens
+		}
+		if got := *operation.Generation.MaxOutputTokens.Default; got != wantDefault {
+			t.Errorf("model %q max_output_tokens default = %d, want %d", definition.ID(), got, wantDefault)
+		}
+	}
 
 	assertOperation(t, catalog, "gpt-6-astra", api.OperationGenerate)
 	assertOperation(t, catalog, "gpt-image-2.5-flare", api.OperationImageGeneration)

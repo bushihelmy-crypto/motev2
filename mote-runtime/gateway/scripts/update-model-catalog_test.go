@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"go/ast"
 	"testing"
 )
@@ -72,5 +73,44 @@ func TestCompileModesRetainsUnaryAndAddsDeclaredAsyncOrStreamingModes(t *testing
 	modes = compileModes("generate", []recordRef{streaming})
 	if len(modes) != 2 || modes[0] != "server_stream" || modes[1] != "unary" {
 		t.Fatalf("compileModes(generate, streaming) = %v, want [server_stream unary]", modes)
+	}
+}
+
+func TestCompileGenerationPolicyUsesUnifiedOutputDefault(t *testing.T) {
+	maxTokens := json.Number("2048")
+	record := recordRef{key: "small-model", record: sourceRecord{
+		MaxOutputTokens: &maxTokens,
+		ModelParameters: []sourceParameter{{
+			ID:      "max_tokens",
+			Default: json.RawMessage("128"),
+		}},
+	}}
+	policy := compileGenerationPolicy([]recordRef{record}, record)
+	if policy == nil || policy.MaxOutputTokens == nil || policy.MaxOutputTokens.Default == nil {
+		t.Fatal("max_output_tokens policy was not generated")
+	}
+	if *policy.MaxOutputTokens.Default != defaultMaxOutputTokens {
+		t.Fatalf("max_output_tokens default = %d, want %d", *policy.MaxOutputTokens.Default, defaultMaxOutputTokens)
+	}
+}
+
+func TestCompileModelClampsUnifiedOutputDefaultToKnownLimit(t *testing.T) {
+	minimum := json.Number("1")
+	maximum := json.Number("2048")
+	record := recordRef{key: "small-model", record: sourceRecord{
+		BaseModel: "small-model",
+		Mode:      "chat",
+		ModelParameters: []sourceParameter{{
+			ID:    "max_tokens",
+			Range: &sourceRange{Minimum: &minimum, Maximum: &maximum},
+		}},
+	}}
+	compiled, ok := compileModel("small-model", []recordRef{record}, nil, nil)
+	if !ok || compiled.Operations[0].Generation == nil || compiled.Operations[0].Generation.MaxOutputTokens == nil ||
+		compiled.Operations[0].Generation.MaxOutputTokens.Default == nil {
+		t.Fatal("small model did not receive an output-token default")
+	}
+	if got := *compiled.Operations[0].Generation.MaxOutputTokens.Default; got != 2048 {
+		t.Fatalf("clamped max_output_tokens default = %d, want 2048", got)
 	}
 }
