@@ -20,6 +20,23 @@ class ObserveIdentityError(ValueError):
     """Raised when an Observe identity or recovery coordinate is malformed."""
 
 
+class ObserveNodeId(StrEnum):
+    """The closed node identities owned by the Observe graph."""
+
+    GET_OBSERVATION = "get_observation"
+    HOOK = "hook"
+    WRITE_OBSERVATION = "write_observation"
+
+
+class ObserveValueName(StrEnum):
+    """The closed value-port names owned by the Observe graph."""
+
+    REQUEST = "request"
+    HOOK_REQUEST = "hook_request"
+    HOOK_RESULT = "hook_result"
+    RESULT = "result"
+
+
 def _require_text(value: str, field: str, /, *, maximum: int = _IDENTITY_MAX_BYTES) -> None:
     if type(value) is not str or not value or value != value.strip() or "\n" in value or "\r" in value:
         raise ObserveIdentityError(f"{field} must be a non-empty trimmed single-line string")
@@ -287,5 +304,7 @@ __all__ = [
     "ObservationWait",
     "ObserveHookStage",
     "ObserveIdentityError",
+    "ObserveNodeId",
+    "ObserveValueName",
     "WaitRegistration",
 ]

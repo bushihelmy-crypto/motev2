@@ -38,8 +38,8 @@ from mote_kernel.act.contract import (
     ToolExecutionResult,
     admit_authorization_interrupt_payload,
 )
-from mote_kernel.act.identity import ActHookStage, OpaqueGraphFailureReason
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult, HookStageResult
+from mote_kernel.act.identity import ActHookStage, ActNodeId, OpaqueGraphFailureReason
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookResult, HookStageResult
 from mote_kernel.state.graph_state import GraphNodeId
 
 AdmissionValueT = TypeVar("AdmissionValueT")
@@ -60,7 +60,7 @@ def _same(left: AdmissionValueT, right: AdmissionValueT, field: str, /) -> None:
 def _stage_node_id(stage: ActHookStage, /) -> GraphNodeId:
     """Map an Act stage to the business node that produced its Hook value."""
 
-    return GraphNodeId(stage.value)
+    return GraphNodeId(str(ActNodeId(stage)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,10 +196,10 @@ class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
 
     def admit_hook_request(
         self,
-        value: HookRequest[ActHookEnvelope, HookStateT],
+        value: HookActivationRequest[ActHookEnvelope, HookStateT],
         /,
-    ) -> HookRequest[ActHookEnvelope, HookStateT]:
-        _exact(value, HookRequest, "Act Hook request")
+    ) -> HookActivationRequest[ActHookEnvelope, HookStateT]:
+        _exact(value, HookActivationRequest, "Act Hook activation")
         self.admit_hook_envelope(value.value)
         if type(value.state) is not self.hook_state_type:
             raise ActContractError("Act Hook request state has an unexpected concrete type")
@@ -233,7 +233,7 @@ class ActPayloadAdmission(Generic[HookStateT, HookCommandT]):
 
     def admit_transition(
         self,
-        request: HookRequest[ActHookEnvelope, HookStateT],
+        request: HookActivationRequest[ActHookEnvelope, HookStateT],
         result: HookStageResult[ActHookEnvelope, HookCommandT],
         /,
     ) -> None:

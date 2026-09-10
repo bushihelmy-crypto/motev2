@@ -10,7 +10,7 @@ body:
     id: component
     attributes:
       label: Component
-      options: [mote-kernel, conformance, cross-language, other]
+      options: [mote-kernel, execution-local, invocation-infra, conformance, cross-language, other]
     validations:
       required: true
   - type: input

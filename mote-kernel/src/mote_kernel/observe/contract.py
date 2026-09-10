@@ -13,6 +13,7 @@ from enum import StrEnum
 from itertools import pairwise
 from typing import Generic, TypeAlias, TypeVar, cast
 
+from mote_kernel.config import Config, require_config
 from mote_kernel.hooks.contract import HookGraphValue
 from mote_kernel.observe.identity import (
     BlockingTaskRef,
@@ -581,6 +582,25 @@ class ConfigSettlementReceipt(HookGraphValue):
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigApplyResult:
+    """Config Port result kept inside the WriteObservation activation.
+
+    The durable receipt is safe to publish in ``ObserveResult``.  The complete
+    successor Config is execution metadata and is deliberately split from the
+    receipt so it cannot become part of a Hook Invocation payload.
+    """
+
+    receipt: ConfigSettlementReceipt
+    successor_config: Config | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.receipt) is not ConfigSettlementReceipt:
+            raise ObserveContractError("config apply result receipt must be a ConfigSettlementReceipt")
+        if self.successor_config is not None:
+            require_config(self.successor_config)
+
+
+@dataclass(frozen=True, slots=True)
 class ContextAppendReceipt(HookGraphValue):
     """Receipt for appending one non-Config family to Context."""
 
@@ -910,6 +930,7 @@ __all__ = [
     "AssistantObservation",
     "Available",
     "BackgroundTaskSnapshot",
+    "ConfigApplyResult",
     "ConfigBatch",
     "ConfigObservation",
     "ConfigSettlementReceipt",

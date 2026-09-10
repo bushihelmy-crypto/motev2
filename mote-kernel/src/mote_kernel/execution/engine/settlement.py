@@ -11,6 +11,7 @@ from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult,
 from mote_kernel.state.graph_state import (
     ContinueGraphRouting,
     FailedGraphNodeOutcome,
+    GraphConfigCursor,
     GraphExecutionToken,
     GraphFailure,
     GraphInterruptPayload,
@@ -41,6 +42,8 @@ def project_success_settlement(
     state: GraphRunState,
     node_id: GraphNodeId,
     route: str | None,
+    *,
+    config_cursor: GraphConfigCursor | None = None,
 ) -> SettleGraphNode:
     routing = ContinueGraphRouting() if route is None else SelectGraphRoute(GraphRouteId(route))
     validate_routing_contribution(graph, node_id, routing)
@@ -48,6 +51,7 @@ def project_success_settlement(
         state.revision,
         require_settlement_execution_token(state),
         SucceededGraphNodeOutcome(node_id, routing),
+        config_cursor,
     )
 
 
@@ -110,7 +114,15 @@ def settle_result(
     if node is None or not isinstance(node.settlement, PendingGraphNode):
         raise ResultCollectionError("task result does not reference a pending node")
     if isinstance(result, TaskSuccess):
-        return project_success_settlement(graph, state, task.node_id, result.route)
+        return project_success_settlement(
+            graph,
+            state,
+            task.node_id,
+            result.route,
+            config_cursor=result.output.activation_config.config_cursor
+            if result.output.activation_config is not None
+            else None,
+        )
     if isinstance(result, TaskFailure):
         return project_failure_settlement(state, task.node_id, result.failure)
     return project_interrupt_settlement(graph, state, task.node_id, result.request_payload)

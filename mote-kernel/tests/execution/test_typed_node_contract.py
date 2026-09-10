@@ -2,7 +2,9 @@ from dataclasses import dataclass, replace
 from typing import Never, TypeAlias, cast
 
 import pytest
+from tests.execution.engine.factories import activation_config
 
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import _make_node_inputs
 from mote_kernel.execution.graph.ports import (
@@ -85,6 +87,33 @@ async def test_typed_node_materializes_one_dto_and_publishes_one_typed_output() 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["result"] == Combined("value:7")
     assert received == [PairRequest(Left("value"), Right(7))]
+
+
+@pytest.mark.asyncio
+async def test_typed_node_publishes_config_activation_metadata_without_changing_output_type() -> None:
+    graph = Graph[PipelineValue]("typed.config-activation")
+    source = Graph.bind("source", Graph.graph_input("source", Left))
+    runtime_config = activation_config(1)
+
+    async def operation(value: Left) -> ConfigActivation[Combined]:
+        return ConfigActivation(Combined(value.value), runtime_config)
+
+    output = graph.add_node(
+        "node",
+        operation,
+        inputs=(source,),
+        input_type=Left,
+        materialize=lambda values: values.get(source),
+        output_name="result",
+        output_type=Combined,
+    )
+    graph.add_edge("node", Graph.END)
+    graph.set_outputs({"result": output})
+
+    result = await graph.run(Graph.values(source=Left("value")), activation_config=runtime_config)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["result"] == Combined("value")
 
 
 @pytest.mark.asyncio

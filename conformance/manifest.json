@@ -1,10 +1,30 @@
 {
   "$schema": "./schemas/case/manifest.v1.schema.json",
   "manifest_version": 1,
-  "protocol_versions": {},
+  "protocol_versions": {
+    "gateway_invocation": 1
+  },
   "suites": {
     "state_vectors": [],
-    "wire_vectors": [],
+    "wire_vectors": [
+      "vectors/wire/gateway_invocation_unary_text.v1.json",
+      "vectors/wire/gateway_invocation_server_stream_tool_call.v1.json",
+      "vectors/wire/gateway_invocation_unary_image.v1.json",
+      "vectors/wire/gateway_invocation_unary_audio.v1.json",
+      "vectors/wire/gateway_invocation_unary_music.v1.json",
+      "vectors/wire/gateway_invocation_duplex_realtime_audio.v1.json",
+      "vectors/wire/gateway_invocation_server_stream_media.v1.json",
+      "vectors/wire/gateway_invocation_async_video.v1.json",
+      "vectors/wire/gateway_invocation_unary_transcription.v1.json",
+      "vectors/wire/gateway_invocation_reject_unknown_mode.v1.json",
+      "vectors/wire/gateway_invocation_reject_extra_field.v1.json",
+      "vectors/wire/gateway_invocation_reject_unknown_version.v1.json",
+      "vectors/wire/gateway_invocation_reject_missing_mode.v1.json",
+      "vectors/wire/gateway_invocation_reject_wrong_primitive.v1.json",
+      "vectors/wire/gateway_invocation_reject_operation_modality.v1.json",
+      "vectors/wire/gateway_invocation_reject_media_as_kernel.v1.json",
+      "vectors/wire/gateway_invocation_reject_llm_as_media.v1.json"
+    ],
     "recovery_scenarios": [],
     "effect_scenarios": [],
     "canonical_traces": []

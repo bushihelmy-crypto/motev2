@@ -8,7 +8,7 @@ from typing import Never, cast
 
 import pytest
 
-from mote_kernel.hooks.contract import HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.contract import (
@@ -16,6 +16,7 @@ from mote_kernel.observe.contract import (
     AssistantObservation,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigObservation,
     ConfigSettlementReceipt,
@@ -334,8 +335,8 @@ def test_hook_admission_keeps_the_predecessor_identity_outside_script_output() -
     admission = _admission()
 
     request = cast(
-        HookRequest[ObserveHookEnvelope, HookStateProjection],
-        HookRequest(envelope, _State(), GraphNodeId("write_observation")),
+        HookActivationRequest[ObserveHookEnvelope, HookStateProjection],
+        HookActivationRequest(envelope, _State(), GraphNodeId("write_observation")),
     )
     with pytest.raises(ObserveContractError, match="node_id"):
         admission.admit_hook_request(request)
@@ -779,6 +780,11 @@ def test_settlement_boundary_validation_accepts_only_same_boundary_or_zero_lengt
     other_stream = ObservationBoundary("other", other_cursor, other_cursor, 2)
     with pytest.raises(ObserveContractError, match="one stream"):
         ConfigSettlementReceipt((DeliveryId("d"),), read, other_stream, "settlement", _snapshot(2))
+
+
+def test_config_apply_result_requires_its_nominal_receipt() -> None:
+    with pytest.raises(ObserveContractError, match="ConfigSettlementReceipt"):
+        ConfigApplyResult(cast(Never, object()))
 
 
 @pytest.mark.parametrize(

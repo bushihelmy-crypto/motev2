@@ -24,6 +24,7 @@ from mote_kernel.state.graph_state.identity import (
 )
 from mote_kernel.state.graph_state.model import (
     GraphAbortReason,
+    GraphConfigCursor,
     GraphExecutionToken,
     GraphJoinProgress,
 )
@@ -86,6 +87,7 @@ class StartGraphRun:
     activations: tuple[GraphFrontierActivation, ...]
     parent: GraphActivationIdentity | None = None
     resume_input_codec: GraphResumeInputCodec | None = None
+    config_cursor: GraphConfigCursor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +108,7 @@ class SettleGraphNode:
     expected_revision: int
     execution: GraphExecutionToken
     outcome: GraphNodeOutcome
+    config_cursor: GraphConfigCursor | None = None
 
 
 @dataclass(frozen=True, slots=True)

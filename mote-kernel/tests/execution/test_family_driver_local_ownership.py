@@ -53,9 +53,9 @@ from mote_kernel.execution.result import (
 )
 from mote_kernel.execution.run_context import (
     ChildBoundaryAvailabilityCoordinate,
-    ChildStateBinding,
     ConfirmedChildBoundary,
     ScopedFrameIndex,
+    ScopedStateBinding,
     _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
@@ -86,8 +86,8 @@ _ChildPhaseView: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminalView
 _ChildWaitResultView: TypeAlias = (
     tuple[GraphBoundary, _ChildTerminalView | None, ConfirmedChildBoundary[str] | None] | asyncio.CancelledError
 )
-_EvidencePublisherView: TypeAlias = Callable[[ChildStateBinding, ScopedFrameIndex[str]], None]
-_EvidenceReaderView: TypeAlias = Callable[[], tuple[tuple[ChildStateBinding, ...], ScopedFrameIndex[str]]]
+_EvidencePublisherView: TypeAlias = Callable[[ScopedStateBinding, ScopedFrameIndex[str]], None]
+_EvidenceReaderView: TypeAlias = Callable[[], tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[str]]]
 _ChildConstructorView: TypeAlias = Callable[
     [GraphActivationIdentity, CompiledGraph[str], GraphInputFrame[str], tuple[int, ...]],
     Coroutine[None, None, "_ChildCallView"],
@@ -170,7 +170,7 @@ class _GraphRunView(Protocol):
     def freeze_root_evidence(
         self,
         evidence_reader: _EvidenceReaderView,
-    ) -> tuple[GraphRunState, tuple[ChildStateBinding, ...], ScopedFrameIndex[str]]: ...
+    ) -> tuple[GraphRunState, tuple[ScopedStateBinding, ...], ScopedFrameIndex[str]]: ...
 
     async def drive_quantum(self) -> GraphBoundary: ...
 
@@ -226,7 +226,7 @@ class _FamilyDriverPrivateView(Protocol):
     @staticmethod
     def evidence_adapter(
         module: object,
-        bindings: tuple[ChildStateBinding, ...],
+        bindings: tuple[ScopedStateBinding, ...],
         frames: ScopedFrameIndex[str],
     ) -> tuple[_EvidencePublisherView, _EvidenceReaderView]:
         return cast(_FamilyDriverPrivateView, module)._evidence_adapter(bindings, frames)
@@ -235,7 +235,7 @@ class _FamilyDriverPrivateView(Protocol):
     def frames_for_owner(
         module: object,
         frames: ScopedFrameIndex[str],
-        bindings: tuple[ChildStateBinding, ...],
+        bindings: tuple[ScopedStateBinding, ...],
         owner: ScopeRunCoordinate,
     ) -> ScopedFrameIndex[str]:
         return cast(_FamilyDriverPrivateView, module)._frames_for_owner(frames, bindings, owner)
@@ -533,7 +533,6 @@ def graph_owner(
     frames: ScopedFrameIndex[str] | None = None,
     commit: GraphCommit[str] | None = None,
     position: tuple[int, ...] = (),
-    parent_activation: StableActivation | None = None,
     publisher: _EvidencePublisherView | None = None,
 ) -> _GraphRunView:
     limits = ExecutionLimits()
@@ -554,7 +553,6 @@ def graph_owner(
             evidence_publisher,
         ),
         position,
-        parent_activation,
         evidence_publisher,
     )
 
@@ -618,7 +616,7 @@ def graph_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
 async def admit_continuation_root(
     graph: CompiledGraph[str],
     state: GraphRunState,
-    bindings: tuple[ChildStateBinding, ...],
+    bindings: tuple[ScopedStateBinding, ...],
     frames: ScopedFrameIndex[str] | None = None,
     commit: GraphCommit[str] | None = None,
     fences: tuple[PlannedFence, ...] = (),
@@ -636,6 +634,15 @@ async def admit_continuation_root(
         recovered=True,
     )
     return cast(tuple[_GraphRunView, _EvidenceReaderView], handoff)
+
+
+@pytest.mark.asyncio
+async def test_continued_root_rejects_a_root_binding_in_child_state() -> None:
+    graph, state, _owner, _parent, _child_scope, _activation, _child_state = nested_runtime()
+    malformed_child_binding = ScopedStateBinding(root_scope_run(state.run_id), state)
+
+    with pytest.raises(SnapshotMismatchError, match="nested child binding is missing its parent activation"):
+        await admit_continuation_root(graph, state, (malformed_child_binding,))
 
 
 @pytest.mark.asyncio
@@ -943,10 +950,9 @@ async def test_worker_failure_preserves_primary_when_family_fence_fails() -> Non
 
 
 def test_frame_partition_requires_known_children() -> None:
+    _graph, _state, _owner, _parent, child, _activation, child_state = nested_runtime()
     root = root_scope_run(GraphRunId("root"))
-    child = ScopeRunCoordinate((GraphNodeId("child"),), GraphRunId("child"))
-    child_activation = StableActivation(root, 0, GraphNodeId("child"))
-    child_binding = ChildStateBinding(child, child_activation, running_state(run_id=child.graph_run_id))
+    child_binding = ScopedStateBinding(child, child_state)
     unknown = ScopeRunCoordinate((GraphNodeId("unknown"),), GraphRunId("unknown"))
     graph = nested_graph()
     boundary = ConfirmedChildBoundary(
@@ -967,11 +973,13 @@ def test_frame_partition_requires_known_children() -> None:
         ScopedFrameIndex(),
     )
     assert read()[0] == (child_binding,)
+    parent = child_binding.state.parent
+    assert parent is not None
     changed_parent = replace(
         child_binding,
-        parent_activation=StableActivation(root, 1, GraphNodeId("child")),
+        state=replace(child_binding.state, parent=replace(parent, superstep=1)),
     )
-    with pytest.raises(SnapshotMismatchError, match="changed its parent activation"):
+    with pytest.raises(SnapshotMismatchError, match="inconsistent parent coordinates"):
         publish(changed_parent, ScopedFrameIndex())
 
 
@@ -1019,7 +1027,7 @@ async def test_graph_owner_rejects_foreign_scope_and_duplicate_or_unknown_positi
 
 
 def test_child_admits_its_terminal_boundary_before_parent_installation() -> None:
-    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     output = graph_output(child_graph, "output")
     terminal = CompletedChild(parent, output)
@@ -1028,7 +1036,6 @@ def test_child_admits_its_terminal_boundary_before_parent_installation() -> None
         child_scope,
         replace(child_state, status=GraphRunStatus.COMPLETED, frontier=GraphFrontierState(())),
         position=(0, 0),
-        parent_activation=activation,
     )
     boundary = child_owner.terminal_boundary(parent, terminal)
     assert boundary is not None
@@ -1357,7 +1364,7 @@ async def test_nested_settlement_requires_one_terminal_child_call() -> None:
 
 
 def test_owner_evidence_cannot_cross_root_child_roles_or_leave_an_active_call() -> None:
-    graph, _state, owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, _state, owner, parent, child_scope, _activation, child_state = nested_runtime()
     assert "_read_evidence" not in _FamilyDriverPrivateView.graph_run(family_driver).__slots__
     with pytest.raises(SnapshotMismatchError, match="root graph evidence"):
         owner.handoff_evidence()
@@ -1368,7 +1375,6 @@ def test_owner_evidence_cannot_cross_root_child_roles_or_leave_an_active_call() 
         child_scope,
         child_state,
         position=(0, 0),
-        parent_activation=activation,
     )
     with pytest.raises(SnapshotMismatchError, match="child graph evidence"):
         child_owner.freeze_root_evidence(lambda: ((), ScopedFrameIndex()))
@@ -1380,7 +1386,7 @@ def test_owner_evidence_cannot_cross_root_child_roles_or_leave_an_active_call() 
 
 @pytest.mark.asyncio
 async def test_child_call_is_one_shot_and_inert_after_release() -> None:
-    graph, _state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, _state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
     aborted_state = reduce_graph_run(
         child_state,
         AbortGraphRun(child_state.revision, GraphAbortReason("aborted")),
@@ -1391,7 +1397,6 @@ async def test_child_call_is_one_shot_and_inert_after_release() -> None:
         child_scope,
         aborted_state,
         position=(0, 0),
-        parent_activation=activation,
     )
     call = _FamilyDriverPrivateView.child_call(
         family_driver,
@@ -1425,17 +1430,17 @@ async def test_child_call_does_not_publish_a_child_whose_abort_was_not_committed
     class AbortCommitError(RuntimeError):
         pass
 
-    graph, _state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, _state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     original = AbortCommitError("abort commit failed")
-    published: list[ChildStateBinding] = []
+    published: list[ScopedStateBinding] = []
 
     async def reject_abort(transition: GraphTransition[str], /) -> GraphRunState:
         if isinstance(transition.command, AbortGraphRun):
             raise original
         return transition.candidate_state
 
-    def publish(binding: ChildStateBinding, _frames: ScopedFrameIndex[str]) -> None:
+    def publish(binding: ScopedStateBinding, _frames: ScopedFrameIndex[str]) -> None:
         published.append(binding)
 
     child_owner = graph_owner(
@@ -1444,7 +1449,6 @@ async def test_child_call_does_not_publish_a_child_whose_abort_was_not_committed
         child_state,
         commit=reject_abort,
         position=(0, 0),
-        parent_activation=activation,
         publisher=publish,
     )
     call = _FamilyDriverPrivateView.child_call(
@@ -1466,17 +1470,17 @@ async def test_child_call_does_not_publish_a_child_whose_abort_was_not_committed
 
 @pytest.mark.asyncio
 async def test_child_call_does_not_handoff_evidence_while_fence_keeps_lease() -> None:
-    graph, _state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, _state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     fence_error = RuntimeError("fence commit failed")
-    published: list[ChildStateBinding] = []
+    published: list[ScopedStateBinding] = []
 
     async def reject_fence(transition: GraphTransition[str], /) -> GraphRunState:
         if isinstance(transition.command, FenceGraphExecution):
             raise fence_error
         return transition.candidate_state
 
-    def publish(binding: ChildStateBinding, _frames: ScopedFrameIndex[str]) -> None:
+    def publish(binding: ScopedStateBinding, _frames: ScopedFrameIndex[str]) -> None:
         published.append(binding)
 
     child_owner = graph_owner(
@@ -1485,7 +1489,6 @@ async def test_child_call_does_not_handoff_evidence_while_fence_keeps_lease() ->
         leased_state(child_state),
         commit=reject_fence,
         position=(0, 0),
-        parent_activation=activation,
         publisher=publish,
     )
     call = _FamilyDriverPrivateView.child_call(
@@ -1507,7 +1510,7 @@ async def test_child_call_does_not_handoff_evidence_while_fence_keeps_lease() ->
 
 @pytest.mark.asyncio
 async def test_continued_owner_projects_a_terminal_failed_child_without_reexecution() -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
+    graph, state, _owner, _parent, child_scope, _activation, child_state = nested_runtime()
     failed_child = leased_state(child_state)
     execution = failed_child.execution
     assert execution is not None
@@ -1522,7 +1525,7 @@ async def test_continued_owner_projects_a_terminal_failed_child_without_reexecut
     root, _evidence_reader = await admit_continuation_root(
         graph,
         state,
-        (ChildStateBinding(child_scope, activation, failed_child),),
+        (ScopedStateBinding(child_scope, failed_child),),
     )
 
     try:
@@ -1542,7 +1545,7 @@ async def test_continued_owner_projects_a_terminal_failed_child_without_reexecut
 
 @pytest.mark.asyncio
 async def test_continued_owner_projects_a_completed_child_from_its_confirmed_boundary() -> None:
-    graph, state, _owner, parent, child_scope, activation, child_state = nested_runtime()
+    graph, state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
     child_graph = graph.nested_graphs[parent.node_id]
     claimed = leased_state(child_state)
     execution = claimed.execution
@@ -1570,7 +1573,7 @@ async def test_continued_owner_projects_a_completed_child_from_its_confirmed_bou
     root, _evidence_reader = await admit_continuation_root(
         graph,
         state,
-        (ChildStateBinding(child_scope, activation, completed),),
+        (ScopedStateBinding(child_scope, completed),),
         ScopedFrameIndex(child_boundaries=(boundary,)),
     )
 
@@ -1737,8 +1740,8 @@ async def test_first_setup_transition_failure_releases_without_aborting(
 async def test_existing_child_handoff_failure_cleans_a_constructed_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
-    binding = ChildStateBinding(child_scope, activation, child_state)
+    graph, state, _owner, _parent, child_scope, _activation, child_state = nested_runtime()
+    binding = ScopedStateBinding(child_scope, child_state)
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
 
@@ -1789,9 +1792,9 @@ async def test_existing_child_handoff_failure_cleans_a_constructed_candidate(
 async def test_transitioned_child_handoff_base_signal_releases_without_stale_abort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
+    graph, state, _owner, _parent, child_scope, _activation, child_state = nested_runtime()
     root_state = leased_state(state)
-    binding = ChildStateBinding(child_scope, activation, child_state)
+    binding = ScopedStateBinding(child_scope, child_state)
     _planned, fences = plan_fences(graph, lineage_states(root_state, (binding,)))
     calls: list[_ChildCallView] = []
     transitions: list[GraphTransition[str]] = []
@@ -1835,9 +1838,9 @@ async def test_transitioned_child_handoff_base_signal_releases_without_stale_abo
 async def test_child_constructor_failure_after_root_fence_preserves_the_confirmed_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    graph, state, _owner, _parent, child_scope, activation, child_state = nested_runtime()
+    graph, state, _owner, _parent, child_scope, _activation, child_state = nested_runtime()
     root_state = leased_state(state)
-    binding = ChildStateBinding(child_scope, activation, child_state)
+    binding = ScopedStateBinding(child_scope, child_state)
     _planned, fences = plan_fences(graph, lineage_states(root_state, (binding,)))
     transitions: list[GraphTransition[str]] = []
 
@@ -1896,11 +1899,7 @@ async def test_descendant_constructor_failure_aborts_each_constructed_candidate(
         None,
         project_start_graph_command(child_graph, child_scope.graph_run_id, parent),
     )
-    child_binding = ChildStateBinding(
-        child_scope,
-        StableActivation(scope_run, parent.superstep, parent.node_id),
-        child_state,
-    )
+    child_binding = ScopedStateBinding(child_scope, child_state)
     grandchild_parent = GraphActivationIdentity(
         child_state.run_id,
         child_state.superstep,
@@ -1915,11 +1914,7 @@ async def test_descendant_constructor_failure_aborts_each_constructed_candidate(
             grandchild_parent,
         ),
     )
-    grandchild_binding = ChildStateBinding(
-        grandchild_scope,
-        StableActivation(child_scope, grandchild_parent.superstep, grandchild_parent.node_id),
-        grandchild_state,
-    )
+    grandchild_binding = ScopedStateBinding(grandchild_scope, grandchild_state)
     transitions: list[GraphTransition[str]] = []
 
     async def commit(transition: GraphTransition[str], /) -> GraphRunState:

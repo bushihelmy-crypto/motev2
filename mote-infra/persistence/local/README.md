@@ -14,7 +14,11 @@ The project is in its bootstrap phase. No public commit, wire, RPC, or daemon st
     └── persistenced/    Configuration and standalone service composition
 
     tests/
-    └── package.rs   External package-import smoke test
+    ├── package.rs       External package-import smoke test
+    ├── unit.rs          Crate-level smoke tests
+    ├── integration.rs   Metadata and ownership-document checks
+    ├── architecture.rs  Non-speculative ownership and hygiene checks
+    └── complexity.rs    Exact production-code complexity ratchet
 
 These directories are candidate responsibilities used to advance the design discussion, not stable package contracts. Until the first consumer-driven storage vertical slice exists, architecture tests do not freeze this layout or its dependency direction, and external consumers must not rely on these modules as a committed API.
 
@@ -31,10 +35,20 @@ The project pins Rust 1.85.0 and declares Rust 1.85 as its MSRV in `Cargo.toml`.
     make format
     make check
 
-Install cargo-deny before running dependency license, source, and advisory checks:
+`make check` runs the same deterministic phases as Local Execution: structure,
+toolchain, formatting, Clippy, architecture, complexity, documentation, Cargo
+hygiene, licensing, focused tests, build, and package verification. See
+[`docs/testing.md`](docs/testing.md) for the individual targets.
+
+Install cargo-deny and detect-secrets before running the dependency, license,
+source, advisory, and secret checks:
 
     cargo install cargo-deny --version 0.19.7 --locked
+    python -m pip install detect-secrets==1.5.0
     make security
+
+The security target also requires `detect-secrets==1.5.0` and scans this
+package against the monorepo baseline.
 
 The root conformance directory owns cross-language and durable protocol contracts. Protocol work in this package must be accompanied by the corresponding conformance schema and cases.
 

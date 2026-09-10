@@ -172,6 +172,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphInputEvidence",
                 "GraphPublicationEvidence",
                 "ScopedFrameIndex",
+                "ScopedStateBinding",
                 "_GraphContinuation",
             }
         ),
@@ -481,7 +482,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
 
     assert (
         not {
-            "_PlannedState",
+            "ScopedStateBinding",
             "PlannedFence",
             "PlannedResume",
             "project_graph_result",
@@ -492,7 +493,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
     assert _symbol_owners(
         frozenset(
             {
-                "_PlannedState",
+                "ScopedStateBinding",
                 "PlannedFence",
                 "PlannedResume",
                 "GraphTransition",
@@ -500,7 +501,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
             }
         )
     ) == {
-        "_PlannedState": ("execution/invocation.py",),
+        "ScopedStateBinding": ("execution/run_context.py",),
         "PlannedFence": ("execution/invocation.py",),
         "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/commit.py",),

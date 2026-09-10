@@ -96,7 +96,6 @@ from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
     ChildBoundaryAvailabilityCoordinate,
-    ChildStateBinding,
     ConfirmedChildBoundary,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
@@ -104,6 +103,7 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    ScopedStateBinding,
     _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
@@ -337,13 +337,9 @@ def test_node_origin_marker_rejects_a_foreign_session() -> None:
 def test_lineage_rejects_a_child_binding_at_the_root_coordinate() -> None:
     state = running_state()
     scope_run = root_scope_run(state.run_id)
-    binding = ChildStateBinding(
-        scope_run,
-        StableActivation(scope_run, state.superstep, GraphNodeId("a")),
-        state,
-    )
+    binding = ScopedStateBinding(scope_run, state)
 
-    with pytest.raises(SnapshotMismatchError, match="repeats one scoped graph run"):
+    with pytest.raises(SnapshotMismatchError, match="requires a nested scope"):
         lineage_states(state, (binding,))
 
 
@@ -363,13 +359,13 @@ def test_fence_planning_rejects_a_child_state_without_its_parent() -> None:
     graph = nested_graph()
     parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent")
     parent_scope = root_scope_run(parent.run_id)
-    child_scope, activation, child = started_nested_child(
+    child_scope, _activation, child = started_nested_child(
         graph,
         parent,
         parent_scope,
         GraphNodeId("nested"),
     )
-    binding = ChildStateBinding(child_scope, activation, replace(child, parent=None))
+    binding = ScopedStateBinding(child_scope, replace(child, parent=None))
 
     with pytest.raises(SnapshotMismatchError, match="nested graph state does not match"):
         plan_fences(graph, lineage_states(parent, (binding,)))
@@ -393,14 +389,41 @@ def test_fence_planning_rejects_a_child_from_a_future_parent_frontier() -> None:
             future_parent,
         ),
     )
-    binding = ChildStateBinding(
-        child_scope,
-        StableActivation(parent_scope, future_parent.superstep, future_parent.node_id),
-        child,
-    )
+    binding = ScopedStateBinding(child_scope, child)
 
     with pytest.raises(SnapshotMismatchError, match="future parent frontier"):
         plan_fences(graph, lineage_states(parent, (binding,)))
+
+
+def test_planned_lineage_rechecks_root_and_nested_parent_shapes() -> None:
+    state = running_state()
+    root_lineage = lineage_states(state, ())
+    root_with_parent = replace(
+        root_lineage.bindings[0],
+        state=replace(
+            state,
+            parent=GraphActivationIdentity(state.run_id, 0, GraphNodeId("parent")),
+        ),
+    )
+    with pytest.raises(SnapshotMismatchError, match="root graph state cannot carry"):
+        _ = root_with_parent.parent_activation
+
+    graph = nested_graph()
+    parent = running_state(definition_id=graph.definition_id, frontier=("nested",), run_id="parent")
+    parent_scope = root_scope_run(parent.run_id)
+    child_scope, _activation, child = started_nested_child(
+        graph,
+        parent,
+        parent_scope,
+        GraphNodeId("nested"),
+    )
+    child_lineage = lineage_states(parent, (ScopedStateBinding(child_scope, child),))
+    child_without_parent = replace(
+        child_lineage.bindings[1],
+        state=replace(child, parent=None),
+    )
+    with pytest.raises(SnapshotMismatchError, match="missing its parent activation"):
+        _ = child_without_parent.parent_activation
 
 
 def test_resume_input_narrow_guards() -> None:
@@ -643,7 +666,7 @@ def test_child_projection_rejects_each_state_coordinate_mismatch(coordinate: str
     graph = nested_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
     activation = GraphActivationIdentity(state.run_id, state.superstep, GraphNodeId("nested"))
-    child_coordinate, stable_activation, child = started_nested_child(
+    child_coordinate, _stable_activation, child = started_nested_child(
         graph,
         state,
         root_scope_run(state.run_id),
@@ -657,7 +680,7 @@ def test_child_projection_rejects_each_state_coordinate_mismatch(coordinate: str
         "definition": replace(child, definition_id=GraphDefinitionId("other.child")),
         "version": replace(child, definition_version=GraphDefinitionVersion(2)),
     }[coordinate]
-    binding = ChildStateBinding(child_coordinate, stable_activation, mismatched)
+    binding = ScopedStateBinding(child_coordinate, mismatched)
 
     with pytest.raises((GraphStateTransitionError, InvalidExecutionSnapshotError, SnapshotMismatchError)):
         plan_fences(graph, lineage_states(state, (binding,)))
@@ -666,14 +689,14 @@ def test_child_projection_rejects_each_state_coordinate_mismatch(coordinate: str
 def test_child_projection_validates_terminal_state_before_projecting_variant() -> None:
     graph = nested_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
-    child_coordinate, stable_activation, child = started_nested_child(
+    child_coordinate, _stable_activation, child = started_nested_child(
         graph,
         state,
         root_scope_run(state.run_id),
         GraphNodeId("nested"),
     )
     corrupted = replace(child, status=GraphRunStatus.COMPLETED)
-    binding = ChildStateBinding(child_coordinate, stable_activation, corrupted)
+    binding = ScopedStateBinding(child_coordinate, corrupted)
 
     with pytest.raises((GraphStateTransitionError, InvalidExecutionSnapshotError), match="canonical empty position"):
         plan_fences(graph, lineage_states(state, (binding,)))
@@ -702,7 +725,7 @@ def test_running_awaiting_resume_child_remains_active_without_rebuild() -> None:
 def test_active_child_must_match_its_compiled_resume_codec() -> None:
     graph = nested_graph()
     state = reduce_graph_run(None, project_start_graph_command(graph, GraphRunId("run")))
-    child_coordinate, stable_activation, child = started_nested_child(
+    child_coordinate, _stable_activation, child = started_nested_child(
         graph,
         state,
         root_scope_run(state.run_id),
@@ -712,7 +735,7 @@ def test_active_child_must_match_its_compiled_resume_codec() -> None:
         child,
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("unexpected.input"), 1),
     )
-    binding = ChildStateBinding(child_coordinate, stable_activation, mismatched)
+    binding = ScopedStateBinding(child_coordinate, mismatched)
 
     with pytest.raises(SnapshotMismatchError, match="codec"):
         plan_fences(graph, lineage_states(state, (binding,)))
@@ -1537,11 +1560,7 @@ async def test_family_driver_projects_an_acknowledged_aborted_child() -> None:
         project_start_graph_command(child_graph, child_coordinate.graph_run_id, parent_activation),
     )
     aborted = reduce_graph_run(child, AbortGraphRun(child.revision, GraphAbortReason("child aborted")))
-    binding = ChildStateBinding(
-        child_coordinate,
-        StableActivation(scope_run, 0, GraphNodeId("nested")),
-        aborted,
-    )
+    binding = ScopedStateBinding(child_coordinate, aborted)
     root, _evidence_reader = await family_driver_module.admit_continued_root(
         graph,
         parent,

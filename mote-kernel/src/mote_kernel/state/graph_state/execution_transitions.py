@@ -36,6 +36,7 @@ from mote_kernel.state.graph_state.identity import (
     GraphJoinOccurrenceIdentity,
 )
 from mote_kernel.state.graph_state.model import (
+    GraphConfigCursor,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
@@ -52,7 +53,6 @@ from mote_kernel.state.graph_state.resource_reducer import (
 from mote_kernel.state.graph_state.routing import SelectGraphRoute
 from mote_kernel.state.graph_state.validation import (
     GraphStateTransitionError,
-    validate_graph_frontier,
     validated_graph_run_state,
 )
 
@@ -65,6 +65,17 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             for activation in activations
         )
     )
+    try:
+        if command.config_cursor is None:
+            config_cursor = GraphConfigCursor(
+                command.definition_id,
+                command.definition_version,
+                1,
+            )
+        else:
+            config_cursor = GraphConfigCursor.admit(command.config_cursor)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphStateTransitionError("graph start Config cursor is malformed") from error
     return validated_graph_run_state(
         GraphRunState(
             run_id=command.run_id,
@@ -75,6 +86,10 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             frontier=frontier,
             parent=command.parent,
             resume_input_codec=command.resume_input_codec,
+            config_revision=config_cursor.revision,
+            config_definition_id=config_cursor.definition_id,
+            config_definition_version=config_cursor.definition_version,
+            config_digest=config_cursor.digest,
         )
     )
 
@@ -419,6 +434,17 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
             raise GraphStateTransitionError("an interrupted node requires a resume input codec")
         settlement = InterruptedGraphNode(GraphNodeInterrupt(identity, outcome.request_payload))
 
+    next_config_cursor = state.config_cursor
+    if command.config_cursor is not None:
+        if not isinstance(outcome, SucceededGraphNodeOutcome):
+            raise GraphStateTransitionError("only a successful node settlement can carry a Config cursor")
+        try:
+            next_config_cursor = next_config_cursor.transition_to(command.config_cursor)
+        except TypeError as error:
+            raise GraphStateTransitionError("node settlement Config cursor is malformed") from error
+        except (AttributeError, ValueError) as error:
+            raise GraphStateTransitionError(str(error)) from error
+
     frontier = GraphFrontierState(
         tuple(
             GraphFrontierNode(
@@ -429,8 +455,6 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
             for node in state.frontier.nodes
         )
     )
-    validate_graph_frontier(state, frontier)
-
     resources = state.resources
     if resources is not None and any(item.node_id == node_id for item in resources.acquisitions):
         try:
@@ -456,6 +480,10 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
             execution=execution,
             resources=resources,
             settled_activations=settled_activations,
+            config_revision=next_config_cursor.revision,
+            config_definition_id=next_config_cursor.definition_id,
+            config_definition_version=next_config_cursor.definition_version,
+            config_digest=next_config_cursor.digest,
         )
     )
 

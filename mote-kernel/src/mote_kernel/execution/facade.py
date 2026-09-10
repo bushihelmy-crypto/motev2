@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, cast, overload
 from uuid import uuid4
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
@@ -104,11 +105,10 @@ from mote_kernel.execution.result import (
     _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
-    ChildStateBinding,
     ScopedFrameIndex,
+    ScopedStateBinding,
     _admit_continuation,
     _CompiledFamilyIdentity,
-    _continuation_recovered,
     _GraphContinuation,
 )
 from mote_kernel.state.graph_state import (
@@ -265,7 +265,12 @@ class Graph(Generic[GraphValueT]):
         output_name: str | None = None,
         /,
     ) -> NodeOutputRef[Never] | PredecessorOutputRef[Never] | PredecessorOutputRef[ValueT]:
-        """Reference either one fixed producer or the actual control predecessor."""
+        """Reference one fixed producer or the actual control predecessor.
+
+        A predecessor reference may be compiled with a graph-input case for
+        an explicit START activation; later activations still select the
+        committed routed predecessor publication.
+        """
 
         if isinstance(node_id_or_output_name, NodeOutputRef):
             if output_name is not None or node_id_or_output_name.descriptor is None:
@@ -678,6 +683,7 @@ class Graph(Generic[GraphValueT]):
         /,
         *,
         run_id: str | None = None,
+        activation_config: Config | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -691,6 +697,7 @@ class Graph(Generic[GraphValueT]):
         state: "Graph.State",
         continuation: "Graph.Continuation[GraphValueT]",
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
+        activation_config: Config | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -703,6 +710,7 @@ class Graph(Generic[GraphValueT]):
         *,
         state: "Graph.State",
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
+        activation_config: Config | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -714,6 +722,7 @@ class Graph(Generic[GraphValueT]):
         /,
         *,
         run_id: str | None = None,
+        activation_config: Config | None = None,
         state: "Graph.State | None" = None,
         continuation: "Graph.Continuation[GraphValueT] | None" = None,
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
@@ -728,6 +737,8 @@ class Graph(Generic[GraphValueT]):
                 raise SnapshotMismatchError("new graph run cannot carry state, continuation, or resume actions")
             invocation = _require_graph_values(values)
         elif values is _MISSING_RUN_VALUES and state is not None and run_id is None:
+            if activation_config is not None:
+                raise SnapshotMismatchError("continued graph runs cannot replace their activation Config")
             invocation = state
         else:
             raise SnapshotMismatchError("state runs require state, forbid run_id, and do not accept values")
@@ -737,7 +748,12 @@ class Graph(Generic[GraphValueT]):
         if isinstance(invocation, _GraphValues):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
-            input_candidate = admit_graph_input(graph, invocation)
+            if activation_config is not None:
+                try:
+                    require_config(activation_config)
+                except ConfigContractError as error:
+                    raise SnapshotMismatchError("activation Config is malformed") from error
+            input_candidate = admit_graph_input(graph, invocation, activation_config)
             root_admission = fresh_root(
                 graph,
                 scope_run,
@@ -747,14 +763,14 @@ class Graph(Generic[GraphValueT]):
             )
         else:
             if continuation is None:
-                child_states: tuple[ChildStateBinding, ...] = ()
+                child_states: tuple[ScopedStateBinding, ...] = ()
                 frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
                 recovered = True
             else:
                 snapshot = _admit_continuation(owner.family_identity, invocation, continuation)
                 child_states = snapshot.child_states
                 frames = snapshot.frames
-                recovered = _continuation_recovered(snapshot)
+                recovered = snapshot.recovered
             lineage = lineage_states(invocation, child_states)
             validate_context(graph, lineage, frames, recovered=recovered)
             planned_lineage, fences = plan_fences(graph, lineage)

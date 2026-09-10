@@ -40,6 +40,51 @@ def _require_identity(value: str, field: str) -> None:
         raise GraphStateTransitionError(f"{field} must be non-empty and trimmed")
 
 
+def _canonical_references(
+    references: tuple[ActivationReference, ...],
+    field: str,
+    *,
+    unhashable_message: str | None = None,
+) -> tuple[ActivationReference, ...]:
+    """Admit one canonical reference collection at the state boundary."""
+
+    for reference in references:
+        if type(reference) is not ActivationReference:
+            raise GraphStateTransitionError(f"{field} contains an invalid reference")
+        try:
+            activation = reference.activation
+        except (AttributeError, TypeError) as error:
+            raise GraphStateTransitionError(f"{field} contains an invalid reference") from error
+        if type(activation) is not GraphActivationIdentity:
+            raise GraphStateTransitionError(f"{field} contains an invalid activation identity")
+    try:
+        canonical = tuple(sorted(set(references), key=ActivationReference.canonical_key))
+    except AttributeError as error:
+        raise GraphStateTransitionError(f"{field} contains an invalid activation identity") from error
+    except TypeError as error:
+        raise GraphStateTransitionError(unhashable_message or f"{field} contains an unhashable value") from error
+    if references != canonical:
+        raise GraphStateTransitionError(f"{field} must be canonical and distinct")
+    return canonical
+
+
+def _reference_activation(reference: ActivationReference, field: str) -> GraphActivationIdentity:
+    """Validate identity fields after collection admission has fixed the shape."""
+
+    try:
+        activation = reference.activation
+        route = reference.route
+    except (AttributeError, TypeError) as error:
+        raise GraphStateTransitionError(f"{field} contains an invalid reference") from error
+    _require_identity(activation.run_id, f"{field} run identity")
+    if type(activation.superstep) is not int or activation.superstep < 0:
+        raise GraphStateTransitionError(f"{field} superstep must be a non-negative integer")
+    _require_identity(activation.node_id, f"{field} node identity")
+    if route is not None:
+        _require_identity(route, f"{field} route identity")
+    return activation
+
+
 def _validate_settled_activations(state: GraphRunState) -> None:
     """Validate the committed success ledger used by historical causes.
 
@@ -55,27 +100,14 @@ def _validate_settled_activations(state: GraphRunState) -> None:
     evidence = state.settled_activations
     if type(evidence) is not tuple:
         raise GraphStateTransitionError("settled activation evidence must be a tuple")
-    if any(type(reference) is not ActivationReference for reference in evidence):
-        raise GraphStateTransitionError("settled activation evidence contains an invalid reference")
-    try:
-        canonical = tuple(sorted(set(evidence), key=ActivationReference.canonical_key))
-    except TypeError as error:
-        raise GraphStateTransitionError("settled activation evidence contains an unhashable value") from error
-    if evidence != canonical:
-        raise GraphStateTransitionError("settled activation evidence must be canonical and distinct")
+    _canonical_references(evidence, "settled activation evidence")
     activation_ids = tuple(reference.activation for reference in evidence)
     if len(activation_ids) != len(set(activation_ids)):
         raise GraphStateTransitionError("settled activation evidence repeats one activation")
     for reference in evidence:
-        activation = reference.activation
-        if (
-            type(activation) is not GraphActivationIdentity
-            or activation.run_id != state.run_id
-            or activation.superstep > state.superstep
-        ):
+        activation = _reference_activation(reference, "settled activation evidence")
+        if activation.run_id != state.run_id or activation.superstep > state.superstep:
             raise GraphStateTransitionError("settled activation evidence has an invalid coordinate")
-        if reference.route is not None:
-            _require_identity(reference.route, "settled activation route identity")
         if activation.superstep == state.superstep:
             current = frontier_node(state.frontier, activation.node_id)
             if current is None or not isinstance(current.settlement, SucceededGraphNode):
@@ -127,33 +159,25 @@ def _validate_join_progress(state: GraphRunState) -> None:
         if occurrence.target_superstep <= state.superstep:
             raise GraphStateTransitionError("pending join occurrence must target a future superstep")
         arrived = join.arrived
-        if (
-            type(arrived) is not tuple
-            or not arrived
-            or any(type(reference) is not ActivationReference for reference in arrived)
-        ):
+        if type(arrived) is not tuple or not arrived:
             raise GraphStateTransitionError("join progress arrivals must be canonical and distinct")
-        try:
-            canonical_arrivals = tuple(sorted(set(arrived), key=ActivationReference.canonical_key))
-        except TypeError as error:
-            raise GraphStateTransitionError("join progress arrivals contain an unhashable value") from error
-        if arrived != canonical_arrivals:
-            raise GraphStateTransitionError("join progress arrivals must be canonical and distinct")
+        _canonical_references(
+            arrived,
+            "join progress arrivals",
+            unhashable_message="join progress arrivals contain an unhashable value",
+        )
         arrived_sources = tuple(reference.activation.node_id for reference in arrived)
         if len(arrived_sources) != len(set(arrived_sources)) or not set(arrived_sources) < set(sources):
             raise GraphStateTransitionError("join progress must contain partial arrivals")
         for reference in arrived:
-            activation = reference.activation
+            activation = _reference_activation(reference, "join progress arrivals")
             if (
-                type(activation) is not GraphActivationIdentity
-                or activation.run_id != occurrence.run_id
+                activation.run_id != occurrence.run_id
                 or activation.superstep >= state.superstep
                 or activation.superstep >= occurrence.target_superstep
                 or activation.node_id not in sources
             ):
                 raise GraphStateTransitionError("join progress contains an invalid predecessor arrival")
-            if reference.route is not None:
-                _require_identity(reference.route, "join arrival route identity")
             if reference not in state.settled_activations:
                 raise GraphStateTransitionError("join progress arrival lacks committed settlement evidence")
         if occurrence in seen:
@@ -197,22 +221,9 @@ def _validate_activation_cause(
     references = cause.references
     if type(references) is not tuple or not references:
         raise GraphStateTransitionError("routed activation cause requires non-empty references")
-    if any(type(reference) is not ActivationReference for reference in references):
-        raise GraphStateTransitionError("routed activation cause contains an invalid reference")
-    if any(type(reference.activation) is not GraphActivationIdentity for reference in references):
-        raise GraphStateTransitionError("routed activation cause contains an invalid activation identity")
+    _canonical_references(references, "routed activation cause references")
     for reference in references:
-        activation = reference.activation
-        _require_identity(activation.run_id, "activation cause run identity")
-        if type(activation.superstep) is not int or activation.superstep < 0:
-            raise GraphStateTransitionError("activation cause superstep must be a non-negative integer")
-        _require_identity(activation.node_id, "activation cause node identity")
-        if reference.route is not None:
-            _require_identity(reference.route, "activation cause route identity")
-    if references != tuple(sorted(set(references), key=ActivationReference.canonical_key)):
-        raise GraphStateTransitionError("routed activation cause references are not canonical and distinct")
-    for reference in cause.references:
-        activation = reference.activation
+        activation = _reference_activation(reference, "routed activation cause")
         if activation.run_id != state.run_id or activation.superstep >= state.superstep:
             raise GraphStateTransitionError("routed activation cause references a non-predecessor activation")
         if reference not in state.settled_activations:
@@ -290,6 +301,10 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         raise GraphStateTransitionError("graph definition version must be positive")
     if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
         raise GraphStateTransitionError("graph counters cannot be negative")
+    try:
+        _ = state.config_cursor
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphStateTransitionError("graph Config cursor is malformed") from error
     _validate_settled_activations(state)
     if state.completion_route is not None:
         _require_identity(state.completion_route, "graph completion route identity")

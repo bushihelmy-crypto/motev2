@@ -6,19 +6,20 @@ from typing import Generic, Never, TypeVar, cast
 
 import pytest
 
+from mote_kernel.config import ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef
 from mote_kernel.hooks import HookNode
 from mote_kernel.hooks.contract import (
+    HookActivationRequest,
     HookGraphValue,
     HookInvocationRequest,
     HookPayloadAdmission,
-    HookRequest,
     HookResult,
     HookStageResult,
 )
 from mote_kernel.hooks.identity import HookSlotId, HookStage
-from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
+from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
 from mote_kernel.invocation import InvocationTypeContract
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 from mote_kernel.think import ThinkNode
@@ -36,13 +37,15 @@ from mote_kernel.think.contract import (
     ModelBinding,
     PromptFrame,
     PromptStep,
+    RouterRequest,
+    RouterStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
     ThinkRequest,
     ThinkStep,
 )
-from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort
+from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort, RouterPort
 
 InvocationRequestT = TypeVar("InvocationRequestT")
 InvocationResultT = TypeVar("InvocationResultT")
@@ -64,36 +67,25 @@ class Command(HookGraphValue):
 
 
 @dataclass(frozen=True, slots=True)
-class Config:
-    marker: str = "x"
-
-
-@dataclass(frozen=True, slots=True)
 class Priority:
     index: int
 
 
-class ConfigSource:
-    def snapshot(self) -> HookConfigSnapshot[Config]:
-        return HookConfigSnapshot(Config())
-
-
-class PlanLoader:
-    def load(self, snapshot: HookConfigSnapshot[Config], /) -> HookPlan[Priority]:
-        return HookPlan(HookPriorityPlan(Priority(1)), HookPriorityPlan(Priority(2)), HookPriorityPlan(Priority(3)))
+def make_plan() -> HookPlan[Priority]:
+    return HookPlan(HookPriorityPlan(Priority(1)), HookPriorityPlan(Priority(2)))
 
 
 class HookRuntime:
     def __init__(self) -> None:
-        self.calls: list[HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State]] = []
+        self.calls: list[HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]]] = []
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 class Ports:
@@ -123,6 +115,14 @@ class Ports:
     ) -> CompactedContext[tuple[str, ...]]:
         self.calls.append("compact")
         return CompactedContext(request.context.snapshot, 1)
+
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        self.calls.append("router")
+        return ModelBinding("provider", "model", 1)
 
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         self.calls.append("inference")
@@ -187,6 +187,15 @@ class StageFailurePorts(Ports):
         self._maybe_fail("compact")
         return CompactedContext(request.context.snapshot, 1)
 
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        self.calls.append("router")
+        self._maybe_fail("router")
+        return ModelBinding("provider", "model", 1)
+
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         self.calls.append("inference")
         self._maybe_fail("inference")
@@ -240,6 +249,16 @@ class IsolatedPorts(Ports):
         self.events.append(("compact", payload))
         return CompactedContext(request.context.snapshot, 1)
 
+    async def route_model(
+        self,
+        request: RouterRequest[str, str, str, tuple[str, ...]],
+        /,
+    ) -> ModelBinding:
+        await asyncio.sleep(0)
+        payload = request.prompt.user.split(":", 1)[1]
+        self.events.append(("router", payload))
+        return ModelBinding("provider", f"model-{payload}", 1)
+
     async def infer(self, request: InferenceRequest[str, str, str, tuple[str, ...]], /) -> InferenceResult[str]:
         await asyncio.sleep(0)
         payload = request.prompt.user.split(":", 1)[1]
@@ -277,13 +296,14 @@ class FailingHookRuntime(HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
-        if request.request.node_id == GraphNodeId(self.failure_node):
+        step_name = type(request.payload.step).__name__.removesuffix("Step").lower()
+        if step_name == self.failure_node:
             raise RuntimeError(f"{self.failure_node} hook failure")
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 class BlockingHookRuntime(HookRuntime):
@@ -294,13 +314,13 @@ class BlockingHookRuntime(HookRuntime):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State], State],
+        request: HookInvocationRequest[Priority, ThinkFrame[ThinkStep, State]],
         /,
     ) -> HookStageResult[ThinkFrame[ThinkStep, State], Command]:
         self.calls.append(request)
         self.entered.set()
         await self.release.wait()
-        return HookStageResult(request.request.value, (Command(str(type(request.request.value.step).__name__)),))
+        return HookStageResult(request.payload, (Command(str(type(request.payload.step).__name__)),))
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,39 +340,37 @@ def make_hook(
     version: int = 1,
     node_id: str = "hook",
     stage: HookStage = HookStage.AFTER_NODE,
-) -> HookNode[Config, Priority, ThinkFrame[ThinkStep, State], State, Command]:
-    admission = HookPayloadAdmission[Config, Priority, ThinkFrame[ThinkStep, State], State, Command](
-        Config,
+) -> HookNode[Priority, ThinkFrame[ThinkStep, State], State, Command]:
+    admission = HookPayloadAdmission[Priority, ThinkFrame[ThinkStep, State], State, Command](
         Priority,
         ThinkFrame,
         State,
         Command,
     )
-    hook: HookNode[Config, Priority, ThinkFrame[ThinkStep, State], State, Command] = HookNode(
+    hook: HookNode[Priority, ThinkFrame[ThinkStep, State], State, Command] = HookNode(
         HookSlotId(
             GraphDefinitionId(definition_id),
             GraphDefinitionVersion(version),
             GraphNodeId(node_id),
             stage,
         ),
-        ConfigSource(),
-        PlanLoader(),
+        make_plan(),
         runtime,
         admission,
     )
     return hook
 
 
-def make_think(runtime: HookRuntime, ports: Ports) -> ThinkNode[Config, Priority, State, Command]:
+def make_think(runtime: HookRuntime, ports: Ports) -> ThinkNode[Priority, State, Command]:
     hook = make_hook(runtime)
     return ThinkNode(
         "think.test",
         prompt_port=ports,
         context_port=ports,
         compact_port=ports,
+        router_port=ports,
         inference_port=ports,
         command_port=ports,
-        model_binding=ModelBinding("provider", "model", 1),
         hook_state_type=State,
         hook=hook,
     )
@@ -366,14 +384,15 @@ async def test_full_graph() -> None:
     request = ThinkRequest(Payload("hello"), State(1))
     result = await think.run(Graph.values(request=request))
     assert isinstance(result, Graph.CompletedResult)
-    assert ports.calls == ["system", "placeholder", "user", "context", "compact", "inference", "command"]
-    assert len(runtime.calls) == 15
-    assert [str(call.request.node_id) for call in runtime.calls] == [
-        *(["prompt"] * 3),
-        *(["context"] * 3),
-        *(["compact"] * 3),
-        *(["inference"] * 3),
-        *(["command"] * 3),
+    assert ports.calls == ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"]
+    assert len(runtime.calls) == 12
+    assert [type(call.payload.step).__name__.removesuffix("Step").lower() for call in runtime.calls] == [
+        *(["prompt"] * 2),
+        *(["context"] * 2),
+        *(["compact"] * 2),
+        *(["router"] * 2),
+        *(["inference"] * 2),
+        *(["command"] * 2),
     ]
     output = cast(HookResult[ThinkFrame[object, State], Command], result.outputs["result"])
     assert type(output.value) is ThinkFrame
@@ -386,7 +405,7 @@ async def test_full_graph() -> None:
     # Hook commands belong to the terminal Hook activation's result.  Think
     # forwards that result unchanged; it does not merge commands from earlier
     # Hook activations into a second command stream.
-    assert output.commands == (Command("CommandStep"),) * 3
+    assert output.commands == (Command("CommandStep"),) * 2
     assert result.state.completion_route == "command"
 
 
@@ -405,10 +424,19 @@ async def test_full_graph() -> None:
             ),
         ),
         (
+            "router",
+            RouterStep(
+                PromptFrame("system", "placeholder", "user"),
+                CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
+            ),
+        ),
+        (
             "inference",
             InferenceStep(
                 PromptFrame("system", "placeholder", "user"),
                 CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
                 InferenceResult("answer"),
             ),
         ),
@@ -417,6 +445,7 @@ async def test_full_graph() -> None:
             CommandStep(
                 PromptFrame("system", "placeholder", "user"),
                 CompactedContext(("history",), 1),
+                ModelBinding("provider", "model", 1),
                 InferenceResult("answer"),
                 ThinkCoreResult("command"),
             ),
@@ -430,7 +459,7 @@ async def test_shared_hook_exports_the_originating_node_route(node_id: str, step
     hook = make_hook(runtime)
     state = State(1)
     frame = ThinkFrame(step, state)
-    request = HookRequest(frame, state, GraphNodeId(node_id))
+    request = HookActivationRequest(frame, state, GraphNodeId(node_id))
 
     result = await hook.run(Graph.values(request=request))
 
@@ -485,7 +514,7 @@ async def test_port_exception_stops_the_graph_before_later_stages() -> None:
     with pytest.raises(RuntimeError, match="context unavailable"):
         await think.run(Graph.values(request=ThinkRequest(Payload("failed"), State(3))))
     assert ports.calls == ["system", "placeholder", "user", "context"]
-    assert len(runtime.calls) == 3
+    assert len(runtime.calls) == 2
 
 
 def _think_with_hook(
@@ -494,21 +523,23 @@ def _think_with_hook(
     definition_id: str = "think.test",
     version: int = 1,
     hook_state_type: type[State] = State,
+    assembly_snapshot_key: ConfigSnapshotKey | None = None,
 ) -> object:
     ports = Ports()
     return cast(
         object,
-        ThinkNode[Config, Priority, State, Command](
+        ThinkNode[Priority, State, Command](
             definition_id,
             version=version,
             prompt_port=ports,
             context_port=ports,
             compact_port=ports,
+            router_port=ports,
             inference_port=ports,
             command_port=ports,
-            model_binding=ModelBinding("provider", "model", 1),
             hook_state_type=hook_state_type,
             hook=cast(Never, hook),
+            assembly_snapshot_key=assembly_snapshot_key,
         ),
     )
 
@@ -525,6 +556,12 @@ def test_think_rejects_non_hook_children_before_graph_assembly() -> None:
 
     with pytest.raises(ThinkContractError, match="shared HookNode"):
         _think_with_hook(not_a_hook)
+
+    with pytest.raises(ThinkContractError, match="assembly snapshot key"):
+        _think_with_hook(
+            make_hook(HookRuntime()),
+            assembly_snapshot_key=cast(ConfigSnapshotKey, object()),
+        )
 
 
 @pytest.mark.parametrize(
@@ -614,11 +651,12 @@ async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
             "user",
             "context",
             "compact",
+            "router",
             "inference",
             "command",
         ]
-    assert len(runtime.calls) == 30
-    assert {call.request.state.turn for call in runtime.calls} == {11, 22}
+    assert len(runtime.calls) == 24
+    assert {call.payload.hook_state.turn for call in runtime.calls} == {11, 22}
 
 
 @pytest.mark.asyncio
@@ -628,13 +666,18 @@ async def test_think_graph_keeps_two_concurrent_runs_isolated() -> None:
         ("system", ["system"], 0),
         ("placeholder", ["system", "placeholder"], 0),
         ("user", ["system", "placeholder", "user"], 0),
-        ("context", ["system", "placeholder", "user", "context"], 3),
-        ("compact", ["system", "placeholder", "user", "context", "compact"], 6),
-        ("inference", ["system", "placeholder", "user", "context", "compact", "inference"], 9),
+        ("context", ["system", "placeholder", "user", "context"], 2),
+        ("compact", ["system", "placeholder", "user", "context", "compact"], 4),
+        ("router", ["system", "placeholder", "user", "context", "compact", "router"], 6),
+        (
+            "inference",
+            ["system", "placeholder", "user", "context", "compact", "router", "inference"],
+            8,
+        ),
         (
             "command",
-            ["system", "placeholder", "user", "context", "compact", "inference", "command"],
-            12,
+            ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"],
+            10,
         ),
     ],
 )
@@ -657,7 +700,7 @@ async def test_think_port_failure_stops_at_the_failed_stage(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure_node", "expected_hook_calls"),
-    [("prompt", 1), ("context", 4), ("compact", 7), ("inference", 10), ("command", 13)],
+    [("prompt", 1), ("context", 3), ("compact", 5), ("router", 7), ("inference", 9), ("command", 11)],
 )
 async def test_think_hook_failure_stops_without_advancing_to_a_later_stage(
     failure_node: str,
@@ -675,8 +718,9 @@ async def test_think_hook_failure_stops_without_advancing_to_a_later_stage(
         "prompt": ["system", "placeholder", "user"],
         "context": ["system", "placeholder", "user", "context"],
         "compact": ["system", "placeholder", "user", "context", "compact"],
-        "inference": ["system", "placeholder", "user", "context", "compact", "inference"],
-        "command": ["system", "placeholder", "user", "context", "compact", "inference", "command"],
+        "router": ["system", "placeholder", "user", "context", "compact", "router"],
+        "inference": ["system", "placeholder", "user", "context", "compact", "router", "inference"],
+        "command": ["system", "placeholder", "user", "context", "compact", "router", "inference", "command"],
     }
     assert ports.calls == expected_port_calls[failure_node]
 
@@ -694,7 +738,7 @@ async def test_think_propagates_caller_cancellation_while_a_port_is_waiting() ->
         await task
 
     assert ports.calls == ["system", "placeholder", "user", "context"]
-    assert len(runtime.calls) == 3
+    assert len(runtime.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -739,7 +783,7 @@ async def test_nested_think_propagates_root_cancellation() -> None:
         await task
 
     assert ports.calls == ["system", "placeholder", "user", "context"]
-    assert len(runtime.calls) == 3
+    assert len(runtime.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -775,7 +819,7 @@ async def test_nested_think_forwards_terminal_result_and_all_commands_to_parent(
     assert type(output) is HookResult
     typed_output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], output)
     assert typed_output.node_id == GraphNodeId("command")
-    assert typed_output.commands == (Command("CommandStep"),) * 3
+    assert typed_output.commands == (Command("CommandStep"),) * 2
     assert type(typed_output.value.step) is CommandStep
 
 
@@ -819,6 +863,7 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
     prompt_frame: PromptFrame[str, str, str] = PromptFrame("system-typed", "placeholder-typed", "user-typed")
     context_frame: ContextFrame[tuple[str, ...]] = ContextFrame(("history-typed",))
     compacted: CompactedContext[tuple[str, ...]] = CompactedContext(("compacted-typed",), 2)
+    model = ModelBinding("provider", "typed-model", 1)
     inference_result: InferenceResult[str] = InferenceResult("answer-typed")
     core_result: ThinkCoreResult[str] = ThinkCoreResult("command-typed")
 
@@ -833,6 +878,10 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
         compacted,
         [],
     )
+    router = RecordingInvocation[
+        RouterRequest[str, str, str, tuple[str, ...]],
+        ModelBinding,
+    ](model, [])
     inference = RecordingInvocation[
         InferenceRequest[str, str, str, tuple[str, ...]],
         InferenceResult[str],
@@ -867,6 +916,13 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
             CompactedContext,
         ),
     )
+    router_port: RouterPort[RouterRequest[str, str, str, tuple[str, ...]]] = RouterPort(
+        router,
+        InvocationTypeContract[RouterRequest[str, str, str, tuple[str, ...]], ModelBinding](
+            RouterRequest,
+            ModelBinding,
+        ),
+    )
     inference_port: InferencePort[
         InferenceRequest[str, str, str, tuple[str, ...]],
         InferenceResult[str],
@@ -887,9 +943,9 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
         prompt_port=prompt_port,
         context_port=context_port,
         compact_port=compact_port,
+        router_port=router_port,
         inference_port=inference_port,
         command_port=command_port,
-        model_binding=ModelBinding("provider", "typed-model", 1),
         hook_state_type=State,
         hook=make_hook(runtime, definition_id="think.typed"),
     )
@@ -902,7 +958,8 @@ async def test_think_invocation_backed_ports_preserve_typed_requests_end_to_end(
     assert user.calls == [payload]
     assert context.calls == [ContextRequest(request, prompt_frame)]
     assert compact.calls == [CompactRequest(prompt_frame, context_frame)]
-    assert inference.calls == [InferenceRequest(prompt_frame, compacted, ModelBinding("provider", "typed-model", 1))]
+    assert router.calls == [RouterRequest(prompt_frame, compacted)]
+    assert inference.calls == [InferenceRequest(prompt_frame, compacted, model)]
     assert command.calls == [inference_result]
     output = cast(HookResult[ThinkFrame[ThinkStep, State], Command], result.outputs["result"])
     raw_step = output.value.step

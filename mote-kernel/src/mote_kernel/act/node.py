@@ -6,6 +6,7 @@ from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
 from mote_kernel.act.authorize import AuthorizeNode
+from mote_kernel.act.config import ActBinding, AuthorizeBinding
 from mote_kernel.act.contract import (
     ActContractError,
     ActHookCommand,
@@ -14,35 +15,39 @@ from mote_kernel.act.contract import (
     Allow,
     AuthorizationDecision,
     AuthorizationInterruptView,
-    AuthorizeNodeInput,
     Deny,
-    ExecuteNodeInput,
     HookStateProjection,
     OpaqueGraphFailureReason,
     ResolveStageValue,
     ResumedAuthorization,
-    SettleNodeInput,
 )
 from mote_kernel.act.execute import ExecuteNode
-from mote_kernel.act.identity import ActHookStage, ActSlotId
+from mote_kernel.act.failover import (
+    ActFailoverDecorators,
+    FailoverPortDecorator,
+    normalize_act_failover_decorators,
+)
+from mote_kernel.act.identity import ActHookStage, ActNodeId, ActSlotId, ActValueName
 from mote_kernel.act.port import (
     AuthorizePort,
     ExecutePort,
     ResolvePort,
     SettlementPort,
     ToolExchangeWriter,
+    capture_authorize_port_contract,
     require_act_port_contracts,
 )
 from mote_kernel.act.resolve import ResolveNode
 from mote_kernel.act.settle import SettleNode
+from mote_kernel.config import Config, ConfigActivation, ConfigSnapshotKey, require_config
 from mote_kernel.execution import Graph
-from mote_kernel.execution.graph.ports import TypedInputBinding
+from mote_kernel.execution.graph.ports import NodeOutputRef
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
+from mote_kernel.hooks.failover import HookFailoverDecorator, HookFailoverDecorators
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
 HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
@@ -50,7 +55,7 @@ HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
 
 class ActNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
+    Generic[PriorityConfigT, HookStateT, HookCommandT],
 ):
     """The four-stage Act graph with one shared Hook.
 
@@ -64,9 +69,52 @@ class ActNode(
 
     __slots__ = (
         "_admission",
+        "_assembly_snapshot_key",
         "_authorize_port",
+        "_failover",
         "_hook",
     )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+        *,
+        failover: ActFailoverDecorators | FailoverPortDecorator | None = None,
+        hook_failover: HookFailoverDecorators[
+            PriorityConfigT,
+            ActHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ]
+        | HookFailoverDecorator
+        | None = None,
+    ) -> ActNode[PriorityConfigT, HookStateT, HookCommandT]:
+        """Assemble Act from the complete config through its own projection."""
+
+        config = require_config(config)
+        selected = config.bind(ActBinding[HookStateT, HookCommandT]())
+        hook: HookNode[PriorityConfigT, ActHookEnvelope, HookStateT, HookCommandT] = HookNode[
+            PriorityConfigT,
+            ActHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ].from_config(config, selected.hook_slot, failover=hook_failover)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            resolve_port=selected.resolve_port,
+            authorize_port=selected.authorize_port,
+            execute_port=selected.execute_port,
+            settlement_port=selected.settlement_port,
+            exchange_writer=selected.exchange_writer,
+            hook=hook,
+            failure_reason=selected.failure_reason,
+            admission=selected.admission,
+            failover=failover,
+            assembly_snapshot_key=config.snapshot.key,
+        )
 
     def __init__(
         self,
@@ -79,7 +127,6 @@ class ActNode(
         settlement_port: SettlementPort,
         exchange_writer: ToolExchangeWriter,
         hook: HookNode[
-            ConfigT,
             PriorityConfigT,
             ActHookEnvelope,
             HookStateT,
@@ -87,17 +134,15 @@ class ActNode(
         ],
         failure_reason: OpaqueGraphFailureReason,
         admission: ActPayloadAdmission[HookStateT, HookCommandT],
+        failover: ActFailoverDecorators | FailoverPortDecorator | None = None,
+        assembly_snapshot_key: ConfigSnapshotKey | None = None,
     ) -> None:
         if type(admission) is not ActPayloadAdmission:
             raise ActContractError("ActNode requires an ActPayloadAdmission")
+        if assembly_snapshot_key is not None and type(assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ActContractError("ActNode assembly snapshot key is malformed")
         admission.admit_graph_failure_reason(failure_reason)
-        codec_id, codec_version = require_act_port_contracts(
-            resolve_port,
-            authorize_port,
-            execute_port,
-            settlement_port,
-            exchange_writer,
-        )
+        decorators = normalize_act_failover_decorators(failover)
 
         if type(hook) is not HookNode:
             raise ActContractError("ActNode requires one shared HookNode")
@@ -118,32 +163,70 @@ class ActNode(
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
-            or hook_slot.node_id != GraphNodeId("hook")
+            or hook_slot.node_id != GraphNodeId(str(ActNodeId.HOOK))
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ActContractError("ActNode shared HookSlotId does not match its definition")
 
-        slots = tuple(
-            ActSlotId(definition_id, version, node_id) for node_id in ("resolve", "authorize", "execute", "settle")
-        )
-        for slot in slots:
-            admission.admit_act_slot(slot)
+        for stage in ActHookStage:
+            admission.admit_act_slot(ActSlotId(definition_id, version, str(ActNodeId(stage))))
 
         # Construct every callable before touching the Graph builder so a
         # failed capability assembly cannot leave a partial definition.
-        resolve = ResolveNode[HookStateT, HookCommandT](resolve_port, admission)
-        authorize = AuthorizeNode[HookStateT, HookCommandT](authorize_port, failure_reason, admission)
-        execute = ExecuteNode[HookStateT, HookCommandT](execute_port, admission)
-        settle = SettleNode[HookStateT, HookCommandT](settlement_port, exchange_writer, admission)
+        # Each stage owns the one assembly-time decoration of its initial Port;
+        # this also keeps direct stage construction equivalent to parent-graph
+        # construction and prevents a wrapper from being applied twice.
+        resolve = ResolveNode[HookStateT, HookCommandT](
+            resolve_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        authorize = AuthorizeNode[HookStateT, HookCommandT](
+            authorize_port,
+            failure_reason,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        execute = ExecuteNode[HookStateT, HookCommandT](
+            execute_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        settle = SettleNode[HookStateT, HookCommandT](
+            settlement_port,
+            exchange_writer,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        decorated_resolve_port = resolve.resolve_port
+        decorated_authorize_port = authorize.authorize_port
+        decorated_execute_port = execute.execute_port
+        decorated_settlement_port = settle.settlement_port
+        decorated_exchange_writer = settle.exchange_writer
+        codec_id, codec_version = require_act_port_contracts(
+            decorated_resolve_port,
+            decorated_authorize_port,
+            decorated_execute_port,
+            decorated_settlement_port,
+            decorated_exchange_writer,
+            authorize_codec_binding=authorize.codec_binding,
+            authorize_codec_capture=authorize.codec_capture,
+        )
 
         super().__init__(definition_id, version=version)
-        self._authorize_port = authorize_port
+        self._assembly_snapshot_key = assembly_snapshot_key
+        self._authorize_port = decorated_authorize_port
+        self._failover = decorators
         self._hook = hook
         self._admission = admission
 
         request_binding = Graph.bind(
-            "request",
-            Graph.graph_input("request", ActRequest),
+            ActValueName.REQUEST,
+            Graph.graph_input(ActValueName.REQUEST, ActRequest),
         )
 
         # Authorize owns the sole codec/correlation capability.  Install it
@@ -152,79 +235,100 @@ class ActNode(
         self.set_resume_codec(
             codec_id,
             codec_version,
-            authorize_port.encode_graph_input,
-            authorize_port.decode_graph_input,
+            decorated_authorize_port.encode_graph_input,
+            decorated_authorize_port.decode_graph_input,
         )
 
         resolve_output = self.add_node(
-            "resolve",
+            ActNodeId.RESOLVE,
             resolve,
             inputs=(request_binding,),
-            input_type=ActRequest,
-            materialize=lambda values: values.get(request_binding),
-            output_name="hook_request",
-            output_type=HookRequest,
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(request_binding),
+                values.activation_config,
+            ),
+            output_name=ActValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
         self.add_node(
-            "hook",
+            ActNodeId.HOOK,
             hook,
-            inputs={"request": Graph.node_output(resolve_output)},
+            inputs={ActValueName.REQUEST: Graph.node_output(resolve_output)},
         )
         # Resolve the nested Hook's declared boundary through the generic
         # Graph API.  This preserves the child descriptor identity for every
         # downstream typed binding and for this graph's public output.
-        hook_result_ref = self.output_ref("hook", "result")
-        hook_result_binding = cast(
-            TypedInputBinding[HookResult[ActHookEnvelope, HookCommandT]],
-            Graph.bind("hook_result", hook_result_ref),
+        hook_result_ref = cast(
+            NodeOutputRef[HookResult[ActHookEnvelope, HookCommandT]],
+            self.output_ref(ActNodeId.HOOK, ActValueName.RESULT),
+        )
+        authorize_hook_result_binding = Graph.bind(ActValueName.HOOK_RESULT, hook_result_ref)
+        stage_hook_result_binding = Graph.bind(
+            ActValueName.HOOK_RESULT,
+            Graph.node_output(hook_result_ref),
         )
         self.add_node(
-            "authorize",
+            ActNodeId.AUTHORIZE,
             authorize,
             # The resume boundary may provide an explicit authorization input;
             # bind normal activations to the most recent Hook publication
             # selected by the compiler.  A predecessor-only binding cannot be
             # resumed with an override, so the fixed Hook source is required
             # for this interruptible stage.
-            inputs=(hook_result_binding,),
-            input_type=AuthorizeNodeInput,
-            materialize=lambda values: AuthorizeNodeInput(values.get(hook_result_binding)),
-            output_name="hook_request",
-            output_type=HookRequest,
+            inputs=(authorize_hook_result_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(authorize_hook_result_binding),
+                values.activation_config,
+            ),
+            output_name=ActValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
         self.add_node(
-            "execute",
+            ActNodeId.EXECUTE,
             execute,
-            inputs=(hook_result_binding,),
-            input_type=ExecuteNodeInput,
-            materialize=lambda values: ExecuteNodeInput(values.get(hook_result_binding)),
-            output_name="hook_request",
-            output_type=HookRequest,
+            inputs=(stage_hook_result_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(stage_hook_result_binding),
+                values.activation_config,
+            ),
+            output_name=ActValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
         self.add_node(
-            "settle",
+            ActNodeId.SETTLE,
             settle,
-            inputs=(hook_result_binding,),
-            input_type=SettleNodeInput,
-            materialize=lambda values: SettleNodeInput(values.get(hook_result_binding)),
-            output_name="hook_request",
-            output_type=HookRequest,
+            inputs=(stage_hook_result_binding,),
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(stage_hook_result_binding),
+                values.activation_config,
+            ),
+            output_name=ActValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
-        for business_node in ("resolve", "authorize", "execute", "settle"):
-            self.add_edge(business_node, "hook")
+        self.add_edge(Graph.START, ActNodeId.RESOLVE)
+        for business_node in (
+            ActNodeId.RESOLVE,
+            ActNodeId.AUTHORIZE,
+            ActNodeId.EXECUTE,
+            ActNodeId.SETTLE,
+        ):
+            self.add_edge(business_node, ActNodeId.HOOK)
         # Hook returns the current business node identity as its terminal
         # route.  Act owns the mapping from that identity to its next stage.
-        self.add_edge("hook", "resolve", "authorize")
-        self.add_edge("hook", "authorize", "execute")
-        self.add_edge("hook", "execute", "settle")
-        self.add_edge("hook", "settle", Graph.END)
-        self.set_outputs({"result": hook_result_ref})
+        self.add_edge(ActNodeId.HOOK, ActNodeId.RESOLVE, ActNodeId.AUTHORIZE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.AUTHORIZE, ActNodeId.EXECUTE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.EXECUTE, ActNodeId.SETTLE)
+        self.add_edge(ActNodeId.HOOK, ActNodeId.SETTLE, Graph.END)
+        self.set_outputs({ActValueName.RESULT: hook_result_ref})
 
     @property
     def hook(
         self,
     ) -> HookNode[
-        ConfigT,
         PriorityConfigT,
         ActHookEnvelope,
         HookStateT,
@@ -240,6 +344,7 @@ class ActNode(
         awaiting: Graph.AwaitingResumeResult[HookGraphValue],
         interrupt_id: str,
         decision: AuthorizationDecision,
+        activation_config: Config | None = None,
     ) -> Graph.ResumeAction[HookGraphValue]:
         """Build the typed Authorize override for a public awaiting result."""
 
@@ -257,7 +362,15 @@ class ActNode(
                 interrupt.request_payload,
             )
         )
-        resumed = self._authorize_port.build_resume_input(view, decision)
+        authorize_port = self._authorize_port
+        if activation_config is not None:
+            selected = activation_config.bind(AuthorizeBinding[HookStateT, HookCommandT]())
+            if selected.admission != self._admission:
+                raise ActContractError("Act config binding changed the compiled payload contract")
+            if self._assembly_snapshot_key is None or selected.snapshot_key != self._assembly_snapshot_key:
+                authorize_port = self._failover.authorize_port(selected.capability.port)
+                capture_authorize_port_contract(authorize_port)
+        resumed = authorize_port.build_resume_input(view, decision)
         resumed = self._admission.admit_authorization_input(resumed)
         if type(resumed.phase) is not ResumedAuthorization:
             raise ActContractError("AuthorizePort resume input must use ResumedAuthorization")
@@ -271,13 +384,13 @@ class ActNode(
         hook_result: HookResult[ActHookEnvelope, HookCommandT] = HookResult(
             envelope,
             (),
-            GraphNodeId("resolve"),
+            GraphNodeId(str(ActNodeId.RESOLVE)),
         )
         self._admission.admit_hook_result(hook_result)
         return self.resume_interrupted(
-            "authorize",
+            ActNodeId.AUTHORIZE,
             str(interrupt.interrupt_id),
-            Graph.values(hook_result=hook_result),
+            Graph.values(**{ActValueName.HOOK_RESULT: hook_result}),
             scope=tuple(str(segment) for segment in interrupt.scope),
         )
 

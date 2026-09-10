@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.unary.audio_transcription",
+  "description": "Execution sends an audio artifact to transcription and receives a finalized transcript DTO, distinct from LLM generation.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {
+    "kind": "media",
+    "schema_version": 1,
+    "operation_id": "op-transcription-1",
+    "model_id": "model.transcribe",
+    "operation": "audio_transcription",
+    "modality": "audio",
+    "mode": "unary",
+    "input": {"kind": "audio_transcription", "media": {"artifact_id": "source-audio-1", "revision": 1, "representation": "original", "kind": "audio", "mime_type": "audio/wav", "content_ref": "artifact:source-audio-1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "size": 1024}, "language": "en"},
+    "features": ["usage"],
+    "trace": {"trace_id": "trace-transcription-1", "generation_id": "generation-transcription-1", "model_call_id": "call-transcription-1"}
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "media_response",
+      "schema_version": 1,
+      "operation_id": "op-transcription-1",
+      "mode": "unary",
+      "terminal": {"outcome": "succeeded", "result": {"kind": "audio_transcription", "transcript": "Hello from the mote."}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-transcription-1",
+        "operation": "audio_transcription",
+        "modality": "audio",
+        "mode": "unary",
+        "correlation": {"trace_id": "trace-transcription-1", "generation_id": "generation-transcription-1", "model_call_id": "call-transcription-1"},
+        "model": {"requested_model_id": "model.transcribe", "provider": "fixture", "protocol": "provider.transcription.v1"},
+        "input": {"kind": "audio_transcription", "media": {"artifact_id": "source-audio-1", "revision": 1, "representation": "original", "kind": "audio", "mime_type": "audio/wav", "content_ref": "artifact:source-audio-1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "size": 1024}, "language": "en"},
+        "finish": {"reasons": ["completed"]},
+        "usage": {"availability": "reported", "input_audio_tokens": 12, "output_text_tokens": 5},
+        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000008"},
+        "timing": {"latency_ms": 95, "streamed": false, "chunk_count": 0},
+        "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}},
+        "attempts": []
+      },
+      "receipt": {"receipt_id": "receipt-transcription-1", "operation_id": "op-transcription-1", "revision": 1}
+    }
+  }
+}

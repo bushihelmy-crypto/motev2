@@ -135,3 +135,39 @@ async def test_graph_namespace_exposes_precise_public_execution_errors() -> None
             failed_scope=(),
             _seal=object(),
         )
+
+
+@pytest.mark.asyncio
+async def test_causal_start_input_is_replaced_by_the_actual_predecessor_on_reactivation() -> None:
+    graph = Graph[int]("causal.start.runtime")
+    received: list[int] = []
+
+    async def source(values: Graph.Values[int]) -> Graph.Values[int]:
+        return Graph.values(value=values["seed"])
+
+    async def loop(values: Graph.Values[int]) -> Graph.Outcome[int]:
+        received.append(values["value"])
+        return Graph.success(Graph.values(value=values["value"]), route="done")
+
+    graph.add_node(
+        "source",
+        source,
+        inputs={"seed": Graph.graph_input("seed", int)},
+        outputs={"value": int},
+    )
+    graph.add_node(
+        "loop",
+        loop,
+        inputs={"value": Graph.node_output("value")},
+        outputs={"value": int},
+    )
+    graph.add_edge("source", "loop")
+    graph.add_edge("loop", "done", Graph.END)
+    graph.add_edge(Graph.START, "loop")
+    graph.set_outputs({"result": Graph.node_output("loop", "value")})
+
+    result = await graph.run(Graph.values(seed=3, value=10))
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert received == [10, 3]
+    assert result.outputs["result"] == 3

@@ -1,0 +1,112 @@
+name: Local Execution quality
+
+on:
+  push:
+    paths:
+      - mote-runtime/execution/local/**
+      - mote-runtime/execution/remote/**
+      - mote-infra/invocation/**
+      - conformance/**
+      - .github/workflows/execution.yml
+  pull_request:
+    paths:
+      - mote-runtime/execution/local/**
+      - mote-runtime/execution/remote/**
+      - mote-infra/invocation/**
+      - conformance/**
+      - .github/workflows/execution.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: execution-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  execution-local-quality:
+    name: Local Execution pinned quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: mote-runtime/execution/local
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          components: clippy, rustfmt
+
+      - name: Run complete package gate
+        run: make check
+
+  execution-local-security:
+    name: Local Execution dependency and secret gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mote-runtime/execution/local
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          components: clippy, rustfmt
+
+      - name: Set up secret scanner
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install secret scanner
+        run: python -m pip install --disable-pip-version-check --no-warn-script-location detect-secre''ts==1.5.0
+        working-directory: .
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.7
+
+      - name: Run security gate
+        run: make security
+
+  execution-local-current-rust-tests:
+    name: Local Execution current stable tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        rust-channel: [stable]
+    defaults:
+      run:
+        working-directory: mote-runtime/execution/local
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up compatibility Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust-channel }}
+
+      - name: Run all targets on current stable
+        run: cargo +${{ matrix.rust-channel }} test --locked --all-targets --all-features

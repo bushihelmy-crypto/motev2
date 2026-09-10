@@ -4,6 +4,7 @@ from collections.abc import Awaitable
 from dataclasses import InitVar, dataclass
 from typing import Generic, Protocol, TypeVar
 
+from mote_kernel.config import Config, ConfigActivation
 from mote_kernel.execution.errors import GraphValueAdmissionError
 from mote_kernel.execution.graph.outcome import (
     GraphOutcome,
@@ -53,7 +54,13 @@ class NodeOperation(Protocol[InputT_contra, OutputT_co]):
         self,
         value: InputT_contra,
         /,
-    ) -> Awaitable[OutputT_co | _GraphSuccessOutcome[OutputT_co] | _GraphFailureOutcome | _GraphInterruptOutcome]: ...
+    ) -> Awaitable[
+        OutputT_co
+        | ConfigActivation[OutputT_co]
+        | _GraphSuccessOutcome[OutputT_co]
+        | _GraphFailureOutcome
+        | _GraphInterruptOutcome
+    ]: ...
 
 
 class NodeInvoker(Protocol[GraphValueT]):
@@ -96,6 +103,16 @@ class NodeInputs(Generic[GraphValueT]):
             binding.name,
             descriptor,
         )
+
+    @property
+    def activation_config(self) -> Config | None:
+        """The complete Config attached to this node activation, if any.
+
+        This is execution metadata.  Domain materializers use it to enrich
+        their local request carrier; ordinary graph values remain unchanged.
+        """
+
+        return self._frame.activation_config
 
 
 def _make_node_inputs(

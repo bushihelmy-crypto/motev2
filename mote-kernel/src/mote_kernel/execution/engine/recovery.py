@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum, auto
 from heapq import heappop, heappush
 from itertools import chain
-from typing import Generic, TypeAlias, TypeVar
+from typing import Generic, TypeAlias, TypeVar, cast
 
 from mote_kernel.execution.engine.admission import claim_resource_snapshot, select_executable_tasks
 from mote_kernel.execution.engine.claim_stage import project_claim_command
@@ -16,9 +16,10 @@ from mote_kernel.execution.engine.resume_input import (
 )
 from mote_kernel.execution.engine.routing import (
     PublicationHistoryWindow,
-    _success_routes,
+    graph_input_availability_coordinate,
     graph_outputs_available,
     project_routing_facts,
+    publication_availability_coordinate,
     publication_history_window,
     resolve_routing_facts,
 )
@@ -39,7 +40,6 @@ from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
     StableActivation,
     child_scope_run_for_activation,
-    stable_activation,
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import SUPERSEDED_CHILD_ABORT_REASON
@@ -49,30 +49,25 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    ScopedStateBinding,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
-    ActivationReference,
     CompleteGraphFrontier,
     FailedGraphNode,
     FenceGraphExecution,
     GraphActivationIdentity,
-    GraphDefinitionId,
-    GraphDefinitionVersion,
     GraphExecutionAttemptId,
     GraphFrontierNode,
     GraphFrontierStatus,
     GraphInterruptId,
     GraphJoinProgress,
     GraphNodeId,
-    GraphResumeInputCodecId,
     GraphRouteId,
     GraphRunState,
     GraphRunStatus,
     OverrideGraphNodeInput,
     PendingGraphNode,
-    ResourceId,
-    ResourceSnapshot,
     RoutedActivationCause,
     SelectGraphRoute,
     StartActivationCause,
@@ -128,72 +123,6 @@ class RecoveryFrontierNode:
     settlement: RecoverySettlementKind
     route: GraphRouteId | None = None
     interrupt_id: GraphInterruptId | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceLockCoordinate:
-    resource_id: ResourceId
-    owner: GraphNodeId | None
-    waiters: tuple[GraphNodeId, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceAcquisitionCoordinate:
-    node_id: GraphNodeId
-    required: tuple[ResourceId, ...]
-    acquired: tuple[ResourceId, ...]
-    waiting_for: ResourceId | None
-
-
-@dataclass(frozen=True, slots=True)
-class ResourceControlCoordinate:
-    locks: tuple[ResourceLockCoordinate, ...]
-    acquisitions: tuple[ResourceAcquisitionCoordinate, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ExecutionControlCoordinate:
-    generation: int
-    attempt_id: GraphExecutionAttemptId
-
-
-@dataclass(frozen=True, slots=True)
-class ScopeControlStateCoordinate:
-    scope_run: ScopeRunCoordinate
-    definition_id: GraphDefinitionId
-    definition_version: GraphDefinitionVersion
-    status: GraphRunStatus
-    superstep: int
-    execution_sequence: int
-    frontier: tuple[RecoveryFrontierNode, ...]
-    join_progress: tuple[GraphJoinProgress, ...]
-    resources: ResourceControlCoordinate | None
-    execution: ExecutionControlCoordinate | None
-    resume_codec_id: GraphResumeInputCodecId | None
-    resume_codec_version: int | None
-    parent: GraphActivationIdentity | None
-    revision: int
-    settled_activations: tuple[ActivationReference, ...] = ()
-    completion_route: GraphRouteId | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ChildControlStateCoordinate:
-    definition_id: GraphDefinitionId
-    definition_version: GraphDefinitionVersion
-    status: GraphRunStatus
-    superstep: int
-    execution_sequence: int
-    frontier: tuple[RecoveryFrontierNode, ...]
-    join_progress: tuple[GraphJoinProgress, ...]
-    resources: ResourceControlCoordinate | None
-    execution: ExecutionControlCoordinate | None
-    resume_codec_id: GraphResumeInputCodecId | None
-    resume_codec_version: int | None
-    parent: GraphActivationIdentity
-    revision: int
-    settled_activations: tuple[ActivationReference, ...] = ()
-    completion_route: GraphRouteId | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,9 +212,13 @@ class RecoveryAvailabilityCoordinates(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class ChildRecoveryDisposition:
-    child_scope_run: ScopeRunCoordinate
-    control: ChildControlStateCoordinate | None
+class MissingChildBinding:
+    """A nested scope that has no durable state binding yet."""
+
+    scope_run: ScopeRunCoordinate
+
+
+ChildRecoveryDisposition: TypeAlias = MissingChildBinding | ScopedStateBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +229,7 @@ class AdmittedResumeFact:
 
 @dataclass(frozen=True, slots=True)
 class RecoveryTransferState(Generic[GraphValueT]):
-    control: ScopeControlStateCoordinate
+    binding: ScopedStateBinding
     limits: ExecutionLimits
     live: tuple[GraphNodeId, ...]
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
@@ -328,21 +261,14 @@ class _ScopeBoundaryKind(IntEnum):
 class _ScopeBoundary(Generic[GraphValueT]):
     kind: _ScopeBoundaryKind
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
-    control: ScopeControlStateCoordinate
-    state: GraphRunState = field(compare=False, repr=False, hash=False)
+    binding: ScopedStateBinding
     completion_route_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryStateBinding:
-    scope_run: ScopeRunCoordinate
-    state: GraphRunState
-
-
-@dataclass(frozen=True, slots=True)
 class RecoveryInvocationSeed(Generic[GraphValueT]):
-    root: RecoveryStateBinding
-    children: tuple[RecoveryStateBinding, ...]
+    root: ScopedStateBinding
+    children: tuple[ScopedStateBinding, ...]
     frames: ScopedFrameIndex[GraphValueT] = field(compare=False, repr=False, hash=False)
     limits: ExecutionLimits
     admitted_actions: tuple[AdmittedResumeFact, ...] = ()
@@ -350,7 +276,7 @@ class RecoveryInvocationSeed(Generic[GraphValueT]):
 
 @dataclass(frozen=True, slots=True)
 class _RecoveryWorkItem(Generic[GraphValueT]):
-    state: GraphRunState = field(repr=False)
+    binding: ScopedStateBinding = field(repr=False)
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
     live: tuple[GraphNodeId, ...] = ()
     children: tuple[ChildRecoveryDisposition, ...] = ()
@@ -408,51 +334,16 @@ class _RecoveryProofBudget:
 
 @dataclass(frozen=True, slots=True)
 class _RecoveryFamily(Generic[GraphValueT]):
-    bindings: tuple[RecoveryStateBinding, ...]
+    bindings: tuple[ScopedStateBinding, ...]
     limits: ExecutionLimits
     admitted_actions: tuple[AdmittedResumeFact, ...]
     budget: _RecoveryProofBudget
-    # Keep the already-confirmed immutable frames available for reproducing a
-    # nested result selector.  This is invocation evidence, not a second
-    # state/store; newly simulated children simply have no matching frame.
-    frames: ScopedFrameIndex[GraphValueT] = field(
-        default_factory=ScopedFrameIndex,
-        compare=False,
-        repr=False,
-        hash=False,
-    )
 
-    def binding(self, coordinate: ScopeRunCoordinate) -> RecoveryStateBinding | None:
+    def binding(self, coordinate: ScopeRunCoordinate) -> ScopedStateBinding | None:
         return next((binding for binding in self.bindings if binding.scope_run == coordinate), None)
 
     def action_node_ids(self) -> tuple[GraphNodeId, ...]:
         return tuple(sorted({action.target.node_id for action in self.admitted_actions}))
-
-
-def _resource_coordinate(snapshot: ResourceSnapshot | None) -> ResourceControlCoordinate | None:
-    if snapshot is None:
-        return None
-    return ResourceControlCoordinate(
-        tuple(ResourceLockCoordinate(lock.resource_id, lock.owner, lock.waiters) for lock in snapshot.resources),
-        tuple(
-            ResourceAcquisitionCoordinate(
-                acquisition.node_id,
-                acquisition.required,
-                acquisition.acquired,
-                acquisition.waiting_for,
-            )
-            for acquisition in snapshot.acquisitions
-        ),
-    )
-
-
-def _execution_coordinate(state: GraphRunState) -> ExecutionControlCoordinate | None:
-    if state.execution is None:
-        return None
-    return ExecutionControlCoordinate(
-        state.execution.token.generation,
-        state.execution.token.attempt_id,
-    )
 
 
 def _activation_cause_coordinate(state: GraphRunState, node: GraphFrontierNode) -> RecoveryActivationCause:
@@ -508,56 +399,6 @@ def _settlement_coordinate(state: GraphRunState, node: GraphFrontierNode) -> Rec
     )
 
 
-def _scope_control(state: GraphRunState, scope_run: ScopeRunCoordinate) -> ScopeControlStateCoordinate:
-    if state.run_id != scope_run.graph_run_id:
-        raise SnapshotMismatchError("recovery scope-run identity does not match authoritative state")
-    codec = state.resume_input_codec
-    return ScopeControlStateCoordinate(
-        scope_run,
-        state.definition_id,
-        state.definition_version,
-        state.status,
-        state.superstep,
-        state.execution_sequence,
-        tuple(_settlement_coordinate(state, node) for node in state.frontier.nodes),
-        state.join_progress,
-        _resource_coordinate(state.resources),
-        _execution_coordinate(state),
-        codec.codec_id if codec is not None else None,
-        codec.version if codec is not None else None,
-        state.parent,
-        state.revision,
-        state.settled_activations,
-        state.completion_route,
-    )
-
-
-def _child_disposition_from_control(control: ScopeControlStateCoordinate) -> ChildRecoveryDisposition:
-    parent = control.parent
-    if parent is None:
-        raise SnapshotMismatchError("nested recovery state is missing its parent activation")
-    return ChildRecoveryDisposition(
-        control.scope_run,
-        ChildControlStateCoordinate(
-            control.definition_id,
-            control.definition_version,
-            control.status,
-            control.superstep,
-            control.execution_sequence,
-            control.frontier,
-            control.join_progress,
-            control.resources,
-            control.execution,
-            control.resume_codec_id,
-            control.resume_codec_version,
-            parent,
-            control.revision,
-            control.settled_activations,
-            control.completion_route,
-        ),
-    )
-
-
 def _atom(value: str) -> str:
     return f"{len(value)}:{value}"
 
@@ -571,26 +412,28 @@ def _coordinate_parts(scope_run: ScopeRunCoordinate) -> tuple[str, ...]:
 
 
 def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> RecoveryTraversalKey:
+    graph_state = state.binding.state
     parts: list[str] = [
         str(state.limits.max_supersteps),
         str(state.limits.max_parallel_tasks),
-        *_coordinate_parts(state.control.scope_run),
-        str(state.control.status.value),
-        str(state.control.superstep),
-        str(state.control.execution_sequence),
-        str(state.control.revision),
+        *_coordinate_parts(state.binding.scope_run),
+        str(graph_state.status.value),
+        str(graph_state.superstep),
+        str(graph_state.execution_sequence),
+        str(graph_state.revision),
     ]
-    for node in state.control.frontier:
+    for node in graph_state.frontier.nodes:
+        projected = _settlement_coordinate(graph_state, node)
         parts.extend(
             (
-                _atom(node.node_id),
-                str(node.cause.kind.value),
-                str(node.settlement.value),
-                _atom(node.route or ""),
-                _atom(node.interrupt_id or ""),
+                _atom(projected.node_id),
+                str(projected.cause.kind.value),
+                str(projected.settlement.value),
+                _atom(projected.route or ""),
+                _atom(projected.interrupt_id or ""),
             )
         )
-        for reference in node.cause.references:
+        for reference in projected.cause.references:
             parts.extend(
                 (
                     str(reference.predecessor_distance),
@@ -598,7 +441,7 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
                     _atom(reference.route or ""),
                 )
             )
-    for reference in state.control.settled_activations:
+    for reference in graph_state.settled_activations:
         parts.extend(
             (
                 _atom(reference.activation.run_id),
@@ -608,9 +451,7 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
             )
         )
     pending = tuple(
-        node.node_id
-        for node in state.control.frontier
-        if node.settlement in (RecoverySettlementKind.PENDING_MATERIALIZED, RecoverySettlementKind.PENDING_OVERRIDE)
+        node.node_id for node in graph_state.frontier.nodes if isinstance(node.settlement, PendingGraphNode)
     )
     resource_waiting = tuple(node_id for node_id in pending if node_id not in state.live)
     for positions in (state.live, resource_waiting):
@@ -631,14 +472,15 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
     for coordinate in state.availability.child_boundaries:
         parts.extend((*_coordinate_parts(coordinate.child_scope_run), str(coordinate.descriptor)))
     for child in state.children:
-        parts.extend((*_coordinate_parts(child.child_scope_run), str(child.control is not None)))
-        if child.control is not None:
+        parts.extend((*_coordinate_parts(child.scope_run), str(isinstance(child, ScopedStateBinding))))
+        if isinstance(child, ScopedStateBinding):
+            child_state = child.state
             parts.extend(
                 (
-                    str(child.control.status.value),
-                    str(child.control.superstep),
-                    str(child.control.execution_sequence),
-                    str(child.control.revision),
+                    str(child_state.status.value),
+                    str(child_state.superstep),
+                    str(child_state.execution_sequence),
+                    str(child_state.revision),
                 )
             )
     for action in state.admitted_actions:
@@ -657,16 +499,15 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
 
 
 def _transfer_state(
-    scope_run: ScopeRunCoordinate,
     item: _RecoveryWorkItem[GraphValueT],
     family: _RecoveryFamily[GraphValueT],
 ) -> RecoveryTransferState[GraphValueT]:
     return RecoveryTransferState(
-        _scope_control(item.state, scope_run),
+        item.binding,
         family.limits,
         tuple(sorted(item.live)),
         item.availability,
-        tuple(sorted(item.children, key=lambda child: child.child_scope_run)),
+        tuple(sorted(item.children, key=lambda child: child.scope_run)),
         family.admitted_actions,
         tuple(sorted(item.invocation_new_children)),
         item.completion_route_known,
@@ -676,10 +517,11 @@ def _transfer_state(
 def _recovery_cycle_signature(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
-    scope_run: ScopeRunCoordinate,
     window: PublicationHistoryWindow,
 ) -> _RecoveryCycleSignature | None:
-    state = item.state
+    binding = item.binding
+    state = binding.state
+    scope_run = binding.scope_run
     if state.execution is not None or item.live or item.children:
         return None
 
@@ -766,21 +608,6 @@ def _recovery_cycle_signature(
     )
 
 
-def _publication_coordinate(
-    graph: CompiledGraph[GraphValueT],
-    scope_run: ScopeRunCoordinate,
-    state: GraphRunState,
-    node_id: GraphNodeId,
-) -> PublicationAvailabilityCoordinate[GraphValueT]:
-    return PublicationAvailabilityCoordinate(
-        stable_activation(
-            scope_run,
-            GraphActivationIdentity(state.run_id, state.superstep, node_id),
-        ),
-        graph.transition.publications[node_id].identity,
-    )
-
-
 def _select_live(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -800,11 +627,12 @@ def _select_live(
 
 def _initial_children(
     graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
+    binding: ScopedStateBinding,
     family: _RecoveryFamily[GraphValueT],
     invocation_new: tuple[GraphNodeId, ...],
 ) -> tuple[ChildRecoveryDisposition, ...]:
+    state = binding.state
+    scope_run = binding.scope_run
     dispositions: list[ChildRecoveryDisposition] = []
     for node_id in pending_node_ids(state.frontier):
         child_graph = graph.nested_graphs.get(node_id)
@@ -812,31 +640,31 @@ def _initial_children(
             continue
         parent = GraphActivationIdentity(state.run_id, state.superstep, node_id)
         coordinate = child_scope_run_for_activation(scope_run, parent)
-        binding = family.binding(coordinate)
-        if binding is None and node_id not in invocation_new:
+        child_binding = family.binding(coordinate)
+        if child_binding is None and node_id not in invocation_new:
             raise GraphValueUnavailableError(
                 f"resume actions {family.action_node_ids()!r} lack child snapshot/nested boundary at {coordinate!r}"
             )
-        if binding is None:
-            disposition = ChildRecoveryDisposition(coordinate, None)
+        if child_binding is None:
+            disposition = MissingChildBinding(coordinate)
         else:
-            disposition = _child_disposition_from_control(_scope_control(binding.state, coordinate))
+            disposition = child_binding
+            if disposition.state.parent is None:
+                raise SnapshotMismatchError("nested recovery state is missing its parent activation")
         dispositions.append(disposition)
-    return tuple(sorted(dispositions, key=lambda disposition: disposition.child_scope_run))
+    return tuple(sorted(dispositions, key=lambda disposition: disposition.scope_run))
 
 
 def _boundary(
     kind: _ScopeBoundaryKind,
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
+    binding: ScopedStateBinding,
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
     completion_route_known: bool = True,
 ) -> _ScopeBoundary[GraphValueT]:
     return _ScopeBoundary(
         kind,
         availability,
-        _scope_control(state, scope_run),
-        state,
+        binding,
         completion_route_known,
     )
 
@@ -859,7 +687,6 @@ def _completed_child_outcomes(
     node_id: GraphNodeId,
     child_graph: CompiledGraph[GraphValueT],
     boundary: _ScopeBoundary[GraphValueT],
-    family: _RecoveryFamily[GraphValueT],
 ) -> tuple[_NestedOutcome[GraphValueT], ...]:
     """Project one completed child and preserve its terminal return route.
 
@@ -871,18 +698,17 @@ def _completed_child_outcomes(
 
     availability = boundary.availability
     boundary_coordinate: ChildBoundaryAvailabilityCoordinate[GraphValueT] = ChildBoundaryAvailabilityCoordinate(
-        boundary.control.scope_run, child_graph.graph_output_descriptor.identity
+        boundary.binding.scope_run, child_graph.graph_output_descriptor.identity
     )
     availability = availability.with_child_boundary(boundary_coordinate)
     projected_boundary = _ScopeBoundary(
         boundary.kind,
         availability,
-        boundary.control,
-        boundary.state,
+        boundary.binding,
         boundary.completion_route_known,
     )
     if boundary.completion_route_known:
-        return (_NestedOutcome(node_id, projected_boundary, boundary.state.completion_route, True),)
+        return (_NestedOutcome(node_id, projected_boundary, boundary.binding.state.completion_route, True),)
 
     # A simulated nested child has no callable output frame from which its
     # terminal exported route could be observed.  If the parent node declares
@@ -902,27 +728,32 @@ def _completed_child_outcomes(
 
 def _child_outcomes(
     parent_graph: CompiledGraph[GraphValueT],
-    parent_state: GraphRunState,
-    parent_scope_run: ScopeRunCoordinate,
+    parent_binding: ScopedStateBinding,
     node_id: GraphNodeId,
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
     family: _RecoveryFamily[GraphValueT],
 ) -> tuple[_NestedOutcome[GraphValueT], ...]:
     child_graph = parent_graph.nested_graphs[node_id]
+    parent_state = parent_binding.state
+    parent_scope_run = parent_binding.scope_run
     parent = GraphActivationIdentity(parent_state.run_id, parent_state.superstep, node_id)
     coordinate = child_scope_run_for_activation(parent_scope_run, parent)
-    binding = family.binding(coordinate)
-    if binding is None:
+    child_binding = family.binding(coordinate)
+    if child_binding is None:
         child_state = reduce_graph_run(
             None,
             project_start_graph_command(child_graph, coordinate.graph_run_id, parent),
         )
-        child_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = GraphInputAvailabilityCoordinate(
-            coordinate, child_graph.graph_input_descriptor.identity
+        child_binding = ScopedStateBinding(coordinate, child_state)
+        child_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = graph_input_availability_coordinate(
+            child_graph,
+            coordinate,
         )
         child_availability = availability.with_graph_input(child_input_coordinate)
     else:
-        child_state = binding.state
+        child_state = child_binding.state
+        if child_state.run_id != coordinate.graph_run_id:
+            raise SnapshotMismatchError("child recovery snapshot has an inconsistent scope-run identity")
         if child_state.parent != parent:
             raise SnapshotMismatchError("child recovery snapshot does not match its parent activation")
         child_availability = availability
@@ -939,38 +770,34 @@ def _child_outcomes(
             )
         boundary = _boundary(
             _ScopeBoundaryKind.COMPLETED,
-            child_state,
-            coordinate,
+            child_binding,
             child_availability,
         )
-        return _completed_child_outcomes(parent_graph, node_id, child_graph, boundary, family)
+        return _completed_child_outcomes(parent_graph, node_id, child_graph, boundary)
     if child_state.status is GraphRunStatus.FAILED:
         boundary = _boundary(
             _ScopeBoundaryKind.FAILED,
-            child_state,
-            coordinate,
+            child_binding,
             child_availability,
         )
         return (_NestedOutcome(node_id, boundary),)
     if child_state.status is GraphRunStatus.ABORTED:
         boundary = _boundary(
             _ScopeBoundaryKind.ABORTED,
-            child_state,
-            coordinate,
+            child_binding,
             child_availability,
         )
         return (_NestedOutcome(node_id, boundary),)
     boundaries = _prove_scope(
         child_graph,
-        child_state,
-        coordinate,
+        child_binding,
         child_availability,
         family,
     )
     outcomes: list[_NestedOutcome[GraphValueT]] = []
     for boundary in boundaries:
         if boundary.kind is _ScopeBoundaryKind.COMPLETED:
-            outcomes.extend(_completed_child_outcomes(parent_graph, node_id, child_graph, boundary, family))
+            outcomes.extend(_completed_child_outcomes(parent_graph, node_id, child_graph, boundary))
         else:
             outcomes.append(_NestedOutcome(node_id, boundary))
     return tuple(outcomes)
@@ -978,8 +805,7 @@ def _child_outcomes(
 
 def _nested_outcome_plans(
     graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
+    binding: ScopedStateBinding,
     node_ids: tuple[GraphNodeId, ...],
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
     family: _RecoveryFamily[GraphValueT],
@@ -990,8 +816,7 @@ def _nested_outcome_plans(
         for plan in plans:
             outcomes = _child_outcomes(
                 graph,
-                state,
-                scope_run,
+                binding,
                 node_id,
                 plan.availability,
                 family,
@@ -1010,10 +835,11 @@ def _nested_outcome_plans(
 
 def _settle_nested_outcomes(
     graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
+    binding: ScopedStateBinding,
     combination: _NestedCombination[GraphValueT],
 ) -> tuple[GraphRunState, RecoveryAvailabilityCoordinates[GraphValueT]]:
+    state = binding.state
+    scope_run = binding.scope_run
     current = state
     availability = combination.availability
     for outcome in combination.outcomes:
@@ -1029,7 +855,11 @@ def _settle_nested_outcomes(
                 ),
             )
             availability = availability.with_publication(
-                _publication_coordinate(graph, scope_run, previous, outcome.node_id)
+                publication_availability_coordinate(
+                    graph,
+                    scope_run,
+                    GraphActivationIdentity(previous.run_id, previous.superstep, outcome.node_id),
+                )
             )
         elif outcome.boundary.kind is _ScopeBoundaryKind.FAILED:
             current = _settle_recovery_child_failure(
@@ -1066,10 +896,11 @@ def _settle_recovery_child_failure(
     return reduce_graph_run(state, project_failure_settlement(state, node_id, reason))
 
 
-def _child_control_awaits_resume(control: ChildControlStateCoordinate | None) -> bool:
-    if control is None or control.status is not GraphRunStatus.RUNNING:
+def _child_awaits_resume(binding: ScopedStateBinding) -> bool:
+    state = binding.state
+    if state.status is not GraphRunStatus.RUNNING:
         return False
-    kinds = tuple(node.settlement for node in control.frontier)
+    kinds = tuple(_settlement_coordinate(state, node).settlement for node in state.frontier.nodes)
     return (
         bool(kinds)
         and RecoverySettlementKind.INTERRUPTED in kinds
@@ -1087,14 +918,14 @@ def _settle_awaiting_children_after_failure(
         return state
     current = state
     for child in children:
-        control = child.control
-        if not _child_control_awaits_resume(control):
+        if isinstance(child, MissingChildBinding) or not _child_awaits_resume(child):
             continue
-        assert control is not None
-        node_id = control.parent.node_id
+        # Child controls enter this collection only through a validated nested
+        # binding or boundary, both of which require a parent activation.
+        parent = cast(GraphActivationIdentity, child.state.parent)
         current = _settle_recovery_child_failure(
             current,
-            node_id,
+            parent.node_id,
             _RecoveryChildFailureKind.SUPERSEDED_AWAITING_RESUME,
         )
     return current
@@ -1117,30 +948,31 @@ def _finish_recovery_execution(
 def _expand_quiescent_executable(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
-    scope_run: ScopeRunCoordinate,
     family: _RecoveryFamily[GraphValueT],
 ) -> tuple[_RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT], ...]:
-    state = item.state
+    binding = item.binding
+    state = binding.state
+    scope_run = binding.scope_run
     try:
         tasks = plan_tasks(graph, state, family.limits)
     except ExecutionLimitError:
-        return (_boundary(_ScopeBoundaryKind.EXECUTION_LIMIT, state, scope_run, item.availability),)
+        return (_boundary(_ScopeBoundaryKind.EXECUTION_LIMIT, binding, item.availability),)
     nested_ids = tuple(task.node_id for task in tasks if task.node_id in graph.nested_graphs)
     children = _initial_children(
         graph,
-        state,
-        scope_run,
+        binding,
         family,
         item.invocation_new_children,
     )
     combinations = _nested_outcome_plans(
         graph,
-        state,
-        scope_run,
+        binding,
         nested_ids,
         item.availability,
         family,
     )
+    callable_pending = any(isinstance(graph.nodes[task.node_id], CallableNodeDefinition) for task in tasks)
+    frontier_failed = any(isinstance(node.settlement, FailedGraphNode) for node in state.frontier.nodes)
     successors: list[_RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]] = []
     for combination in combinations:
         limited = next(
@@ -1158,31 +990,16 @@ def _expand_quiescent_executable(
         if limited is not None:
             successors.append(limited.boundary)
             continue
-        terminal_failure = any(isinstance(node.settlement, FailedGraphNode) for node in state.frontier.nodes) or any(
-            outcome.boundary.kind in (_ScopeBoundaryKind.FAILED, _ScopeBoundaryKind.ABORTED)
-            for outcome in combination.outcomes
-        )
-        settleable_child = any(
-            outcome.boundary.kind
-            in (
-                _ScopeBoundaryKind.COMPLETED,
-                _ScopeBoundaryKind.FAILED,
-                _ScopeBoundaryKind.ABORTED,
-            )
-            for outcome in combination.outcomes
-        )
-        callable_pending = any(isinstance(graph.nodes[task.node_id], CallableNodeDefinition) for task in tasks)
+        outcome_kinds = frozenset(outcome.boundary.kind for outcome in combination.outcomes)
         if (
-            not terminal_failure
-            and not settleable_child
+            not frontier_failed
             and not callable_pending
-            and any(outcome.boundary.kind is _ScopeBoundaryKind.AWAITING_RESUME for outcome in combination.outcomes)
+            and outcome_kinds == frozenset((_ScopeBoundaryKind.AWAITING_RESUME,))
         ):
             successors.append(
                 _boundary(
                     _ScopeBoundaryKind.AWAITING_RESUME,
-                    state,
-                    scope_run,
+                    binding,
                     combination.availability,
                     item.completion_route_known,
                 )
@@ -1216,13 +1033,10 @@ def _expand_quiescent_executable(
         )
         settled, availability = _settle_nested_outcomes(
             graph,
-            claimed,
-            scope_run,
+            ScopedStateBinding(scope_run, claimed),
             combination,
         )
-        outcome_children = tuple(
-            _child_disposition_from_control(outcome.boundary.control) for outcome in combination.outcomes
-        )
+        outcome_children = tuple(outcome.boundary.binding for outcome in combination.outcomes)
         completion_route_known = item.completion_route_known and all(
             outcome.route_known
             for outcome in combination.outcomes
@@ -1233,7 +1047,7 @@ def _expand_quiescent_executable(
             settled = _finish_recovery_execution(settled, outcome_children)
         successors.append(
             _RecoveryWorkItem(
-                settled,
+                ScopedStateBinding(scope_run, settled),
                 availability,
                 live,
                 outcome_children or children,
@@ -1247,19 +1061,25 @@ def _expand_quiescent_executable(
 def _expand_live(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
-    scope_run: ScopeRunCoordinate,
     family: _RecoveryFamily[GraphValueT],
 ) -> tuple[_RecoveryWorkItem[GraphValueT], ...]:
+    binding = item.binding
+    scope_run = binding.scope_run
     successors: list[_RecoveryWorkItem[GraphValueT]] = []
     node_id = item.live[0]
     remaining_live = item.live[1:]
-    for route in _success_routes(graph, node_id):
+    routes = tuple(graph.transition.conditional_targets[node_id]) or (None,)
+    for route in routes:
         settled = reduce_graph_run(
-            item.state,
-            project_success_settlement(graph, item.state, node_id, route),
+            binding.state,
+            project_success_settlement(graph, binding.state, node_id, route),
         )
         availability = item.availability.with_publication(
-            _publication_coordinate(graph, scope_run, item.state, node_id)
+            publication_availability_coordinate(
+                graph,
+                scope_run,
+                GraphActivationIdentity(binding.state.run_id, binding.state.superstep, node_id),
+            )
         )
         live = _select_live(graph, settled, family.limits, remaining_live)
         completion_route_known = item.completion_route_known and not (
@@ -1269,7 +1089,7 @@ def _expand_live(
             settled = _finish_recovery_execution(settled, item.children)
         successors.append(
             _RecoveryWorkItem(
-                settled,
+                ScopedStateBinding(scope_run, settled),
                 availability,
                 live,
                 item.children,
@@ -1283,10 +1103,11 @@ def _expand_live(
 def _resolve_quiescent(
     graph: CompiledGraph[GraphValueT],
     item: _RecoveryWorkItem[GraphValueT],
-    scope_run: ScopeRunCoordinate,
     family: _RecoveryFamily[GraphValueT],
 ) -> _RecoveryWorkItem[GraphValueT] | _ScopeBoundary[GraphValueT]:
-    state = item.state
+    binding = item.binding
+    state = binding.state
+    scope_run = binding.scope_run
     facts = resolve_routing_facts(graph, state, scope_run, item.availability)
     command = project_routing_facts(state, facts)
     if isinstance(command, AbortGraphRun):
@@ -1304,14 +1125,13 @@ def _resolve_quiescent(
     if isinstance(command, CompleteGraphFrontier):
         return _boundary(
             _ScopeBoundaryKind.COMPLETED,
-            resolved,
-            scope_run,
+            ScopedStateBinding(scope_run, resolved),
             item.availability,
             item.completion_route_known,
         )
     invocation_new = tuple(node_id for node_id in pending_node_ids(resolved.frontier) if node_id in graph.nested_graphs)
     return _RecoveryWorkItem(
-        resolved,
+        ScopedStateBinding(scope_run, resolved),
         item.availability,
         (),
         (),
@@ -1322,22 +1142,22 @@ def _resolve_quiescent(
 
 def _prove_scope(
     graph: CompiledGraph[GraphValueT],
-    state: GraphRunState,
-    scope_run: ScopeRunCoordinate,
+    binding: ScopedStateBinding,
     availability: RecoveryAvailabilityCoordinates[GraphValueT],
     family: _RecoveryFamily[GraphValueT],
 ) -> tuple[_ScopeBoundary[GraphValueT], ...]:
+    scope_run = binding.scope_run
     history_window = publication_history_window(graph)
     initial = _RecoveryWorkItem(
-        state,
+        binding,
         availability,
-        children=_initial_children(graph, state, scope_run, family, ()),
+        children=_initial_children(graph, binding, family, ()),
         completion_route_known=True,
     )
     family.budget.admit(1)
     sequence = 0
     pending: list[tuple[RecoveryTraversalKey, int, _RecoveryWorkItem[GraphValueT]]] = [
-        (recovery_traversal_key(_transfer_state(scope_run, initial, family)), sequence, initial)
+        (recovery_traversal_key(_transfer_state(initial, family)), sequence, initial)
     ]
 
     def enqueue(candidate: _RecoveryWorkItem[GraphValueT]) -> None:
@@ -1346,7 +1166,7 @@ def _prove_scope(
         heappush(
             pending,
             (
-                recovery_traversal_key(_transfer_state(scope_run, candidate, family)),
+                recovery_traversal_key(_transfer_state(candidate, family)),
                 sequence,
                 candidate,
             ),
@@ -1357,11 +1177,11 @@ def _prove_scope(
     boundaries: set[_ScopeBoundary[GraphValueT]] = set()
     while pending:
         _key, _sequence, item = heappop(pending)
-        transfer = _transfer_state(scope_run, item, family)
+        transfer = _transfer_state(item, family)
         if transfer in seen:
             continue
         seen.add(transfer)
-        current = item.state
+        current = item.binding.state
         if current.status is GraphRunStatus.COMPLETED:
             if not graph_outputs_available(
                 graph,
@@ -1376,8 +1196,7 @@ def _prove_scope(
             boundaries.add(
                 _boundary(
                     _ScopeBoundaryKind.COMPLETED,
-                    current,
-                    scope_run,
+                    item.binding,
                     item.availability,
                     item.completion_route_known,
                 )
@@ -1387,8 +1206,7 @@ def _prove_scope(
             boundaries.add(
                 _boundary(
                     _ScopeBoundaryKind.FAILED,
-                    current,
-                    scope_run,
+                    item.binding,
                     item.availability,
                     item.completion_route_known,
                 )
@@ -1398,8 +1216,7 @@ def _prove_scope(
             boundaries.add(
                 _boundary(
                     _ScopeBoundaryKind.ABORTED,
-                    current,
-                    scope_run,
+                    item.binding,
                     item.availability,
                     item.completion_route_known,
                 )
@@ -1412,8 +1229,7 @@ def _prove_scope(
             boundaries.add(
                 _boundary(
                     _ScopeBoundaryKind.AWAITING_RESUME,
-                    current,
-                    scope_run,
+                    item.binding,
                     item.availability,
                     item.completion_route_known,
                 )
@@ -1426,18 +1242,17 @@ def _prove_scope(
         if current.execution is not None:
             if not item.live:
                 raise SnapshotMismatchError("recovery simulated execution has no legal live task")
-            successors = _expand_live(graph, item, scope_run, family)
+            successors = _expand_live(graph, item, family)
         elif status is GraphFrontierStatus.SETTLED:
-            successors = (_resolve_quiescent(graph, item, scope_run, family),)
+            successors = (_resolve_quiescent(graph, item, family),)
         else:
-            signature = _recovery_cycle_signature(graph, item, scope_run, history_window)
+            signature = _recovery_cycle_signature(graph, item, history_window)
             previous_superstep = cycle_entries.get(signature) if signature is not None else None
             if previous_superstep is not None and previous_superstep < current.superstep:
                 boundaries.add(
                     _boundary(
                         _ScopeBoundaryKind.BOUNDED_RECURRENCE,
-                        current,
-                        scope_run,
+                        item.binding,
                         item.availability,
                         item.completion_route_known,
                     )
@@ -1445,7 +1260,7 @@ def _prove_scope(
                 continue
             if signature is not None:
                 cycle_entries[signature] = current.superstep
-            successors = _expand_quiescent_executable(graph, item, scope_run, family)
+            successors = _expand_quiescent_executable(graph, item, family)
         family.budget.admit(len(successors))
         for successor in successors:
             if isinstance(successor, _ScopeBoundary):
@@ -1459,7 +1274,7 @@ def _prove_scope(
                 boundary.kind,
                 recovery_traversal_key(
                     RecoveryTransferState(
-                        boundary.control,
+                        boundary.binding,
                         family.limits,
                         (),
                         boundary.availability,
@@ -1489,7 +1304,7 @@ def preflight_recovery(
     action_targets = tuple(action.target for action in seed.admitted_actions)
     if action_targets != tuple(sorted(set(action_targets))):
         raise SnapshotMismatchError("recovery admitted resume actions must be unique and canonical")
-    family = _RecoveryFamily(bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget(), seed.frames)
+    family = _RecoveryFamily[GraphValueT](bindings, seed.limits, seed.admitted_actions, _RecoveryProofBudget())
     for action in seed.admitted_actions:
         binding = family.binding(action.target.scope_run)
         if binding is None or binding.state.superstep != action.target.superstep:
@@ -1510,14 +1325,13 @@ def preflight_recovery(
             raise SnapshotMismatchError("recovery admitted resume action lacks its exact resume-input availability")
     boundaries = _prove_scope(
         graph,
-        seed.root.state,
-        seed.root.scope_run,
+        seed.root,
         availability,
         family,
     )
     return tuple(
         RecoveryTransferState(
-            boundary.control,
+            boundary.binding,
             seed.limits,
             (),
             boundary.availability,

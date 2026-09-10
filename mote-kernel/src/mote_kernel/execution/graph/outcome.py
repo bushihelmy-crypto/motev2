@@ -1,6 +1,7 @@
 """Factory-owned public outcomes of exactly one callable graph node."""
 
 from dataclasses import InitVar, dataclass
+from enum import StrEnum
 from typing import Generic, TypeAlias, TypeVar, final
 
 from mote_kernel.execution.errors import NodeExecutionContractError
@@ -58,11 +59,16 @@ def _success(
     *,
     route: str | None = None,
 ) -> _GraphSuccessOutcome[FactoryValueT]:
-    if route is not None and (
-        type(route) is not str or not route or route.strip() != route or "\n" in route or "\r" in route
+    canonical_route = str(route) if isinstance(route, StrEnum) else route
+    if canonical_route is not None and (
+        type(canonical_route) is not str
+        or not canonical_route
+        or canonical_route.strip() != canonical_route
+        or "\n" in canonical_route
+        or "\r" in canonical_route
     ):
         raise NodeExecutionContractError("success route must be a non-empty trimmed string")
-    return _GraphSuccessOutcome(output=_require_graph_values(output), route=route, _seal=_OUTCOME_SEAL)
+    return _GraphSuccessOutcome(output=_require_graph_values(output), route=canonical_route, _seal=_OUTCOME_SEAL)
 
 
 def _failure(reason: str) -> _GraphFailureOutcome:

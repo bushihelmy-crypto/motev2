@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import (
+    ExecutionError,
     InvalidRoutingCommandError,
     JoinProgressError,
     RoutingDeadlockError,
@@ -18,6 +19,7 @@ from mote_kernel.execution.graph.ports import (
     NodeOutputPort,
     PublicationSelection,
     PublicationSelectionKind,
+    ResolvedInputBinding,
     ResolvedValueSource,
     require_publication_selection,
 )
@@ -123,44 +125,103 @@ def publication_history_window(graph: CompiledGraph[GraphValueT]) -> Publication
     return PublicationHistoryWindow(tuple(sorted(absolute_supersteps)), relative_horizon)
 
 
-def _graph_input_coordinate(
+def graph_input_availability_coordinate(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
 ) -> GraphInputAvailabilityCoordinate[GraphValueT]:
     return GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity)
 
 
-def _node_output_coordinate(
+def publication_availability_coordinate(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    source: NodeOutputPort,
-    superstep: int,
+    activation: GraphActivationIdentity,
 ) -> PublicationAvailabilityCoordinate[GraphValueT]:
+    """Project one state-owned activation to its compiled publication frame.
+
+    Publication coordinates are routing facts: the compiled graph owns the
+    descriptor and the durable activation owns the run/superstep/node
+    identity.  Keeping this projection here prevents recovery, commit, and
+    continuation code from rebuilding a subtly different coordinate.
+    """
+
     return PublicationAvailabilityCoordinate(
-        stable_activation(
-            scope_run,
-            GraphActivationIdentity(scope_run.graph_run_id, superstep, source.node_id),
-        ),
-        graph.transition.publications[source.node_id].identity,
+        stable_activation(scope_run, activation),
+        graph.transition.publications[activation.node_id].identity,
     )
 
 
-def _value_available(
+def source_availability_coordinate(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
     source: ResolvedValueSource,
     publication: PublicationSelection | None,
     activation_superstep: int,
-    frames: ScopedFrameAvailability[GraphValueT],
-) -> bool:
+    missing_selection: ExecutionError,
+) -> GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT]:
+    """Project one non-causal source to the frame coordinate it publishes."""
+
     if isinstance(source, GraphInputPort):
-        return frames.has_graph_input(_graph_input_coordinate(graph, scope_run))
-    selection = require_publication_selection(
-        publication,
-        InvalidRoutingCommandError("compiled value binding lacks its activation selection"),
+        return graph_input_availability_coordinate(graph, scope_run)
+    selection = require_publication_selection(publication, missing_selection)
+    return publication_availability_coordinate(
+        graph,
+        scope_run,
+        GraphActivationIdentity(scope_run.graph_run_id, selection.resolve(activation_superstep), source.node_id),
     )
-    return frames.has_publication(
-        _node_output_coordinate(graph, scope_run, source, selection.resolve(activation_superstep))
+
+
+def frame_coordinate_available(
+    frames: ScopedFrameAvailability[GraphValueT],
+    coordinate: GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+) -> bool:
+    if isinstance(coordinate, GraphInputAvailabilityCoordinate):
+        return frames.has_graph_input(coordinate)
+    return frames.has_publication(coordinate)
+
+
+def binding_source_coordinate(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState | None,
+    scope_run: ScopeRunCoordinate,
+    activation_superstep: int,
+    binding: ResolvedInputBinding[GraphValueT],
+    cause: GraphActivationCause | None = None,
+) -> tuple[
+    ResolvedValueSource,
+    GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+]:
+    """Resolve one compiled input binding to its actual source and frame.
+
+    The compiler owns the binding and State owns the activation cause.  This
+    is the one projection used by both live routing and resume materialization;
+    callers translate its routing error into their own public boundary.
+    """
+
+    source = binding.source
+    if isinstance(source, CompiledPredecessorInput):
+        if state is None or cause is None:
+            raise InvalidRoutingCommandError("predecessor input availability requires authoritative graph state")
+        selected = causal_input_source_for_cause(
+            graph,
+            state,
+            activation_superstep,
+            cause,
+            binding,
+        )
+        if isinstance(selected, GraphInputPort):
+            return selected, graph_input_availability_coordinate(graph, scope_run)
+        resolved = selected.source
+        return resolved, publication_availability_coordinate(graph, scope_run, selected.predecessor)
+    if isinstance(source, GraphInputPort):
+        return source, graph_input_availability_coordinate(graph, scope_run)
+    return source, source_availability_coordinate(
+        graph,
+        scope_run,
+        source,
+        binding.publication,
+        activation_superstep,
+        InvalidRoutingCommandError("compiled node-output binding lacks its activation selection"),
     )
 
 
@@ -230,12 +291,31 @@ def settled_activation_admission_error(
     return None
 
 
-def _success_routes(
+def _successor_targets_for_reference(
     graph: CompiledGraph[GraphValueT],
-    node_id: GraphNodeId,
-) -> tuple[GraphRouteId | None, ...]:
-    routes = tuple(graph.transition.conditional_targets[node_id])
-    return routes or (None,)
+    reference: ActivationReference,
+) -> tuple[GraphNodeId, ...]:
+    """Resolve one settled activation's compiled control successors.
+
+    Live routing and recovery admission use the same successor rule.  The
+    callers deliberately retain their own error boundaries: live routing lets
+    ``InvalidRoutingCommandError`` escape, while recovery turns it into a
+    deterministic snapshot diagnostic.
+    """
+
+    source = reference.activation.node_id
+    routes = graph.transition.conditional_targets[source]
+    if routes and reference.route is None:
+        raise InvalidRoutingCommandError("conditional predecessor settlement lacks its selected route")
+    if reference.route is not None and routes and reference.route not in routes:
+        raise InvalidRoutingCommandError("predecessor settlement selected an unknown route")
+
+    targets = list(graph.transition.direct_targets[source])
+    if reference.route is not None and routes:
+        target = routes[reference.route]
+        if target != END:
+            targets.append(target)
+    return tuple(targets)
 
 
 def _gate_matches_cause(
@@ -256,22 +336,34 @@ def _gate_matches_cause(
     )
 
 
-def predecessor_source_for_cause(
+def causal_input_source_for_cause(
+    graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-    node_id: GraphNodeId,
-    input_name: str,
     target_superstep: int,
     cause: GraphActivationCause,
-    binding: CompiledPredecessorInput,
-) -> PredecessorSourceSelection:
-    """Select only the committed publication that caused this activation."""
+    binding: ResolvedInputBinding[GraphValueT],
+) -> GraphInputPort | PredecessorSourceSelection:
+    """Select the sole causal value source from the committed activation cause."""
 
-    if binding.target != node_id or binding.input_name != input_name:
+    source = binding.source
+    if not isinstance(source, CompiledPredecessorInput):
+        raise InvalidRoutingCommandError("causal source selection requires a predecessor-bound input")
+    node_id = binding.destination.node_id
+    input_name = binding.destination.local_name
+    if source.target != node_id or source.input_name != input_name:
         raise InvalidRoutingCommandError("predecessor binding does not match its target input")
-    if type(target_superstep) is not int or target_superstep < 1:
+    if type(target_superstep) is not int or target_superstep < 0:
         raise InvalidRoutingCommandError("predecessor-bound activation has an invalid target coordinate")
     if type(cause) is StartActivationCause:
+        if target_superstep == 0:
+            if source.start_input is None:
+                raise InvalidRoutingCommandError("predecessor-bound activation has an invalid target coordinate")
+            if node_id not in graph.transition.entries or source.start_input.name != input_name:
+                raise InvalidRoutingCommandError("causal START input does not belong to an initial graph activation")
+            return source.start_input
         raise InvalidRoutingCommandError("predecessor-bound activation cannot carry the START cause")
+    if target_superstep < 1:
+        raise InvalidRoutingCommandError("predecessor-bound activation has an invalid target coordinate")
     if type(cause) is not RoutedActivationCause:
         raise InvalidRoutingCommandError("predecessor-bound activation has an unsupported cause")
     if cause.join_occurrence is not None or len(cause.references) != 1:
@@ -281,7 +373,7 @@ def predecessor_source_for_cause(
     expected = GraphActivationIdentity(state.run_id, target_superstep - 1, reference.activation.node_id)
     if reference.activation != expected or reference not in state.settled_activations:
         raise InvalidRoutingCommandError("predecessor activation lacks immediate committed settlement evidence")
-    sources = tuple(source for source in binding.sources if source.node_id == reference.activation.node_id)
+    sources = tuple(port for port in source.sources if port.node_id == reference.activation.node_id)
     if len(sources) != 1:
         raise InvalidRoutingCommandError("activation cause is not an allowed predecessor source")
     return PredecessorSourceSelection(sources[0], reference.activation)
@@ -310,27 +402,30 @@ def _pending_join_arrivals(
     state: GraphRunState,
 ) -> dict[GraphJoinOccurrenceIdentity, list[ActivationReference]]:
     declared = _declared_joins(graph)
+    settled = frozenset(state.settled_activations)
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
     for progress in state.join_progress:
         occurrence = progress.occurrence
         plan = declared.get(occurrence.join)
-        arrived_sources = tuple(reference.activation.node_id for reference in progress.arrived)
+        arrived = progress.arrived
+        arrived_sources = tuple(reference.activation.node_id for reference in arrived)
+        source_set = frozenset(arrived_sources)
         if (
             plan is None
             or occurrence in arrivals
             or occurrence.run_id != state.run_id
             or occurrence.target_superstep <= state.superstep
-            or not progress.arrived
-            or not set(arrived_sources) < set(occurrence.join.sources)
+            or not arrived
+            or not source_set < frozenset(occurrence.join.sources)
         ):
             raise JoinProgressError("snapshot contains invalid Join progress")
-        if len(arrived_sources) != len(set(arrived_sources)):
+        if len(arrived_sources) != len(source_set):
             raise JoinProgressError("snapshot Join progress repeats one source activation")
-        if any(reference not in state.settled_activations for reference in progress.arrived):
+        if any(reference not in settled for reference in arrived):
             raise JoinProgressError("snapshot Join progress lacks committed settlement evidence")
-        if any(plan.occurrence_for(reference.activation) != occurrence for reference in progress.arrived):
+        if any(plan.occurrence_for(reference.activation) != occurrence for reference in arrived):
             raise JoinProgressError("snapshot Join progress has misprojected arrival evidence")
-        arrivals[occurrence] = list(progress.arrived)
+        arrivals[occurrence] = list(arrived)
     return arrivals
 
 
@@ -349,13 +444,12 @@ def _frontier_gate_error(
         try:
             for binding in graph.transition.materializations[node.node_id].bindings.entries:
                 if isinstance(binding.source, CompiledPredecessorInput):
-                    predecessor_source_for_cause(
+                    causal_input_source_for_cause(
+                        graph,
                         state,
-                        node.node_id,
-                        binding.destination.local_name,
                         state.superstep,
                         cause,
-                        binding.source,
+                        binding,
                     )
         except InvalidRoutingCommandError as error:
             return str(error)
@@ -389,14 +483,6 @@ def _frontier_gate_error(
     return None
 
 
-def _append_successor_candidate(
-    candidates: dict[GraphNodeId, list[RoutedActivationCause]],
-    target: GraphNodeId,
-    cause: RoutedActivationCause,
-) -> None:
-    candidates.setdefault(target, []).append(cause)
-
-
 def _historical_join_arrivals(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
@@ -404,6 +490,7 @@ def _historical_join_arrivals(
     """Rebuild every live Join occurrence from committed settlement evidence."""
 
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
+    seen_sources: dict[tuple[GraphJoinOccurrenceIdentity, GraphNodeId], ActivationReference] = {}
     for reference in state.settled_activations:
         activation = reference.activation
         if activation.superstep >= state.superstep:
@@ -412,16 +499,14 @@ def _historical_join_arrivals(
             raise JoinProgressError(f"settled activation references unknown node {activation.node_id!r}")
         for plan in graph.transition.joins_by_source[activation.node_id]:
             occurrence = plan.occurrence_for(activation)
-            bucket = arrivals.setdefault(occurrence, [])
-            existing = next(
-                (item for item in bucket if item.activation.node_id == activation.node_id),
-                None,
-            )
+            key = (occurrence, activation.node_id)
+            existing = seen_sources.get(key)
             if existing is not None:
                 if existing != reference:
                     raise JoinProgressError("Join source activation occurrence selected two routes")
                 raise JoinProgressError("Join source activation occurrence repeated")
-            bucket.append(reference)
+            seen_sources[key] = reference
+            arrivals.setdefault(occurrence, []).append(reference)
     return {
         occurrence: tuple(sorted(references, key=ActivationReference.canonical_key))
         for occurrence, references in arrivals.items()
@@ -456,17 +541,12 @@ def _post_advance_error(
             # owner-level diagnostic or a malformed snapshot bypassing the
             # outer admission function.
             return f"settled activation references unknown node {source!r}"
-        routes = graph.transition.conditional_targets[source]
-        if routes and reference.route is None:
-            return "conditional predecessor settlement lacks its selected route"
-        if reference.route is not None and routes and reference.route not in routes:
-            return "predecessor settlement selected an unknown route"
-        for target in graph.transition.direct_targets[source]:
-            _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if reference.route is not None and routes:
-            target = routes[reference.route]
-            if target != END:
-                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
+        try:
+            targets = _successor_targets_for_reference(graph, reference)
+        except InvalidRoutingCommandError as error:
+            return str(error)
+        for target in targets:
+            candidates.setdefault(target, []).append(RoutedActivationCause((reference,)))
 
     actual = {
         node.node_id: node.cause for node in state.frontier.nodes if isinstance(node.cause, RoutedActivationCause)
@@ -489,11 +569,7 @@ def _post_advance_error(
             if occurrence.target_superstep != state.superstep:
                 return "Join occurrence completed before its target coordinate"
             if identity.target != END:
-                _append_successor_candidate(
-                    candidates,
-                    identity.target,
-                    RoutedActivationCause(arrivals, occurrence),
-                )
+                candidates.setdefault(identity.target, []).append(RoutedActivationCause(arrivals, occurrence))
             continue
         if occurrence.target_superstep == state.superstep:
             return "Join occurrence reached its target coordinate without every source"
@@ -549,7 +625,15 @@ def unavailable_graph_outputs(
     unavailable: list[str] = []
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
-        if not _value_available(graph, scope_run, source, binding.publication, completion_superstep, frames):
+        coordinate = source_availability_coordinate(
+            graph,
+            scope_run,
+            source,
+            binding.publication,
+            completion_superstep,
+            InvalidRoutingCommandError("compiled value binding lacks its activation selection"),
+        )
+        if not frame_coordinate_available(frames, coordinate):
             unavailable.append(f"{binding.destination.boundary_name}<-{_source_label(source)}")
     return tuple(unavailable)
 
@@ -567,29 +651,15 @@ def _required_target(
         raise InvalidRoutingCommandError("compiled successor activation does not match its target")
     unavailable: list[str] = []
     for binding in graph.transition.materializations[target].bindings.entries:
-        source = binding.source
-        if isinstance(source, CompiledPredecessorInput):
-            selected = predecessor_source_for_cause(
-                state,
-                target,
-                binding.destination.local_name,
-                activation_superstep,
-                activation.cause,
-                source,
-            )
-            source = selected.source
-            available = frames.has_publication(
-                _node_output_coordinate(graph, scope_run, source, selected.predecessor.superstep)
-            )
-        else:
-            available = _value_available(
-                graph,
-                scope_run,
-                source,
-                binding.publication,
-                activation_superstep,
-                frames,
-            )
+        source, coordinate = binding_source_coordinate(
+            graph,
+            state,
+            scope_run,
+            activation_superstep,
+            binding,
+            cause=activation.cause,
+        )
+        available = frame_coordinate_available(frames, coordinate)
         if not available:
             unavailable.append(f"{binding.destination.local_name}<-{_source_label(source)}")
     return RequiredTarget(target, tuple(unavailable))
@@ -610,14 +680,9 @@ def _resolve_control(
         selected_route = contribution.route if isinstance(contribution, SelectGraphRoute) else None
         source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)
         reference = ActivationReference(source_activation, selected_route)
-        for target in graph.transition.direct_targets[node_id]:
+        for target in _successor_targets_for_reference(graph, reference):
             direct_control_targets.add(target)
-            _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
-        if isinstance(contribution, SelectGraphRoute) and graph.transition.conditional_targets[node_id]:
-            target = graph.transition.conditional_targets[node_id][contribution.route]
-            if target != END:
-                direct_control_targets.add(target)
-                _append_successor_candidate(candidates, target, RoutedActivationCause((reference,)))
+            candidates.setdefault(target, []).append(RoutedActivationCause((reference,)))
         for plan in graph.transition.joins_by_source[node_id]:
             occurrence = plan.occurrence_for(source_activation)
             join_arrivals = arrivals.setdefault(occurrence, [])
@@ -637,11 +702,7 @@ def _resolve_control(
                 raise JoinProgressError("completed Join occurrence has the wrong target coordinate")
             if identity.target != END:
                 completed_join_targets.add(identity.target)
-                _append_successor_candidate(
-                    candidates,
-                    identity.target,
-                    RoutedActivationCause(arrived, occurrence),
-                )
+                candidates.setdefault(identity.target, []).append(RoutedActivationCause(arrived, occurrence))
             elif occurrence in prior_occurrences:
                 consumed_progress.append(occurrence)
         else:
@@ -804,9 +865,8 @@ def resolve_routing(
 
 __all__ = [
     "_declared_joins",
-    "_graph_input_coordinate",
-    "_node_output_coordinate",
-    "_success_routes",
     "frontier_admission_error",
+    "graph_input_availability_coordinate",
+    "publication_availability_coordinate",
     "settled_activation_admission_error",
 ]

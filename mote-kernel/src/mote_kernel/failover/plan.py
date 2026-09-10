@@ -1,10 +1,10 @@
 """Immutable failover profiles, plans, bindings, and durable cursors.
 
-The graph receives one :class:`FailoverPlan` at its entry Plan node.  The
-plan is a value, not a live configuration subscription.  All counters that
-can affect a later edge are carried by :class:`RetryContext`, so a restart
-continues from the last committed graph state rather than from a decorator's
-memory.
+Composition resolves and passes one :class:`FailoverPlan` into the failover
+graph.  The plan is a value, not a live configuration subscription.  All
+counters that can affect a later edge are carried by :class:`RetryContext`,
+so a restart continues from the last committed graph state rather than from
+a decorator's memory.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Generic, NewType, Protocol, TypeVar, runtime_checkable
+from typing import Generic, NewType, TypeVar
 
 from mote_kernel.failover.contract import (
     FailoverContractError,
@@ -70,7 +70,7 @@ class RetryBudget:
 
     ``strategy_limits`` wins first.  If a strategy has no entry, the
     ``default_max_strategy_uses`` value is used.  The built-in value is the
-    final fallback when a config source omits both fields.  The wire-attempt
+    final fallback when composition omits both fields.  The wire-attempt
     ceiling is independent from preparation strategy counts.
     """
 
@@ -109,7 +109,7 @@ class RetryBudget:
 
 @dataclass(frozen=True, slots=True)
 class RetryTiming:
-    """Timing parameters captured by a Plan node."""
+    """Timing parameters carried by the assembly-supplied config."""
 
     base_backoff_seconds: float = 0.0
     max_backoff_seconds: float = 60.0
@@ -141,7 +141,7 @@ class FailoverProfile(Generic[TransformT]):
     """Reusable Role-level parameters for the fixed failover policy.
 
     The policy module exclusively owns the status/error-hint mapping.  A
-    profile can hot-reload budgets, timing, and the typed instruction used by
+    profile can configure budgets, timing, and the typed instruction used by
     the fixed request-transformation strategy without changing that mapping.
     """
 
@@ -203,7 +203,7 @@ class PortBinding(Generic[TransformT]):
 
 @dataclass(frozen=True, slots=True)
 class FailoverConfigSnapshot(Generic[TransformT]):
-    """One immutable Role configuration revision read by the Plan node."""
+    """One immutable Role configuration revision resolved by composition."""
 
     revision: FailoverConfigRevision
     default_profile: FailoverProfile[TransformT]
@@ -258,7 +258,7 @@ def resolve_plan(
     port_id: FailoverPortId,
     binding: PortBinding[TransformT],
 ) -> FailoverPlan[TransformT] | None:
-    """Resolve one binding at the Plan node's assembly boundary."""
+    """Resolve one binding at the composition boundary."""
 
     if type(snapshot) is not FailoverConfigSnapshot:
         raise FailoverContractError("plan resolution requires a FailoverConfigSnapshot")
@@ -354,21 +354,10 @@ class RetryContext:
         return replace(self, strategy_usages=updated, last_strategy=strategy)
 
 
-ConfigSourceT = TypeVar("ConfigSourceT")
-
-
-@runtime_checkable
-class FailoverConfigSource(Protocol[ConfigSourceT]):
-    """Read the current immutable configuration once at graph entry."""
-
-    def snapshot(self) -> FailoverConfigSnapshot[ConfigSourceT]: ...
-
-
 __all__ = [
     "FailoverBindingMode",
     "FailoverConfigRevision",
     "FailoverConfigSnapshot",
-    "FailoverConfigSource",
     "FailoverOperationId",
     "FailoverPlan",
     "FailoverPortId",

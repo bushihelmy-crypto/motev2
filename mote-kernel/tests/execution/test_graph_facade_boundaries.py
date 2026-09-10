@@ -3,6 +3,8 @@ from typing import Protocol, cast
 
 import pytest
 
+import mote_kernel.execution.facade as facade_module
+from mote_kernel.config import Config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import NodeCallable
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
@@ -280,9 +282,30 @@ async def test_state_run_runtime_dispatch_rejects_explicit_values_before_compila
     uncompiled = Graph[str]("facade.state-dispatch.uncompiled")
     uncompiled.add_node("node", empty, inputs={}, outputs={})
     run = cast(RuntimeRun, uncompiled.run)
+    malformed_config = cast(Config, object())
     with pytest.raises(Graph.SnapshotMismatchError, match="do not accept values"):
         await run(None, state=completed.state)
+    with pytest.raises(Graph.SnapshotMismatchError, match="cannot replace their activation Config"):
+        await uncompiled.run(state=completed.state, activation_config=malformed_config)
 
     uncompiled.set_outputs({})
+    with pytest.raises(Graph.SnapshotMismatchError, match="activation Config is malformed"):
+        await uncompiled.run(Graph.values(), activation_config=malformed_config)
     result = await uncompiled.run(Graph.values())
     assert isinstance(result, Graph.CompletedResult)
+
+
+@pytest.mark.asyncio
+async def test_new_run_does_not_mask_unexpected_config_validation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = Graph[str]("facade.config-error-boundary")
+    graph.add_node("node", empty, inputs={}, outputs={})
+    graph.set_outputs({})
+
+    def reject(_config: Config) -> Config:
+        raise RuntimeError("config validator failed unexpectedly")
+
+    monkeypatch.setattr(facade_module, "require_config", reject)
+    with pytest.raises(RuntimeError, match="config validator failed unexpectedly"):
+        await graph.run(Graph.values(), activation_config=cast(Config, object()))

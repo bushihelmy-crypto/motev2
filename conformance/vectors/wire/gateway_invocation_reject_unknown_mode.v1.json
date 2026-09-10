@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.unknown_mode",
+  "description": "An unknown delivery mode is rejected before a model connection is opened.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {"kind": "llm", "schema_version": 1, "operation_id": "reject-mode-1", "model_id": "model.text", "operation": "generate", "modality": "text", "mode": "batch", "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]}, "features": []},
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

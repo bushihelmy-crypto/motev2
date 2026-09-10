@@ -4,7 +4,7 @@ import operator
 import typing
 from collections.abc import Mapping, MutableMapping, MutableSequence, MutableSet
 from dataclasses import dataclass
-from enum import IntEnum, auto
+from enum import IntEnum, StrEnum, auto
 from inspect import isabstract
 from typing import Generic, Protocol, TypeAlias, TypeVar
 
@@ -34,9 +34,10 @@ def _is_mutable_container_type(value_type: type[ValueT], /) -> bool:
 def canonical_port_name(name: str, *, kind: str = "port") -> str:
     """Return one stable user-facing port name or fail at its call boundary."""
 
-    if not is_canonical_identity(name):
+    canonical = str(name) if isinstance(name, StrEnum) else name
+    if not is_canonical_identity(canonical):
         raise GraphValidationError(f"{kind} name must be a non-empty trimmed string")
-    return name
+    return canonical
 
 
 def canonical_nominal_type(value_type: type[ValueT] | str) -> "NominalTypeDescriptor[ValueT]":
@@ -179,11 +180,20 @@ class PublicationSelection:
 
 @dataclass(frozen=True, slots=True)
 class CompiledPredecessorInput:
-    """Compiler-proved output ports for one control-causal input."""
+    """Compiler-proved cases for one control-causal input.
+
+    ``sources`` is the set of routed predecessors that may supply the value.
+    An entry activation has no predecessor reference, so the compiler records
+    its graph-input case separately in ``start_input``.  Keeping both cases in
+    the immutable binding makes the activation contract explicit; runtime code
+    only selects one of these compiler-proved sources from the State-owned
+    cause.
+    """
 
     target: GraphNodeId
     input_name: str
     sources: tuple[NodeOutputPort, ...]
+    start_input: GraphInputPort | None = None
 
 
 ResolvedInputSource: TypeAlias = ResolvedValueSource | CompiledPredecessorInput
@@ -253,14 +263,24 @@ class MaterializationPlan(Generic[GraphValueT]):
     descriptor: FrameDescriptor[GraphValueT]
 
 
+def _canonical_named_values(
+    values: Mapping[str, ValueT] | None,
+    *,
+    kind: str,
+    error: str,
+) -> tuple[tuple[str, ValueT], ...]:
+    """Validate and canonicalize one named declaration mapping."""
+
+    if not isinstance(values, Mapping):
+        raise GraphValidationError(error)
+    return tuple((canonical_port_name(name, kind=kind), value) for name, value in sorted(values.items()))
+
+
 def normalize_input_bindings(
     values: Mapping[str, InputBindingSource[GraphValueT] | type[GraphValueT]] | None,
 ) -> InputBindings[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("inputs must be a mapping")
     entries: list[InputBinding[GraphValueT]] = []
-    for name, source in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="input")
+    for canonical, source in _canonical_named_values(values, kind="input", error="inputs must be a mapping"):
         if not isinstance(source, GraphInputRef | NodeOutputRef | PredecessorOutputRef):
             raise GraphValidationError(f"input {canonical!r} must bind one graph input or node output")
         entries.append(InputBinding(canonical, source))
@@ -274,11 +294,8 @@ def normalize_output_declarations(
     ]
     | None,
 ) -> OutputDeclarations[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("outputs must be a mapping")
     entries: list[OutputDeclaration[GraphValueT]] = []
-    for name, value_type in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="output")
+    for canonical, value_type in _canonical_named_values(values, kind="output", error="outputs must be a mapping"):
         if isinstance(value_type, GraphInputRef | NodeOutputRef):
             raise GraphValidationError(f"output {canonical!r} must declare one concrete nominal type")
         entries.append(OutputDeclaration(canonical, canonical_nominal_type(value_type)))
@@ -292,11 +309,12 @@ def normalize_graph_output_declarations(
     ]
     | None,
 ) -> GraphOutputDeclarations[GraphValueT]:
-    if not isinstance(values, Mapping):
-        raise GraphValidationError("graph outputs must be a mapping")
     entries: list[GraphOutputDeclaration[GraphValueT]] = []
-    for name, source in sorted(values.items()):
-        canonical = canonical_port_name(name, kind="graph output")
+    for canonical, source in _canonical_named_values(
+        values,
+        kind="graph output",
+        error="graph outputs must be a mapping",
+    ):
         if not isinstance(source, GraphInputRef | NodeOutputRef):
             raise GraphValidationError(f"graph output {canonical!r} must bind one graph input or node output")
         entries.append(GraphOutputDeclaration(canonical, source))

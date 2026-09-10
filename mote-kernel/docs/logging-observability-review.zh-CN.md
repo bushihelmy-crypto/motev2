@@ -170,7 +170,7 @@ ObservedNode(object(), object(), object())
 
 ### P1-3：Role/Flow 尚未真正接入装饰器
 
-生产代码中没有 Role/Flow assembly 使用这些 decorator；[`role/__init__.py`](../src/mote_kernel/role/__init__.py) 目前只有模块说明。当前交付因此更准确地称为“契约、值对象和 wrapper 原型”，还不是完整的可选能力接入。
+生产代码中没有 Role/Flow assembly 使用这些 decorator；原先仅含模块说明的 `role/` 空壳已移除。当前交付因此更准确地称为“契约、值对象和 wrapper 原型”，还不是完整的可选能力接入。
 
 如果本轮目标仅是建立 Kernel contract，应在设计文档中明确“assembly integration deferred”；如果目标是可直接启用 logging/observability，则需要补一条 Role assembly 路径，并确保缺少可选 Port 时在构图阶段直接使用原 node/commit。
 

@@ -5,15 +5,18 @@ from itertools import combinations
 from typing import Generic, TypeAlias, TypeVar, overload
 
 from mote_kernel.execution.errors import (
-    DuplicateBoundaryError,
     GraphValidationError,
     MissingEntryError,
     UnknownNodeError,
     UnreachableNodeError,
 )
 from mote_kernel.execution.graph.constants import END
-from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
+from mote_kernel.execution.graph.definition import (
+    GraphDefinition,
+    GraphNode,
+    NestedGraphNodeDefinition,
+)
+from mote_kernel.execution.graph.edge import DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
@@ -229,16 +232,18 @@ def _resolve_predecessor_output(
     target: GraphNodeId,
     input_name: str,
     node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
-    entries: tuple[GraphNodeId, ...],
     gates: list[_RawActivationGate],
+    start_input: GraphInputPort | None,
 ) -> tuple[CompiledPredecessorInput, NominalTypeDescriptor[GraphValueT]]:
-    """Resolve one causal input against every possible activation predecessor."""
+    """Resolve one causal input against its compiled activation cases."""
 
-    if target in entries:
-        raise GraphValidationError(f"predecessor-bound node {target!r} cannot be activated from START")
     if any(len(gate) != 1 for gate in gates):
         raise GraphValidationError(f"predecessor-bound node {target!r} cannot be activated by a Join")
     source_ids = tuple(sorted({gate[0][0] for gate in gates}))
+    if not source_ids:
+        raise GraphValidationError(
+            f"predecessor input {input_name!r} on node {target!r} has no routed predecessor type source"
+        )
     descriptors: list[NominalTypeDescriptor[GraphValueT]] = []
     ports: list[NodeOutputPort] = []
     for source_id in source_ids:
@@ -258,7 +263,7 @@ def _resolve_predecessor_output(
         raise GraphValidationError(
             f"typed predecessor input {input_name!r} on node {target!r} does not match its declared exact type"
         )
-    return CompiledPredecessorInput(target, input_name, tuple(ports)), descriptor
+    return CompiledPredecessorInput(target, input_name, tuple(ports), start_input), descriptor
 
 
 def _data_cycle(data_dependencies: dict[GraphNodeId, set[GraphNodeId]]) -> bool:
@@ -339,6 +344,25 @@ def _event_options(
     return tuple((node_id, route) for route in routes) or ((node_id, None),)
 
 
+def _static_successors(
+    node_ids: tuple[GraphNodeId, ...],
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+) -> dict[GraphNodeId, set[GraphNodeId]]:
+    """Build the route-independent control successor relation once.
+
+    A conditional edge contributes its target to static reachability for every
+    declared route; route-sensitive proofs use ``_ordinary_event_successors``
+    below and therefore retain the selected route separately.
+    """
+
+    return {
+        node_id: set(direct_targets[node_id])
+        | {target for target in conditional_targets[node_id].values() if target != END}
+        for node_id in node_ids
+    }
+
+
 def _ordinary_event_successors(
     event: _ControlEvent,
     direct_targets: dict[GraphNodeId, set[GraphNodeId]],
@@ -374,16 +398,13 @@ def _ordinary_reachable_events(
 def _join_affected_nodes(
     node_ids: tuple[GraphNodeId, ...],
     joins: tuple[JoinEdge, ...],
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> frozenset[GraphNodeId]:
     affected = {join.target for join in joins if join.target != END}
     pending = sorted(affected)
     while pending:
         source = pending.pop()
-        successors = set(direct_targets[source])
-        successors.update(target for target in conditional_targets[source].values() if target != END)
-        newly_affected = successors - affected
+        newly_affected = successors[source] - affected
         affected.update(newly_affected)
         pending.extend(sorted(newly_affected))
     return frozenset(node_id for node_id in node_ids if node_id in affected)
@@ -395,6 +416,7 @@ def _control_flow_proof(
     direct_targets: dict[GraphNodeId, set[GraphNodeId]],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
     joins: tuple[JoinEdge, ...],
+    static_successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> _ControlFlowProof:
     """Compute ordinary-control events that may share one frontier.
 
@@ -436,7 +458,7 @@ def _control_flow_proof(
 
     return _ControlFlowProof(
         frozenset(coexisting),
-        _join_affected_nodes(node_ids, joins, direct_targets, conditional_targets),
+        _join_affected_nodes(node_ids, joins, static_successors),
     )
 
 
@@ -511,11 +533,7 @@ def _validate_cycle_exits(
     while the definition is still immutable and trusted.
     """
 
-    cyclic = frozenset(
-        node_id
-        for node_id in node_ids
-        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
-    )
+    cyclic = _cycle_nodes(node_ids, successors)
     if not cyclic:
         return
     terminal_sources = tuple(source for gate in terminal_gates for source in gate)
@@ -771,12 +789,13 @@ def _validate_joint_activation_paths(
     activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
     data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
     conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> dict[GraphNodeId, _RouteRequirementProof]:
-    dependency_successors = {node_id: set[GraphNodeId]() for node_id in node_ids}
+    # The control successor map already contains every activation-gate edge,
+    # including normalized Join sources.  Reuse that compiler-owned relation
+    # and add only value dependencies instead of rebuilding a second copy.
+    dependency_successors = {node_id: set(successors[node_id]) for node_id in node_ids}
     for target in node_ids:
-        for gate in activation_gates[target]:
-            for source, _route in gate:
-                dependency_successors[source].add(target)
         for source in data_dependencies[target]:
             dependency_successors[source].add(target)
     variable = _cycle_reachable_nodes(node_ids, dependency_successors)
@@ -902,11 +921,7 @@ def _cycle_reachable_nodes(
     node_ids: tuple[GraphNodeId, ...],
     successors: dict[GraphNodeId, set[GraphNodeId]],
 ) -> frozenset[GraphNodeId]:
-    cycle_nodes = {
-        node_id
-        for node_id in node_ids
-        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
-    }
+    cycle_nodes = _cycle_nodes(node_ids, successors)
     reached = set(cycle_nodes)
     pending = sorted(cycle_nodes)
     while pending:
@@ -916,6 +931,25 @@ def _cycle_reachable_nodes(
                 reached.add(target)
                 pending.append(target)
     return frozenset(reached)
+
+
+def _cycle_nodes(
+    node_ids: tuple[GraphNodeId, ...],
+    successors: dict[GraphNodeId, set[GraphNodeId]],
+) -> frozenset[GraphNodeId]:
+    """Return the nodes that participate in a control cycle.
+
+    Cycle membership is one topology fact used by exit validation, repeatable
+    activation analysis, and absolute-level inference.  Keep its definition
+    in one place; callers decide whether they need only the cycle or its
+    forward-reachable descendants.
+    """
+
+    return frozenset(
+        node_id
+        for node_id in node_ids
+        if any(_can_reach(successor, node_id, successors) for successor in successors[node_id])
+    )
 
 
 def _absolute_activation_levels(
@@ -980,36 +1014,66 @@ def _output_publication_selection(
     raise GraphValidationError(f"graph output source {source.node_id!r} has no unique completion activation coordinate")
 
 
-def _compile_definition(
-    definition: GraphDefinition[GraphValueT],
-    nested_graphs: dict[GraphNodeId, CompiledGraph[GraphValueT]],
-) -> CompiledGraph[GraphValueT]:
-    resource_order = tuple(resource.resource_id for resource in definition.resources)
-    positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
-    nodes = {
-        node.node_id: (
-            CallableNodeDefinition(
-                node.node_id,
-                node.invoker,
-                node.inputs,
-                node.outputs,
-                tuple(sorted(node.resources, key=positions.__getitem__)),
-            )
-            if isinstance(node, CallableNodeDefinition)
-            else node
-        )
-        for node in definition.nodes
-    }
-    node_ids = tuple(sorted(nodes))
-    graph_inputs = _collect_graph_inputs(definition)
-    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]] = {
-        node_id: (
-            node.outputs
-            if isinstance(node := nodes[node_id], CallableNodeDefinition)
-            else _nested_outputs(nested_graphs[node_id])
-        )
-        for node_id in node_ids
-    }
+def _collect_control_topology(
+    node_ids: tuple[GraphNodeId, ...],
+    edges: tuple[Edge, ...],
+) -> tuple[
+    dict[GraphNodeId, set[GraphNodeId]],
+    dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
+    dict[GraphNodeId, list[_RawActivationGate]],
+    tuple[frozenset[GraphNodeId], ...],
+    tuple[JoinEdge, ...],
+]:
+    """Lower declared edges into the compiler's single control relations."""
+
+    direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {node_id: set() for node_id in node_ids}
+    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {node_id: {} for node_id in node_ids}
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {node_id: [] for node_id in node_ids}
+    gates_to_end: list[frozenset[GraphNodeId]] = []
+    joins: list[JoinEdge] = []
+    for edge in edges:
+        if isinstance(edge, JoinEdge):
+            normalized = JoinEdge(tuple(sorted(edge.sources)), edge.target)
+            joins.append(normalized)
+            sources = normalized.sources
+            target = normalized.target
+            gate = tuple((source, None) for source in sources)
+        elif isinstance(edge, DirectEdge):
+            source = edge.source
+            target = edge.target
+            sources = (source,)
+            gate = ((source, None),)
+            if target != END:
+                direct_targets[source].add(target)
+        else:
+            # ``Edge`` is a closed alias, so the remaining variant is
+            # ConditionalEdge.  Keeping this final case explicit avoids a
+            # pattern-match fallthrough that could leave ``target`` unset.
+            source = edge.source
+            route = edge.route
+            target = edge.target
+            sources = (source,)
+            gate = ((source, route),)
+            conditional_targets[source][route] = target
+        if target != END:
+            activation_gates[target].append(gate)
+        else:
+            gates_to_end.append(frozenset(sources))
+    return direct_targets, conditional_targets, activation_gates, tuple(gates_to_end), tuple(joins)
+
+
+def _resolve_input_bindings(
+    nodes: dict[GraphNodeId, GraphNode[GraphValueT]],
+    node_ids: tuple[GraphNodeId, ...],
+    graph_inputs: OutputDeclarations[GraphValueT],
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
+) -> tuple[
+    dict[GraphNodeId, ResolvedInputBindings[GraphValueT]],
+    dict[GraphNodeId, tuple[tuple[str, PredecessorOutputRef[GraphValueT]], ...]],
+    dict[GraphNodeId, set[GraphNodeId]],
+]:
+    """Resolve ordinary value sources and retain predecessor declarations."""
+
     input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]] = {}
     predecessor_bindings_by_node: dict[
         GraphNodeId,
@@ -1045,34 +1109,18 @@ def _compile_definition(
         predecessor_bindings_by_node[node_id] = tuple(predecessor_bindings)
     if _data_cycle(data_dependencies):
         raise GraphValidationError("ordinary node value bindings contain a data cycle")
+    return input_bindings_by_node, predecessor_bindings_by_node, data_dependencies
 
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]] = {node_id: set() for node_id in node_ids}
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] = {node_id: {} for node_id in node_ids}
-    activation_gates: dict[GraphNodeId, list[_RawActivationGate]] = {node_id: [] for node_id in node_ids}
-    gates_to_end: list[frozenset[GraphNodeId]] = []
-    joins: list[JoinEdge] = []
-    for edge in definition.edges:
-        if isinstance(edge, DirectEdge):
-            if edge.target == END:
-                gates_to_end.append(frozenset((edge.source,)))
-            else:
-                direct_targets[edge.source].add(edge.target)
-                activation_gates[edge.target].append(((edge.source, None),))
-        elif isinstance(edge, ConditionalEdge):
-            conditional_targets[edge.source][edge.route] = edge.target
-            if edge.target == END:
-                gates_to_end.append(frozenset((edge.source,)))
-            else:
-                activation_gates[edge.target].append(((edge.source, edge.route),))
-        else:
-            normalized = JoinEdge(tuple(sorted(edge.sources)), edge.target)
-            joins.append(normalized)
-            if edge.target == END:
-                gates_to_end.append(frozenset(edge.sources))
-            else:
-                activation_gates[edge.target].append(tuple((source, None) for source in normalized.sources))
 
-    explicit_entries = tuple(sorted(definition.entries))
+def _resolve_entries(
+    node_ids: tuple[GraphNodeId, ...],
+    declared_entries: tuple[GraphNodeId, ...],
+    data_dependencies: dict[GraphNodeId, set[GraphNodeId]],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
+) -> tuple[GraphNodeId, ...]:
+    """Resolve explicit entries, then fill undeclared roots automatically."""
+
+    explicit_entries = tuple(sorted(declared_entries))
     if any(data_dependencies[node_id] for node_id in explicit_entries):
         raise GraphValidationError("an explicit START target cannot require a node output")
     for target, sources in data_dependencies.items():
@@ -1082,26 +1130,56 @@ def _compile_definition(
                 "but has no incoming control edge"
             )
     automatic_entries = tuple(
-        node_id for node_id in node_ids if not data_dependencies[node_id] and not activation_gates[node_id]
+        node_id
+        for node_id in node_ids
+        if node_id not in explicit_entries
+        if not data_dependencies[node_id] and not activation_gates[node_id]
     )
-    duplicates = set(explicit_entries).intersection(automatic_entries)
-    if duplicates:
-        raise DuplicateBoundaryError(f"automatic entry is also declared from START: {tuple(sorted(duplicates))!r}")
     entries = tuple(sorted((*explicit_entries, *automatic_entries)))
     if not entries:
         raise MissingEntryError("graph definition requires at least one automatic or explicit entry")
+    return entries
 
-    for node_id in node_ids:
-        resolved = list(input_bindings_by_node[node_id].entries)
+
+def _complete_input_bindings(
+    nodes: dict[GraphNodeId, GraphNode[GraphValueT]],
+    nested_graphs: dict[GraphNodeId, CompiledGraph[GraphValueT]],
+    graph_inputs: OutputDeclarations[GraphValueT],
+    input_bindings_by_node: dict[GraphNodeId, ResolvedInputBindings[GraphValueT]],
+    predecessor_bindings_by_node: dict[
+        GraphNodeId,
+        tuple[tuple[str, PredecessorOutputRef[GraphValueT]], ...],
+    ],
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]],
+    entries: tuple[GraphNodeId, ...],
+    activation_gates: dict[GraphNodeId, list[_RawActivationGate]],
+) -> tuple[dict[GraphNodeId, ResolvedInputBindings[GraphValueT]], OutputDeclarations[GraphValueT]]:
+    """Resolve causal inputs and their START-side graph-input declarations."""
+
+    completed = dict(input_bindings_by_node)
+    graph_input_descriptors = {declaration.name: declaration.descriptor for declaration in graph_inputs.entries}
+    for node_id in sorted(completed):
+        resolved = list(completed[node_id].entries)
         for input_name, declared_source in predecessor_bindings_by_node[node_id]:
+            start_input = GraphInputPort(input_name) if node_id in entries else None
             source, descriptor = _resolve_predecessor_output(
                 declared_source,
                 target=node_id,
                 input_name=input_name,
                 node_outputs=node_outputs,
-                entries=entries,
                 gates=activation_gates[node_id],
+                start_input=start_input,
             )
+            if start_input is not None:
+                entry_descriptor = graph_input_descriptors.get(input_name)
+                if entry_descriptor is not None and entry_descriptor.value_type is not descriptor.value_type:
+                    raise GraphValidationError(
+                        f"graph input {input_name!r} conflicts with its START causal input exact type"
+                    )
+                if entry_descriptor is None:
+                    graph_input_descriptors[input_name] = descriptor
+                else:
+                    descriptor = entry_descriptor
             resolved.append(
                 ResolvedInputBinding(
                     NodeInputPort(node_id, input_name),
@@ -1122,13 +1200,75 @@ def _compile_definition(
                 for binding, declaration in zip(resolved_bindings.entries, expected, strict=True)
             ):
                 raise GraphValidationError(f"nested node {node_id!r} inputs do not exactly match child boundary")
-        input_bindings_by_node[node_id] = resolved_bindings
+        completed[node_id] = resolved_bindings
+    completed_graph_inputs = OutputDeclarations(
+        tuple(OutputDeclaration(name, descriptor) for name, descriptor in sorted(graph_input_descriptors.items()))
+    )
+    return completed, completed_graph_inputs
 
-    successors = {node_id: set(targets) for node_id, targets in direct_targets.items()}
-    for source, routes in conditional_targets.items():
-        successors[source].update(target for target in routes.values() if target != END)
-    reachability_successors = {node_id: set(targets) for node_id, targets in successors.items()}
-    for join in joins:
+
+def _compile_definition(
+    definition: GraphDefinition[GraphValueT],
+    nested_graphs: dict[GraphNodeId, CompiledGraph[GraphValueT]],
+) -> CompiledGraph[GraphValueT]:
+    resource_order = tuple(resource.resource_id for resource in definition.resources)
+    positions = {resource_id: position for position, resource_id in enumerate(resource_order)}
+    nodes = {
+        node.node_id: (
+            CallableNodeDefinition(
+                node.node_id,
+                node.invoker,
+                node.inputs,
+                node.outputs,
+                tuple(sorted(node.resources, key=positions.__getitem__)),
+            )
+            if isinstance(node, CallableNodeDefinition)
+            else node
+        )
+        for node in definition.nodes
+    }
+    node_ids = tuple(sorted(nodes))
+    graph_inputs = _collect_graph_inputs(definition)
+    node_outputs: dict[GraphNodeId, OutputDeclarations[GraphValueT]] = {
+        node_id: (
+            node.outputs
+            if isinstance(node := nodes[node_id], CallableNodeDefinition)
+            else _nested_outputs(nested_graphs[node_id])
+        )
+        for node_id in node_ids
+    }
+    input_bindings_by_node, predecessor_bindings_by_node, data_dependencies = _resolve_input_bindings(
+        nodes,
+        node_ids,
+        graph_inputs,
+        node_outputs,
+    )
+    direct_targets, conditional_targets, activation_gates, end_gates, join_edges = _collect_control_topology(
+        node_ids,
+        definition.edges,
+    )
+    entries = _resolve_entries(node_ids, definition.entries, data_dependencies, activation_gates)
+    input_bindings_by_node, graph_inputs = _complete_input_bindings(
+        nodes,
+        nested_graphs,
+        graph_inputs,
+        input_bindings_by_node,
+        predecessor_bindings_by_node,
+        node_outputs,
+        entries,
+        activation_gates,
+    )
+    # Reachability must use the route-independent relation before Join edges
+    # are expanded into the successor map.  `_reachable` already owns Join
+    # activation, so keeping a second copied map here would create a mirror
+    # of the same static fact.
+    successors = _static_successors(node_ids, direct_targets, conditional_targets)
+    reached = _reachable(entries, successors, join_edges)
+    unreachable = set(node_ids) - reached
+    if unreachable:
+        raise UnreachableNodeError(f"unreachable nodes: {', '.join(sorted(unreachable))}")
+
+    for join in join_edges:
         if join.target != END:
             for source in join.sources:
                 successors[source].add(join.target)
@@ -1139,23 +1279,21 @@ def _compile_definition(
                 raise GraphValidationError(
                     f"node output {source!r} is not guaranteed before controlled node {target!r}"
                 )
-    reached = _reachable(entries, reachability_successors, tuple(joins))
-    unreachable = set(node_ids) - reached
-    if unreachable:
-        raise UnreachableNodeError(f"unreachable nodes: {', '.join(sorted(unreachable))}")
     route_requirements = _validate_joint_activation_paths(
         node_ids,
         entries,
         activation_gates,
         data_dependencies,
         conditional_targets,
+        successors,
     )
     control_proof = _control_flow_proof(
         node_ids,
         entries,
         direct_targets,
         conditional_targets,
-        tuple(joins),
+        join_edges,
+        successors,
     )
     _reject_ambiguous_activation_gates(
         activation_gates,
@@ -1171,14 +1309,14 @@ def _compile_definition(
             raise GraphValidationError(f"controlled node {target!r} can activate before required producers {missing!r}")
     terminal_gates = _terminal_gates(
         node_ids,
-        tuple(gates_to_end),
+        end_gates,
         successors,
     )
     _validate_cycle_exits(node_ids, successors, terminal_gates)
     terminal_guarantees = _terminal_guarantees(guarantees, terminal_gates)
     absolute_levels = _absolute_activation_levels(node_ids, entries, successors)
     compiled_joins = _compile_join_occurrence_plans(
-        tuple(joins),
+        join_edges,
         entries,
         activation_gates,
         successors,
@@ -1193,15 +1331,6 @@ def _compile_definition(
             joins_by_target[join.identity.target].append(join)
         for source in join.identity.sources:
             joins_by_source[source].append(join)
-    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {
-        node_id: _frame_descriptor(
-            definition,
-            FrameKind.NODE_OUTPUT,
-            ordinal,
-            node_outputs[node_id],
-        )
-        for ordinal, node_id in enumerate(node_ids)
-    }
     graph_output_bindings: list[GraphOutputBinding[GraphValueT]] = []
     for output in definition.outputs.entries:
         source, descriptor = _resolve_source(
@@ -1226,8 +1355,18 @@ def _compile_definition(
         )
     graph_outputs = GraphOutputBindings(tuple(graph_output_bindings))
 
+    # Output and input descriptors share the same stable node ordinal.  Build
+    # both plans in one pass so the compiler has one owner for per-node frame
+    # layout and never re-traverses the node set for a second ordinal map.
+    publications: dict[GraphNodeId, FrameDescriptor[GraphValueT]] = {}
     materializations: dict[GraphNodeId, MaterializationPlan[GraphValueT]] = {}
     for ordinal, node_id in enumerate(node_ids):
+        publications[node_id] = _frame_descriptor(
+            definition,
+            FrameKind.NODE_OUTPUT,
+            ordinal,
+            node_outputs[node_id],
+        )
         bindings = input_bindings_by_node[node_id]
         published_bindings: list[ResolvedInputBinding[GraphValueT]] = []
         for binding in bindings.entries:

@@ -6,15 +6,24 @@ import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from typing import Never, Protocol, TypeAlias, cast
+from unittest.mock import Mock
 
 import pytest
 
 import mote_kernel.failover as failover_package
 import mote_kernel.failover.assembly as assembly_module
+from mote_kernel.config import Config, ConfigContractError
 from mote_kernel.execution import Graph
 from mote_kernel.failover import Failover
 from mote_kernel.failover.assembly import FailoverCall, FailoverResult
+from mote_kernel.failover.config import (
+    FailoverPlanBinding,
+    FailoverPlanConfig,
+    FailoverPrepareBinding,
+    FailoverPrepareConfig,
+)
 from mote_kernel.failover.contract import (
+    AttemptPreparation,
     Completed,
     ErrorHint,
     FailoverContractError,
@@ -34,15 +43,12 @@ from mote_kernel.failover.contract import (
     Wait,
 )
 from mote_kernel.failover.plan import (
-    FailoverBindingMode,
     FailoverConfigRevision,
-    FailoverConfigSnapshot,
     FailoverOperationId,
     FailoverPlan,
     FailoverPortId,
     FailoverProfile,
     FailoverProfileId,
-    PortBinding,
     RetryContext,
 )
 from mote_kernel.failover.policy import FailoverDecision, ObservationRoute
@@ -77,13 +83,25 @@ class Transform:
 TestOutcome: TypeAlias = PortOutcome[Response, Receipt, Handle]
 TestResult: TypeAlias = FailoverResult[Request, Response, Receipt, Handle, Transform]
 _TEST_PORT_ID = FailoverPortId("payment")
-_INHERITED_BINDING = PortBinding[Transform](FailoverBindingMode.INHERIT)
+
+
+def _config(
+    revision: int = 1,
+    profile: FailoverProfile[Transform] | None = None,
+    *,
+    port_id: FailoverPortId = _TEST_PORT_ID,
+) -> FailoverPlan[Transform]:
+    return FailoverPlan(
+        FailoverConfigRevision(revision),
+        port_id,
+        profile or FailoverProfile(FailoverProfileId("standard")),
+    )
 
 
 class _PrivateConstructor(Protocol):
     """Typed test-side access to one owner-internal constructor."""
 
-    def __call__(self, *args: object) -> object: ...
+    def __call__(self, *args: object, **kwargs: object) -> object: ...
 
 
 class _PrivateNode(Protocol):
@@ -94,10 +112,26 @@ class _PrivateNode(Protocol):
     ) -> Awaitable[Graph.Values[HookGraphValue] | Graph.Outcome[HookGraphValue]]: ...
 
 
+class _BuilderNode(Protocol):
+    node_id: str
+
+
+class _BuilderState(Protocol):
+    nodes: tuple[_BuilderNode, ...]
+
+
+class _InspectableGraph(Protocol):
+    _builder_state: _BuilderState
+
+    @staticmethod
+    def node_ids(graph: object) -> tuple[str, ...]:
+        view = cast(_InspectableGraph, graph)
+        return tuple(str(node.node_id) for node in view._builder_state.nodes)
+
+
 @dataclass(frozen=True, slots=True)
 class _AssemblyTestAccess:
     frame: _PrivateConstructor
-    finish: _PrivateConstructor
     invoke: _PrivateConstructor
     invoke_step: _PrivateConstructor
     observe: _PrivateConstructor
@@ -107,10 +141,9 @@ class _AssemblyTestAccess:
 
 class _AssemblyPrivateView(Protocol):
     _FailoverFrame: _PrivateConstructor
-    _Finish: _PrivateConstructor
     _InvokeOnce: _PrivateConstructor
     _InvokeStep: _PrivateConstructor
-    _ObserveAndRoute: _PrivateConstructor
+    _ObserveCall: _PrivateConstructor
     _ObserveStep: _PrivateConstructor
     _PrepareNextAttempt: _PrivateConstructor
 
@@ -119,10 +152,9 @@ class _AssemblyPrivateView(Protocol):
         view = cast(_AssemblyPrivateView, module)
         return _AssemblyTestAccess(
             view._FailoverFrame,
-            view._Finish,
             view._InvokeOnce,
             view._InvokeStep,
-            view._ObserveAndRoute,
+            view._ObserveCall,
             view._ObserveStep,
             view._PrepareNextAttempt,
         )
@@ -132,15 +164,33 @@ def _private_assembly() -> _AssemblyTestAccess:
     return _AssemblyPrivateView.read(cast(object, assembly_module))
 
 
-class FailoverConfigSource:
-    def __init__(self, revision: int = 1, profile: FailoverProfile[Transform] | None = None) -> None:
-        self.revision = revision
-        self.profile = profile or FailoverProfile(FailoverProfileId("standard"))
-        self.calls = 0
+class _RuntimePlan(Protocol):
+    def __call__(
+        self,
+        config: Config | None,
+        binding: FailoverPlanBinding[Transform] | None,
+        fallback_plan: FailoverPlan[Transform],
+        /,
+    ) -> FailoverPlan[Transform]: ...
 
-    def snapshot(self) -> FailoverConfigSnapshot[Transform]:
-        self.calls += 1
-        return FailoverConfigSnapshot(FailoverConfigRevision(self.revision), self.profile)
+
+class _RuntimeConfig(Protocol):
+    def __call__(
+        self,
+        config: Config | None,
+        binding: FailoverPrepareBinding[Request, Transform] | None,
+        fallback_plan: FailoverPlan[Transform],
+        fallback_preparation: AttemptPreparation[Request, Transform],
+        /,
+    ) -> tuple[FailoverPlan[Transform], AttemptPreparation[Request, Transform]]: ...
+
+
+def _runtime_plan() -> _RuntimePlan:
+    return cast(_RuntimePlan, object.__getattribute__(assembly_module, "_runtime_plan"))
+
+
+def _runtime_config() -> _RuntimeConfig:
+    return cast(_RuntimeConfig, object.__getattribute__(assembly_module, "_runtime_config"))
 
 
 class ScriptedAttempt:
@@ -192,17 +242,12 @@ class InvalidPreparation:
 
 
 def _decorate(
-    config_source: FailoverConfigSource,
+    config: FailoverPlan[Transform],
     attempt: ScriptedAttempt | InvalidAttempt | CancelledAttempt,
     preparation: RecordingPreparation | InvalidPreparation,
-    *,
-    port_id: FailoverPortId = _TEST_PORT_ID,
-    binding: PortBinding[Transform] = _INHERITED_BINDING,
 ) -> Graph[HookGraphValue]:
     decorator: Failover[Request, Response, Receipt, Handle, Transform] = Failover(
-        port_id,
-        binding,
-        config_source,
+        config,
         preparation,
     )
     return decorator(attempt)
@@ -213,15 +258,15 @@ def _graph(
     profile: FailoverProfile[Transform] | None = None,
 ) -> tuple[
     Graph[HookGraphValue],
-    FailoverConfigSource,
+    FailoverPlan[Transform],
     ScriptedAttempt,
     RecordingPreparation,
 ]:
-    config_source = FailoverConfigSource(profile=profile)
+    config = _config(profile=profile)
     attempt = ScriptedAttempt(outcomes)
     preparation = RecordingPreparation()
-    graph = _decorate(config_source, attempt, preparation)
-    return graph, config_source, attempt, preparation
+    graph = _decorate(config, attempt, preparation)
+    return graph, config, attempt, preparation
 
 
 async def _run(graph: Graph[HookGraphValue]) -> TestResult:
@@ -237,6 +282,12 @@ def test_package_exposes_only_the_failover_decorator() -> None:
     assert failover_package.Failover is Failover
 
 
+def test_failover_graph_contains_only_observe_invoke_and_prepare() -> None:
+    graph, _config, _attempt, _preparation = _graph([Completed(Response("paid"))])
+
+    assert _InspectableGraph.node_ids(graph) == ("observe", "invoke", "prepare")
+
+
 @pytest.mark.asyncio
 async def test_completed_operation_calls_the_wrapped_port_once() -> None:
     graph, config, attempt, preparation = _graph([Completed(Response("paid"))])
@@ -245,7 +296,7 @@ async def test_completed_operation_calls_the_wrapped_port_once() -> None:
 
     assert terminal.outcome == Completed(Response("paid"))
     assert terminal.context.attempt_ordinal == 0
-    assert config.calls == 1
+    assert terminal.context.plan_revision == config.plan_revision
     assert attempt.calls == [Request("pay")]
     assert preparation.calls == []
 
@@ -269,13 +320,12 @@ async def test_decorated_port_composes_as_one_nested_graph_node() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hot_loaded_parameters_are_snapshotted_by_the_next_operation_only() -> None:
-    config = FailoverConfigSource(revision=1)
+async def test_direct_config_is_reused_by_each_graph_operation() -> None:
+    config = _config(revision=7)
     attempt = ScriptedAttempt([Completed(Response("first")), Completed(Response("second"))])
     graph = _decorate(config, attempt, RecordingPreparation())
 
     first = await _run(graph)
-    config.revision = 2
     second = await graph.run(
         Graph.values(request=FailoverCall(FailoverOperationId("operation-2"), Request("pay-again")))
     )
@@ -283,9 +333,8 @@ async def test_hot_loaded_parameters_are_snapshotted_by_the_next_operation_only(
     assert isinstance(second, Graph.CompletedResult)
     second_terminal = second.outputs["result"]
     assert type(second_terminal) is FailoverResult
-    assert first.context.plan_revision == 1
-    assert cast(TestResult, second_terminal).context.plan_revision == 2
-    assert config.calls == 2
+    assert first.context.plan_revision == 7
+    assert cast(TestResult, second_terminal).context.plan_revision == 7
     assert attempt.calls == [Request("pay"), Request("pay-again")]
 
 
@@ -298,7 +347,7 @@ async def test_retry_returns_to_the_same_wrapped_port_through_prepare() -> None:
             ErrorHint("rate_limited"),
         )
     )
-    graph, config, attempt, preparation = _graph([rejected, Completed(Response("paid"))])
+    graph, _config, attempt, preparation = _graph([rejected, Completed(Response("paid"))])
 
     terminal = await _run(graph)
 
@@ -307,7 +356,6 @@ async def test_retry_returns_to_the_same_wrapped_port_through_prepare() -> None:
     assert isinstance(preparation.calls[0][1], Wait)
     assert terminal.context.attempt_ordinal == 1
     assert terminal.context.uses_for(FailureStrategy.WAIT) == 1
-    assert config.calls == 1
 
 
 @pytest.mark.asyncio
@@ -317,7 +365,7 @@ async def test_unknown_provider_context_is_returned_without_kernel_follow_up() -
         handle,
         FailureEvidence(FailureClass.NO_RESPONSE, None, ErrorHint("no_response")),
     )
-    graph, config, attempt, preparation = _graph([unknown])
+    graph, _config, attempt, preparation = _graph([unknown])
 
     terminal = await _run(graph)
 
@@ -326,7 +374,6 @@ async def test_unknown_provider_context_is_returned_without_kernel_follow_up() -
     assert terminal.context.last_failure is FailureClass.NO_RESPONSE
     assert attempt.calls == [Request("pay")]
     assert preparation.calls == []
-    assert config.calls == 1
 
 
 @pytest.mark.asyncio
@@ -457,13 +504,12 @@ async def test_terminal_rejection_is_returned_without_preparation() -> None:
 @pytest.mark.asyncio
 async def test_abort_policy_fails_without_running_an_internal_hook() -> None:
     rejected = Rejected(FailureEvidence(FailureClass.UNKNOWN_OUTCOME, 409, ErrorHint("conflict")))
-    graph, config, attempt, preparation = _graph([rejected])
+    graph, _config, attempt, preparation = _graph([rejected])
 
     result = await graph.run(Graph.values(request=FailoverCall(FailoverOperationId("operation-1"), Request("pay"))))
 
     assert isinstance(result, Graph.FailedResult)
     assert tuple(failure.failure for failure in result.failures) == ("failover policy aborted the operation",)
-    assert config.calls == 1
     assert attempt.calls == [Request("pay")]
     assert preparation.calls == []
 
@@ -471,7 +517,7 @@ async def test_abort_policy_fails_without_running_an_internal_hook() -> None:
 @pytest.mark.asyncio
 async def test_caller_cancellation_never_starts_another_attempt() -> None:
     attempt = CancelledAttempt()
-    graph = _decorate(FailoverConfigSource(), attempt, RecordingPreparation())
+    graph = _decorate(_config(), attempt, RecordingPreparation())
 
     with pytest.raises(asyncio.CancelledError):
         await graph.run(Graph.values(request=FailoverCall(FailoverOperationId("operation-1"), Request("pay"))))
@@ -484,7 +530,7 @@ async def test_external_capabilities_must_return_their_declared_nominal_results(
     with pytest.raises(FailoverContractError, match="single-attempt capability returned"):
         await _run(
             _decorate(
-                FailoverConfigSource(),
+                _config(),
                 InvalidAttempt(),
                 RecordingPreparation(),
             )
@@ -494,7 +540,7 @@ async def test_external_capabilities_must_return_their_declared_nominal_results(
     with pytest.raises(FailoverContractError, match="must return a PreparedRequest"):
         await _run(
             _decorate(
-                FailoverConfigSource(),
+                _config(),
                 ScriptedAttempt([rejected]),
                 InvalidPreparation(),
             )
@@ -513,13 +559,12 @@ def test_failover_result_and_call_reject_malformed_values() -> None:
 
     with pytest.raises(FailoverContractError, match="operation_id"):
         FailoverCall(FailoverOperationId(" bad"), Request("pay"))
-    with pytest.raises(FailoverContractError, match="terminal decision"):
+    with pytest.raises(FailoverContractError, match="abort decision"):
         replace(
             terminal,
             decision=FailoverDecision(
-                ObservationRoute.PREPARE,
-                FailureStrategy.WAIT,
-                Wait(0),
+                ObservationRoute.ABORT,
+                FailureStrategy.ABORT,
             ),
         )
     rejected = Rejected(FailureEvidence(FailureClass.RATE_LIMITED, 429, ErrorHint("rate_limited")))
@@ -554,47 +599,110 @@ async def test_internal_frames_and_nodes_reject_impossible_recovery_values() -> 
         private.frame(private.invoke_step(request, mismatched), plan)
 
     await _assert_step_rejected(private.invoke(ScriptedAttempt([])), observe_frame, "invoke step")
-    await _assert_step_rejected(private.observe(), invoke_frame, "observe step")
-    await _assert_step_rejected(private.prepare(RecordingPreparation()), invoke_frame, "prepare step")
-    await _assert_step_rejected(private.finish(), invoke_frame, "finish step")
+    await _assert_step_rejected(private.prepare(RecordingPreparation()), invoke_frame, "observe step")
+
+    # Runtime projection admission is fail-closed even when a persistence or
+    # resolver boundary supplies a structurally plausible but invalid result.
+    bad_config = Mock()
+    bad_config.bind.side_effect = ConfigContractError("broken binding")
+    with pytest.raises(FailoverContractError, match="broken binding"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="broken binding"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    bad_config.bind.side_effect = None
+    bad_config.bind.return_value = None
+    with pytest.raises(FailoverContractError, match="did not provide"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="did not provide"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    bad_config.bind.return_value = object()
+    with pytest.raises(FailoverContractError, match="invalid projection"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+    with pytest.raises(FailoverContractError, match="invalid projection"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    forged_plan_projection = cast(
+        FailoverPlanConfig[Transform],
+        object.__new__(FailoverPlanConfig),
+    )
+    object.__setattr__(forged_plan_projection, "plan", replace(plan, port_id=FailoverPortId("other")))
+    bad_config.bind.return_value = forged_plan_projection
+    with pytest.raises(FailoverContractError, match="changed"):
+        _runtime_plan()(cast(Config, bad_config), None, plan)
+
+    forged_prepare_projection = cast(
+        FailoverPrepareConfig[Request, Transform],
+        object.__new__(FailoverPrepareConfig),
+    )
+    object.__setattr__(forged_prepare_projection, "plan", replace(plan, port_id=FailoverPortId("other")))
+    object.__setattr__(forged_prepare_projection, "preparation", RecordingPreparation())
+    bad_config.bind.return_value = forged_prepare_projection
+    with pytest.raises(FailoverContractError, match="changed"):
+        _runtime_config()(cast(Config, bad_config), None, plan, RecordingPreparation())
+
+    other_plan = replace(plan, plan_revision=FailoverConfigRevision(2))
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+
+        def alternate_plan(
+            _config: Config | None,
+            _binding: FailoverPlanBinding[Transform] | None,
+            _fallback_plan: FailoverPlan[Transform],
+            /,
+        ) -> FailoverPlan[Transform]:
+            return other_plan
+
+        def alternate_config(
+            _config: Config | None,
+            _binding: FailoverPrepareBinding[Request, Transform] | None,
+            _fallback_plan: FailoverPlan[Transform],
+            _fallback_preparation: AttemptPreparation[Request, Transform],
+            /,
+        ) -> tuple[FailoverPlan[Transform], AttemptPreparation[Request, Transform]]:
+            return other_plan, RecordingPreparation()
+
+        monkeypatch.setattr(assembly_module, "_runtime_plan", alternate_plan)
+        await _assert_step_rejected(
+            private.invoke(ScriptedAttempt([]), fallback_plan=plan),
+            invoke_frame,
+            "bound plan revisions",
+        )
+        monkeypatch.setattr(assembly_module, "_runtime_config", alternate_config)
+        await _assert_step_rejected(
+            private.prepare(RecordingPreparation(), fallback_plan=plan),
+            observe_frame,
+            "bound plan revisions",
+        )
+    finally:
+        monkeypatch.undo()
 
 
-def test_decorator_rejects_disabled_or_malformed_dependencies_before_reading_config() -> None:
-    config = FailoverConfigSource()
+def test_decorator_rejects_malformed_config_or_capabilities() -> None:
+    config = _config()
     preparation = RecordingPreparation()
-    arguments = (_TEST_PORT_ID, _INHERITED_BINDING, config, preparation)
+    arguments = (config, preparation)
 
-    with pytest.raises(FailoverContractError, match="port_id"):
-        Failover[Request, Response, Receipt, Handle, Transform](FailoverPortId(" bad"), *arguments[1:])
-    with pytest.raises(FailoverContractError, match="PortBinding"):
+    with pytest.raises(FailoverContractError, match="FailoverPlan config"):
         Failover[Request, Response, Receipt, Handle, Transform](
-            _TEST_PORT_ID,
-            cast(Never, object()),
-            config,
-            preparation,
-        )
-    with pytest.raises(FailoverContractError, match="disabled"):
-        Failover[Request, Response, Receipt, Handle, Transform](
-            _TEST_PORT_ID,
-            PortBinding[Transform](FailoverBindingMode.DISABLED),
-            config,
-            preparation,
-        )
-    with pytest.raises(FailoverContractError, match="config source"):
-        Failover[Request, Response, Receipt, Handle, Transform](
-            _TEST_PORT_ID,
-            _INHERITED_BINDING,
             cast(Never, object()),
             preparation,
         )
     with pytest.raises(FailoverContractError, match="preparation capability"):
         Failover[Request, Response, Receipt, Handle, Transform](
-            _TEST_PORT_ID,
-            _INHERITED_BINDING,
             config,
             cast(Never, object()),
         )
     decorator: Failover[Request, Response, Receipt, Handle, Transform] = Failover(*arguments)
     with pytest.raises(FailoverContractError, match="single-attempt Port"):
         decorator(cast(Never, object()))
-    assert config.calls == 0
+
+    with pytest.raises(FailoverContractError, match="plan binding must"):
+        Failover(*arguments, plan_binding=cast(FailoverPlanBinding[Transform], object()))
+    with pytest.raises(FailoverContractError, match="plan binding does not"):
+        Failover(*arguments, plan_binding=FailoverPlanBinding(FailoverPortId("other")))
+    with pytest.raises(FailoverContractError, match="prepare binding must"):
+        Failover(*arguments, prepare_binding=cast(FailoverPrepareBinding[Request, Transform], object()))
+    with pytest.raises(FailoverContractError, match="prepare binding does not"):
+        Failover(*arguments, prepare_binding=FailoverPrepareBinding(FailoverPortId("other")))

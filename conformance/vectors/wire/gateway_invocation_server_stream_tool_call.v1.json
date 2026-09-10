@@ -1,0 +1,69 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.server_stream.native_tool_call",
+  "description": "A server stream is delivered live to its caller but crosses the Kernel boundary as one finalized complete native tool call.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "op-tool-1",
+    "model_id": "model.tools",
+    "operation": "generate",
+    "modality": "text",
+    "mode": "server_stream",
+    "input": {
+      "kind": "generate",
+      "messages": [{"role": "user", "content": [{"type": "text", "text": "Look up mote."}]}],
+      "tools": [{"name": "lookup", "description": "Look up a value", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+      "tool_choice": {"mode": "required"}
+    },
+    "features": ["tool_calls", "usage"],
+    "trace": {"trace_id": "trace-tool-1", "generation_id": "generation-tool-1", "model_call_id": "call-tool-1"}
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "llm_response",
+      "schema_version": 1,
+      "operation_id": "op-tool-1",
+      "mode": "server_stream",
+      "terminal": {"outcome": "succeeded", "result": {"kind": "generate", "tool_calls": [{"call_id": "call-1", "name": "lookup", "arguments": {"q": "mote"}, "arguments_raw": "{\"q\":\"mote\"}"}]}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-tool-1",
+        "operation": "generate",
+        "modality": "text",
+        "mode": "server_stream",
+        "correlation": {"trace_id": "trace-tool-1", "generation_id": "generation-tool-1", "model_call_id": "call-tool-1"},
+        "model": {"requested_model_id": "model.tools", "provider": "fixture", "protocol": "openai.responses.v1"},
+        "input": {
+          "kind": "generate",
+          "messages": [{"role": "user", "content": [{"type": "text", "text": "Look up mote."}]}],
+          "tools": [{"name": "lookup", "description": "Look up a value", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+          "tool_choice": {"mode": "required"}
+        },
+        "finish": {"reasons": ["tool_calls"]},
+        "usage": {"availability": "reported", "input_tokens": 6, "output_tokens": 8, "total_tokens": 14},
+        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000014"},
+        "timing": {"latency_ms": 35, "streamed": true, "chunk_count": 4, "time_to_first_byte_ms": 4.2, "time_to_first_token_ms": 6.1},
+        "cache": {"prompt": {"state": "miss", "key_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "result": {"state": "bypassed"}},
+        "attempts": [{
+          "attempt_id": "attempt-tool-1",
+          "ordinal": 1,
+          "resume_generation": 0,
+          "state": "succeeded",
+          "model_id": "model.tools",
+          "provider": "fixture",
+          "endpoint_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "credential_slot_id": "slot-fixture-1",
+          "latency_ms": 35,
+          "usage": {"availability": "reported", "input_tokens": 6, "output_tokens": 8, "total_tokens": 14},
+          "cost": {"currency": "USD", "availability": "reported", "amount": "0.000014"},
+          "selected": true
+        }]
+      },
+      "receipt": {"receipt_id": "receipt-tool-1", "operation_id": "op-tool-1", "revision": 1}
+    }
+  }
+}

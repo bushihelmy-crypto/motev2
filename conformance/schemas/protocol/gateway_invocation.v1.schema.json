@@ -1,0 +1,662 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mote.dev/conformance/protocol/gateway_invocation.v1.schema.json",
+  "title": "Mote Gateway invocation profiles v1",
+  "description": "The provider-neutral model request and terminal response contract. Kernel uses the LLM profile; Execution uses the distinct media profile. Stream delivery is local and never serialized as deltas or events.",
+  "$ref": "#/$defs/request",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$"
+    },
+    "model_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "json_object": {
+      "type": "object",
+      "description": "JSON owned by a model feature (for example a tool schema or structured result), not a Gateway control map.",
+      "additionalProperties": true
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "revision", "representation", "kind", "mime_type", "content_ref", "digest", "size"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/identifier"},
+        "revision": {"type": "integer", "minimum": 1},
+        "representation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+        "kind": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+        "mime_type": {"type": "string", "pattern": "^[^\\s/]+/[^\\s]+$"},
+        "content_ref": {"$ref": "#/$defs/identifier"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "size": {"type": "integer", "minimum": 0}
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "top_p": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "max_output_tokens": {"type": "integer", "minimum": 1},
+        "stop": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "seed": {"type": "integer"}
+      }
+    },
+    "text_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text"],
+      "properties": {
+        "type": {"const": "text"},
+        "text": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifact_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "artifact"],
+      "properties": {
+        "type": {"enum": ["image", "audio", "video"]},
+        "artifact": {"$ref": "#/$defs/artifact_ref"}
+      }
+    },
+    "content_part": {
+      "oneOf": [
+        {"$ref": "#/$defs/text_part"},
+        {"$ref": "#/$defs/artifact_part"}
+      ]
+    },
+    "tool_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "input_schema"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"},
+        "description": {"type": "string", "maxLength": 4096},
+        "input_schema": {"$ref": "#/$defs/json_object"}
+      }
+    },
+    "tool_choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["auto", "none", "required", "named"]},
+        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"}
+      },
+      "allOf": [
+        {"if": {"properties": {"mode": {"const": "named"}}}, "then": {"required": ["name"]}},
+        {"if": {"properties": {"mode": {"enum": ["auto", "none", "required"]}}}, "then": {"not": {"required": ["name"]}}}
+      ]
+    },
+    "response_format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["text", "json_object", "json_schema"]},
+        "schema": {"$ref": "#/$defs/json_object"}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "json_schema"}}}, "then": {"required": ["schema"]}},
+        {"if": {"properties": {"type": {"enum": ["text", "json_object"]}}}, "then": {"not": {"required": ["schema"]}}}
+      ]
+    },
+    "tool_call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["call_id", "name", "arguments"],
+      "properties": {
+        "call_id": {"$ref": "#/$defs/identifier"},
+        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"},
+        "arguments": {"$ref": "#/$defs/json_object"},
+        "arguments_raw": {"type": "string", "maxLength": 1048576}
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": {"enum": ["system", "developer", "user", "assistant", "tool"]},
+        "content": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/content_part"}},
+        "name": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$"},
+        "tool_call_id": {"$ref": "#/$defs/identifier"},
+        "tool_calls": {"type": "array", "items": {"$ref": "#/$defs/tool_call"}}
+      }
+    },
+    "llm_generate_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "messages"],
+      "properties": {
+        "kind": {"const": "generate"},
+        "messages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/message"}},
+        "system_prompt": {"type": "string", "maxLength": 200000},
+        "tools": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/tool_definition"}},
+        "tool_choice": {"$ref": "#/$defs/tool_choice"},
+        "response_format": {"$ref": "#/$defs/response_format"},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "llm_realtime_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"const": "realtime"},
+        "instructions": {"type": "string", "maxLength": 200000},
+        "modalities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["text", "audio"]}},
+        "tools": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/tool_definition"}},
+        "tool_choice": {"$ref": "#/$defs/tool_choice"},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "llm_input": {
+      "oneOf": [
+        {"$ref": "#/$defs/llm_generate_input"},
+        {"$ref": "#/$defs/llm_realtime_input"}
+      ]
+    },
+    "image_generation_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "prompt"],
+      "properties": {
+        "kind": {"const": "image_generation"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "source": {"$ref": "#/$defs/artifact_ref"},
+        "count": {"type": "integer", "minimum": 1, "maximum": 128},
+        "size": {"type": "string", "pattern": "^[0-9]{2,5}x[0-9]{2,5}$"},
+        "quality": {"enum": ["standard", "hd"]},
+        "response_format": {"enum": ["artifact"]},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "audio_generation_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "voice"],
+      "properties": {
+        "kind": {"const": "audio_generation"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "voice": {"type": "string", "minLength": 1, "maxLength": 128},
+        "response_format": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,31}$"},
+        "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 4},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "music_generation_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "prompt"],
+      "properties": {
+        "kind": {"const": "music_generation"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "duration_ms": {"type": "integer", "minimum": 1, "maximum": 3600000},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "video_generation_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "prompt"],
+      "properties": {
+        "kind": {"const": "video_generation"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "source": {"$ref": "#/$defs/artifact_ref"},
+        "duration_ms": {"type": "integer", "minimum": 1, "maximum": 3600000},
+        "width": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "height": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "fps": {"type": "integer", "minimum": 1, "maximum": 240},
+        "count": {"type": "integer", "minimum": 1, "maximum": 16},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "transcription_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "media"],
+      "properties": {
+        "kind": {"const": "audio_transcription"},
+        "media": {"$ref": "#/$defs/artifact_ref"},
+        "language": {"type": "string", "pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})?$"},
+        "parameters": {"$ref": "#/$defs/parameters"}
+      }
+    },
+    "media_input": {
+      "oneOf": [
+        {"$ref": "#/$defs/image_generation_input"},
+        {"$ref": "#/$defs/audio_generation_input"},
+        {"$ref": "#/$defs/music_generation_input"},
+        {"$ref": "#/$defs/video_generation_input"},
+        {"$ref": "#/$defs/transcription_input"}
+      ]
+    },
+    "trace_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "parent_span_id": {"$ref": "#/$defs/identifier"},
+        "generation_id": {"$ref": "#/$defs/identifier"},
+        "model_call_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "request_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "schema_version", "operation_id", "model_id", "operation", "modality", "mode", "input", "features"],
+      "properties": {
+        "kind": {"enum": ["llm", "media"]},
+        "schema_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "model_id": {"$ref": "#/$defs/model_id"},
+        "operation": {"type": "string"},
+        "modality": {"type": "string"},
+        "mode": {"type": "string"},
+        "input": {"type": "object"},
+        "features": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "trace": {"$ref": "#/$defs/trace_context"}
+      }
+    },
+    "llm_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_base"},
+        {
+          "type": "object",
+          "required": ["kind", "operation", "modality", "mode", "input", "features"],
+          "properties": {
+            "kind": {"const": "llm"},
+            "operation": {"enum": ["generate", "realtime"]},
+            "modality": {"enum": ["text", "audio"]},
+            "mode": {"enum": ["unary", "server_stream", "duplex"]},
+            "input": {"$ref": "#/$defs/llm_input"},
+            "features": {"items": {"enum": ["tool_calls", "structured_output", "prompt_cache", "usage"]}}
+          },
+          "allOf": [
+            {"if": {"properties": {"operation": {"const": "generate"}}}, "then": {"properties": {"modality": {"const": "text"}, "mode": {"enum": ["unary", "server_stream"]}, "input": {"$ref": "#/$defs/llm_generate_input"}}}},
+            {"if": {"properties": {"operation": {"const": "realtime"}}}, "then": {"properties": {"modality": {"const": "audio"}, "mode": {"const": "duplex"}, "input": {"$ref": "#/$defs/llm_realtime_input"}}}},
+            {"if": {"properties": {"mode": {"const": "duplex"}}}, "then": {"properties": {"operation": {"const": "realtime"}}}}
+          ]
+        }
+      ]
+    },
+    "media_request": {
+      "allOf": [
+        {"$ref": "#/$defs/request_base"},
+        {
+          "type": "object",
+          "required": ["kind", "operation", "modality", "mode", "input", "features"],
+          "properties": {
+            "kind": {"const": "media"},
+            "operation": {"enum": ["image_generation", "audio_generation", "music_generation", "video_generation", "audio_transcription"]},
+            "modality": {"enum": ["image", "audio", "music", "video"]},
+            "mode": {"enum": ["unary", "server_stream", "async"]},
+            "input": {"$ref": "#/$defs/media_input"},
+            "features": {"items": {"enum": ["prompt_cache", "usage"]}}
+          },
+          "allOf": [
+            {"if": {"properties": {"operation": {"const": "image_generation"}}}, "then": {"properties": {"modality": {"const": "image"}, "input": {"$ref": "#/$defs/image_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "audio_generation"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/audio_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "music_generation"}}}, "then": {"properties": {"modality": {"const": "music"}, "input": {"$ref": "#/$defs/music_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "video_generation"}}}, "then": {"properties": {"modality": {"const": "video"}, "input": {"$ref": "#/$defs/video_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "audio_transcription"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/transcription_input"}}}}
+          ]
+        }
+      ]
+    },
+    "request": {
+      "oneOf": [
+        {"$ref": "#/$defs/llm_request"},
+        {"$ref": "#/$defs/media_request"}
+      ]
+    },
+    "llm_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"const": "generate"},
+        "text": {"type": "string"},
+        "structured": {},
+        "tool_calls": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/tool_call"}}
+      },
+      "anyOf": [{"required": ["text"]}, {"required": ["structured"]}, {"required": ["tool_calls"]}]
+    },
+    "media_output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "artifacts"],
+          "properties": {"kind": {"enum": ["image", "audio", "music", "video"]}, "artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact_ref"}}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "transcript"],
+          "properties": {
+            "kind": {"const": "audio_transcription"},
+            "transcript": {"type": "string"},
+            "segments": {"type": "array", "items": {"$ref": "#/$defs/transcript_segment"}}
+          }
+        }
+      ]
+    },
+    "transcript_segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_ms", "end_ms", "text"],
+      "properties": {
+        "start_ms": {"type": "integer", "minimum": 0},
+        "end_ms": {"type": "integer", "minimum": 0},
+        "text": {"type": "string", "minLength": 1}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "domain", "retryability", "external_commit_state"],
+      "properties": {
+        "code": {"enum": ["INVALID_REQUEST", "UNSUPPORTED_CAPABILITY", "UPSTREAM_REJECTED", "UPSTREAM_UNAVAILABLE", "OUTCOME_UNKNOWN", "CANCELLED", "RESPONSE_INVALID"]},
+        "domain": {"enum": ["request", "capability", "transport", "provider", "protocol", "internal", "cancellation"]},
+        "safe_message": {"type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$"},
+        "provider_code": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"},
+        "retryability": {"enum": ["never", "same_call", "reconcile_only"]},
+        "external_commit_state": {"enum": ["not_committed", "committed", "unknown"]}
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "operation_id"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/identifier"},
+        "provider_task_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "llm_terminal": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["outcome", "result"], "properties": {"outcome": {"const": "succeeded"}, "result": {"$ref": "#/$defs/llm_output"}}},
+        {"type": "object", "additionalProperties": false, "required": ["outcome", "error"], "properties": {"outcome": {"enum": ["failed", "cancelled", "unknown"]}, "error": {"$ref": "#/$defs/error"}}}
+      ]
+    },
+    "media_terminal": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["outcome", "result"], "properties": {"outcome": {"const": "succeeded"}, "result": {"$ref": "#/$defs/media_output"}}},
+        {"type": "object", "additionalProperties": false, "required": ["outcome", "task"], "properties": {"outcome": {"const": "submitted"}, "task": {"$ref": "#/$defs/task"}}},
+        {"type": "object", "additionalProperties": false, "required": ["outcome", "error"], "properties": {"outcome": {"enum": ["failed", "cancelled", "unknown"]}, "error": {"$ref": "#/$defs/error"}}}
+      ]
+    },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace_id", "generation_id", "model_call_id"],
+      "properties": {
+        "trace_id": {"$ref": "#/$defs/identifier"},
+        "session_id": {"$ref": "#/$defs/identifier"},
+        "parent_span_id": {"$ref": "#/$defs/identifier"},
+        "generation_id": {"$ref": "#/$defs/identifier"},
+        "model_call_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "model_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested_model_id", "provider", "protocol"],
+      "properties": {
+        "requested_model_id": {"$ref": "#/$defs/model_id"},
+        "resolved_model_id": {"$ref": "#/$defs/model_id"},
+        "provider": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "protocol": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}(\\.[a-z][a-z0-9_.-]{0,127})+$"},
+        "provider_request_id": {"$ref": "#/$defs/identifier"},
+        "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
+        "tenant_fingerprint": {"$ref": "#/$defs/digest"},
+        "credential_slot_id": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "finish": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reasons"],
+      "properties": {
+        "reasons": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stop", "length", "tool_calls", "content_filter", "completed", "cancelled", "error", "unknown"]}},
+        "provider_reason": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"}
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability"],
+      "properties": {
+        "availability": {"enum": ["reported", "estimated", "partial", "unavailable"]},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "cache_read_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_tokens": {"type": "integer", "minimum": 0},
+        "reasoning_tokens": {"type": "integer", "minimum": 0},
+        "input_text_tokens": {"type": "integer", "minimum": 0},
+        "output_text_tokens": {"type": "integer", "minimum": 0},
+        "input_audio_tokens": {"type": "integer", "minimum": 0},
+        "output_audio_tokens": {"type": "integer", "minimum": 0},
+        "input_image_tokens": {"type": "integer", "minimum": 0},
+        "output_image_tokens": {"type": "integer", "minimum": 0},
+        "input_video_tokens": {"type": "integer", "minimum": 0},
+        "output_video_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "availability"],
+      "properties": {
+        "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,18})?$"},
+        "availability": {"enum": ["reported", "estimated", "unavailable"]}
+      },
+      "allOf": [
+        {"if": {"properties": {"availability": {"enum": ["reported", "estimated"]}}}, "then": {"required": ["amount"]}},
+        {"if": {"properties": {"availability": {"const": "unavailable"}}}, "then": {"not": {"required": ["amount"]}}}
+      ]
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latency_ms", "streamed", "chunk_count"],
+      "properties": {
+        "latency_ms": {"type": "number", "minimum": 0},
+        "streamed": {"type": "boolean"},
+        "chunk_count": {"type": "integer", "minimum": 0},
+        "input_event_count": {"type": "integer", "minimum": 0},
+        "output_event_count": {"type": "integer", "minimum": 0},
+        "time_to_first_byte_ms": {"type": "number", "minimum": 0},
+        "time_to_first_token_ms": {"type": "number", "minimum": 0}
+      },
+      "allOf": [
+        {"if": {"properties": {"streamed": {"const": true}}}, "then": {"properties": {"chunk_count": {"minimum": 1}}}},
+        {"if": {"properties": {"streamed": {"const": false}}}, "then": {"properties": {"chunk_count": {"const": 0}}}}
+      ]
+    },
+    "prompt_cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {"enum": ["not_requested", "hit", "miss", "bypassed", "unavailable"]},
+        "read_tokens": {"type": "integer", "minimum": 0},
+        "write_tokens": {"type": "integer", "minimum": 0},
+        "key_fingerprint": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "result_cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {"enum": ["not_requested", "hit", "miss", "bypassed", "unavailable"]},
+        "key_fingerprint": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt", "result"],
+      "properties": {
+        "prompt": {"$ref": "#/$defs/prompt_cache"},
+        "result": {"$ref": "#/$defs/result_cache"}
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt_id", "ordinal", "resume_generation", "state", "model_id", "provider", "latency_ms", "usage", "cost", "selected"],
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/identifier"},
+        "ordinal": {"type": "integer", "minimum": 1},
+        "resume_generation": {"type": "integer", "minimum": 0},
+        "state": {"enum": ["succeeded", "failed", "cancelled", "unknown"]},
+        "model_id": {"$ref": "#/$defs/model_id"},
+        "provider": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
+        "credential_slot_id": {"$ref": "#/$defs/identifier"},
+        "latency_ms": {"type": "number", "minimum": 0},
+        "usage": {"$ref": "#/$defs/usage"},
+        "cost": {"$ref": "#/$defs/money"},
+        "error": {"$ref": "#/$defs/error"},
+        "selected": {"type": "boolean"}
+      },
+      "allOf": [
+        {"if": {"properties": {"state": {"enum": ["failed", "cancelled", "unknown"]}}}, "then": {"required": ["error"]}},
+        {"if": {"properties": {"state": {"const": "succeeded"}}}, "then": {"not": {"required": ["error"]}}}
+      ]
+    },
+    "observation_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "operation_id", "operation", "modality", "mode", "correlation", "model", "input", "finish", "usage", "cost", "timing", "cache", "attempts"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "operation": {"type": "string"},
+        "modality": {"type": "string"},
+        "mode": {"type": "string"},
+        "correlation": {"$ref": "#/$defs/correlation"},
+        "model": {"$ref": "#/$defs/model_observation"},
+        "input": {"type": "object"},
+        "finish": {"$ref": "#/$defs/finish"},
+        "usage": {"$ref": "#/$defs/usage"},
+        "cost": {"$ref": "#/$defs/money"},
+        "timing": {"$ref": "#/$defs/timing"},
+        "cache": {"$ref": "#/$defs/cache"},
+        "attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt"}}
+      }
+    },
+    "llm_observation": {
+      "allOf": [
+        {"$ref": "#/$defs/observation_base"},
+        {
+          "type": "object",
+          "properties": {
+            "operation": {"enum": ["generate", "realtime"]},
+            "modality": {"enum": ["text", "audio"]},
+            "mode": {"enum": ["unary", "server_stream", "duplex"]},
+            "input": {"$ref": "#/$defs/llm_input"}
+          },
+          "allOf": [
+            {"if": {"properties": {"operation": {"const": "generate"}}}, "then": {"properties": {"modality": {"const": "text"}, "mode": {"enum": ["unary", "server_stream"]}, "input": {"$ref": "#/$defs/llm_generate_input"}}}},
+            {"if": {"properties": {"operation": {"const": "realtime"}}}, "then": {"properties": {"modality": {"const": "audio"}, "mode": {"const": "duplex"}, "input": {"$ref": "#/$defs/llm_realtime_input"}}}}
+          ]
+        }
+      ]
+    },
+    "media_observation": {
+      "allOf": [
+        {"$ref": "#/$defs/observation_base"},
+        {
+          "type": "object",
+          "properties": {
+            "operation": {"enum": ["image_generation", "audio_generation", "music_generation", "video_generation", "audio_transcription"]},
+            "modality": {"enum": ["image", "audio", "music", "video"]},
+            "mode": {"enum": ["unary", "server_stream", "async"]},
+            "input": {"$ref": "#/$defs/media_input"}
+          },
+          "allOf": [
+            {"if": {"properties": {"operation": {"const": "image_generation"}}}, "then": {"properties": {"modality": {"const": "image"}, "input": {"$ref": "#/$defs/image_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "audio_generation"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/audio_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "music_generation"}}}, "then": {"properties": {"modality": {"const": "music"}, "input": {"$ref": "#/$defs/music_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "video_generation"}}}, "then": {"properties": {"modality": {"const": "video"}, "input": {"$ref": "#/$defs/video_generation_input"}}}},
+            {"if": {"properties": {"operation": {"const": "audio_transcription"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/transcription_input"}}}}
+          ]
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_id", "operation_id", "revision"],
+      "properties": {
+        "receipt_id": {"$ref": "#/$defs/identifier"},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "revision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "response_base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "schema_version", "operation_id", "mode", "terminal", "observation", "receipt"],
+      "properties": {
+        "kind": {"enum": ["llm_response", "media_response"]},
+        "schema_version": {"const": 1},
+        "operation_id": {"$ref": "#/$defs/identifier"},
+        "mode": {"type": "string"},
+        "terminal": {"type": "object"},
+        "observation": {"type": "object"},
+        "receipt": {"$ref": "#/$defs/receipt"}
+      }
+    },
+    "llm_response": {
+      "allOf": [
+        {"$ref": "#/$defs/response_base"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "llm_response"},
+            "mode": {"enum": ["unary", "server_stream", "duplex"]},
+            "terminal": {"$ref": "#/$defs/llm_terminal"},
+            "observation": {"$ref": "#/$defs/llm_observation"}
+          }
+        }
+      ]
+    },
+    "media_response": {
+      "allOf": [
+        {"$ref": "#/$defs/response_base"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "media_response"},
+            "mode": {"enum": ["unary", "server_stream", "async"]},
+            "terminal": {"$ref": "#/$defs/media_terminal"},
+            "observation": {"$ref": "#/$defs/media_observation"}
+          }
+        }
+      ]
+    },
+    "response": {
+      "oneOf": [
+        {"$ref": "#/$defs/llm_response"},
+        {"$ref": "#/$defs/media_response"}
+      ]
+    }
+  }
+}

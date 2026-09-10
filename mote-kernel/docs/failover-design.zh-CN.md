@@ -1,6 +1,6 @@
 # Mote Kernel Failover 设计
 
-状态：设计共识（固定策略映射、Role 默认参数、Port 绑定继承、参数热加载、Graph 持久恢复）
+状态：设计共识（固定策略映射、Role 默认参数、Port 绑定继承、显式 config、Graph 持久恢复）
 
 本文定义 Kernel 中 Failover 的边界和最小模型。它基于：
 
@@ -21,14 +21,14 @@ Failover 是一张固定的、可持久恢复的重试图。它一次只包裹�
 Role config
   ├─> 默认 FailoverProfile 参数
   └─> Port binding（继承 / 覆盖 / 禁用）
-        └─> 每个 operation 的 FailoverPlan 快照
-              └─> Failover(...)(port)
-                    └─> 固定四个领域节点 + 一个出口投影
+        └─> 组装期解析的 FailoverPlan config
+              └─> Failover(config, preparation)(port)
+                    └─> 固定 observe / invoke / prepare 三节点
                           └─> 一个具体 Port 的单次调用
 ```
 
 同一套 `FailoverProfile` 参数可以被多个 Port 继承，但每个 Port 仍分别装配自己的重试图；每次 logical
-operation 都有独立的配置快照、持久化 cursor/预算和 operation identity。共享的是无状态的策略模板，
+operation 都有独立的持久化 cursor/预算和 operation identity。共享的是组装期传入的不可变 config 和无状态策略模板，
 不共享包装实例、cursor 或运行状态。cursor 属于 Graph 的状态值，不属于 Port 或 decorator 实例的可变字段。
 Failover 不调用其他 Port，不编排业务流程；主业务 Graph 负责决定何时调用付款、审批或其他 Port。
 
@@ -44,7 +44,7 @@ Failover 图由现有 `mote_kernel.execution.Graph` 执行。它不能在 Port �
 
 ## 2. 设计目标
 
-- 同一个重试图拓扑可以长期复用；重试次数、退避、超时等参数可以热加载；
+- 同一个重试图拓扑可以长期复用；重试次数、退避、超时等参数由组装方显式传入；
 - 每次重试都是 Graph 的普通状态推进，并进入同一个 durable state/commit 边界；
 - 一个 Port 的恢复和另一个 Port 完全隔离；
 - 不确定的外部结果直接返回；Port 自己拥有版本检查和已有状态查询，Kernel 不盲目重放副作用；
@@ -105,21 +105,22 @@ SingleAttempt<RequestT, AttemptResultT>
 
 ## 5. 固定重试图
 
-### 5.1 核心图：四个领域节点，一个出口投影
+### 5.1 核心图：三个节点
 
 本节记录已经确认的核心图。核心图不按 HTTP 状态码展开，也不为每一种 Role config 生成一张新拓扑。
 Role config 只生成不可变的 `FailoverPlan`；状态码和 provider 证据交给“观察并分流”节点处理。
 
-一个单 Port 的 failover nested graph 有四个领域节点，以及一个只负责把内部 frame 投影为 `FailoverResult`
-的出口节点。`START`、`END` 是 Graph 边界，不计入节点数。领域节点之间直接连接，图内不插入 Hook：
+一个单 Port 的 failover nested graph 只有 `observe`、`invoke`、`prepare` 三个节点。
+`START`、`END` 是 Graph 边界，不计入节点数。节点之间直接连接，图内不插入 Hook：
 
 ```text
-START -> LoadPlanOnce -> InvokeOnce -> ObserveAndRoute
-ObserveAndRoute -- prepare ---> PrepareNextAttempt -> InvokeOnce
-ObserveAndRoute -- finish ----> ProjectResult ------> END
+START -> observe -> invoke -> prepare
+                    ^          |
+                    +-- retry -+
+prepare -- finish ------------> END
 ```
 
-`InvokeOnce` 的实际前驱只能是 `LoadPlanOnce` 或 `PrepareNextAttempt`，两条路线在同一轮互斥，因此它使用
+`invoke` 的实际前驱只能是首轮 `observe` 或重试 `prepare`，两条路线在同一轮互斥，因此它使用
 `Graph.node_output("frame")` 读取本次实际控制前驱的 typed publication。`ObserveAndRoute` 只有 `InvokeOnce`
 一个生产者，使用普通两参数引用。图中没有第二个 router，也没有隐藏的策略判断。
 
@@ -134,11 +135,9 @@ Failover 只观察这次 Port 调用返回的内容。
 
 | 节点 | 职责 | 边界 |
 | --- | --- | --- |
-| `LoadPlanOnce` | 读取本次 operation 的 plan snapshot，生成 `RetryContext` | 只读一次配置；恢复时使用已持久化的 plan |
-| `InvokeOnce` | 调用被装饰 Port 的一次 wire operation | 一次 activation 至多一次底层调用，不拥有 retry loop |
-| `ObserveAndRoute` | 看调用结果，判断成功、失败、未知，并选择固定路线 | 不执行等待、切换或重新提交 |
-| `PrepareNextAttempt` | 按 typed 策略等待、改请求、换凭证或换地址 | 只准备下一步；不隐藏新的 retry loop |
-| `ProjectResult` | 把终态内部 frame 投影成唯一公开结果 | 不判断策略、不调用 Port |
+| `observe` | 接收新 operation，并把组装方传入的不可变 config 与初始 `RetryContext` 放入 frame | 不读取 config source |
+| `invoke` | 调用被装饰 Port 的一次 wire operation | 一次 activation 至多一次底层调用，不拥有 retry loop |
+| `prepare` | 观察调用结果并选择固定路线；终态直接投影 `FailoverResult`，可重试时执行一个 typed preparation | 不调用被装饰 Port，不隐藏 retry loop |
 
 图中传递的核心值是不可变类型，而不是裸字典或局部变量：
 
@@ -242,8 +241,8 @@ Conflict(existing_fingerprint)
 
 ### 6.1 装饰发生在组装期
 
-装饰不是写死在 Port 实现类上的 Python 注解，而是 Role/Flow 组装时对 Port binding 应用 profile，并通过
-唯一的包级行为 API `Failover(...)(port)` 包裹该 Port。
+装饰不是写死在 Port 实现类上的 Python 注解，而是 Role/Flow 组装时对 Port binding 应用 profile、解析出
+`FailoverPlan`，并通过唯一的包级行为 API `Failover(config, preparation)(port)` 包裹该 Port。
 Role 给出一个默认 profile，单个 Port 可以继承、覆盖或禁用：
 
 ```text
@@ -295,8 +294,8 @@ Failover 图不会从 `payment_port` 调用 `approval_port`。付款彻底失败
 `Failover` 装饰器；装饰结果是普通 nested `Graph`，不提供公开的 `assemble_failover`、`FailoverGraph` runner
 或第二种执行入口。装饰器由 Role/Flow binding 调用，不负责扫描或接管整个主业务 Graph。
 
-装饰必须在主 Graph 第一次 `run()` 之前完成。Graph 冻结后，参数热加载只能改变下一次 activation 的
-plan，不能修改已经编译的节点和边。整个主 Graph 不能设置一个全局 failover 包装，否则会把业务节点
+装饰必须在主 Graph 第一次 `run()` 之前完成。Graph 冻结后，改变 config 需要由 composition 组装新版本，
+不能修改已经编译的节点和边。整个主 Graph 不能设置一个全局 failover 包装，否则会把业务节点
 也纳入重试。
 
 ### 6.3 一个 Port 一层 Failover
@@ -306,20 +305,19 @@ operation。组装层应在装配时拒绝重复包装，而不是在运行时�
 
 ## 7. 配置快照和热加载
 
-### 7.1 快照一次
+### 7.1 显式传入一次
 
-每个 logical operation 进入重试图时，只把当前 Port binding 与 Role 默认 profile 合并并读取一次配置：
+Role/Flow composition 把当前 Port binding 与 Role 默认 profile 合并，解析为不可变 config 后传入：
 
 ```text
 Role default profile + Port binding override
-    → FailoverConfigSource.snapshot()
     → FailoverConfigSnapshot(revision=N)
     → FailoverPlan(revision=N)
-    → 整个 operation 使用 plan N
+    → Failover(config=plan N, ...)
 ```
 
-图不订阅配置更新，也不在每次 retry 中读取“最新配置”。当前 operation 使用自己的 plan；新 operation
-使用新 revision。这使得崩溃恢复和审计结果保持确定。
+图不订阅配置更新，也不在每次 retry 中读取“最新配置”。同一个已组装图的所有 operation 使用传入的同一份
+plan；新 revision 由 composition 组装为新图版本。这使得崩溃恢复和审计结果保持确定。
 
 profile 可以被多个 Port 复用，但 plan 不能跨 operation 或跨 Port 复用。`inherit` 只表示继承默认参数，
 `override` 只覆盖声明的参数，`disabled` 表示该 Port 不装配 failover；binding 声明在组装期固定，启用 Port 的
@@ -467,7 +465,7 @@ src/mote_kernel/failover/
   contract.py       # FailureClass、typed outcome、PreparationAction、单次调用结构
   plan.py           # 参数化 FailoverProfile、Port binding、config snapshot、FailoverPlan、RetryContext
   policy.py         # 固定 status/error-hint 映射和纯观察/分流规则
-  assembly.py       # Failover 装饰器、四个领域节点和 terminal result 投影
+  assembly.py       # Failover 装饰器、observe/invoke/prepare 三节点和 terminal result 投影
 ```
 
 同一 `FailoverProfile` 可以由多个 Port 复用；`assembly.py` 为每个 binding 生成独立的 graph activation。
@@ -477,8 +475,8 @@ src/mote_kernel/failover/
 
 实现时至少覆盖：
 
-1. 同一 Port 的一次 operation 只读取一次 config snapshot；
-2. 参数热加载不改变 Graph definition identity/version；
+1. Failover 只使用 composition 显式传入的 config，不读取 config source；
+2. 拓扑变化必须升级 Graph definition version；
 3. 同一不可变 `FailoverProfile` 参数可被多个 Port 继承，但各 operation 的 `FailoverPlan`、`RetryContext`、usage 和
    operation identity 互不共享；
 4. `inherit`、`override`、`disabled` 的 binding 在组装期固定；effective plan 每个 operation 只解析一次；
@@ -499,7 +497,7 @@ src/mote_kernel/failover/
 ## 13. 实施顺序
 
 1. 先实现类型化的 failure/outcome、参数化 profile/binding、plan 和固定纯 policy，不接具体 provider；
-2. 实现 `Failover(...)(port)` 唯一装饰入口和固定的四领域节点单 Port nested Graph，图内不注入 Hook；
+2. 实现 `Failover(config, preparation)(port)` 唯一装饰入口和固定三节点单 Port nested Graph，图内不注入 Hook；
 3. 用一个可控的测试 Port 验证 profile 继承、覆盖、禁用、retry、budget、config snapshot 和 crash recovery；
 4. 用版本感知的测试 Port 验证已有状态查询完全封装在一次普通 Port 调用内；
 5. 再接入真实的 Model/Service Port；

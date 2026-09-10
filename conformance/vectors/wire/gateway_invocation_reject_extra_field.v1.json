@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.extra_field",
+  "description": "Unknown request fields fail closed at the provider-neutral boundary.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {"kind": "llm", "schema_version": 1, "operation_id": "reject-extra-1", "model_id": "model.text", "operation": "generate", "modality": "text", "mode": "unary", "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]}, "features": [], "unexpected": true},
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

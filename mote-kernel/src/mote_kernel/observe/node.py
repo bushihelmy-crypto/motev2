@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigActivation, ConfigSnapshotKey, require_config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.ports import GraphInputRef, TypedInputBinding
 from mote_kernel.hooks import HookNode
-from mote_kernel.hooks.contract import HookGraphValue, HookPayloadAdmission, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookGraphValue, HookPayloadAdmission, HookResult
+from mote_kernel.hooks.failover import HookFailoverDecorator, HookFailoverDecorators
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
+from mote_kernel.observe.config import (
+    AcknowledgeBinding,
+    GetObservationBinding,
+    ObserveBinding,
+    WriteObservationBinding,
+)
 from mote_kernel.observe.contract import (
     AssistantBatch,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigSettlementReceipt,
     Conflict,
     ContextAppendReceipt,
@@ -33,8 +42,11 @@ from mote_kernel.observe.contract import (
     ToolBatch,
     UserBatch,
     WriteObservationStageValue,
-    observation_kind,
-    validate_settlement_boundary,
+)
+from mote_kernel.observe.failover import (
+    FailoverPortDecorator,
+    ObserveFailoverDecorators,
+    normalize_observe_failover_decorators,
 )
 from mote_kernel.observe.identity import (
     DeliveryAckReference,
@@ -42,6 +54,8 @@ from mote_kernel.observe.identity import (
     ObservationWait,
     ObserveHookStage,
     ObserveIdentityError,
+    ObserveNodeId,
+    ObserveValueName,
 )
 from mote_kernel.observe.port import (
     BackgroundTaskPort,
@@ -54,7 +68,6 @@ from mote_kernel.observe.port import (
 )
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphNodeId
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 HookStateT = TypeVar("HookStateT", bound=HookStateProjection)
 HookCommandT = TypeVar("HookCommandT", bound=ObserveHookCommand)
@@ -66,31 +79,66 @@ def _conflict_reason(conflict: Conflict, /) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class GetObservationNode(Generic[HookStateT]):
+class GetObservationNode(Generic[HookStateT, HookCommandT]):
     """Read one complete queue window and publish the first Hook envelope."""
 
     queue_port: ObservationQueuePort
     background_task_port: BackgroundTaskPort
     admission: ObservePayloadAdmission
+    failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_observe_failover_decorators(self.failover)
+        queue_port = decorators.queue_port(self.queue_port)
+        background_task_port = decorators.background_task_port(self.background_task_port)
+        try:
+            read_after = queue_port.read_after
+            register_wait = queue_port.register_wait
+            snapshot = background_task_port.snapshot
+        except AttributeError as error:
+            raise ObserveContractError("GetObservationNode requires its declared Ports") from error
+        if not callable(read_after) or not callable(register_wait):
+            raise ObserveContractError("ObservationQueuePort read/wait methods must be callable")
+        if not callable(snapshot):
+            raise ObserveContractError("GetObservationNode requires a BackgroundTaskPort")
+        object.__setattr__(self, "queue_port", queue_port)
+        object.__setattr__(self, "background_task_port", background_task_port)
+        object.__setattr__(self, "failover", decorators)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("get_observation assembly snapshot key is malformed")
 
     async def __call__(
         self,
-        value: ObserveRequest[HookStateT],
+        value: ConfigActivation[ObserveRequest[HookStateT]],
         /,
-    ) -> HookRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
-        request = self.admission.admit_request(value)
-        read = self.admission.admit_read_after(await self.queue_port.read_after(request.cursor), request.cursor)
+    ) -> HookActivationRequest[ObserveHookEnvelope, HookStateT] | Graph.Outcome[HookGraphValue]:
+        request = self.admission.admit_request(value.value)
+        activation_config = value.activation_config
+        # ``__post_init__`` stores the normalized bundle; activation-time
+        # Config selection reuses that single admitted owner.
+        decorators = cast(ObserveFailoverDecorators, self.failover)
+        queue_port = self.queue_port
+        background_task_port = self.background_task_port
+        if activation_config is not None:
+            selected = activation_config.bind(GetObservationBinding())
+            if selected.admission != self.admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                queue_port = decorators.queue_port(selected.capability.queue_port)
+                background_task_port = decorators.background_task_port(selected.capability.background_task_port)
+        read = self.admission.admit_read_after(await queue_port.read_after(request.cursor), request.cursor)
         if type(read) is Empty:
             # The provider performs an atomic recheck/registration.  The
             # registration receipt is intentionally not treated as a message;
             # the durable wait coordinate is the only interrupt payload.
-            registration = await self.queue_port.register_wait(read.wait)
+            registration = await queue_port.register_wait(read.wait)
             self.admission.admit_wait_registration_for(read.wait, registration)
             return Graph.interrupt(read.wait.encode())
         if type(read) is Conflict:
             return Graph.failure(_conflict_reason(read))
         available = cast(Available, read)
-        snapshot = self.admission.admit_task_snapshot(await self.background_task_port.snapshot(available.boundary))
+        snapshot = self.admission.admit_task_snapshot(await background_task_port.snapshot(available.boundary))
         if snapshot.observation_revision != available.boundary.observation_revision:
             raise ObserveContractError("background task snapshot revision does not match observation boundary")
         frame = self.admission.admit_frame(ObserveFrame(available.batch, available.boundary, snapshot))
@@ -99,7 +147,11 @@ class GetObservationNode(Generic[HookStateT]):
             GetObservationStageValue(frame),
             request.hook_state,
         )
-        hook_request = HookRequest(envelope, request.hook_state, GraphNodeId("get_observation"))
+        hook_request = HookActivationRequest(
+            envelope,
+            request.hook_state,
+            GraphNodeId(str(ObserveNodeId.GET_OBSERVATION)),
+        )
         self.admission.admit_hook_request(hook_request)
         return hook_request
 
@@ -149,12 +201,34 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
     config_port: ConfigObservationPort
     context_port: ContextObservationPort
     admission: ObservePayloadAdmission
+    failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None
+    assembly_snapshot_key: ConfigSnapshotKey | None = field(default=None, kw_only=True, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        decorators = normalize_observe_failover_decorators(self.failover)
+        config_port = decorators.config_port(self.config_port)
+        context_port = decorators.context_port(self.context_port)
+        try:
+            apply = config_port.apply
+            append = context_port.append
+        except AttributeError as error:
+            raise ObserveContractError("WriteObservationNode requires its declared Ports") from error
+        if not callable(apply):
+            raise ObserveContractError("ConfigObservationPort.apply must be callable")
+        if not callable(append):
+            raise ObserveContractError("ContextObservationPort.append must be callable")
+        object.__setattr__(self, "config_port", config_port)
+        object.__setattr__(self, "context_port", context_port)
+        object.__setattr__(self, "failover", decorators)
+        if self.assembly_snapshot_key is not None and type(self.assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("write_observation assembly snapshot key is malformed")
 
     async def __call__(
         self,
-        value: HookResult[ObserveHookEnvelope, HookCommandT],
+        activation: ConfigActivation[HookResult[ObserveHookEnvelope, HookCommandT]],
         /,
-    ) -> HookRequest[ObserveHookEnvelope, HookStateT]:
+    ) -> ConfigActivation[HookActivationRequest[ObserveHookEnvelope, HookStateT]]:
+        value = activation.value
         hook_result = self.admission.admit_hook_result(value)
         envelope = hook_result.value
         if (
@@ -164,12 +238,27 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             raise ObserveContractError("write_observation input must be an after-get Hook envelope")
         frame = envelope.payload.frame
         batch = frame.batch
+        config_apply_result: ConfigApplyResult | None = None
         config_receipt: ConfigSettlementReceipt | None = None
         context_receipt: ContextAppendReceipt | None = None
+        current_config = activation.activation_config
+        # ``__post_init__`` stores the normalized bundle; activation-time
+        # Config selection reuses that single admitted owner.
+        decorators = cast(ObserveFailoverDecorators, self.failover)
+        config_port = self.config_port
+        context_port = self.context_port
+        if current_config is not None:
+            selected = current_config.bind(WriteObservationBinding())
+            if selected.admission != self.admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
+                config_port = decorators.config_port(selected.capability.config_port)
+                context_port = decorators.context_port(selected.capability.context_port)
         config = batch.config
         if config is not None:
             config_batch = self.admission.admit_config_batch(config)
-            config_receipt = self.admission.admit_config_receipt(await self.config_port.apply(config_batch))
+            config_apply_result = self.admission.admit_config_apply_result(await config_port.apply(config_batch))
+            config_receipt = config_apply_result.receipt
             if config_receipt.read_boundary != frame.boundary:
                 raise ObserveContractError("Config settlement receipt read boundary does not match observation frame")
             if config_receipt.delivery_ids != config_batch.delivery_ids:
@@ -177,7 +266,7 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         context_batch = _context_batch(batch)
         if context_batch is not None:
             self.admission.admit_context_batch(context_batch)
-            context_receipt = self.admission.admit_context_receipt(await self.context_port.append(context_batch))
+            context_receipt = self.admission.admit_context_receipt(await context_port.append(context_batch))
             if context_receipt.read_boundary != frame.boundary:
                 raise ObserveContractError("Context settlement receipt read boundary does not match observation frame")
             if context_receipt.delivery_ids != context_batch.delivery_ids:
@@ -187,10 +276,6 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
         settlement_boundaries = tuple(
             receipt.settlement_boundary for receipt in (config_receipt, context_receipt) if receipt is not None
         )
-        for candidate in settlement_boundaries:
-            # Keep the relation in the contract owner so direct receipt
-            # admission and this live write path cannot drift apart.
-            validate_settlement_boundary(frame.boundary, candidate, "observation")
         # Config and Context are separate capability calls, but their receipts
         # describe one Observe activation.  A single successor boundary is
         # therefore required whenever both are present; selecting the newer
@@ -213,8 +298,23 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             context_receipt,
             ack_reference,
         )
+        successor_config = current_config
+        if config_apply_result is not None and config_apply_result.successor_config is not None:
+            candidate = config_apply_result.successor_config
+            if current_config is not None:
+                current_key = current_config.snapshot.key
+                candidate_key = candidate.snapshot.key
+                if (
+                    candidate_key.definition_id != current_key.definition_id
+                    or candidate_key.definition_version != current_key.definition_version
+                    or candidate_key.revision != current_key.revision + 1
+                ):
+                    raise ObserveContractError(
+                        "Config successor must preserve graph identity and advance its snapshot revision"
+                    )
+            successor_config = candidate
         result = ObserveResult(
-            observation_kind(batch),
+            receipt.current_state,
             batch.delivery_ids,
             settlement_boundary.cursor_range,
             snapshot,
@@ -226,9 +326,13 @@ class WriteObservationNode(Generic[HookStateT, HookCommandT]):
             WriteObservationStageValue(result),
             hook_state,
         )
-        hook_request = HookRequest(next_envelope, hook_state, GraphNodeId("write_observation"))
+        hook_request = HookActivationRequest(
+            next_envelope,
+            hook_state,
+            GraphNodeId(str(ObserveNodeId.WRITE_OBSERVATION)),
+        )
         self.admission.admit_hook_request(hook_request)
-        return hook_request
+        return ConfigActivation(hook_request, successor_config)
 
 
 def _context_batch(batch: ObservationBatch, /) -> ToolBatch | UserBatch | AssistantBatch | None:
@@ -249,15 +353,64 @@ def _context_batch(batch: ObservationBatch, /) -> ToolBatch | UserBatch | Assist
 
 class ObserveNode(
     Graph[HookGraphValue],
-    Generic[ConfigT, PriorityConfigT, HookStateT, HookCommandT],
+    Generic[PriorityConfigT, HookStateT, HookCommandT],
 ):
     """The two-business-node Observe nested graph with one shared Hook."""
 
     __slots__ = (
         "_ack_port",
         "_admission",
+        "_assembly_snapshot_key",
+        "_failover",
         "_hook",
     )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Config,
+        /,
+        *,
+        failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None,
+        hook_failover: HookFailoverDecorators[
+            PriorityConfigT,
+            ObserveHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ]
+        | HookFailoverDecorator
+        | None = None,
+    ) -> ObserveNode[PriorityConfigT, HookStateT, HookCommandT]:
+        """Assemble Observe from the complete config via its own projection.
+
+        Observe receives the complete object only at this assembly boundary;
+        all capabilities retained by the node come from ``ObserveBinding``.
+        Its shared Hook is independently selected by the Hook slot declared in
+        that projection.
+        """
+
+        config = require_config(config)
+        selected = config.bind(ObserveBinding[PriorityConfigT, HookStateT, HookCommandT]())
+        hook: HookNode[PriorityConfigT, ObserveHookEnvelope, HookStateT, HookCommandT] = HookNode[
+            PriorityConfigT,
+            ObserveHookEnvelope,
+            HookStateT,
+            HookCommandT,
+        ].from_config(config, selected.hook_slot, failover=hook_failover)
+        return cls(
+            str(selected.definition_id),
+            version=int(selected.definition_version),
+            queue_port=selected.queue_port,
+            background_task_port=selected.background_task_port,
+            config_port=selected.config_port,
+            context_port=selected.context_port,
+            ack_port=selected.ack_port,
+            resume_port=selected.resume_port,
+            hook=hook,
+            admission=selected.admission,
+            failover=failover,
+            assembly_snapshot_key=config.snapshot.key,
+        )
 
     def __init__(
         self,
@@ -271,13 +424,14 @@ class ObserveNode(
         ack_port: ObservationAckPort,
         resume_port: ObservationResumePort,
         hook: HookNode[
-            ConfigT,
             PriorityConfigT,
             ObserveHookEnvelope,
             HookStateT,
             HookCommandT,
         ],
         admission: ObservePayloadAdmission,
+        failover: ObserveFailoverDecorators | FailoverPortDecorator | None = None,
+        assembly_snapshot_key: ConfigSnapshotKey | None = None,
     ) -> None:
         if type(admission) is not ObservePayloadAdmission:
             raise ObserveContractError("ObserveNode requires an ObservePayloadAdmission")
@@ -291,14 +445,41 @@ class ObserveNode(
             raise ObserveContractError("ObserveNode definition_id must be a canonical string")
         if type(version) is not int or version < 1:
             raise ObserveContractError("ObserveNode version must be a positive integer")
-        resume_binding = require_observe_port_contracts(
+        decorators = normalize_observe_failover_decorators(failover)
+        if assembly_snapshot_key is not None and type(assembly_snapshot_key) is not ConfigSnapshotKey:
+            raise ObserveContractError("ObserveNode assembly snapshot key is malformed")
+
+        # Build all callable nodes before touching the parent Graph builder;
+        # failed capability assembly cannot leave a partial definition.
+        get_node = GetObservationNode[HookStateT, HookCommandT](
             queue_port,
             background_task_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
+        )
+        write_node = WriteObservationNode[HookStateT, HookCommandT](
             config_port,
             context_port,
-            ack_port,
-            resume_port,
+            admission,
+            decorators,
+            assembly_snapshot_key=assembly_snapshot_key,
         )
+        decorated_queue_port = get_node.queue_port
+        decorated_background_task_port = get_node.background_task_port
+        decorated_config_port = write_node.config_port
+        decorated_context_port = write_node.context_port
+        decorated_ack_port = decorators.ack_port(ack_port)
+        decorated_resume_port = decorators.resume_port(resume_port)
+        resume_binding = require_observe_port_contracts(
+            decorated_queue_port,
+            decorated_background_task_port,
+            decorated_config_port,
+            decorated_context_port,
+            decorated_ack_port,
+            decorated_resume_port,
+        )
+
         if type(hook) is not HookNode:
             raise ObserveContractError("ObserveNode requires one shared HookNode")
         hook_admission = hook.payload_admission
@@ -318,31 +499,24 @@ class ObserveNode(
         if (
             hook_slot.definition_id != GraphDefinitionId(definition_id)
             or int(hook_slot.definition_version) != version
-            or hook_slot.node_id != GraphNodeId("hook")
+            or hook_slot.node_id != GraphNodeId(str(ObserveNodeId.HOOK))
             or hook_slot.stage is not HookStage.AFTER_NODE
         ):
             raise ObserveContractError("Observe shared HookSlotId does not match its definition")
         admission.admit_observe_slot(hook_slot)
 
-        # Build all callable nodes before touching the parent Graph builder;
-        # failed capability assembly cannot leave a partial definition.
-        get_node = GetObservationNode[HookStateT](
-            queue_port,
-            background_task_port,
-            admission,
-        )
-        write_node = WriteObservationNode[HookStateT, HookCommandT](config_port, context_port, admission)
-
         super().__init__(definition_id, version=version)
-        self._ack_port = ack_port
+        self._assembly_snapshot_key = assembly_snapshot_key
+        self._ack_port = decorated_ack_port
+        self._failover = decorators
         self._hook = hook
         self._admission = admission
 
         request_input = cast(
             GraphInputRef[ObserveRequest[HookStateT]],
-            Graph.graph_input("request", ObserveRequest),
+            Graph.graph_input(ObserveValueName.REQUEST, ObserveRequest),
         )
-        request_binding = Graph.bind("request", request_input)
+        request_binding = Graph.bind(ObserveValueName.REQUEST, request_input)
 
         self.set_resume_codec(
             resume_binding.codec_id,
@@ -352,51 +526,55 @@ class ObserveNode(
         )
 
         get_output = self.add_node(
-            "get_observation",
+            ObserveNodeId.GET_OBSERVATION,
             get_node,
             inputs=(request_binding,),
-            input_type=ObserveRequest,
-            materialize=lambda values: values.get(request_binding),
-            output_name="hook_request",
-            output_type=HookRequest,
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(request_binding),
+                values.activation_config,
+            ),
+            output_name=ObserveValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
         self.add_node(
-            "hook",
+            ObserveNodeId.HOOK,
             hook,
-            inputs={"request": Graph.node_output(get_output)},
+            inputs={ObserveValueName.REQUEST: Graph.node_output(get_output)},
         )
-        hook_result_ref = self.output_ref("hook", "result")
+        hook_result_ref = self.output_ref(ObserveNodeId.HOOK, ObserveValueName.RESULT)
         hook_result_source = Graph.node_output(hook_result_ref)
         hook_result_binding = cast(
             TypedInputBinding[HookResult[ObserveHookEnvelope, HookCommandT]],
-            Graph.bind("hook_result", hook_result_source),
+            Graph.bind(ObserveValueName.HOOK_RESULT, hook_result_source),
         )
         self.add_node(
-            "write_observation",
+            ObserveNodeId.WRITE_OBSERVATION,
             write_node,
-            # This is deliberately predecessor-bound.  The same Hook node is
-            # activated twice; a fixed publication reference could otherwise
-            # accidentally read the first activation after a topology change.
-            # The typed predecessor handle reuses the descriptor owned by the
-            # shared Hook's P3 declaration instead of manufacturing a second
-            # HookResult descriptor at this boundary.
             inputs=(hook_result_binding,),
-            input_type=HookResult,
-            materialize=lambda values: values.get(hook_result_binding),
-            output_name="hook_request",
-            output_type=HookRequest,
+            input_type=ConfigActivation,
+            materialize=lambda values: ConfigActivation(
+                values.get(hook_result_binding),
+                values.activation_config,
+            ),
+            output_name=ObserveValueName.HOOK_REQUEST,
+            output_type=HookActivationRequest,
         )
-        self.add_edge("get_observation", "hook")
-        self.add_edge("hook", "get_observation", "write_observation")
-        self.add_edge("write_observation", "hook")
-        self.add_edge("hook", "write_observation", Graph.END)
-        self.set_outputs({"result": hook_result_ref})
+        self.add_edge(Graph.START, ObserveNodeId.GET_OBSERVATION)
+        self.add_edge(ObserveNodeId.GET_OBSERVATION, ObserveNodeId.HOOK)
+        self.add_edge(
+            ObserveNodeId.HOOK,
+            ObserveNodeId.GET_OBSERVATION,
+            ObserveNodeId.WRITE_OBSERVATION,
+        )
+        self.add_edge(ObserveNodeId.WRITE_OBSERVATION, ObserveNodeId.HOOK)
+        self.add_edge(ObserveNodeId.HOOK, ObserveNodeId.WRITE_OBSERVATION, Graph.END)
+        self.set_outputs({ObserveValueName.RESULT: hook_result_ref})
 
     @property
     def hook(
         self,
     ) -> HookNode[
-        ConfigT,
         PriorityConfigT,
         ObserveHookEnvelope,
         HookStateT,
@@ -410,13 +588,29 @@ class ObserveNode(
         self,
         result: ObserveResult,
         /,
+        *,
+        activation_config: Config | None = None,
     ) -> DeliveryAck:
         """Acknowledge a settled result after its enclosing commit succeeds."""
 
         admitted = self._admission.admit_result(result)
-        ack = self._admission.admit_ack(
-            await self._ack_port.acknowledge(admitted.delivery_ids, admitted.observation_receipt)
-        )
+        # ``_ack_port`` was decorated once during assembly.  Re-decoration
+        # here would stack wrappers for the no-config/public acknowledgement
+        # path; only a newly selected activation-time capability needs the
+        # failover seam applied again.
+        ack_port = self._ack_port
+        if activation_config is not None:
+            selected = activation_config.bind(AcknowledgeBinding())
+            if selected.admission != self._admission:
+                raise ObserveContractError("Observe config binding changed the compiled payload contract")
+            if self._assembly_snapshot_key is None or selected.snapshot_key != self._assembly_snapshot_key:
+                ack_port = self._failover.ack_port(selected.capability)
+            else:
+                # The assembly-time Port already carries the decorator for
+                # this immutable snapshot.  Reusing it avoids stacking the
+                # same wrapper on post-commit acknowledgement.
+                ack_port = self._ack_port
+        ack = self._admission.admit_ack(await ack_port.acknowledge(admitted.delivery_ids, admitted.observation_receipt))
         if ack.reference != admitted.observation_receipt.ack_reference:
             raise ObserveContractError("delivery acknowledgement does not match observation receipt")
         return ack
@@ -439,7 +633,7 @@ class ObserveNode(
         matches = tuple(
             interrupt
             for interrupt in awaiting.interrupts
-            if str(interrupt.interrupt_id) == interrupt_id and str(interrupt.node_id) == "get_observation"
+            if str(interrupt.interrupt_id) == interrupt_id and str(interrupt.node_id) == ObserveNodeId.GET_OBSERVATION
         )
         if len(matches) != 1:
             raise ObserveContractError("interrupt_id must identify exactly one Observe get_observation interrupt")
@@ -449,9 +643,9 @@ class ObserveNode(
         except ObserveIdentityError as error:
             raise ObserveContractError("Observe interrupt payload is not a valid ObservationWait") from error
         request = self._admission.admit_request(ObserveRequest(wait.after_cursor, hook_state))
-        values = Graph.values(request=request)
+        values = Graph.values(**{ObserveValueName.REQUEST: request})
         return self.resume_interrupted(
-            "get_observation",
+            ObserveNodeId.GET_OBSERVATION,
             interrupt_id,
             values,
             scope=tuple(str(segment) for segment in interrupt.scope),

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.node import (
     CallableNodeDefinition,
@@ -89,12 +90,31 @@ class _TypedNodeInvoker(Generic[GraphValueT, InputT, OutputT]):
         result = await self.operation(typed_input)
         if type(result) in (_GraphSuccessOutcome, _GraphFailureOutcome, _GraphInterruptOutcome):
             return cast(GraphOutcome[GraphValueT], result)
+        if type(result) is ConfigActivation:
+            activation = cast(ConfigActivation[OutputT], result)
+            candidate = activation.value
+            output_config = activation.activation_config
+        else:
+            candidate = cast(OutputT, result)
+            output_config = None
         admitted = admit_exact(
-            cast(OutputT, result),
+            candidate,
             self.output.descriptor,
             kind=f"typed node output {self.output.name!r}",
         )
-        return cast(_GraphValues[GraphValueT], _make_single_graph_value(self.output.name, admitted))
+        # A ConfigActivation is execution metadata, never the declared domain
+        # output.  Observe can use it to publish a successor Config for the
+        # next activation without putting that Config in a business DTO.
+        if output_config is None:
+            output_config = inputs.activation_config
+        return cast(
+            _GraphValues[GraphValueT],
+            _make_single_graph_value(
+                self.output.name,
+                admitted,
+                output_config,
+            ),
+        )
 
 
 def make_node_invoker(operation: NodeCallable[GraphValueT]) -> NodeInvoker[GraphValueT]:

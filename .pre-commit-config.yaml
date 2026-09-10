@@ -32,33 +32,27 @@ repos:
         language: system
         pass_filenames: false
         files: ^mote-infra/persistence/local/.*\.rs$
-      - id: persistence-cloudflare-python-static
-        name: Cloudflare Python Persistence static checks
-        entry: make -C mote-infra/persistence/cloudflare/python static
+      - id: execution-local-rustfmt
+        name: Local Execution rustfmt
+        entry: cargo fmt --manifest-path mote-runtime/execution/local/Cargo.toml --all -- --check
         language: system
         pass_filenames: false
-        files: ^mote-infra/persistence/cloudflare/python/
-      - id: persistence-cloudflare-ts-static
-        name: Cloudflare TypeScript Persistence static checks
-        entry: pnpm --dir mote-infra/persistence/cloudflare/ts run check:static
+        files: ^mote-runtime/execution/local/.*\.rs$
+      - id: execution-local-complexity
+        name: Local Execution complexity ratchet
+        entry: make -C mote-runtime/execution/local complexity
         language: system
         pass_filenames: false
-        files: ^mote-infra/persistence/cloudflare/ts/
-      - id: container-cloudflare-ts-static
-        name: Cloudflare TypeScript Container static checks
-        entry: pnpm --dir mote-resource/container/cloudflare/ts run check:static
+        files: ^mote-runtime/execution/local/(src|quality)/.*\.(rs|json)$
+      - id: container-cloudflare-static
+        name: Cloudflare Container static checks
+        entry: pnpm --dir mote-resource/container/cloudflare run check:static
         language: system
         pass_filenames: false
-        files: ^mote-resource/container/cloudflare/ts/
-      - id: container-cloudflare-python-static
-        name: Cloudflare Python Container static checks
-        entry: make -C mote-resource/container/cloudflare/python static
-        language: system
-        pass_filenames: false
-        files: ^mote-resource/container/cloudflare/python/
+        files: ^mote-resource/container/cloudflare/
       - id: detect-secrets
         name: detect secrets
         entry: detect-secrets-hook --baseline .secrets.baseline
         language: system
         types: [text]
-        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-infra/persistence/cloudflare/ts/pnpm-lock\.yaml|mote-resource/container/cloudflare/(ts/pnpm-lock\.yaml|python/(pnpm-lock\.yaml|pylock\.toml)))
+        exclude: ^(\.secrets\.baseline|mote-kernel/third_party_licenses/|mote-infra/persistence/local/third_party_licenses/|mote-runtime/execution/local/third_party_licenses/|mote-resource/container/cloudflare/pnpm-lock\.yaml)

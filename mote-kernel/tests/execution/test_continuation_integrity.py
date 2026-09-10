@@ -15,13 +15,12 @@ from mote_kernel.execution.graph.values import (
     _make_node_input_frame,
     _make_node_output_frame,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import AbortedGraph
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     AdmittedResumeInput,
-    ChildStateBinding,
     ConfirmedChildBoundary,
     ConfirmedPublication,
     ContinuationSnapshot,
@@ -1111,11 +1110,11 @@ async def test_recovered_continuation_rejects_an_unknown_child_scope() -> None:
     child = snapshot.child_states[0]
     unknown = replace(
         child,
-        coordinate=ScopeRunCoordinate((GraphNodeId("unknown"),), child.coordinate.graph_run_id),
+        scope_run=ScopeRunCoordinate((GraphNodeId("unknown"),), child.scope_run.graph_run_id),
     )
     layout.install(replace(snapshot, child_states=(unknown,), frames=ScopedFrameIndex()))
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="unknown nested node"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="inconsistent parent coordinates"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
 
 
@@ -1167,7 +1166,7 @@ async def test_continuation_rejects_noncanonical_child_binding_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continuation_rejects_duplicate_parent_activation() -> None:
+async def test_continuation_rejects_duplicate_child_scope() -> None:
     parent, completed = await _completed_parallel_children("continuation.duplicate-parent-activation")
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
@@ -1175,11 +1174,11 @@ async def test_continuation_rejects_duplicate_parent_activation() -> None:
     layout.install(
         replace(
             snapshot,
-            child_states=(left, replace(right, parent_activation=left.parent_activation)),
+            child_states=(left, replace(right, scope_run=left.scope_run)),
         )
     )
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="repeats one parent graph activation"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="repeats one scoped graph run"):
         await parent.run(state=completed.state, continuation=completed.continuation)
 
 
@@ -1191,7 +1190,7 @@ async def test_recovered_continuation_rejects_a_child_run_id_mismatch() -> None:
     child = snapshot.child_states[0]
     mismatched = replace(
         child,
-        coordinate=replace(child.coordinate, graph_run_id=GraphRunId("foreign-child-run")),
+        scope_run=replace(child.scope_run, graph_run_id=GraphRunId("foreign-child-run")),
     )
     layout.install(replace(snapshot, child_states=(mismatched,), frames=ScopedFrameIndex()))
 
@@ -1205,13 +1204,15 @@ async def test_recovered_continuation_rejects_inconsistent_parent_coordinates() 
     layout = _layout(recovered.continuation)
     snapshot = layout.reveal()
     child = snapshot.child_states[0]
-    activation = child.parent_activation
-    inconsistent_activation = StableActivation(
-        activation.scope_run,
-        activation.superstep + 1,
-        activation.node_id,
+    parent_activation = child.state.parent
+    assert parent_activation is not None
+    inconsistent = replace(
+        child,
+        state=replace(
+            child.state,
+            parent=replace(parent_activation, superstep=parent_activation.superstep + 1),
+        ),
     )
-    inconsistent = ChildStateBinding(child.coordinate, inconsistent_activation, child.state)
     layout.install(replace(snapshot, child_states=(inconsistent,), frames=ScopedFrameIndex()))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="inconsistent parent coordinates"):

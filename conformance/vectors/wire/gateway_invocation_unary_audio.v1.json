@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.unary.audio",
+  "description": "An audio generation result is returned as a finalized artifact with aggregate usage facts.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {"kind": "media", "schema_version": 1, "operation_id": "op-audio-1", "model_id": "model.audio", "operation": "audio_generation", "modality": "audio", "mode": "unary", "input": {"kind": "audio_generation", "text": "Welcome.", "voice": "neutral"}, "features": ["usage"], "trace": {"trace_id": "trace-audio-1", "generation_id": "generation-audio-1", "model_call_id": "call-audio-1"}},
+  "expect": {"outcome": "accept", "value": {
+    "kind": "media_response", "schema_version": 1, "operation_id": "op-audio-1", "mode": "unary",
+    "terminal": {"outcome": "succeeded", "result": {"kind": "audio", "artifacts": [{"artifact_id": "audio-1", "revision": 1, "representation": "original", "kind": "audio", "mime_type": "audio/mpeg", "content_ref": "artifact:audio-1", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "size": 256}]}},
+    "observation": {"schema_version": 1, "operation_id": "op-audio-1", "operation": "audio_generation", "modality": "audio", "mode": "unary", "correlation": {"trace_id": "trace-audio-1", "generation_id": "generation-audio-1", "model_call_id": "call-audio-1"}, "model": {"requested_model_id": "model.audio", "provider": "fixture", "protocol": "openai.audio.v1"}, "input": {"kind": "audio_generation", "text": "Welcome.", "voice": "neutral"}, "finish": {"reasons": ["completed"]}, "usage": {"availability": "reported", "input_text_tokens": 2, "output_audio_tokens": 10}, "cost": {"currency": "USD", "availability": "reported", "amount": "0.000010"}, "timing": {"latency_ms": 80, "streamed": false, "chunk_count": 0}, "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}}, "attempts": []},
+    "receipt": {"receipt_id": "receipt-audio-1", "operation_id": "op-audio-1", "revision": 1}
+  }}
+}

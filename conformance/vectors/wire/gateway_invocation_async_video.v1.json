@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.async.video",
+  "description": "Execution may submit a long-running video generation and receive only a durable task handle until a separate reconciliation operation completes.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {
+    "kind": "media",
+    "schema_version": 1,
+    "operation_id": "op-video-async-1",
+    "model_id": "model.video",
+    "operation": "video_generation",
+    "modality": "video",
+    "mode": "async",
+    "input": {"kind": "video_generation", "prompt": "A slow orbit around a mote.", "duration_ms": 5000, "width": 1280, "height": 720, "fps": 30},
+    "features": ["prompt_cache"],
+    "trace": {"trace_id": "trace-video-async-1", "generation_id": "generation-video-async-1", "model_call_id": "call-video-async-1"}
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "media_response",
+      "schema_version": 1,
+      "operation_id": "op-video-async-1",
+      "mode": "async",
+      "terminal": {"outcome": "submitted", "task": {"task_id": "task-video-async-1", "provider_task_id": "provider-task-video-async-1", "operation_id": "op-video-async-1"}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-video-async-1",
+        "operation": "video_generation",
+        "modality": "video",
+        "mode": "async",
+        "correlation": {"trace_id": "trace-video-async-1", "generation_id": "generation-video-async-1", "model_call_id": "call-video-async-1"},
+        "model": {"requested_model_id": "model.video", "provider": "fixture", "protocol": "provider.video.v1", "provider_request_id": "provider-request-video-async-1"},
+        "input": {"kind": "video_generation", "prompt": "A slow orbit around a mote.", "duration_ms": 5000, "width": 1280, "height": 720, "fps": 30},
+        "finish": {"reasons": ["completed"]},
+        "usage": {"availability": "unavailable"},
+        "cost": {"currency": "USD", "availability": "unavailable"},
+        "timing": {"latency_ms": 18, "streamed": false, "chunk_count": 0},
+        "cache": {"prompt": {"state": "miss", "key_fingerprint": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}, "result": {"state": "bypassed"}},
+        "attempts": []
+      },
+      "receipt": {"receipt_id": "receipt-video-async-1", "operation_id": "op-video-async-1", "revision": 1}
+    }
+  }
+}

@@ -6,13 +6,20 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar, cast
 
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult, HookStageResult
+from mote_kernel.config import require_config
+from mote_kernel.hooks.contract import (
+    HookActivationRequest,
+    HookGraphValue,
+    HookResult,
+    HookStageResult,
+)
 from mote_kernel.hooks.identity import HookSlotId
 from mote_kernel.observe.contract import (
     AssistantBatch,
     AssistantObservation,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigObservation,
     ConfigSettlementReceipt,
@@ -52,6 +59,7 @@ from mote_kernel.observe.identity import (
     ObservationCursor,
     ObservationWait,
     ObserveHookStage,
+    ObserveNodeId,
     WaitRegistration,
 )
 from mote_kernel.state.graph_state import GraphNodeId
@@ -494,6 +502,17 @@ class ObservePayloadAdmission:
             self.admit_task_snapshot(value.background_task_snapshot)
         return value
 
+    def admit_config_apply_result(self, value: ConfigApplyResult, /) -> ConfigApplyResult:
+        _exact(value, ConfigApplyResult, "Config apply result")
+        _revalidate(
+            lambda: ConfigApplyResult(value.receipt, value.successor_config),
+            "Config apply result",
+        )
+        self.admit_config_receipt(value.receipt)
+        if value.successor_config is not None:
+            require_config(value.successor_config)
+        return value
+
     def admit_context_receipt(self, value: ContextAppendReceipt, /) -> ContextAppendReceipt:
         _exact(value, ContextAppendReceipt, "Context append receipt")
         _revalidate(
@@ -584,11 +603,18 @@ class ObservePayloadAdmission:
 
     def admit_hook_request(
         self,
-        value: HookRequest[ObserveHookEnvelope, AdmissionHookStateT],
+        value: HookActivationRequest[ObserveHookEnvelope, AdmissionHookStateT],
         /,
-    ) -> HookRequest[ObserveHookEnvelope, AdmissionHookStateT]:
-        _exact(value, HookRequest, "Observe Hook request")
-        _revalidate(lambda: HookRequest(value.value, value.state, value.node_id), "Observe Hook request")
+    ) -> HookActivationRequest[ObserveHookEnvelope, AdmissionHookStateT]:
+        _exact(value, HookActivationRequest, "Observe Hook activation")
+        _revalidate(
+            lambda: HookActivationRequest(
+                value.value,
+                value.state,
+                value.node_id,
+            ),
+            "Observe Hook activation",
+        )
         self.admit_hook_envelope(value.value)
         _concrete_state(value.state, self.hook_state_type, "Observe Hook request state")
         if value.state != value.value.hook_state:
@@ -604,7 +630,10 @@ class ObservePayloadAdmission:
         /,
     ) -> HookResult[ObserveHookEnvelope, AdmissionHookCommandT]:
         _exact(value, HookResult, "Observe Hook result")
-        _revalidate(lambda: HookResult(value.value, value.commands, value.node_id), "Observe Hook result")
+        _revalidate(
+            lambda: HookResult(value.value, value.commands, value.node_id),
+            "Observe Hook result",
+        )
         self.admit_hook_envelope(value.value)
         for command in value.commands:
             _concrete_command(command, self.hook_command_type, "Observe Hook command")
@@ -615,7 +644,7 @@ class ObservePayloadAdmission:
 
     def admit_transition(
         self,
-        request: HookRequest[ObserveHookEnvelope, AdmissionHookStateT],
+        request: HookActivationRequest[ObserveHookEnvelope, AdmissionHookStateT],
         result: HookStageResult[ObserveHookEnvelope, AdmissionHookCommandT],
         /,
     ) -> None:
@@ -642,9 +671,9 @@ class ObservePayloadAdmission:
     @staticmethod
     def _expected_hook_node(stage: ObserveHookStage, /) -> GraphNodeId:
         if stage is ObserveHookStage.AFTER_GET_OBSERVATION:
-            return GraphNodeId("get_observation")
+            return GraphNodeId(str(ObserveNodeId.GET_OBSERVATION))
         if stage is ObserveHookStage.AFTER_WRITE_OBSERVATION:
-            return GraphNodeId("write_observation")
+            return GraphNodeId(str(ObserveNodeId.WRITE_OBSERVATION))
         raise ObserveContractError("Observe Hook stage is unknown")
 
 

@@ -16,8 +16,6 @@ REQUIRED_PACKAGES = frozenset(
         "observability",
         "observe",
         "execution/resource",
-        "role",
-        "role/restore",
         "state",
         "state/graph_state",
         "think",
@@ -54,6 +52,10 @@ def test_kernel_invocation_is_one_module() -> None:
 
 def test_loop_has_no_private_react_package() -> None:
     assert not (PACKAGE_ROOT / "loop" / "react").exists()
+
+
+def test_role_package_is_removed() -> None:
+    assert not (PACKAGE_ROOT / "role").exists()
 
 
 def test_generic_ownerless_packages_are_forbidden() -> None:

@@ -61,9 +61,9 @@ from mote_kernel.observe.contract import (
     AssistantBatch,
     AssistantObservation,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigObservation,
-    ConfigSettlementReceipt,
     ContextAppendReceipt,
     GetObservationStageValue,
     ObservationKind,
@@ -111,13 +111,11 @@ async def test_observe_terminal_output_is_the_second_shared_hook_activation() ->
     assert isinstance(output.value.payload, WriteObservationStageValue)
     assert output.value.payload.result.current_state is ObservationKind.ASSISTANT
     assert result.state.completion_route == "write_observation"
-    assert tuple(request.request.node_id for request in invocation.requests) == (
-        GraphNodeId("get_observation"),
-        GraphNodeId("get_observation"),
-        GraphNodeId("get_observation"),
-        GraphNodeId("write_observation"),
-        GraphNodeId("write_observation"),
-        GraphNodeId("write_observation"),
+    assert tuple(request.payload.stage for request in invocation.requests) == (
+        ObserveHookStage.AFTER_GET_OBSERVATION,
+        ObserveHookStage.AFTER_GET_OBSERVATION,
+        ObserveHookStage.AFTER_WRITE_OBSERVATION,
+        ObserveHookStage.AFTER_WRITE_OBSERVATION,
     )
 
 
@@ -126,12 +124,12 @@ async def test_shared_hook_can_rewrite_the_stage_payload_but_not_its_graph_route
     class RewriteInvocation(_HookInvocation):
         async def invoke(
             self,
-            request: HookInvocationRequest[_Priority, ObserveHookEnvelope, _State],
+            request: HookInvocationRequest[_Priority, ObserveHookEnvelope],
             /,
         ) -> HookStageResult[ObserveHookEnvelope, _Command]:
             self.requests.append(request)
-            value = request.request.value
-            if value.stage is ObserveHookStage.AFTER_GET_OBSERVATION and request.config.ordinal == 1:
+            value = request.payload
+            if value.stage is ObserveHookStage.AFTER_GET_OBSERVATION and request.hook_config.ordinal == 1:
                 replacement = _available(_delivery(0, ConfigObservation("rewritten"), "rewritten"))
                 value = ObserveHookEnvelope(
                     ObserveHookStage.AFTER_GET_OBSERVATION,
@@ -252,7 +250,7 @@ class _FailingPorts(_Ports):
         self._fail("snapshot")
         return await super().snapshot(boundary)
 
-    async def apply(self, batch: ConfigBatch, /) -> ConfigSettlementReceipt:
+    async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
         self._fail("config")
         return await super().apply(batch)
 
@@ -264,7 +262,7 @@ class _FailingPorts(_Ports):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failure", "hook_calls"),
-    [("read", 0), ("snapshot", 0), ("config", 3), ("context", 3)],
+    [("read", 0), ("snapshot", 0), ("config", 2), ("context", 2)],
 )
 async def test_observe_port_failure_stops_before_later_graph_stages(failure: str, hook_calls: int) -> None:
     ports = _FailingPorts(failure)
@@ -287,17 +285,19 @@ class _FailingHook(_HookInvocation):
 
     async def invoke(
         self,
-        request: HookInvocationRequest[_Priority, ObserveHookEnvelope, _State],
+        request: HookInvocationRequest[_Priority, ObserveHookEnvelope],
         /,
     ) -> HookStageResult[ObserveHookEnvelope, _Command]:
         self.requests.append(request)
-        if request.request.node_id == GraphNodeId(self.node_id):
+        if (self.node_id == "get_observation" and request.payload.stage is ObserveHookStage.AFTER_GET_OBSERVATION) or (
+            self.node_id == "write_observation" and request.payload.stage is ObserveHookStage.AFTER_WRITE_OBSERVATION
+        ):
             raise RuntimeError(f"{self.node_id} hook failure")
-        return HookStageResult(request.request.value, ())
+        return HookStageResult(request.payload, ())
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("node_id", "hook_calls"), [("get_observation", 1), ("write_observation", 4)])
+@pytest.mark.parametrize(("node_id", "hook_calls"), [("get_observation", 1), ("write_observation", 3)])
 async def test_observe_hook_failure_does_not_advance_to_a_later_stage(node_id: str, hook_calls: int) -> None:
     ports = _Ports()
     invocation = _FailingHook(node_id)

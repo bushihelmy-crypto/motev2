@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "metrics": {
+    "production_files": 4,
+    "code_lines": 11,
+    "function_like_items": 1,
+    "decision_points": 0,
+    "public_items": 1,
+    "unsafe_occurrences": 0,
+    "max_file_code_lines": 11
+  }
+}

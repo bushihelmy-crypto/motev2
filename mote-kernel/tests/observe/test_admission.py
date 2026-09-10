@@ -37,7 +37,7 @@ from tests.observe.test_nodes import (
     make_empty as _empty,
 )
 
-from mote_kernel.hooks.contract import HookRequest, HookResult, HookStageResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookResult, HookStageResult
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.contract import (
     AssistantObservation,
@@ -356,17 +356,21 @@ def test_admission_checks_hook_request_state_and_stage_identity() -> None:
     frame = _user_frame()
     envelope = ObserveHookEnvelope(ObserveHookStage.AFTER_GET_OBSERVATION, GetObservationStageValue(frame), _State())
     with pytest.raises(ObserveContractError, match=r"unexpected|does not match"):
-        _admission().admit_hook_request(HookRequest(envelope, _OtherState(), GraphNodeId("get_observation")))
+        _admission().admit_hook_request(HookActivationRequest(envelope, _OtherState(), GraphNodeId("get_observation")))
     with pytest.raises(ObserveContractError, match="concrete HookStateProjection"):
-        _admission().admit_hook_request(HookRequest(envelope, HookStateProjection(), GraphNodeId("get_observation")))
+        _admission().admit_hook_request(
+            HookActivationRequest(envelope, HookStateProjection(), GraphNodeId("get_observation"))
+        )
     with pytest.raises(ObserveContractError, match="does not match its envelope"):
-        _admission().admit_hook_request(HookRequest(envelope, _State("changed"), GraphNodeId("get_observation")))
+        _admission().admit_hook_request(
+            HookActivationRequest(envelope, _State("changed"), GraphNodeId("get_observation"))
+        )
     with pytest.raises(ObserveContractError, match="node_id"):
-        _admission().admit_hook_request(HookRequest(envelope, _State(), GraphNodeId("write_observation")))
+        _admission().admit_hook_request(HookActivationRequest(envelope, _State(), GraphNodeId("write_observation")))
 
     with pytest.raises(ObserveContractError, match="stage is unknown"):
         unknown = ObserveHookEnvelope(_unknown_hook_stage(), GetObservationStageValue(frame), _State())
-        _admission().admit_hook_request(HookRequest(unknown, _State(), GraphNodeId("get_observation")))
+        _admission().admit_hook_request(HookActivationRequest(unknown, _State(), GraphNodeId("get_observation")))
 
 
 def test_admission_rejects_abstract_or_mixed_hook_commands() -> None:
@@ -397,7 +401,7 @@ def test_transition_admission_allows_a_payload_rewrite_within_the_same_business_
     )
 
     admission.admit_transition(
-        HookRequest(original, state, GraphNodeId("get_observation")),
+        HookActivationRequest(original, state, GraphNodeId("get_observation")),
         HookStageResult(rewritten, (_Command("rewrite"),)),
     )
 
@@ -410,7 +414,7 @@ def test_transition_admission_preserves_stage_state_and_exact_commands() -> None
         GetObservationStageValue(_user_frame()),
         state,
     )
-    request = HookRequest(envelope, state, GraphNodeId("get_observation"))
+    request = HookActivationRequest(envelope, state, GraphNodeId("get_observation"))
 
     with pytest.raises(ObserveContractError, match="HookStageResult"):
         admission.admit_transition(

@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.unary.image",
+  "description": "An image generation result crosses the boundary by artifact reference rather than inline bytes.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {"kind": "media", "schema_version": 1, "operation_id": "op-image-1", "model_id": "model.image", "operation": "image_generation", "modality": "image", "mode": "unary", "input": {"kind": "image_generation", "prompt": "A blue mote."}, "features": [], "trace": {"trace_id": "trace-image-1", "generation_id": "generation-image-1", "model_call_id": "call-image-1"}},
+  "expect": {"outcome": "accept", "value": {
+    "kind": "media_response", "schema_version": 1, "operation_id": "op-image-1", "mode": "unary",
+    "terminal": {"outcome": "succeeded", "result": {"kind": "image", "artifacts": [{"artifact_id": "image-1", "revision": 1, "representation": "original", "kind": "image", "mime_type": "image/png", "content_ref": "artifact:image-1", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 128}]}},
+    "observation": {"schema_version": 1, "operation_id": "op-image-1", "operation": "image_generation", "modality": "image", "mode": "unary", "correlation": {"trace_id": "trace-image-1", "generation_id": "generation-image-1", "model_call_id": "call-image-1"}, "model": {"requested_model_id": "model.image", "provider": "fixture", "protocol": "openai.responses.v1"}, "input": {"kind": "image_generation", "prompt": "A blue mote."}, "finish": {"reasons": ["completed"]}, "usage": {"availability": "unavailable"}, "cost": {"currency": "USD", "availability": "unavailable"}, "timing": {"latency_ms": 120, "streamed": false, "chunk_count": 0}, "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}}, "attempts": []},
+    "receipt": {"receipt_id": "receipt-image-1", "operation_id": "op-image-1", "revision": 1}
+  }}
+}

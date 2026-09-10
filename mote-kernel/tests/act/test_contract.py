@@ -23,16 +23,13 @@ from mote_kernel.act.contract import (
     AuthorizationPhase,
     AuthorizationRequestRef,
     AuthorizedInvocation,
-    AuthorizeNodeInput,
     AuthorizeStageValue,
     CanonicalArguments,
     Deny,
-    ExecuteNodeInput,
     ExecutePortResult,
     ExecuteStageValue,
     ExecutionStopped,
     HookGraphValue,
-    HookRequest,
     HookResult,
     HookStateProjection,
     InitialAuthorization,
@@ -43,7 +40,6 @@ from mote_kernel.act.contract import (
     ResumedAuthorization,
     SettledActResult,
     SettlementProjection,
-    SettleNodeInput,
     SettleStageValue,
     ToolExchangeWriteRequest,
     ToolExchangeWriteResult,
@@ -67,7 +63,7 @@ from mote_kernel.act.identity import (
     ToolPairingIdentity,
     ToolSelector,
 )
-from mote_kernel.hooks.contract import HookStageResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookStageResult
 from mote_kernel.state.graph_state import GraphNodeId
 
 
@@ -303,40 +299,34 @@ def test_stage_envelope_has_one_concrete_payload_and_no_next_hop() -> None:
         )
 
 
-def test_business_node_input_dtos_are_exact_frozen_hook_handoffs() -> None:
+def test_business_nodes_use_exact_frozen_hook_results() -> None:
     state, _, _, resolved = _parts()
     cases = (
-        AuthorizeNodeInput(
-            HookResult(
-                _envelope(ActHookStage.RESOLVE, state, resolved),
-                (_HookCommand(),),
-                GraphNodeId("resolve"),
-            )
+        HookResult(
+            _envelope(ActHookStage.RESOLVE, state, resolved),
+            (_HookCommand(),),
+            GraphNodeId("resolve"),
         ),
-        ExecuteNodeInput(
-            HookResult(
-                _envelope(ActHookStage.AUTHORIZE, state, resolved),
-                (_HookCommand(),),
-                GraphNodeId("authorize"),
-            )
+        HookResult(
+            _envelope(ActHookStage.AUTHORIZE, state, resolved),
+            (_HookCommand(),),
+            GraphNodeId("authorize"),
         ),
-        SettleNodeInput(
-            HookResult(
-                _envelope(ActHookStage.EXECUTE, state, resolved),
-                (_HookCommand(),),
-                GraphNodeId("execute"),
-            )
+        HookResult(
+            _envelope(ActHookStage.EXECUTE, state, resolved),
+            (_HookCommand(),),
+            GraphNodeId("execute"),
         ),
     )
 
-    assert tuple(value.hook_result.node_id for value in cases) == (
+    assert tuple(value.node_id for value in cases) == (
         GraphNodeId("resolve"),
         GraphNodeId("authorize"),
         GraphNodeId("execute"),
     )
     for value in cases:
         with pytest.raises(FrozenInstanceError):
-            value.hook_result = value.hook_result  # type: ignore[misc]
+            value.node_id = value.node_id  # type: ignore[misc]
 
 
 def test_interrupt_view_allows_root_scope_and_rejects_malformed_fields() -> None:
@@ -380,7 +370,7 @@ def test_admission_accepts_valid_values_and_checks_identity_relationships() -> N
     write_request = ToolExchangeWriteRequest(projection)
     write_result = ToolExchangeWriteResult(OpaqueToolExchangeReceipt(b"receipt"))
     settled = SettledActResult(projection, write_result.receipt)
-    hook_request: HookRequest[ActHookEnvelope, _HookState] = HookRequest(
+    hook_request: HookActivationRequest[ActHookEnvelope, _HookState] = HookActivationRequest(
         _envelope(ActHookStage.EXECUTE, state, resolved),
         state,
     )
@@ -492,12 +482,12 @@ def test_admission_fails_closed_for_wrong_outer_classes_and_hook_state() -> None
     with pytest.raises(ActContractError):
         admission.admit_hook_request(
             cast(
-                HookRequest[ActHookEnvelope, _HookState],
-                HookRequest(envelope, HookStateProjection()),
+                HookActivationRequest[ActHookEnvelope, _HookState],
+                HookActivationRequest(envelope, HookStateProjection()),
             )
         )
     with pytest.raises(ActContractError):
-        admission.admit_hook_request(HookRequest(envelope, _HookState("other")))
+        admission.admit_hook_request(HookActivationRequest(envelope, _HookState("other")))
     with pytest.raises(ActContractError):
         admission.admit_hook_result(HookResult(envelope, (ActHookCommand(),)))
     with pytest.raises(ActContractError):
@@ -570,8 +560,8 @@ def test_hook_request_and_result_admission_rejects_every_concrete_boundary() -> 
         admission.admit_hook_state(_OtherHookState())
 
     wrong_state_request = cast(
-        HookRequest[ActHookEnvelope, _HookState],
-        HookRequest(envelope, _OtherHookState()),
+        HookActivationRequest[ActHookEnvelope, _HookState],
+        HookActivationRequest(envelope, _OtherHookState()),
     )
     with pytest.raises(ActContractError, match="request state"):
         admission.admit_hook_request(wrong_state_request)
@@ -581,11 +571,11 @@ def test_hook_request_and_result_admission_rejects_every_concrete_boundary() -> 
         envelope.payload,
         _OtherHookState(),
     )
-    wrong_envelope_state = HookRequest(other_state_envelope, state)
+    wrong_envelope_state = HookActivationRequest(other_state_envelope, state)
     with pytest.raises(ActContractError, match="envelope state"):
         admission.admit_hook_request(wrong_envelope_state)
 
-    wrong_node = HookRequest(envelope, state, GraphNodeId("execute"))
+    wrong_node = HookActivationRequest(envelope, state, GraphNodeId("execute"))
     with pytest.raises(ActContractError, match="node_id"):
         admission.admit_hook_request(wrong_node)
 
@@ -620,7 +610,7 @@ def test_transition_admission_preserves_the_complete_envelope_and_concrete_comma
     admission = _admission()
     state, _, _, resolved = _parts()
     envelope = _envelope(ActHookStage.RESOLVE, state, resolved)
-    request = HookRequest(envelope, state, GraphNodeId("resolve"))
+    request = HookActivationRequest(envelope, state, GraphNodeId("resolve"))
     admission.admit_transition(request, HookStageResult(envelope, (_HookCommand(),)))
 
     with pytest.raises(ActContractError, match="HookStageResult"):

@@ -11,12 +11,13 @@ from mote_kernel.hooks.contract import HookGraphValue
 from mote_kernel.observe.contract import (
     AssistantBatch,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
-    ConfigSettlementReceipt,
     ContextAppendReceipt,
     DeliveryAck,
     ObservationBatchReceipt,
     ObservationRead,
+    ObserveContractError,
     ToolBatch,
     UserBatch,
 )
@@ -33,7 +34,10 @@ from mote_kernel.observe.port import (
     ContextObservationPort,
     ObservationAckPort,
     ObservationQueuePort,
+    ObservationResumeBinding,
+    ObservationResumeCapture,
     ObservationResumePort,
+    capture_observation_resume_binding,
     require_observe_port_contracts,
 )
 
@@ -51,7 +55,7 @@ class _CompleteBundle:
         del boundary
         raise NotImplementedError
 
-    async def apply(self, batch: ConfigBatch, /) -> ConfigSettlementReceipt:
+    async def apply(self, batch: ConfigBatch, /) -> ConfigApplyResult:
         del batch
         raise NotImplementedError
 
@@ -223,6 +227,106 @@ def test_resume_contract_rejects_a_nonnull_object_without_codec_members() -> Non
     bundle = _CompleteBundle()
     with pytest.raises(ValueError, match="ObservationResumePort"):
         require_observe_port_contracts(bundle, bundle, bundle, bundle, bundle, cast(Never, _Incomplete()))
+
+
+def test_resume_contract_captures_and_reuses_codec_provenance() -> None:
+    bundle = _CompleteBundle()
+    capture = capture_observation_resume_binding(bundle)
+    assert isinstance(capture, ObservationResumeCapture)
+    assert capture.binding.codec_id == "observe-test.codec"
+    assert (
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            resume_capture=capture,
+            resume_binding=ObservationResumeBinding(
+                capture.binding.codec_id,
+                capture.binding.codec_version,
+                capture.binding.encoder,
+                capture.binding.decoder,
+            ),
+        )
+        == capture.binding
+    )
+
+    with pytest.raises(ObserveContractError, match="provenance"):
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            _CompleteBundle(),
+            resume_capture=capture,
+        )
+    with pytest.raises(ObserveContractError, match="captured contract"):
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            resume_capture=capture,
+            resume_binding=ObservationResumeBinding(
+                "other.codec",
+                capture.binding.codec_version,
+                capture.binding.encoder,
+                capture.binding.decoder,
+            ),
+        )
+    with pytest.raises(ObserveContractError, match="Port contract"):
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            resume_binding=ObservationResumeBinding(
+                "other.codec",
+                capture.binding.codec_version,
+                capture.binding.encoder,
+                capture.binding.decoder,
+            ),
+        )
+    with pytest.raises(ObserveContractError, match="malformed"):
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            resume_binding=cast(ObservationResumeBinding, object()),
+        )
+    malformed_capture = ObservationResumeCapture(bundle, cast(ObservationResumeBinding, object()))
+    with pytest.raises(ObserveContractError, match="malformed"):
+        require_observe_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            resume_capture=malformed_capture,
+        )
+
+    class MissingCodecMetadata(_CompleteBundle):
+        @property
+        def codec_id(self) -> str:
+            raise AttributeError("codec_id unavailable")
+
+        @property
+        def codec_version(self) -> int:
+            raise AttributeError("codec_version unavailable")
+
+    with pytest.raises(ObserveContractError, match="ObservationResumePort"):
+        capture_observation_resume_binding(MissingCodecMetadata())
 
 
 @pytest.mark.parametrize(

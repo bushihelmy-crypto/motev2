@@ -5,11 +5,15 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from typing import Generic, Protocol, TypeVar, final
 
-from mote_kernel.execution.engine.routing import transition_admission_error
+from mote_kernel.execution.engine.routing import (
+    graph_input_availability_coordinate,
+    publication_availability_coordinate,
+    transition_admission_error,
+)
 from mote_kernel.execution.errors import FrameInstallationInvariantError, SnapshotMismatchError
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import GraphInputFrame
-from mote_kernel.execution.identity import ScopeRunCoordinate, stable_activation
+from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.result import (
     GraphCommitResult,
     TaskResult,
@@ -23,10 +27,8 @@ from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
-    GraphInputAvailabilityCoordinate,
     GraphInputEvidence,
     GraphPublicationEvidence,
-    PublicationAvailabilityCoordinate,
     ScopedFrameIndex,
 )
 from mote_kernel.state.graph_state import (
@@ -172,7 +174,7 @@ def prepare_transition(
             raise FrameInstallationInvariantError("StartGraphRun requires graph input evidence")
         input_evidence = (
             GraphInputEvidence(
-                GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+                graph_input_availability_coordinate(graph, scope_run),
                 graph_input,
             ),
         )
@@ -193,14 +195,11 @@ def prepare_transition(
         ):
             raise SnapshotMismatchError("settlement result does not match its command coordinates")
         if isinstance(result, TaskSuccess):
-            descriptor = graph.transition.publications[task.node_id]
             publication = GraphPublicationEvidence(
-                PublicationAvailabilityCoordinate(
-                    stable_activation(
-                        scope_run,
-                        GraphActivationIdentity(task.run_id, task.superstep, task.node_id),
-                    ),
-                    descriptor.identity,
+                publication_availability_coordinate(
+                    graph,
+                    scope_run,
+                    GraphActivationIdentity(task.run_id, task.superstep, task.node_id),
                 ),
                 result.output,
                 ExecutionPublicationProvenance(command.execution),
