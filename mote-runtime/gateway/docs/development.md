@@ -16,6 +16,10 @@ Cross-language or durable shapes must additionally be represented in the root
 5. Update conformance schemas/vectors when the shape is observable outside Go.
 6. Run `make check` and record any unavailable external integration checks.
 
+For the model capability catalog change, use
+[`review-model-capability-catalog.md`](review-model-capability-catalog.md) as the
+review checklist and record design findings separately from gate results.
+
 Upstream service integration tests must use local deterministic fixtures by default.
 Live API tests are opt-in and must never be required for the package quality
 gate.
