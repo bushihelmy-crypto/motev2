@@ -21,3 +21,14 @@ No model wire protocol or durable DTO is released by this scaffold.
   service, protocol, and upstream identity names.
 - Narrowed monetary observation data to optional upstream-service-reported cost facts;
   Gateway does not estimate costs or own pricing and customer billing policy.
+- Added an immutable model catalog with operation-scoped capabilities,
+  model defaults, validated Kernel overrides, and deterministic filtering of
+  known optional generation parameters unsupported by the selected model.
+  Supported numeric request parameters are clamped to model-owned bounds.
+- Added built-in Embedding model capabilities with text/image/audio/video
+  input declarations, fixed and adjustable vector dimensions, and the same
+  deterministic filtering and clamping rules. This does not publish an
+  Embedding invocation DTO.
+- Generated the model-only catalog from pinned new-api and Bifrost revisions
+  and a content-addressed Bifrost parameter snapshot; service, protocol,
+  credential, endpoint, family, and pricing data are excluded.

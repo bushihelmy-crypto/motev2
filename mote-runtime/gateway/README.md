@@ -5,12 +5,14 @@ exposes two caller-owned invocation profiles: Kernel `LLMRequest`/
 `LLMResponse` for language and realtime calls, and Execution
 `MediaRequest`/`MediaResponse` for image, audio, music, video, and
 transcription calls. Embeddings and reranking remain reserved for a separately
-versioned profile. It is not a model router and it is not an MCP or
-tool-execution runtime.
+versioned invocation profile. The internal model catalog already models
+Embedding as an independent operation, including multimodal inputs and fixed
+or caller-adjustable vector dimensions. It is not a model router and it is not
+an MCP or tool-execution runtime.
 
-The repository is currently at the project-scaffold stage. The package layout
-and quality gates are intentional; protocol and service implementations are
-added behind these boundaries as their contracts are accepted.
+The repository currently contains the boundary scaffold and model catalog;
+protocol and service implementations are added behind these boundaries as
+their contracts are accepted.
 
 ## Module layout
 

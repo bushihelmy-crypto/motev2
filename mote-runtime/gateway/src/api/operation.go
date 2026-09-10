@@ -50,15 +50,12 @@ const (
 type Modality string
 
 const (
-	ModalityText  Modality = "text"
-	ModalityImage Modality = "image"
-	ModalityAudio Modality = "audio"
-	ModalityMusic Modality = "music"
-	ModalityVideo Modality = "video"
-	ModalityEmbed Modality = "embedding"
-	// ModalityEmbedding is the descriptive spelling retained for callers that
-	// prefer the full capability name. Both constants have the same wire value.
-	ModalityEmbedding Modality = ModalityEmbed
+	ModalityText      Modality = "text"
+	ModalityImage     Modality = "image"
+	ModalityAudio     Modality = "audio"
+	ModalityMusic     Modality = "music"
+	ModalityVideo     Modality = "video"
+	ModalityEmbedding Modality = "embedding"
 )
 
 // DeliveryMode selects the invocation lifecycle.  The mode does not change
@@ -145,7 +142,7 @@ func (value Operation) IsValid() bool {
 func (value Modality) IsValid() bool {
 	switch value {
 	case ModalityText, ModalityImage, ModalityAudio, ModalityMusic,
-		ModalityVideo, ModalityEmbed:
+		ModalityVideo, ModalityEmbedding:
 		return true
 	default:
 		return false
@@ -157,6 +154,17 @@ func (value Modality) IsValid() bool {
 func (value DeliveryMode) IsValid() bool {
 	switch value {
 	case ModeUnary, ModeServerStream, ModeDuplex, ModeAsync:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsValid reports whether the feature belongs to the service- and
+// protocol-neutral capability vocabulary.
+func (value Feature) IsValid() bool {
+	switch value {
+	case FeatureToolCalls, FeatureStructured, FeaturePromptCache, FeatureUsage:
 		return true
 	default:
 		return false

@@ -92,7 +92,7 @@ Gateway 不能把“组合不兼容”解释成“让我换个模型或服务商
 
 模型描述模型本身，例如：
 
-- 规范模型 ID 和模型家族；
+- 规范模型 ID；
 - 是否支持文本、图片、音频；
 - 是否支持 tool call、结构化输出、thinking；
 - 上下文窗口和最大输出；
@@ -106,6 +106,40 @@ Gateway 不能把“组合不兼容”解释成“让我换个模型或服务商
 - `/v1/messages`、`/v1/responses` 的 JSON 结构。
 
 同一个 Claude 模型可以部署在 Anthropic、Azure、Vertex 或 Bedrock，所以模型不能等同于服务商。
+
+模型层不需要带 `Chat()`、`Embed()` 或网络行为的 `BaseLLM`。公共部分是
+`model.Config` 数据：精确模型 ID、生命周期、token 限制；不同部分是每个
+operation 声明的模态、delivery mode、feature，以及参数的支持状态、默认值和
+数值边界。执行行为仍然属于 Protocol Adapter 与 Service Connector。
+
+模型配置按固定优先级只合并一次：
+
+```text
+Gateway catalog default
+        +
+Kernel invocation config 中该模型的显式 override
+        =
+immutable model.Definition
+```
+
+override 使用 presence 语义：未提供的公共标量和 token limit 继承默认值；非 nil
+的 operation 集合整体替换默认集合，不存在第二套 operation patch 规则。override
+不能借此传入 service、protocol、endpoint、credential 或 price。Gateway 不读取
+另一份用户配置源，也不在调用中修改已经冻结的 `model.Definition`。
+
+本次请求的规范生成参数再按“模型默认值 → Kernel 显式请求值”覆盖。对于 Gateway
+DTO 已知、但该模型明确不支持的可选参数，模型层在协议编码前自动过滤；
+模型支持的数值参数小于 minimum 时映射为 minimum，大于 maximum 时映射为
+maximum。边界和默认值都只由最终 `model.Definition` 持有；非法边界或越界默认值
+在 catalog 构造时拒绝，不能在运行时暗中修正。未知 DTO 字段仍然 fail closed。
+Tool call、structured output 等会改变请求语义的 required feature 不能静默过滤，
+必须由 Admission 返回不支持错误。
+
+Embedding 是独立 operation，不借用文本生成参数。模型声明可接受的 text、image、
+audio、video 输入模态，并只输出 embedding。固定向量宽度由 `FixedDimensions`
+记录，用户传入的 `dimensions` 会被过滤；可调宽度由 `Dimensions` 唯一持有默认值
+和已知上下界，Kernel 显式值优先并被映射到边界。当前模型层已具备该能力；跨语言
+调用仍须先发布独立、版本化的 Embedding DTO 与 conformance 契约。
 
 ### 3.2 请求协议：请求和响应长什么样
 
