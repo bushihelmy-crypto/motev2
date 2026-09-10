@@ -31,11 +31,11 @@
         "modality": "audio",
         "mode": "unary",
         "correlation": {"trace_id": "trace-transcription-1", "generation_id": "generation-transcription-1", "model_call_id": "call-transcription-1"},
-        "model": {"requested_model_id": "model.transcribe", "provider": "fixture", "protocol": "provider.transcription.v1"},
+        "model": {"requested_model_id": "model.transcribe", "service_kind": "fixture", "protocol_id": "fixture.transcription.v1"},
         "input": {"kind": "audio_transcription", "media": {"artifact_id": "source-audio-1", "revision": 1, "representation": "original", "kind": "audio", "mime_type": "audio/wav", "content_ref": "artifact:source-audio-1", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "size": 1024}, "language": "en"},
         "finish": {"reasons": ["completed"]},
         "usage": {"availability": "reported", "input_audio_tokens": 12, "output_text_tokens": 5},
-        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000008"},
+        "service_reported_cost": {"currency": "USD", "amount": "0.000008"},
         "timing": {"latency_ms": 95, "streamed": false, "chunk_count": 0},
         "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}},
         "attempts": []

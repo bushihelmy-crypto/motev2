@@ -494,11 +494,14 @@ ModelReceipt
 ├── started_at / completed_at
 ├── outcome
 ├── usage
+├── service_reported_cost（可选，仅上游服务明确返回时记录）
 ├── normalized result reference
 └── raw artifact reference（可选）
 ```
 
 Receipt 不保存明文 API Key、Bearer token、云凭据或签名 Header。大响应和完整流放到 artifact/stream manager，receipt 只保存有限元数据和引用。
+
+`service_reported_cost` 只是上游服务返回的执行事实。Gateway 可以校验、规范化、记录并对同币种的已报告金额求和，但不得根据模型价格、usage、汇率、折扣或用户计费规则推导金额。上游服务未报告时字段缺省，不估算也不伪造为零。它不是用户售价、应付账单、余额扣款或最终发票。
 
 ## 13. 建议目录边界
 
@@ -507,7 +510,7 @@ mote-runtime/gateway/
 ├── architecture.md
 ├── docs/
 └── src/                         # Go module root
-    ├── api/                     # provider-neutral 请求、事件、结果、usage、error
+    ├── api/                     # service/protocol-neutral 请求、事件、结果、usage、error
     ├── internal/
     │   ├── application/         # invoke 用例编排；唯一组合三维的地方
     │   ├── admission/           # 模型 × 协议 × 服务兼容性门禁

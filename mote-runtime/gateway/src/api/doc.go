@@ -1,4 +1,4 @@
-// Package api owns the provider-neutral request, terminal result, usage,
+// Package api owns the service- and protocol-neutral request, terminal result, usage,
 // observation, receipt, and error shapes exposed by the model gateway.
 //
 // LLMRequest/LLMResponse are the Kernel profile. MediaRequest/MediaResponse

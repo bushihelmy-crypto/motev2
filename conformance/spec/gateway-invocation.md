@@ -1,6 +1,6 @@
 # Gateway model invocation contract
 
-This document defines `gateway_invocation` version `1`, the provider-neutral
+This document defines `gateway_invocation` version `1`, the service- and protocol-neutral
 model boundary used by the runtimes. The JSON Schema in
 [`schemas/protocol/gateway_invocation.v1.schema.json`](../schemas/protocol/gateway_invocation.v1.schema.json)
 is authoritative. Go types under `mote-runtime/gateway/src/api` and any
@@ -21,7 +21,7 @@ the wire discriminator.
 ## Scope
 
 Gateway owns outbound model access only. The contract does not contain model
-routing, provider selection, MCP/discovery/execution, agent flow, billing
+routing, service selection, MCP/discovery/execution, agent flow, billing
 policy, or network configuration. Connection reuse and protocol framing are
 implementation concerns under Gateway's upstream packages.
 
@@ -29,7 +29,7 @@ The request has these fixed dimensions:
 
 | Field | Meaning |
 | --- | --- |
-| `operation_id` | Stable identity of one logical model operation; it is not a provider request id. |
+| `operation_id` | Stable identity of one logical model operation; it is not an upstream request id. |
 | `model_id` | Model already selected by Router/Kernel. Gateway never replaces it. |
 | `operation` | Semantic model operation. |
 | `modality` | Primary input/output modality. `music` is distinct from `audio`. |
@@ -53,7 +53,7 @@ The operation/modality/input combinations fixed by v1 are:
 Embedding and reranking are Gateway capabilities reserved for a separately
 versioned profile and DTO. They MUST NOT be represented as a `kernel_llm` or
 `execution_media` request by compatibility shims. Service kind, endpoint,
-credentials, provider protocol, retry/fallback policy, and connection-pool
+credentials, protocol, retry/fallback policy, and connection-pool
 settings are intentionally absent from the request; they are Gateway
 composition and outbound transport concerns.
 
@@ -102,7 +102,7 @@ LLMResponse | MediaResponse
 │   ├── requested/resolved model and opaque resource identities
 │   ├── canonical input snapshot
 │   ├── final finish disposition
-│   ├── final usage and decimal cost
+│   ├── final usage and optional service-reported cost
 │   ├── aggregate timing and stream counters
 │   ├── prompt/result cache observations
 │   └── terminal summaries of physical attempts
@@ -112,11 +112,12 @@ LLMResponse | MediaResponse
 `terminal.result` is the sole canonical output projection.  The observation
 sidecar deliberately has no second output field: Kernel's observability
 adapter uses the terminal result as Langfuse generation output and uses the
-sidecar for model, usage, cost, timing, cache, and correlation metadata.
+sidecar for model, usage, optional service-reported cost, timing, cache, and
+correlation metadata.
 This prevents two competing representations of the model answer.
 
 The sidecar is backend-neutral.  It must not contain a `langfuse` field, an
-SDK object, logger object, provider secret, signed header, raw provider body,
+SDK object, logger object, service secret, signed header, raw upstream body,
 or a cache key.  Endpoint, tenant, credential-slot, and cache-key values are
 opaque fingerprints/identities only.
 
@@ -165,11 +166,11 @@ project one terminal response as follows:
 | --- | --- |
 | generation/operation id | `operation_id`, `observation.correlation.generation_id`, and `model_call_id` |
 | trace/session/parent | `observation.correlation` |
-| generation model/provider | `observation.model` |
+| generation model/service/protocol | `observation.model` |
 | generation input | `observation.input` (the canonical request input) |
 | generation output | `terminal.result` when `outcome=succeeded` |
 | usage | `observation.usage` |
-| cost | `observation.cost` |
+| cost reported by the configured upstream service | `observation.service_reported_cost`, when present |
 | latency/TTFT/chunk facts | `observation.timing` |
 | finish reason | `observation.finish` |
 | error level/message | `terminal.error` and failed attempt summaries |
@@ -177,10 +178,18 @@ project one terminal response as follows:
 | cache metrics | `observation.cache` |
 | durable operation identity | `receipt` |
 
-Absent usage/cost values are represented by an availability state, not by a
-fabricated zero.  Token dimensions are optional so a provider that reports no
-usage remains distinguishable from a provider that reports zero.  Cost uses a
-decimal string to avoid binary floating-point billing drift.
+Absent usage values are represented by an availability state, not by a
+fabricated zero. Token dimensions are optional so an upstream service that
+reports no usage remains distinguishable from one that reports zero.
+
+`service_reported_cost` is present only when the configured upstream model service
+explicitly reports a monetary cost for the call. Gateway may validate,
+normalize, record, and add same-currency reported amounts. It MUST NOT derive
+an amount from usage, model prices, exchange rates, discounts, or customer
+billing policy. If the service does not report a cost, the field is absent;
+Gateway never estimates it or fabricates a zero. This value is not a customer
+price, amount due, balance deduction, settled invoice, or billing ledger entry.
+Its amount is a decimal string to avoid binary floating-point drift.
 
 ## Terminal outcomes and recovery
 

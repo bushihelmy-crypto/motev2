@@ -14,3 +14,10 @@ first public API is released.
   gate configuration.
 
 No model wire protocol or durable DTO is released by this scaffold.
+
+### Changed
+
+- Replaced ambiguous provider vocabulary at the public boundary with explicit
+  service, protocol, and upstream identity names.
+- Narrowed monetary observation data to optional upstream-service-reported cost facts;
+  Gateway does not estimate costs or own pricing and customer billing policy.

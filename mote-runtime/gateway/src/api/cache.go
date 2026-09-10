@@ -1,6 +1,6 @@
 package api
 
-// CacheState is deliberately richer than a boolean: a provider can omit a
+// CacheState is deliberately richer than a boolean: an upstream service can omit a
 // cache report, and a caller can explicitly bypass a cache.
 type CacheState string
 
@@ -12,7 +12,7 @@ const (
 	CacheUnavailable  CacheState = "unavailable"
 )
 
-// PromptCacheObservation contains normalized provider prompt/context-cache
+// PromptCacheObservation contains normalized upstream prompt/context-cache
 // facts.  KeyFingerprint is opaque and must never be a raw cache key.
 type PromptCacheObservation struct {
 	State          CacheState `json:"state"`

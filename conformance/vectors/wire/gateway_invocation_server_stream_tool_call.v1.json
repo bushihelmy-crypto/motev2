@@ -36,7 +36,7 @@
         "modality": "text",
         "mode": "server_stream",
         "correlation": {"trace_id": "trace-tool-1", "generation_id": "generation-tool-1", "model_call_id": "call-tool-1"},
-        "model": {"requested_model_id": "model.tools", "provider": "fixture", "protocol": "openai.responses.v1"},
+        "model": {"requested_model_id": "model.tools", "service_kind": "fixture", "protocol_id": "openai.responses.v1"},
         "input": {
           "kind": "generate",
           "messages": [{"role": "user", "content": [{"type": "text", "text": "Look up mote."}]}],
@@ -45,7 +45,7 @@
         },
         "finish": {"reasons": ["tool_calls"]},
         "usage": {"availability": "reported", "input_tokens": 6, "output_tokens": 8, "total_tokens": 14},
-        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000014"},
+        "service_reported_cost": {"currency": "USD", "amount": "0.000014"},
         "timing": {"latency_ms": 35, "streamed": true, "chunk_count": 4, "time_to_first_byte_ms": 4.2, "time_to_first_token_ms": 6.1},
         "cache": {"prompt": {"state": "miss", "key_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "result": {"state": "bypassed"}},
         "attempts": [{
@@ -54,12 +54,12 @@
           "resume_generation": 0,
           "state": "succeeded",
           "model_id": "model.tools",
-          "provider": "fixture",
+          "service_kind": "fixture",
           "endpoint_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
           "credential_slot_id": "slot-fixture-1",
           "latency_ms": 35,
           "usage": {"availability": "reported", "input_tokens": 6, "output_tokens": 8, "total_tokens": 14},
-          "cost": {"currency": "USD", "availability": "reported", "amount": "0.000014"},
+          "service_reported_cost": {"currency": "USD", "amount": "0.000014"},
           "selected": true
         }]
       },

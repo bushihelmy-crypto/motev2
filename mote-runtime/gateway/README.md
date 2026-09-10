@@ -23,7 +23,7 @@ gateway/
 ├── docs/                        # package and development decisions
 ├── scripts/                     # deterministic repository checks
 ├── src/                         # Go module root
-│   ├── api/                     # provider-neutral public DTO boundary
+│   ├── api/                     # service/protocol-neutral public DTO boundary
 │   ├── cmd/gateway/             # process entry point
 │   ├── internal/                # composition and domain implementation
 │   │   ├── application/         # invocation orchestration
@@ -44,7 +44,7 @@ gateway/
 └── Makefile                     # project commands delegate to src/
 ```
 
-`api/` is the only place for provider-neutral request/result/observation
+`api/` is the only place for service- and protocol-neutral request/result/observation
 shapes. `LLMInput` and `MediaInput` are intentionally different DTOs; a
 protocol or durable cross-language shape is not considered released merely
 because a Go type exists; it must first have an accepted conformance contract

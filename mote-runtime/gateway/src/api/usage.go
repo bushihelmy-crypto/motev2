@@ -1,7 +1,7 @@
 package api
 
-// UsageAvailability describes whether the provider reported a quantity and
-// whether Gateway had to estimate it.  Pointer fields in Usage preserve the
+// UsageAvailability describes whether the upstream response reported a
+// quantity and whether Gateway had to estimate it. Pointer fields in Usage preserve the
 // distinction between an absent quantity and a real zero.
 type UsageAvailability string
 
@@ -12,8 +12,9 @@ const (
 	UsageUnavailable UsageAvailability = "unavailable"
 )
 
-// Usage is the normalized terminal usage snapshot used by Kernel billing and
-// Langfuse projection.  It contains no per-chunk values.
+// Usage is the normalized terminal usage snapshot used by downstream
+// accounting and observability projections. It contains no prices, monetary
+// calculations, or per-chunk values.
 type Usage struct {
 	Availability      UsageAvailability `json:"availability"`
 	InputTokens       *int64            `json:"input_tokens,omitempty"`

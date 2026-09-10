@@ -31,4 +31,4 @@ The command includes formatting, vet, static analysis, unit tests with the race
 detector, deterministic integration harness tests, architecture checks,
 complexity ratchet, module hygiene, security, license, and a reproducible
 build. The compatibility matrix repeats the unit and integration test targets;
-live provider tests are never part of CI.
+live upstream-service tests are never part of CI.

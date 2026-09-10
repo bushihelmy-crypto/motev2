@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mote.dev/conformance/protocol/gateway_invocation.v1.schema.json",
   "title": "Mote Gateway invocation profiles v1",
-  "description": "The provider-neutral model request and terminal response contract. Kernel uses the LLM profile; Execution uses the distinct media profile. Stream delivery is local and never serialized as deltas or events.",
+  "description": "The service- and protocol-neutral model request and terminal response contract. Kernel uses the LLM profile; Execution uses the distinct media profile. Stream delivery is local and never serialized as deltas or events.",
   "$ref": "#/$defs/request",
   "$defs": {
     "identifier": {
@@ -367,9 +367,9 @@
       "required": ["code", "domain", "retryability", "external_commit_state"],
       "properties": {
         "code": {"enum": ["INVALID_REQUEST", "UNSUPPORTED_CAPABILITY", "UPSTREAM_REJECTED", "UPSTREAM_UNAVAILABLE", "OUTCOME_UNKNOWN", "CANCELLED", "RESPONSE_INVALID"]},
-        "domain": {"enum": ["request", "capability", "transport", "provider", "protocol", "internal", "cancellation"]},
+        "domain": {"enum": ["request", "capability", "transport", "service", "protocol", "internal", "cancellation"]},
         "safe_message": {"type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$"},
-        "provider_code": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"},
+        "upstream_code": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"},
         "retryability": {"enum": ["never", "same_call", "reconcile_only"]},
         "external_commit_state": {"enum": ["not_committed", "committed", "unknown"]}
       }
@@ -380,7 +380,7 @@
       "required": ["task_id", "operation_id"],
       "properties": {
         "task_id": {"$ref": "#/$defs/identifier"},
-        "provider_task_id": {"$ref": "#/$defs/identifier"},
+        "upstream_task_id": {"$ref": "#/$defs/identifier"},
         "operation_id": {"$ref": "#/$defs/identifier"}
       }
     },
@@ -412,13 +412,13 @@
     "model_observation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requested_model_id", "provider", "protocol"],
+      "required": ["requested_model_id", "service_kind", "protocol_id"],
       "properties": {
         "requested_model_id": {"$ref": "#/$defs/model_id"},
         "resolved_model_id": {"$ref": "#/$defs/model_id"},
-        "provider": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
-        "protocol": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}(\\.[a-z][a-z0-9_.-]{0,127})+$"},
-        "provider_request_id": {"$ref": "#/$defs/identifier"},
+        "service_kind": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "protocol_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}(\\.[a-z][a-z0-9_.-]{0,127})+$"},
+        "upstream_request_id": {"$ref": "#/$defs/identifier"},
         "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
         "tenant_fingerprint": {"$ref": "#/$defs/digest"},
         "credential_slot_id": {"$ref": "#/$defs/identifier"}
@@ -430,7 +430,7 @@
       "required": ["reasons"],
       "properties": {
         "reasons": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stop", "length", "tool_calls", "content_filter", "completed", "cancelled", "error", "unknown"]}},
-        "provider_reason": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"}
+        "upstream_reason": {"type": "string", "maxLength": 256, "pattern": "^[^\\r\\n]*$"}
       }
     },
     "usage": {
@@ -455,19 +455,15 @@
         "output_video_tokens": {"type": "integer", "minimum": 0}
       }
     },
-    "money": {
+    "service_reported_cost": {
       "type": "object",
+      "description": "A monetary cost explicitly reported by the upstream model service. Gateway does not derive it from usage, prices, exchange rates, discounts, or customer billing policy.",
       "additionalProperties": false,
-      "required": ["currency", "availability"],
+      "required": ["currency", "amount"],
       "properties": {
         "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
-        "amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,18})?$"},
-        "availability": {"enum": ["reported", "estimated", "unavailable"]}
-      },
-      "allOf": [
-        {"if": {"properties": {"availability": {"enum": ["reported", "estimated"]}}}, "then": {"required": ["amount"]}},
-        {"if": {"properties": {"availability": {"const": "unavailable"}}}, "then": {"not": {"required": ["amount"]}}}
-      ]
+        "amount": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,18})?$"}
+      }
     },
     "timing": {
       "type": "object",
@@ -519,19 +515,19 @@
     "attempt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["attempt_id", "ordinal", "resume_generation", "state", "model_id", "provider", "latency_ms", "usage", "cost", "selected"],
+      "required": ["attempt_id", "ordinal", "resume_generation", "state", "model_id", "service_kind", "latency_ms", "usage", "selected"],
       "properties": {
         "attempt_id": {"$ref": "#/$defs/identifier"},
         "ordinal": {"type": "integer", "minimum": 1},
         "resume_generation": {"type": "integer", "minimum": 0},
         "state": {"enum": ["succeeded", "failed", "cancelled", "unknown"]},
         "model_id": {"$ref": "#/$defs/model_id"},
-        "provider": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "service_kind": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
         "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
         "credential_slot_id": {"$ref": "#/$defs/identifier"},
         "latency_ms": {"type": "number", "minimum": 0},
         "usage": {"$ref": "#/$defs/usage"},
-        "cost": {"$ref": "#/$defs/money"},
+        "service_reported_cost": {"$ref": "#/$defs/service_reported_cost"},
         "error": {"$ref": "#/$defs/error"},
         "selected": {"type": "boolean"}
       },
@@ -543,7 +539,7 @@
     "observation_base": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "operation_id", "operation", "modality", "mode", "correlation", "model", "input", "finish", "usage", "cost", "timing", "cache", "attempts"],
+      "required": ["schema_version", "operation_id", "operation", "modality", "mode", "correlation", "model", "input", "finish", "usage", "timing", "cache", "attempts"],
       "properties": {
         "schema_version": {"const": 1},
         "operation_id": {"$ref": "#/$defs/identifier"},
@@ -555,7 +551,7 @@
         "input": {"type": "object"},
         "finish": {"$ref": "#/$defs/finish"},
         "usage": {"$ref": "#/$defs/usage"},
-        "cost": {"$ref": "#/$defs/money"},
+        "service_reported_cost": {"$ref": "#/$defs/service_reported_cost"},
         "timing": {"$ref": "#/$defs/timing"},
         "cache": {"$ref": "#/$defs/cache"},
         "attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt"}}

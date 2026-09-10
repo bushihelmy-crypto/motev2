@@ -1,7 +1,7 @@
 package api
 
-// Operation is the provider-neutral semantic operation requested from a
-// model.  It deliberately describes what the model does, not which provider
+// Operation is the service- and protocol-neutral semantic operation requested
+// from a model. It deliberately describes what the model does, not which service
 // endpoint happens to implement it.
 type Operation string
 

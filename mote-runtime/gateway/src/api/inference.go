@@ -18,7 +18,7 @@ type LLMInput struct {
 	Parameters     GenerationParameters `json:"parameters,omitempty"`
 }
 
-// LLMRequest is the provider-neutral Kernel → Gateway request. The model is
+// LLMRequest is the service- and protocol-neutral Kernel → Gateway request. The model is
 // already selected by Router; service, protocol, and credentials are bound by
 // Gateway configuration and never appear here.
 type LLMRequest struct {

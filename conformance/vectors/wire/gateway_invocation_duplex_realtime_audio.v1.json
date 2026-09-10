@@ -35,11 +35,11 @@
         "modality": "audio",
         "mode": "duplex",
         "correlation": {"trace_id": "trace-realtime-1", "session_id": "session-realtime-1", "generation_id": "generation-realtime-1", "model_call_id": "call-realtime-1"},
-        "model": {"requested_model_id": "model.realtime", "provider": "fixture", "protocol": "openai.realtime.v1"},
+        "model": {"requested_model_id": "model.realtime", "service_kind": "fixture", "protocol_id": "openai.realtime.v1"},
         "input": {"kind": "realtime", "instructions": "Answer briefly.", "modalities": ["audio", "text"]},
         "finish": {"reasons": ["stop"]},
         "usage": {"availability": "reported", "input_audio_tokens": 4, "output_audio_tokens": 6, "total_tokens": 10},
-        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000020"},
+        "service_reported_cost": {"currency": "USD", "amount": "0.000020"},
         "timing": {"latency_ms": 240, "streamed": true, "chunk_count": 5, "input_event_count": 3, "output_event_count": 5, "time_to_first_byte_ms": 8.5},
         "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "bypassed"}},
         "attempts": []

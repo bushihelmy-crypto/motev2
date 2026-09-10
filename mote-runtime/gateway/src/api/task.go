@@ -4,6 +4,6 @@ package api
 // Polling, cancellation, and reconciliation are separate operations.
 type TaskHandle struct {
 	TaskID         string `json:"task_id"`
-	ProviderTaskID string `json:"provider_task_id,omitempty"`
+	UpstreamTaskID string `json:"upstream_task_id,omitempty"`
 	OperationID    string `json:"operation_id"`
 }

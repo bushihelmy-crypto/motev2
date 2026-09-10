@@ -9,13 +9,13 @@ Cross-language or durable shapes must additionally be represented in the root
 ## Change checklist
 
 1. Identify the single owner for the new concept.
-2. Add or update one canonical contract; do not duplicate provider DTOs in a
+2. Add or update one canonical contract; do not duplicate upstream DTOs in a
    shared package.
 3. Keep model, protocol, service, and transport dependencies one-way.
 4. Add deterministic unit tests at the owning boundary.
 5. Update conformance schemas/vectors when the shape is observable outside Go.
 6. Run `make check` and record any unavailable external integration checks.
 
-Provider integration tests must use local deterministic fixtures by default.
+Upstream service integration tests must use local deterministic fixtures by default.
 Live API tests are opt-in and must never be required for the package quality
 gate.

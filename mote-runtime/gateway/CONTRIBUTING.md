@@ -13,4 +13,4 @@ make lint
 
 If a change alters an observable request, response, stream, receipt, or durable
 contract, update the matching conformance schema and deterministic cases in the
-same change. Do not add live-provider tests to the default quality gate.
+same change. Do not add live-upstream-service tests to the default quality gate.

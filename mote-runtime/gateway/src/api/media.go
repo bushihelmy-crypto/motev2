@@ -28,7 +28,7 @@ type MediaInput struct {
 	Parameters     GenerationParameters `json:"parameters,omitempty"`
 }
 
-// MediaRequest is the provider-neutral Execution → Gateway request for a
+// MediaRequest is the service- and protocol-neutral Execution → Gateway request for a
 // media operation. It is not an alias of LLMRequest.
 type MediaRequest struct {
 	Kind          RequestKind  `json:"kind"`
@@ -53,7 +53,7 @@ type MediaOutput struct {
 }
 
 // TranscriptSegment is an optional bounded transcript annotation. It carries
-// no provider-specific confidence or raw response fields.
+// no upstream-specific confidence or raw response fields.
 type TranscriptSegment struct {
 	StartMS int64  `json:"start_ms"`
 	EndMS   int64  `json:"end_ms"`

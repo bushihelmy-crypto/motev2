@@ -19,7 +19,7 @@
 
 - Keep model, protocol, and service as independent dimensions. Combine them
   once in an immutable call plan after deterministic admission.
-- `src/api` is the only provider-neutral DTO boundary. Do not duplicate the
+- `src/api` is the only service- and protocol-neutral DTO boundary. Do not duplicate the
   same request/result/event shape in protocol or connector packages.
 - Protocol adapters encode/decode wire values. Service connectors resolve
   targets, credentials, and cloud signatures. Neither may absorb the other's
@@ -48,7 +48,7 @@
 
 - Unit tests live beside the package they protect and are deterministic by
   default. Integration tests live under `src/integration` and run only with
-  `-tags=integration`; live provider tests are opt-in and never required by the
+  `-tags=integration`; live upstream-service tests are opt-in and never required by the
   default gate.
 - Architecture tests own package layout and dependency direction. They are
   high-signal owner checks, not coverage tests.

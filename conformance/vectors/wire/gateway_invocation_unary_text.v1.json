@@ -34,11 +34,11 @@
         "modality": "text",
         "mode": "unary",
         "correlation": {"trace_id": "trace-text-1", "generation_id": "generation-text-1", "model_call_id": "call-text-1"},
-        "model": {"requested_model_id": "model.text", "provider": "fixture", "protocol": "openai.chat_completions.v1"},
+        "model": {"requested_model_id": "model.text", "service_kind": "fixture", "protocol_id": "openai.chat_completions.v1"},
         "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "Say hello."}]}]},
         "finish": {"reasons": ["stop"]},
         "usage": {"availability": "reported", "input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
-        "cost": {"currency": "USD", "availability": "reported", "amount": "0.000001"},
+        "service_reported_cost": {"currency": "USD", "amount": "0.000001"},
         "timing": {"latency_ms": 12.5, "streamed": false, "chunk_count": 0},
         "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}},
         "attempts": [{
@@ -47,10 +47,10 @@
           "resume_generation": 0,
           "state": "succeeded",
           "model_id": "model.text",
-          "provider": "fixture",
+          "service_kind": "fixture",
           "latency_ms": 12.5,
           "usage": {"availability": "reported", "input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
-          "cost": {"currency": "USD", "availability": "reported", "amount": "0.000001"},
+          "service_reported_cost": {"currency": "USD", "amount": "0.000001"},
           "selected": true
         }]
       },

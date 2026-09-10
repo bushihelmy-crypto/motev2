@@ -16,7 +16,7 @@ type ArtifactRef struct {
 	Size           int64  `json:"size"`
 }
 
-// ContentPart is a provider-neutral LLM message part. Media is always carried
+// ContentPart is a service- and protocol-neutral LLM message part. Media is always carried
 // by an ArtifactRef so the Kernel request remains bounded and replayable.
 type ContentPart struct {
 	Type     string       `json:"type"`
@@ -42,7 +42,7 @@ type ResponseFormat struct {
 }
 
 // GenerationParameters contains controls shared by LLM and media adapters.
-// Provider-specific knobs require a reviewed protocol version instead of an
+// Protocol-specific knobs require a reviewed protocol version instead of an
 // unbounded map at this boundary.
 type GenerationParameters struct {
 	Temperature     *float64 `json:"temperature,omitempty"`

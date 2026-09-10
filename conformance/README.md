@@ -34,7 +34,7 @@ Runners load `manifest.json`, reject unsupported manifest versions, validate eve
 No suite is enabled until it has a stable protocol schema and at least one reviewed case. Empty suite arrays are valid during bootstrap.
 
 The first enabled runtime contract is `gateway_invocation` v1. It is the
-provider-neutral model invocation boundary used by the Go Gateway scaffold.
+service- and protocol-neutral model invocation boundary used by the Go Gateway scaffold.
 It has a `kernel_llm` profile for Kernel and a distinct `execution_media`
 profile for Execution; media requests are not admitted as Kernel LLM
 requests. Its schema and normative lifecycle rules live in

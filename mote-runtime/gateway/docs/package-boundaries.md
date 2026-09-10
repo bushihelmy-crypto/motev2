@@ -2,7 +2,7 @@
 
 | Package | Owns | Must not own |
 | --- | --- | --- |
-| `api` | provider-neutral LLM/media DTOs, terminal results, observations, and error vocabulary | provider JSON, stream event wire formats, or tool execution |
+| `api` | service- and protocol-neutral LLM/media DTOs, terminal results, observations, and error vocabulary | upstream protocol JSON, stream event wire formats, or tool execution |
 | `internal/model` | model identity and capabilities | endpoint, credentials, routing |
 | `internal/protocol` | adapter contracts and wire feature declarations | cloud signing or host resolution |
 | `internal/service` | service config, target resolution, authorization | protocol payload encoding |
