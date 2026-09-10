@@ -91,6 +91,33 @@ def project_graph_outputs(
                 raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
             activation_config = candidate_config
         entries.append(NamedValue(binding.destination.boundary_name, value))
+    # A nested graph may intentionally expose no business outputs.  Its
+    # terminal publication still carries the activation metadata needed by
+    # the parent activation, so retain that existing frame-owned projection
+    # instead of manufacturing a second Config source.
+    if activation_config is None:
+        terminal_frames = tuple(
+            record.frame
+            for record in frames.publications
+            if record.coordinate.activation.scope_run == scope_run
+            and record.coordinate.activation.superstep == completion_superstep
+        )
+        if completion_superstep == 0:
+            terminal_frames = (
+                *terminal_frames,
+                *(record.frame for record in frames.graph_inputs if record.coordinate.scope_run == scope_run),
+            )
+        terminal_frames = (
+            *terminal_frames,
+            *(record.frame for record in frames.child_boundaries if record.coordinate.child_scope_run == scope_run),
+        )
+        for frame in terminal_frames:
+            candidate_config = frame.activation_config
+            if candidate_config is None:
+                continue
+            if activation_config is not None and activation_config != candidate_config:
+                raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
+            activation_config = candidate_config
     return _make_graph_output_view(
         tuple(entries),
         graph.graph_output_descriptor.declarations,

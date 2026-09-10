@@ -10,10 +10,12 @@ from mote_kernel.execution.engine.routing import graph_outputs_available, resolv
 from mote_kernel.execution.errors import GraphValueAdmissionError, InvalidRoutingCommandError, SnapshotMismatchError
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.ports import GraphOutputBindings, normalize_graph_output_declarations
-from mote_kernel.execution.graph.values import _make_graph_input_frame, _make_node_output_frame
+from mote_kernel.execution.graph.values import _make_graph_input_frame, _make_graph_output_view, _make_node_output_frame
 from mote_kernel.execution.identity import StableActivation, root_scope_run
 from mote_kernel.execution.run_context import (
     AdmittedGraphInput,
+    ChildBoundaryAvailabilityCoordinate,
+    ConfirmedChildBoundary,
     ConfirmedPublication,
     ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
@@ -132,6 +134,68 @@ def test_output_projection_rejects_sources_with_different_activation_configs() -
             output_frame,
             1,
             ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+        )
+    )
+
+    with pytest.raises(GraphValueAdmissionError, match="different activation Config snapshots"):
+        project_graph_outputs(compiled, scope_run, 0, frames)
+
+
+def test_output_projection_preserves_config_from_a_nested_empty_boundary() -> None:
+    compiled = GraphCompiler(
+        graph(
+            nodes=(node("source"),),
+            outputs=normalize_graph_output_declarations({}),
+        )
+    ).compile()
+    scope_run = root_scope_run(GraphRunId("run"))
+    config = activation_config(1)
+    boundary = _make_graph_output_view(
+        (),
+        compiled.graph_output_descriptor.declarations,
+        activation_config=config,
+    )
+    frames = ScopedFrameIndex().add_child_boundary(
+        ConfirmedChildBoundary(
+            ChildBoundaryAvailabilityCoordinate(scope_run, compiled.graph_output_descriptor.identity),
+            boundary,
+        )
+    )
+
+    projected = project_graph_outputs(compiled, scope_run, 0, frames)
+
+    assert projected.entries == ()
+    assert projected.activation_config is config
+
+
+def test_empty_output_projection_rejects_conflicting_fallback_configs() -> None:
+    compiled = GraphCompiler(
+        graph(
+            nodes=(node("source"),),
+            outputs=normalize_graph_output_declarations({}),
+        )
+    ).compile()
+    scope_run = root_scope_run(GraphRunId("run"))
+    input_config = activation_config(1)
+    boundary_config = activation_config(2)
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, compiled.graph_input_descriptor.identity),
+            _make_graph_input_frame(
+                Graph.values(value="input"),
+                compiled.graph_input_descriptor.declarations,
+                activation_config=input_config,
+            ),
+        )
+    )
+    frames = frames.add_child_boundary(
+        ConfirmedChildBoundary(
+            ChildBoundaryAvailabilityCoordinate(scope_run, compiled.graph_output_descriptor.identity),
+            _make_graph_output_view(
+                (),
+                compiled.graph_output_descriptor.declarations,
+                activation_config=boundary_config,
+            ),
         )
     )
 

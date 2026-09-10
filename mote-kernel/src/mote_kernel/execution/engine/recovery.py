@@ -57,6 +57,7 @@ from mote_kernel.state.graph_state import (
     FailedGraphNode,
     FenceGraphExecution,
     GraphActivationIdentity,
+    GraphConfigCursor,
     GraphExecutionAttemptId,
     GraphFrontierNode,
     GraphFrontierStatus,
@@ -311,6 +312,7 @@ _CycleSettlementKey: TypeAlias = tuple[bool, int, GraphNodeId, GraphRouteId | No
 class _RecoveryCycleSignature:
     """Facts that can change a quiescent loop position's next transfer."""
 
+    config_cursor: GraphConfigCursor
     frontier: tuple[RecoveryFrontierNode, ...]
     join_progress: tuple[GraphJoinProgress, ...]
     settled_activations: tuple[_CycleSettlementKey, ...]
@@ -399,6 +401,31 @@ def _settlement_coordinate(state: GraphRunState, node: GraphFrontierNode) -> Rec
     )
 
 
+def _activation_config_cursor(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> GraphConfigCursor | None:
+    """Project the runtime Config cursor that a nested activation can inherit.
+
+    The state layer materializes a topology-local default cursor when no
+    activation Config was supplied.  That sentinel is intentionally not
+    copied into a different nested topology: live construction likewise
+    starts such a child without activation metadata.  Any non-default cursor
+    is the single State-owned Config fact and is inherited by a simulated
+    child or propagated from a completed child settlement.
+    """
+
+    cursor = state.config_cursor
+    if (
+        cursor.definition_id == graph.definition_id
+        and cursor.definition_version == graph.version
+        and cursor.revision == 1
+        and cursor.digest is None
+    ):
+        return None
+    return cursor
+
+
 def _atom(value: str) -> str:
     return f"{len(value)}:{value}"
 
@@ -413,6 +440,7 @@ def _coordinate_parts(scope_run: ScopeRunCoordinate) -> tuple[str, ...]:
 
 def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> RecoveryTraversalKey:
     graph_state = state.binding.state
+    config_cursor = graph_state.config_cursor
     parts: list[str] = [
         str(state.limits.max_supersteps),
         str(state.limits.max_parallel_tasks),
@@ -421,6 +449,10 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
         str(graph_state.superstep),
         str(graph_state.execution_sequence),
         str(graph_state.revision),
+        _atom(config_cursor.definition_id),
+        str(config_cursor.definition_version),
+        str(config_cursor.revision),
+        _atom(config_cursor.digest or ""),
     ]
     for node in graph_state.frontier.nodes:
         projected = _settlement_coordinate(graph_state, node)
@@ -475,12 +507,17 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
         parts.extend((*_coordinate_parts(child.scope_run), str(isinstance(child, ScopedStateBinding))))
         if isinstance(child, ScopedStateBinding):
             child_state = child.state
+            child_config_cursor = child_state.config_cursor
             parts.extend(
                 (
                     str(child_state.status.value),
                     str(child_state.superstep),
                     str(child_state.execution_sequence),
                     str(child_state.revision),
+                    _atom(child_config_cursor.definition_id),
+                    str(child_config_cursor.definition_version),
+                    str(child_config_cursor.revision),
+                    _atom(child_config_cursor.digest or ""),
                 )
             )
     for action in state.admitted_actions:
@@ -596,6 +633,7 @@ def _recovery_cycle_signature(
         )
     )
     return _RecoveryCycleSignature(
+        config_cursor=state.config_cursor,
         frontier=tuple(_settlement_coordinate(state, node) for node in state.frontier.nodes),
         join_progress=state.join_progress,
         settled_activations=settled_activations,
@@ -742,7 +780,12 @@ def _child_outcomes(
     if child_binding is None:
         child_state = reduce_graph_run(
             None,
-            project_start_graph_command(child_graph, coordinate.graph_run_id, parent),
+            project_start_graph_command(
+                child_graph,
+                coordinate.graph_run_id,
+                parent,
+                _activation_config_cursor(parent_graph, parent_state),
+            ),
         )
         child_binding = ScopedStateBinding(coordinate, child_state)
         child_input_coordinate: GraphInputAvailabilityCoordinate[GraphValueT] = graph_input_availability_coordinate(
@@ -845,6 +888,7 @@ def _settle_nested_outcomes(
     for outcome in combination.outcomes:
         if outcome.boundary.kind is _ScopeBoundaryKind.COMPLETED:
             previous = current
+            child_graph = graph.nested_graphs[outcome.node_id]
             current = reduce_graph_run(
                 current,
                 project_success_settlement(
@@ -852,6 +896,7 @@ def _settle_nested_outcomes(
                     current,
                     outcome.node_id,
                     None if outcome.route is None else str(outcome.route),
+                    config_cursor=_activation_config_cursor(child_graph, outcome.boundary.binding.state),
                 ),
             )
             availability = availability.with_publication(
@@ -1111,7 +1156,7 @@ def _resolve_quiescent(
     facts = resolve_routing_facts(graph, state, scope_run, item.availability)
     command = project_routing_facts(state, facts)
     if isinstance(command, AbortGraphRun):
-        required = (*facts.control_targets, *facts.completed_join_targets)
+        required = facts.required_targets
         missing_inputs = tuple(
             (target.node_id, target.unavailable_inputs) for target in required if target.unavailable_inputs
         )

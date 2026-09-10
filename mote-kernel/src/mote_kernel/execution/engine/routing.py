@@ -1,6 +1,8 @@
 """Unique compiled control/data resolver for one settled frontier."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import TypeAlias, TypeVar
 
 from mote_kernel.execution.errors import (
@@ -72,22 +74,29 @@ class RequiredTarget:
 
 @dataclass(frozen=True, slots=True)
 class RoutingFacts:
-    control_targets: tuple[RequiredTarget, ...]
-    completed_join_targets: tuple[RequiredTarget, ...]
-    remaining_join_progress: tuple[GraphJoinProgress, ...]
-    unavailable_graph_outputs: tuple[str, ...]
-    activations: tuple[GraphFrontierActivation, ...]
-    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
+    """Immutable derived facts for one exact graph/state routing input.
+
+    This is an invocation-local projection, not another runtime state model.
+    The durable ``GraphRunState`` remains the only owner of settled
+    activations and Join progress; this record merely lets the admission,
+    successor and control checks consume the same validated projections once.
+    """
+
+    declared_joins: Mapping[GraphJoinIdentity, CompiledJoin]
+    pending_join_arrivals: Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]
+    historical_join_arrivals: Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]
+    remaining_join_progress: tuple[GraphJoinProgress, ...] = ()
+    activations: tuple[GraphFrontierActivation, ...] = ()
+    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...] = ()
+    required_targets: tuple[RequiredTarget, ...] = ()
+    unavailable_graph_outputs: tuple[str, ...] = ()
     completion_route: GraphRouteId | None = None
+    admission_error: str | None = None
+    pending_error: JoinProgressError | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _ControlResolution:
-    direct_targets: frozenset[GraphNodeId]
-    join_targets: frozenset[GraphNodeId]
-    remaining_join_progress: tuple[GraphJoinProgress, ...]
-    activations: tuple[GraphFrontierActivation, ...]
-    consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
+_EMPTY_JOIN_DECLARATIONS: Mapping[GraphJoinIdentity, CompiledJoin] = MappingProxyType({})
+_EMPTY_JOIN_ARRIVALS: Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]] = MappingProxyType({})
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,13 +409,13 @@ def _declared_joins(
 def _pending_join_arrivals(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-) -> dict[GraphJoinOccurrenceIdentity, list[ActivationReference]]:
-    declared = _declared_joins(graph)
+    declared_joins: Mapping[GraphJoinIdentity, CompiledJoin],
+) -> Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
     settled = frozenset(state.settled_activations)
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
     for progress in state.join_progress:
         occurrence = progress.occurrence
-        plan = declared.get(occurrence.join)
+        plan = declared_joins.get(occurrence.join)
         arrived = progress.arrived
         arrived_sources = tuple(reference.activation.node_id for reference in arrived)
         source_set = frozenset(arrived_sources)
@@ -426,17 +435,14 @@ def _pending_join_arrivals(
         if any(plan.occurrence_for(reference.activation) != occurrence for reference in arrived):
             raise JoinProgressError("snapshot Join progress has misprojected arrival evidence")
         arrivals[occurrence] = list(arrived)
-    return arrivals
+    return MappingProxyType({occurrence: tuple(references) for occurrence, references in arrivals.items()})
 
 
 def _frontier_gate_error(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
+    declared_joins: Mapping[GraphJoinIdentity, CompiledJoin],
 ) -> str | None:
-    try:
-        declared_joins = _declared_joins(graph)
-    except SnapshotMismatchError as error:
-        return str(error)
     for node in state.frontier.nodes:
         if node.node_id not in graph.nodes:
             return f"frontier activation references unknown node {node.node_id!r}"
@@ -486,7 +492,7 @@ def _frontier_gate_error(
 def _historical_join_arrivals(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-) -> dict[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
+) -> Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
     """Rebuild every live Join occurrence from committed settlement evidence."""
 
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
@@ -507,15 +513,18 @@ def _historical_join_arrivals(
                 raise JoinProgressError("Join source activation occurrence repeated")
             seen_sources[key] = reference
             arrivals.setdefault(occurrence, []).append(reference)
-    return {
-        occurrence: tuple(sorted(references, key=ActivationReference.canonical_key))
-        for occurrence, references in arrivals.items()
-    }
+    return MappingProxyType(
+        {
+            occurrence: tuple(sorted(references, key=ActivationReference.canonical_key))
+            for occurrence, references in arrivals.items()
+        }
+    )
 
 
 def _post_advance_error(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
+    evaluation: RoutingFacts,
 ) -> str | None:
     """Check that a non-initial frontier is the successor of the prior one.
 
@@ -526,8 +535,6 @@ def _post_advance_error(
     consumed on this transition.
     """
 
-    if state.superstep == 0:
-        return None
     previous = tuple(
         reference for reference in state.settled_activations if reference.activation.superstep == state.superstep - 1
     )
@@ -535,12 +542,6 @@ def _post_advance_error(
         return "non-initial frontier has no committed predecessor settlements"
     candidates: dict[GraphNodeId, list[RoutedActivationCause]] = {}
     for reference in previous:
-        source = reference.activation.node_id
-        if source not in graph.nodes:
-            # Keep this private helper total even when called directly by an
-            # owner-level diagnostic or a malformed snapshot bypassing the
-            # outer admission function.
-            return f"settled activation references unknown node {source!r}"
         try:
             targets = _successor_targets_for_reference(graph, reference)
         except InvalidRoutingCommandError as error:
@@ -552,12 +553,7 @@ def _post_advance_error(
         node.node_id: node.cause for node in state.frontier.nodes if isinstance(node.cause, RoutedActivationCause)
     }
     expected_progress: dict[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]] = {}
-    try:
-        _pending_join_arrivals(graph, state)
-        join_arrivals = _historical_join_arrivals(graph, state)
-    except (JoinProgressError, SnapshotMismatchError) as error:
-        return str(error)
-    for occurrence, arrivals in join_arrivals.items():
+    for occurrence, arrivals in evaluation.historical_join_arrivals.items():
         source_ids = tuple(reference.activation.node_id for reference in arrivals)
         identity = occurrence.join
         complete = set(source_ids) == set(identity.sources)
@@ -593,18 +589,61 @@ def _post_advance_error(
     return None
 
 
+def _routing_evaluation(
+    graph: CompiledGraph[GraphValueT],
+    state: GraphRunState,
+) -> RoutingFacts:
+    """Build the validated, invocation-local projection for one state.
+
+    Admission and control resolution consume this same projection.  The
+    ordering mirrors the original admission boundary: settled-ledger checks,
+    compiled Join declarations, frontier provenance, pending progress,
+    historical arrivals, then successor validation.
+    """
+
+    evaluation = RoutingFacts(
+        _EMPTY_JOIN_DECLARATIONS,
+        _EMPTY_JOIN_ARRIVALS,
+        _EMPTY_JOIN_ARRIVALS,
+    )
+    admission_error = settled_activation_admission_error(graph, state)
+    if admission_error is not None or state.status is GraphRunStatus.COMPLETED:
+        return replace(evaluation, admission_error=admission_error)
+
+    try:
+        declared_joins = _declared_joins(graph)
+    except SnapshotMismatchError as error:
+        return replace(evaluation, admission_error=str(error))
+    evaluation = replace(evaluation, declared_joins=declared_joins)
+
+    frontier_error = _frontier_gate_error(graph, state, declared_joins)
+    if frontier_error is not None:
+        return replace(evaluation, admission_error=frontier_error)
+
+    try:
+        pending_join_arrivals = _pending_join_arrivals(graph, state, declared_joins)
+    except JoinProgressError as error:
+        evaluation = replace(evaluation, pending_error=error)
+        return replace(evaluation, admission_error=str(error)) if state.superstep > 0 else evaluation
+    evaluation = replace(evaluation, pending_join_arrivals=pending_join_arrivals)
+    if state.superstep == 0:
+        return evaluation
+
+    try:
+        historical_join_arrivals = _historical_join_arrivals(graph, state)
+    except (JoinProgressError, SnapshotMismatchError) as error:
+        return replace(evaluation, admission_error=str(error))
+    evaluation = replace(evaluation, historical_join_arrivals=historical_join_arrivals)
+    return replace(evaluation, admission_error=_post_advance_error(graph, state, evaluation))
+
+
 def frontier_admission_error(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
 ) -> str | None:
     """Return a deterministic topology/provenance error for one snapshot."""
 
-    ledger_error = settled_activation_admission_error(graph, state)
-    if ledger_error is not None:
-        return ledger_error
-    if state.status is GraphRunStatus.COMPLETED:
-        return None
-    return _frontier_gate_error(graph, state) or _post_advance_error(graph, state)
+    return _routing_evaluation(graph, state).admission_error
 
 
 def graph_outputs_available(
@@ -668,12 +707,13 @@ def _required_target(
 def _resolve_control(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-) -> _ControlResolution:
+    evaluation: RoutingFacts,
+) -> RoutingFacts:
     """Resolve the sole compiled control successor and Join progression."""
 
-    arrivals = _pending_join_arrivals(graph, state)
-    direct_control_targets: set[GraphNodeId] = set()
-    completed_join_targets: set[GraphNodeId] = set()
+    if evaluation.pending_error is not None:
+        raise evaluation.pending_error
+    arrivals = {occurrence: list(references) for occurrence, references in evaluation.pending_join_arrivals.items()}
     candidates: dict[GraphNodeId, list[RoutedActivationCause]] = {}
     for node_id, contribution in routing_contributions(state.frontier):
         validate_routing_contribution(graph, node_id, contribution)
@@ -681,7 +721,6 @@ def _resolve_control(
         source_activation = GraphActivationIdentity(state.run_id, state.superstep, node_id)
         reference = ActivationReference(source_activation, selected_route)
         for target in _successor_targets_for_reference(graph, reference):
-            direct_control_targets.add(target)
             candidates.setdefault(target, []).append(RoutedActivationCause((reference,)))
         for plan in graph.transition.joins_by_source[node_id]:
             occurrence = plan.occurrence_for(source_activation)
@@ -701,7 +740,6 @@ def _resolve_control(
             if occurrence.target_superstep != state.superstep + 1:
                 raise JoinProgressError("completed Join occurrence has the wrong target coordinate")
             if identity.target != END:
-                completed_join_targets.add(identity.target)
                 candidates.setdefault(identity.target, []).append(RoutedActivationCause(arrived, occurrence))
             elif occurrence in prior_occurrences:
                 consumed_progress.append(occurrence)
@@ -718,12 +756,11 @@ def _resolve_control(
             )
         activations_by_target[target] = GraphFrontierActivation(target, target_candidates[0])
 
-    return _ControlResolution(
-        frozenset(direct_control_targets),
-        frozenset(completed_join_targets),
-        tuple(remaining),
-        tuple(activations_by_target[target] for target in sorted(activations_by_target)),
-        tuple(sorted(consumed_progress)),
+    return replace(
+        evaluation,
+        remaining_join_progress=tuple(remaining),
+        activations=tuple(activations_by_target[target] for target in sorted(activations_by_target)),
+        consumed_join_progress=tuple(sorted(consumed_progress)),
     )
 
 
@@ -761,16 +798,16 @@ def transition_admission_error(
 ) -> str | None:
     """Validate topology facts that cannot survive a terminal State reduction."""
 
-    candidate_error = frontier_admission_error(graph, candidate_state)
-    if candidate_error is not None or candidate_state.status is not GraphRunStatus.COMPLETED:
-        return candidate_error
+    candidate_evaluation = _routing_evaluation(graph, candidate_state)
+    if candidate_evaluation.admission_error is not None or candidate_state.status is not GraphRunStatus.COMPLETED:
+        return candidate_evaluation.admission_error
     if previous_state is None or type(command) is not CompleteGraphFrontier:
         return "completed graph state lacks its admitted completion transition"
-    previous_error = frontier_admission_error(graph, previous_state)
-    if previous_error is not None:
-        return previous_error
+    previous_evaluation = _routing_evaluation(graph, previous_state)
+    if previous_evaluation.admission_error is not None:
+        return previous_evaluation.admission_error
     try:
-        control = _resolve_control(graph, previous_state)
+        control = _resolve_control(graph, previous_state, previous_evaluation)
     except (InvalidRoutingCommandError, JoinProgressError, SnapshotMismatchError) as error:
         return str(error)
     if control.activations or control.remaining_join_progress:
@@ -794,43 +831,35 @@ def resolve_routing_facts(
 ) -> RoutingFacts:
     if frontier_status(state.frontier) is not GraphFrontierStatus.SETTLED:
         raise InvalidRoutingCommandError("routing requires a settled frontier without failures or interrupts")
-    admission_error = frontier_admission_error(graph, state)
-    if admission_error is not None:
-        raise InvalidRoutingCommandError(admission_error)
-    control = _resolve_control(graph, state)
-    activation_by_target = {activation.node_id: activation for activation in control.activations}
-
-    required_targets: dict[GraphNodeId, RequiredTarget] = {}
-    for target in sorted(control.direct_targets | control.join_targets):
-        activation = activation_by_target.get(target)
-        if activation is None:
-            raise InvalidRoutingCommandError(f"compiled successor target {target!r} lacks an admitted activation")
-        required_targets[target] = _required_target(
+    evaluation = _routing_evaluation(graph, state)
+    if evaluation.admission_error is not None:
+        raise InvalidRoutingCommandError(evaluation.admission_error)
+    control = _resolve_control(graph, state, evaluation)
+    required_targets = tuple(
+        _required_target(
             graph,
-            target,
+            activation.node_id,
             activation,
             state,
             scope_run,
             state.superstep + 1,
             frames,
         )
-    control_facts = tuple(required_targets[target] for target in sorted(control.direct_targets))
-    completed_join_facts = tuple(required_targets[target] for target in sorted(control.join_targets))
-    output_diagnostics = unavailable_graph_outputs(graph, scope_run, state.superstep, frames)
-    return RoutingFacts(
-        control_facts,
-        completed_join_facts,
-        control.remaining_join_progress,
-        output_diagnostics,
-        control.activations,
-        control.consumed_join_progress,
-        None if control.activations or control.remaining_join_progress else _completion_route(graph, state),
+        for activation in control.activations
+    )
+    return replace(
+        control,
+        required_targets=required_targets,
+        unavailable_graph_outputs=unavailable_graph_outputs(graph, scope_run, state.superstep, frames),
+        completion_route=(
+            None if control.activations or control.remaining_join_progress else _completion_route(graph, state)
+        ),
     )
 
 
 def project_routing_facts(state: GraphRunState, facts: RoutingFacts) -> ResolutionCommand:
-    required_targets = facts.control_targets + facts.completed_join_targets
-    control_targets = tuple(sorted(target.node_id for target in required_targets))
+    required_targets = facts.required_targets
+    control_targets = tuple(target.node_id for target in required_targets)
     unavailable_control = tuple(target.node_id for target in required_targets if target.unavailable_inputs)
     if unavailable_control:
         return AbortGraphRun(

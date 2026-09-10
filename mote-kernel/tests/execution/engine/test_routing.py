@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import FrozenInstanceError, replace
 from typing import Protocol, TypeVar, cast
 
@@ -105,41 +105,27 @@ from mote_kernel.state.graph_state import (
 GraphValueT = TypeVar("GraphValueT")
 
 
-class _ControlResolutionView(Protocol):
-    direct_targets: frozenset[GraphNodeId]
-    join_targets: frozenset[GraphNodeId]
+class _RoutingEvaluationView(Protocol):
+    declared_joins: object
+    pending_join_arrivals: object
+    historical_join_arrivals: object
     remaining_join_progress: tuple[GraphJoinProgress, ...]
     activations: tuple[GraphFrontierActivation, ...]
     consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...]
+    admission_error: str | None
+    pending_error: JoinProgressError | None
 
 
 class _RoutingPrivateView(Protocol):
-    _ControlResolution: Callable[..., _ControlResolutionView]
+    RoutingFacts: Callable[..., _RoutingEvaluationView]
     _declared_joins: Callable[..., object]
     _frontier_gate_error: Callable[..., object]
     _gate_matches_cause: Callable[..., object]
     _historical_join_arrivals: Callable[..., object]
     _pending_join_arrivals: Callable[..., object]
     _post_advance_error: Callable[..., object]
+    _routing_evaluation: Callable[..., object]
     _required_target: Callable[..., object]
-
-    @staticmethod
-    def control_resolution(
-        module: object,
-        direct_targets: frozenset[GraphNodeId],
-        join_targets: frozenset[GraphNodeId],
-        remaining_join_progress: tuple[GraphJoinProgress, ...],
-        activations: tuple[GraphFrontierActivation, ...],
-        consumed_join_progress: tuple[GraphJoinOccurrenceIdentity, ...],
-    ) -> _ControlResolutionView:
-        view = cast(_RoutingPrivateView, module)
-        return view._ControlResolution(
-            direct_targets,
-            join_targets,
-            remaining_join_progress,
-            activations,
-            consumed_join_progress,
-        )
 
     @staticmethod
     def declared_joins(module: object, graph: CompiledGraph[GraphValueT]) -> dict[GraphJoinIdentity, CompiledJoin]:
@@ -151,11 +137,16 @@ class _RoutingPrivateView(Protocol):
 
     @staticmethod
     def frontier_gate_error(module: object, graph: CompiledGraph[GraphValueT], state: GraphRunState) -> str | None:
+        view = cast(_RoutingPrivateView, module)
+        try:
+            declared = _RoutingPrivateView.declared_joins(module, graph)
+        except SnapshotMismatchError as error:
+            return str(error)
         function = cast(
-            Callable[[CompiledGraph[GraphValueT], GraphRunState], str | None],
-            cast(_RoutingPrivateView, module)._frontier_gate_error,
+            Callable[[CompiledGraph[GraphValueT], GraphRunState, object], str | None],
+            view._frontier_gate_error,
         )
-        return function(graph, state)
+        return function(graph, state, declared)
 
     @staticmethod
     def gate_matches_cause(module: object, gate: ActivationGate, cause: RoutedActivationCause) -> bool:
@@ -185,23 +176,33 @@ class _RoutingPrivateView(Protocol):
         module: object,
         graph: CompiledGraph[GraphValueT],
         state: GraphRunState,
-    ) -> dict[GraphJoinOccurrenceIdentity, list[ActivationReference]]:
+    ) -> Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
+        view = cast(_RoutingPrivateView, module)
+        declared = _RoutingPrivateView.declared_joins(module, graph)
         function = cast(
             Callable[
-                [CompiledGraph[GraphValueT], GraphRunState],
-                dict[GraphJoinOccurrenceIdentity, list[ActivationReference]],
+                [CompiledGraph[GraphValueT], GraphRunState, object],
+                Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]],
             ],
-            cast(_RoutingPrivateView, module)._pending_join_arrivals,
+            view._pending_join_arrivals,
         )
-        return function(graph, state)
+        return function(graph, state, declared)
 
     @staticmethod
     def post_advance_error(module: object, graph: CompiledGraph[GraphValueT], state: GraphRunState) -> str | None:
+        view = cast(_RoutingPrivateView, module)
+        declared = _RoutingPrivateView.declared_joins(module, graph)
+        try:
+            pending = _RoutingPrivateView.pending_join_arrivals(module, graph, state)
+            historical = _RoutingPrivateView.historical_join_arrivals(module, graph, state)
+        except (JoinProgressError, SnapshotMismatchError) as error:
+            return str(error)
+        evaluation = view.RoutingFacts(declared, pending, historical)
         function = cast(
-            Callable[[CompiledGraph[GraphValueT], GraphRunState], str | None],
-            cast(_RoutingPrivateView, module)._post_advance_error,
+            Callable[[CompiledGraph[GraphValueT], GraphRunState, object], str | None],
+            view._post_advance_error,
         )
-        return function(graph, state)
+        return function(graph, state, evaluation)
 
     @staticmethod
     def required_target(
@@ -288,6 +289,14 @@ def reference(
 
 
 def _allow_frontier_admission(_graph: CompiledGraph[str], _state: GraphRunState) -> str | None:
+    return None
+
+
+def _allow_frontier_gate(
+    _graph: CompiledGraph[str],
+    _state: GraphRunState,
+    _declared: object,
+) -> str | None:
     return None
 
 
@@ -541,6 +550,9 @@ def test_compiled_join_source_index_corruption_fails_closed() -> None:
     )
     with pytest.raises(SnapshotMismatchError, match="non-source"):
         _RoutingPrivateView.declared_joins(routing_module, non_source)
+    assert frontier_admission_error(non_source, running_state(frontier=("a", "b"))) == (
+        "compiled Join is indexed under a non-source node"
+    )
 
     conflicting_index = dict(base.transition.joins_by_source)
     conflicting_index[GraphNodeId("b")] = (compiled_join(("a", "b"), "c", offsets=(2, 1)),)
@@ -1181,9 +1193,9 @@ def test_stale_join_occurrence_cannot_combine_with_a_later_source_activation(
         superstep=2,
         evidence=(reference("a"), reference("a", superstep=1), reference("b", superstep=2)),
     )
-    monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
+    monkeypatch.setattr(routing, "_frontier_gate_error", _allow_frontier_gate)
 
-    with pytest.raises(JoinProgressError, match="invalid Join progress"):
+    with pytest.raises(InvalidRoutingCommandError, match="invalid Join progress"):
         resolve_routing_facts(
             graph,
             replace(state, join_progress=(stale,)),
@@ -1724,29 +1736,6 @@ def test_required_target_rejects_a_successor_with_a_different_target() -> None:
         )
 
 
-def test_routing_facts_reject_a_control_target_without_an_admitted_activation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mote_kernel.execution.engine.routing as routing
-
-    graph = topology("a", "b", edges=(direct("a", "b"),))
-    state = _settled_routing_state("a", StartActivationCause(), evidence=(reference("a"),))
-
-    def missing_activation(_graph: CompiledGraph[str], _state: GraphRunState) -> _ControlResolutionView:
-        return _RoutingPrivateView.control_resolution(
-            routing_module,
-            frozenset({GraphNodeId("b")}),
-            frozenset(),
-            (),
-            (),
-            (),
-        )
-
-    monkeypatch.setattr(routing, "_resolve_control", missing_activation)
-    with pytest.raises(InvalidRoutingCommandError, match="lacks an admitted activation"):
-        resolve_routing_facts(graph, state, root_scope_run(state.run_id), ScopedFrameIndex())
-
-
 def test_gate_matching_rejects_a_reference_count_mismatch() -> None:
     cause = RoutedActivationCause(
         (reference("a"), reference("b")),
@@ -1905,6 +1894,26 @@ def test_historical_join_arrival_rejects_an_unknown_older_ledger_node() -> None:
         _RoutingPrivateView.historical_join_arrivals(routing_module, graph, state)
 
 
+def test_frontier_admission_normalizes_historical_join_errors() -> None:
+    graph = topology(
+        "a",
+        "b",
+        "c",
+        "work",
+        edges=(direct("a", "work"), join(("a", "b"), "c")),
+        entries=("a", "b"),
+    )
+    repeated = reference("a")
+    state = _settled_routing_state(
+        "work",
+        RoutedActivationCause((repeated,)),
+        superstep=1,
+        evidence=(repeated, repeated),
+    )
+
+    assert frontier_admission_error(graph, state) == "Join source activation occurrence repeated"
+
+
 @pytest.mark.parametrize(
     ("superstep", "work_superstep", "message"),
     [
@@ -2027,9 +2036,9 @@ def test_routing_snapshot_rejects_duplicate_join_progress_sources_before_routing
         (reference("a"), reference("a")),
         target_superstep=2,
     )
-    monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
+    monkeypatch.setattr(routing, "_frontier_gate_error", _allow_frontier_gate)
 
-    with pytest.raises(JoinProgressError, match="repeats one source activation"):
+    with pytest.raises(InvalidRoutingCommandError, match="repeats one source activation"):
         resolve_routing_facts(
             graph,
             replace(state, join_progress=(progress,)),
@@ -2063,9 +2072,9 @@ def test_routing_snapshot_rejects_join_progress_without_settlement_evidence(
         (reference("c"),),
         target_superstep=2,
     )
-    monkeypatch.setattr(routing, "frontier_admission_error", _allow_frontier_admission)
+    monkeypatch.setattr(routing, "_frontier_gate_error", _allow_frontier_gate)
 
-    with pytest.raises(JoinProgressError, match="lacks committed settlement evidence"):
+    with pytest.raises(InvalidRoutingCommandError, match="lacks committed settlement evidence"):
         resolve_routing_facts(
             graph,
             replace(state, join_progress=(progress,)),
