@@ -11,6 +11,7 @@ from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import ExecutableTask
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
@@ -21,7 +22,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.limits import ExecutionLimits
@@ -112,7 +112,7 @@ def interrupt_graph(
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(
+            resume_input=FrameCodec(
                 GraphResumeInputCodecId("session.v1"),
                 1,
                 codec.encode,

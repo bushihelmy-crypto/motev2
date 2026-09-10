@@ -250,6 +250,17 @@ class FrameDescriptorIdentity:
     frame_kind: FrameKind
     owner_ordinal: int
 
+    def __post_init__(self) -> None:
+        if (
+            not is_canonical_identity(self.definition_id)
+            or type(self.definition_version) is not int
+            or self.definition_version < 1
+            or type(self.frame_kind) is not FrameKind
+            or type(self.owner_ordinal) is not int
+            or self.owner_ordinal < 0
+        ):
+            raise GraphValidationError("frame descriptor identity requires canonical, exact typed coordinates")
+
 
 @dataclass(frozen=True, slots=True)
 class FrameDescriptor(Generic[GraphValueT]):

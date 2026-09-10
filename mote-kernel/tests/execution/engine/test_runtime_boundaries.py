@@ -40,6 +40,7 @@ from mote_kernel.execution.errors import (
     SnapshotMismatchError,
 )
 from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -52,7 +53,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
@@ -65,6 +65,7 @@ from mote_kernel.execution.graph.values import (
     _make_node_input_frame,
     _make_node_output_frame,
 )
+from mote_kernel.execution.graph_result import _CompiledFamilyIdentity
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
@@ -104,7 +105,6 @@ from mote_kernel.execution.run_context import (
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
     ScopedStateBinding,
-    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -471,7 +471,7 @@ def test_resume_input_narrow_guards() -> None:
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(
+            resume_input=FrameCodec(
                 GraphResumeInputCodecId("compiled.v1"),
                 1,
                 codec.encode,

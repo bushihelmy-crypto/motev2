@@ -39,10 +39,20 @@ predecessor cases for later activations. Join targets still cannot implicitly ch
 compiler derives every possible predecessor from the topology, requires the requested output with one exact type on
 all of them, and admits multiple incoming paths only when it can prove them mutually exclusive. Runtime selection
 comes only from the state-owned activation cause and its exact publication (or the compiled START input case)—never
-from a latest-value scan. This is currently an in-process value contract; the atomic commit seam is ready, but no
-concrete cross-process publication store is included.
+from a latest-value scan. The same admission rules apply to transient frames and backend-independent persistent
+evidence; no concrete persistence backend is included.
 
-`Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
+`Graph.run()` supports new runs, process-local continuations and control-only state recovery. Its owner-internal durable
+recovery seam materializes a complete checkpoint into that same execution path; it is not another runner. Every
+completed, failed, aborted, or awaiting-resume result carries authoritative state and a non-optional opaque continuation.
+Selective resume actions come from the same facade. A commit callback receives each scoped reducer candidate and
+complete write set; only confirmed state and values become visible. State-only calls do not load missing values, and
+continuations are not serializable. Every continuation, including a partial-commit handoff, retains its original commit
+capability: omission or `None` inherits it, and a different object is rejected before execution. Durable recovery uses
+its bound commit's single codec for reading and writes; changing capabilities requires an authoritative reread, not an
+in-memory downgrade. A persistent frame's single digest covers its codec, payload, and Config cursor, including absence.
+The current persistence phase supplies typed commit/recovery contracts;
+Agent loading and backend integration remain separate work in the [implementation plan](docs/kernel-persistence-implementation-plan.zh-CN.md).
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 

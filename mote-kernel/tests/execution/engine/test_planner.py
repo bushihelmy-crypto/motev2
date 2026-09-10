@@ -7,6 +7,7 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.task import GraphTask, task_identity
 from mote_kernel.execution.errors import ExecutionLimitError, InvalidExecutionSnapshotError, SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -15,7 +16,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_graph_output_declarations,
     normalize_input_bindings,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.state.graph_state import (
@@ -90,7 +90,7 @@ def test_planner_excludes_every_nonpending_settlement_variant() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = running_state(frontier=("a", "b", "c", "d"))

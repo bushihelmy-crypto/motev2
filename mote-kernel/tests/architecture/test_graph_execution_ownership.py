@@ -142,7 +142,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "apply_commit_writes",
             }
         ),
-        "execution/graph/resume_input.py": frozenset({"ResumeInputBinding"}),
+        "execution/graph/codec.py": frozenset({"FrameCodec"}),
         "execution/engine/resume_input.py": frozenset(
             {
                 "require_resume_input_binding",
@@ -173,7 +173,20 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphPublicationEvidence",
                 "ScopedFrameIndex",
                 "ScopedStateBinding",
+            }
+        ),
+        "execution/graph_result.py": frozenset(
+            {
+                "ContinuationSnapshot",
+                "_CompiledFamilyIdentity",
                 "_GraphContinuation",
+                "_make_continuation",
+                "_admit_continuation",
+                "_PartialCommitError",
+                "_CompletedGraphResult",
+                "_AwaitingResumeGraphResult",
+                "_FailedGraphResult",
+                "_AbortedGraphResult",
             }
         ),
         "execution/engine/routing.py": frozenset(
@@ -236,11 +249,19 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
 
 
 def test_production_continuation_has_no_hidden_mutation_path() -> None:
-    source = (PACKAGE_ROOT / "execution" / "run_context.py").read_text()
+    source = (PACKAGE_ROOT / "execution" / "graph_result.py").read_text()
 
     assert "object.__setattr__" not in source
     assert "def checkpoint(" not in source
     assert "_checkpoint_continuation" not in source
+    assert _class_fields("execution/graph_result.py", "ContinuationSnapshot") == {
+        "family_identity": "_CompiledFamilyIdentity",
+        "root_state": "GraphRunState",
+        "child_runs": "tuple[ScopedRunEvidence, ...]",
+        "frames": "ScopedFrameIndex[GraphValueT]",
+        "recovered": "bool",
+        "commit": "GraphCommit[GraphValueT] | None",
+    }
 
 
 def test_resource_state_identities_are_owned_by_the_durable_model() -> None:
@@ -283,7 +304,7 @@ def test_graph_state_does_not_process_compiled_or_generic_inputs() -> None:
     )
 
 
-def test_resume_codec_is_invoked_only_by_its_node_input_materializer() -> None:
+def test_frame_codecs_are_invoked_only_by_the_codec_owner() -> None:
     invocation_owners: list[tuple[str, str]] = []
     for relative, tree in _production_modules():
         for node in ast.walk(tree):
@@ -293,8 +314,8 @@ def test_resume_codec_is_invoked_only_by_its_node_input_materializer() -> None:
                 invocation_owners.append((relative, node.func.attr))
 
     assert sorted(invocation_owners) == [
-        ("execution/engine/resume_input.py", "decoder"),
-        ("execution/engine/resume_input.py", "encoder"),
+        ("execution/graph/codec.py", "decoder"),
+        ("execution/graph/codec.py", "encoder"),
     ]
 
 
@@ -582,7 +603,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "graph_output_descriptor": "FrameDescriptor[GraphValueT]",
         "transition": "FrontierTransitionPlan[GraphValueT]",
         "resources": "FrozenMap[ResourceId, ResourceDefinition]",
-        "resume_input": "ResumeInputBinding[GraphValueT] | None",
+        "resume_input": "FrameCodec[GraphValueT] | None",
     }
     assert all(isinstance(statement, ast.AnnAssign) for statement in compiled_graph.body)
 

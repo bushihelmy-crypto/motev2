@@ -36,9 +36,17 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 compiler 会把首轮 graph input case 和后续 routed predecessor cases 一并写入 immutable binding。Join target
 仍不能隐式挑选某一个前驱值；多个入边只有在 control-flow proof 能证明互斥时才会被准入。runtime 只根据
 State-owned activation cause 选择编译好的 graph input 或 exact predecessor publication，不扫描“最新值”。
-这仍是进程内 value contract，不增加跨进程 concrete value recovery。
+瞬时 frame 与后端无关的持久值证据复用同一套准入规则；Kernel 不内置具体持久化后端。
 
-`Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
+`Graph.run()` 支持 new run、进程内 continuation 与 control-only state recovery；其 owner-internal durable recovery
+接缝将完整 checkpoint 准入到同一执行路径，不另建 runner。Completed、failed、aborted 与 awaiting-resume result 都携带
+authoritative state 和 non-optional opaque continuation；选择性恢复动作仍由同一个门面创建。可选异步 commit callback
+逐条收到 scoped reducer candidate 与完整写集，只有精确确认后才安装 state/value。仅传 state 不会读取缺失值，
+continuation 也不可序列化。所有 continuation（包括 partial handoff）保留原 commit capability：省略或传 `None`
+都继承原对象，改绑在执行前拒绝。持久恢复的读写共用绑定 commit 的同一个 codec；换能力必须重新读取权威 checkpoint，
+不能降级为内存提交。持久 frame 的唯一摘要覆盖 codec、payload 和 Config cursor，包括 cursor 缺席。
+当前持久化阶段交付类型化提交/恢复契约；Agent load 与后端接入的后续范围以
+[实施计划](docs/kernel-persistence-implementation-plan.zh-CN.md)为准。
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。
 

@@ -26,6 +26,7 @@ from mote_kernel.execution.family_driver import (
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import GraphInputFrame, GraphOutputView, NamedValue, _make_graph_output_view
+from mote_kernel.execution.graph_result import _CompiledFamilyIdentity
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
@@ -56,7 +57,6 @@ from mote_kernel.execution.run_context import (
     ConfirmedChildBoundary,
     ScopedFrameIndex,
     ScopedStateBinding,
-    _CompiledFamilyIdentity,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -1612,9 +1612,15 @@ async def test_child_owner_completes_resume_before_child_call_handoff(
     parent = Graph[str]("ownership.resume-order.parent")
     parent.add_node("nested", child, inputs={})
     parent.set_outputs({})
-    awaiting = await parent.run(Graph.values())
-    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     events: list[tuple[str, tuple[str, ...]]] = []
+
+    async def record_commit(transition: GraphTransition[str], /) -> GraphRunState:
+        if isinstance(transition.command, ResumeGraphNodes):
+            events.append(("resume", transition.scope))
+        return transition.candidate_state
+
+    awaiting = await parent.run(Graph.values(), commit=record_commit)
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     graph_run_class = _FamilyDriverPrivateView.graph_run(family_driver)
     original_accept = graph_run_class.accept_child_call
     original_resume = graph_run_class.apply_admission_resume
@@ -1634,11 +1640,6 @@ async def test_child_owner_completes_resume_before_child_call_handoff(
         assert self.state.run_id == planned.scope_run.graph_run_id
         events.append(("owner", tuple(planned.scope_run.scope)))
         await original_resume(self, planned)
-
-    async def record_commit(transition: GraphTransition[str], /) -> GraphRunState:
-        if isinstance(transition.command, ResumeGraphNodes):
-            events.append(("resume", transition.scope))
-        return transition.candidate_state
 
     monkeypatch.setattr(graph_run_class, "accept_child_call", record_handoff)
     monkeypatch.setattr(graph_run_class, "apply_admission_resume", record_owner_resume)
@@ -1709,8 +1710,6 @@ async def test_first_setup_transition_failure_releases_without_aborting(
     parent = Graph[str]("ownership.setup-transition-failure.parent")
     parent.add_node("nested", child, inputs={})
     parent.set_outputs({})
-    awaiting = await parent.run(Graph.values())
-    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     original: BaseException = (
         asyncio.CancelledError("resume commit cancelled after write")
         if cancel_commit
@@ -1724,6 +1723,9 @@ async def test_first_setup_transition_failure_releases_without_aborting(
             raise original
         return transition.candidate_state
 
+    awaiting = await parent.run(Graph.values(), commit=reject_resume)
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
+    transitions.clear()
     with pytest.raises(type(original)) as raised:
         await parent.run(
             state=awaiting.state,
@@ -2403,8 +2405,6 @@ async def test_continued_root_setup_cleanup_survives_repeated_cancellation(
     graph.set_resume_codec("empty", 1, encode_empty, decode_empty)
     graph.add_node("node", interrupt, inputs={}, outputs={})
     graph.set_outputs({})
-    awaiting = await graph.run(Graph.values())
-    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
 
@@ -2419,6 +2419,8 @@ async def test_continued_root_setup_cleanup_survives_repeated_cancellation(
             await cleanup_release.wait()
         return transition.candidate_state
 
+    awaiting = await graph.run(Graph.values(), commit=commit)
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     fail_owner_construction(monkeypatch, original, scope_depth=0)
     task = asyncio.create_task(
         graph.run(
@@ -2452,8 +2454,6 @@ async def test_continued_child_setup_cleanup_survives_repeated_cancellation(
     parent = Graph[str]("ownership.continued-child-cleanup-cancellation.parent")
     parent.add_node("nested", child, inputs={})
     parent.set_outputs({})
-    awaiting = await parent.run(Graph.values())
-    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
 
@@ -2468,6 +2468,8 @@ async def test_continued_child_setup_cleanup_survives_repeated_cancellation(
             await cleanup_release.wait()
         return transition.candidate_state
 
+    awaiting = await parent.run(Graph.values(), commit=commit)
+    assert isinstance(awaiting, Graph.AwaitingResumeResult)
     fail_owner_construction(monkeypatch, original, scope_depth=1)
     task = asyncio.create_task(
         parent.run(

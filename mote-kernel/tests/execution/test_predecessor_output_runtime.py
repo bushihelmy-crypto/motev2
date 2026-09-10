@@ -15,10 +15,11 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.graph_result import _CompiledFamilyIdentity
 from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import make_node_invoker
-from mote_kernel.execution.run_context import ScopedFrameIndex, _CompiledFamilyIdentity
+from mote_kernel.execution.run_context import ScopedFrameIndex
 from mote_kernel.state.graph_state import (
     ActivationReference,
     AdvanceGraphFrontier,
@@ -120,6 +121,7 @@ async def run_loop(
             evidence_reader,
             disposition,
             recovered=False,
+            commit=commit,
         )
     finally:
         await root.release()
@@ -344,6 +346,7 @@ async def test_recovery_requires_the_exact_loop_publication_after_a_lost_repeat_
             evidence_reader,
             disposition,
             recovered=False,
+            commit=None,
         )
     finally:
         await continued_root.release()

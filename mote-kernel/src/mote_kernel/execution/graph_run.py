@@ -9,6 +9,7 @@ from mote_kernel.state.graph_state import (
     GraphConfigCursor,
     GraphFrontierActivation,
     GraphResumeInputCodec,
+    GraphResumeInputCodecId,
     GraphRunId,
     StartActivationCause,
     StartGraphRun,
@@ -35,7 +36,11 @@ def project_start_graph_command(
             GraphFrontierActivation(node_id, StartActivationCause()) for node_id in graph.transition.entries
         ),
         parent=parent,
-        resume_input_codec=(GraphResumeInputCodec(binding.codec_id, binding.version) if binding is not None else None),
+        resume_input_codec=(
+            GraphResumeInputCodec(GraphResumeInputCodecId(binding.codec_id), binding.version)
+            if binding is not None
+            else None
+        ),
         config_cursor=config_cursor,
     )
 

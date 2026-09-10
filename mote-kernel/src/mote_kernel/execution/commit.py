@@ -36,9 +36,11 @@ from mote_kernel.state.graph_state import (
     GraphRunCommand,
     GraphRunId,
     GraphRunState,
+    GraphStateTransitionError,
     SettleGraphNode,
     StartGraphRun,
     reduce_graph_run,
+    validate_graph_run_state,
 )
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
@@ -227,7 +229,11 @@ async def confirm_transition(
     commit: GraphCommit[GraphValueT],
 ) -> GraphRunState:
     confirmed = await commit(transition)
-    if type(confirmed) is not GraphRunState or confirmed != transition.candidate_state:
+    try:
+        validate_graph_run_state(confirmed)
+    except GraphStateTransitionError as error:
+        raise SnapshotMismatchError("commit must return the exact authoritative reducer successor") from error
+    if confirmed != transition.candidate_state:
         raise SnapshotMismatchError("commit must return the exact authoritative reducer successor")
     return confirmed
 

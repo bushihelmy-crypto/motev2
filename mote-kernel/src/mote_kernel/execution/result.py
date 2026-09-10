@@ -1,80 +1,30 @@
-"""Execution results, public commit evidence, and graph dispositions."""
+"""Task outcomes, settlement evidence, and graph execution dispositions."""
 
-import asyncio
 from dataclasses import InitVar, dataclass
 from typing import Generic, TypeAlias, TypeVar, final
 
 from mote_kernel.execution.engine.task import GraphTask
-from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractError, SnapshotMismatchError
+from mote_kernel.execution.errors import NodeExecutionContractError
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
     NodeOutputFrame,
     _GraphValues,
     _public_values,
 )
-from mote_kernel.execution.run_context import AdmittedResumeInput, GraphPublicationEvidence, _GraphContinuation
+from mote_kernel.execution.run_context import AdmittedResumeInput, GraphPublicationEvidence
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
     CompleteGraphFrontier,
     GraphAbortReason,
     GraphActivationIdentity,
-    GraphInterruptId,
     GraphNodeId,
-    GraphRunState,
     ResumeGraphNodes,
     SettleGraphNode,
 )
 
 GraphValueT = TypeVar("GraphValueT")
-_PartialCommitCause: TypeAlias = Exception | asyncio.CancelledError
 SUPERSEDED_CHILD_ABORT_REASON = GraphAbortReason("nested graph was superseded by a sibling failure")
-
-
-class _PartialCommitSeal:
-    __slots__ = ()
-
-
-_PARTIAL_COMMIT_SEAL = _PartialCommitSeal()
-
-
-@final
-class _PartialCommitError(ExecutionError, Generic[GraphValueT]):
-    """Explicit handoff for an invocation that durably confirmed only a prefix."""
-
-    __slots__ = ("cause", "continuation", "failed_scope", "state")
-
-    def __init__(
-        self,
-        *,
-        state: GraphRunState,
-        continuation: _GraphContinuation[GraphValueT],
-        cause: _PartialCommitCause,
-        failed_scope: tuple[str, ...],
-        _seal: _PartialCommitSeal,
-    ) -> None:
-        if _seal is not _PARTIAL_COMMIT_SEAL:
-            raise SnapshotMismatchError("partial commit errors can only be produced by their Graph owner")
-        super().__init__(f"graph commit failed at scope {failed_scope!r} after an exact-confirmed prefix")
-        self.state = state
-        self.continuation = continuation
-        self.cause = cause
-        self.failed_scope = failed_scope
-
-
-def _partial_commit_error(
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-    cause: _PartialCommitCause,
-    failed_scope: tuple[str, ...],
-) -> _PartialCommitError[GraphValueT]:
-    return _PartialCommitError(
-        state=state,
-        continuation=continuation,
-        cause=cause,
-        failed_scope=failed_scope,
-        _seal=_PARTIAL_COMMIT_SEAL,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,166 +229,9 @@ class PreparedResume(Generic[GraphValueT]):
     inputs: tuple[AdmittedResumeInput[GraphValueT], ...]
 
 
-@dataclass(frozen=True, slots=True)
-class GraphFailureView:
-    scope: tuple[str, ...]
-    node_id: str
-    failure: str
-
-
-@dataclass(frozen=True, slots=True)
-class GraphInterruptView:
-    scope: tuple[str, ...]
-    node_id: str
-    interrupt_id: GraphInterruptId
-    request_payload: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class GraphAbortView:
-    scope: tuple[str, ...]
-    reason: str
-
-
-class _ResultSeal:
-    __slots__ = ()
-
-
-_RESULT_SEAL = _ResultSeal()
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _CompletedGraphResult(Generic[GraphValueT]):
-    state: GraphRunState
-    continuation: _GraphContinuation[GraphValueT]
-    outputs: _GraphValues[GraphValueT]
-    _seal: InitVar[_ResultSeal]
-
-    def __post_init__(self, _seal: _ResultSeal) -> None:
-        if _seal is not _RESULT_SEAL:
-            raise NodeExecutionContractError("completed results require the graph family driver")
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _AbortedGraphResult(Generic[GraphValueT]):
-    state: GraphRunState
-    continuation: _GraphContinuation[GraphValueT]
-    abort: GraphAbortView
-    _seal: InitVar[_ResultSeal]
-
-    def __post_init__(self, _seal: _ResultSeal) -> None:
-        if _seal is not _RESULT_SEAL:
-            raise NodeExecutionContractError("aborted results require the graph family driver")
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _FailedGraphResult(Generic[GraphValueT]):
-    state: GraphRunState
-    continuation: _GraphContinuation[GraphValueT]
-    failures: tuple[GraphFailureView, ...]
-    interrupts: tuple[GraphInterruptView, ...]
-    _seal: InitVar[_ResultSeal]
-
-    def __post_init__(self, _seal: _ResultSeal) -> None:
-        if _seal is not _RESULT_SEAL:
-            raise NodeExecutionContractError("failed results require the graph family driver")
-        if not self.failures:
-            raise NodeExecutionContractError("failed results require at least one failure")
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _AwaitingResumeGraphResult(Generic[GraphValueT]):
-    state: GraphRunState
-    continuation: _GraphContinuation[GraphValueT]
-    interrupts: tuple[GraphInterruptView, ...]
-    _seal: InitVar[_ResultSeal]
-
-    def __post_init__(self, _seal: _ResultSeal) -> None:
-        if _seal is not _RESULT_SEAL:
-            raise NodeExecutionContractError("awaiting-resume results require the graph family driver")
-        if not self.interrupts:
-            raise NodeExecutionContractError("awaiting-resume results require at least one interrupt")
-
-
-GraphResult: TypeAlias = (
-    _CompletedGraphResult[GraphValueT]
-    | _FailedGraphResult[GraphValueT]
-    | _AbortedGraphResult[GraphValueT]
-    | _AwaitingResumeGraphResult[GraphValueT]
-)
-
-
-def _completed_result(
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-    outputs: _GraphValues[GraphValueT],
-) -> _CompletedGraphResult[GraphValueT]:
-    return _CompletedGraphResult(
-        state=state,
-        continuation=continuation,
-        outputs=outputs,
-        _seal=_RESULT_SEAL,
-    )
-
-
-def _aborted_result(
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-    abort: GraphAbortView,
-) -> _AbortedGraphResult[GraphValueT]:
-    return _AbortedGraphResult(
-        state=state,
-        continuation=continuation,
-        abort=abort,
-        _seal=_RESULT_SEAL,
-    )
-
-
-def _failed_result(
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-    failures: tuple[GraphFailureView, ...],
-    interrupts: tuple[GraphInterruptView, ...],
-) -> _FailedGraphResult[GraphValueT]:
-    return _FailedGraphResult(
-        state=state,
-        continuation=continuation,
-        failures=failures,
-        interrupts=interrupts,
-        _seal=_RESULT_SEAL,
-    )
-
-
-def _awaiting_result(
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-    interrupts: tuple[GraphInterruptView, ...],
-) -> _AwaitingResumeGraphResult[GraphValueT]:
-    return _AwaitingResumeGraphResult(
-        state=state,
-        continuation=continuation,
-        interrupts=interrupts,
-        _seal=_RESULT_SEAL,
-    )
-
-
 __all__ = [
-    "_AbortedGraphResult",
-    "_AwaitingResumeGraphResult",
-    "_CompletedGraphResult",
-    "_FailedGraphResult",
     "_GraphFailureResult",
     "_GraphInterruptResult",
     "_GraphSuccessResult",
-    "_PartialCommitError",
-    "_aborted_result",
-    "_awaiting_result",
     "_commit_result",
-    "_completed_result",
-    "_failed_result",
-    "_partial_commit_error",
 ]

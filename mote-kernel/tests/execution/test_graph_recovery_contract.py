@@ -601,18 +601,17 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
     graph.add_edge("produce", "done", Graph.END)
     graph.add_edge("child", "produce")
     graph.set_outputs({})
-    first_commits = CommitLog()
+    commits = CommitLog()
 
     if lineage == "complete":
-        paused = await graph.run(Graph.values(), max_supersteps=8, commit=first_commits)
+        paused = await graph.run(Graph.values(), max_supersteps=8, commit=commits)
     else:
         with pytest.raises(AcknowledgementLostError):
             await graph.run(Graph.values(), commit=lose_start, max_supersteps=8)
         assert captured is not None
-        paused = await graph.run(state=captured, max_supersteps=8, commit=first_commits)
+        paused = await graph.run(state=captured, max_supersteps=8, commit=commits)
     assert isinstance(paused, Graph.AwaitingResumeResult)
 
-    second_commits = CommitLog()
     completed = await graph.run(
         state=paused.state,
         continuation=paused.continuation,
@@ -624,13 +623,12 @@ async def test_repeated_nested_path_keeps_distinct_child_runs_and_latest_boundar
             ),
         ),
         max_supersteps=8,
-        commit=second_commits,
     )
 
     assert isinstance(completed, Graph.CompletedResult)
     child_outputs = tuple(
         transition.writes.settlement.output["query"]
-        for transition in (*first_commits.transitions, *second_commits.transitions)
+        for transition in commits.transitions
         if transition.scope == ()
         and isinstance(transition.writes.settlement, Graph.SuccessResult)
         and transition.writes.settlement.node_id == "child"

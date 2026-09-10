@@ -32,6 +32,7 @@ from mote_kernel.execution.family_driver import (
     fresh_root,
     project_graph_result,
 )
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -65,7 +66,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.validation import require_graph_identity
 from mote_kernel.execution.graph.values import (
@@ -73,6 +73,17 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _make_graph_values,
     _require_graph_values,
+)
+from mote_kernel.execution.graph_result import (
+    GraphResult,
+    _AbortedGraphResult,
+    _admit_continuation,
+    _AwaitingResumeGraphResult,
+    _CompiledFamilyIdentity,
+    _CompletedGraphResult,
+    _FailedGraphResult,
+    _GraphContinuation,
+    _PartialCommitError,
 )
 from mote_kernel.execution.identity import (
     root_scope_run,
@@ -87,6 +98,7 @@ from mote_kernel.execution.invocation import (
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import TypedNodeAssembly, make_node_invoker, make_typed_node_assembly
+from mote_kernel.execution.persistence import GraphRecovery, restore_checkpoint
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -94,22 +106,13 @@ from mote_kernel.execution.request import (
 )
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.execution.result import (
-    GraphResult,
-    _AbortedGraphResult,
-    _AwaitingResumeGraphResult,
-    _CompletedGraphResult,
-    _FailedGraphResult,
     _GraphFailureResult,
     _GraphInterruptResult,
     _GraphSuccessResult,
-    _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
-    ScopedStateBinding,
-    _admit_continuation,
-    _CompiledFamilyIdentity,
-    _GraphContinuation,
+    ScopedRunEvidence,
 )
 from mote_kernel.state.graph_state import (
     GraphAbortReason,
@@ -117,7 +120,6 @@ from mote_kernel.state.graph_state import (
     GraphDefinitionVersion,
     GraphInterruptId,
     GraphNodeId,
-    GraphResumeInputCodecId,
     GraphRouteId,
     GraphRunId,
     GraphRunState,
@@ -168,7 +170,7 @@ class _GraphBuilderState(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...] = ()
     outputs: GraphOutputDeclarations[GraphValueT] | None = None
     resources: tuple[ResourceDefinition, ...] = ()
-    resume_input: ResumeInputBinding[GraphValueT] | None = None
+    resume_input: FrameCodec[GraphValueT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -587,12 +589,8 @@ class Graph(Generic[GraphValueT]):
         state = self._require_mutable()
         if state.resume_input is not None:
             raise GraphValidationError("resume input codec can be declared exactly once")
-        if not callable(encoder) or not callable(decoder):
-            raise GraphValidationError("resume input encoder and decoder must be callable")
-        canonical_id = GraphResumeInputCodecId(canonical_port_name(codec_id, kind="resume codec"))
-        if type(version) is not int or version < 1:
-            raise GraphValidationError("resume codec version must be an exact positive integer")
-        binding = ResumeInputBinding(canonical_id, version, encoder, decoder)
+        binding = FrameCodec(codec_id, version, encoder, decoder)
+        binding.validate()
         replacement = replace(state, resume_input=binding)
         self._commit_builder(state, replacement)
         return self
@@ -694,6 +692,17 @@ class Graph(Generic[GraphValueT]):
         self,
         /,
         *,
+        recovery: GraphRecovery[GraphValueT],
+        resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
+        max_supersteps: int = 1_000,
+        max_parallel_tasks: int = 64,
+    ) -> "Graph.Result[GraphValueT]": ...
+
+    @overload
+    async def run(
+        self,
+        /,
+        *,
         state: "Graph.State",
         continuation: "Graph.Continuation[GraphValueT]",
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
@@ -725,6 +734,7 @@ class Graph(Generic[GraphValueT]):
         activation_config: Config | None = None,
         state: "Graph.State | None" = None,
         continuation: "Graph.Continuation[GraphValueT] | None" = None,
+        recovery: GraphRecovery[GraphValueT] | None = None,
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
@@ -732,7 +742,23 @@ class Graph(Generic[GraphValueT]):
     ) -> "Graph.Result[GraphValueT]":
         limits = ExecutionLimits(max_supersteps, max_parallel_tasks)
         invocation: _GraphValues[GraphValueT] | GraphRunState
-        if isinstance(values, _GraphValues):
+        if recovery is not None:
+            if (
+                type(recovery) is not GraphRecovery
+                or values is not _MISSING_RUN_VALUES
+                or state is not None
+                or continuation is not None
+                or run_id is not None
+                or activation_config is not None
+                or commit is not None
+            ):
+                raise SnapshotMismatchError(
+                    "durable recovery cannot replace its input, state, identity, Config or commit capability"
+                )
+            recovery = replace(recovery)
+            commit = recovery.commit
+            invocation = recovery.checkpoint.root_state
+        elif isinstance(values, _GraphValues):
             if state is not None or continuation is not None or resume:
                 raise SnapshotMismatchError("new graph run cannot carry state, continuation, or resume actions")
             invocation = _require_graph_values(values)
@@ -762,16 +788,21 @@ class Graph(Generic[GraphValueT]):
                 commit,
             )
         else:
-            if continuation is None:
-                child_states: tuple[ScopedStateBinding, ...] = ()
+            if recovery is not None:
+                child_runs = recovery.checkpoint.child_runs
+                frames = restore_checkpoint(graph, recovery)
+                recovered = True
+            elif continuation is None:
+                child_runs: tuple[ScopedRunEvidence, ...] = ()
                 frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
                 recovered = True
             else:
-                snapshot = _admit_continuation(owner.family_identity, invocation, continuation)
-                child_states = snapshot.child_states
+                snapshot = _admit_continuation(owner.family_identity, invocation, continuation, commit)
+                child_runs = snapshot.child_runs
                 frames = snapshot.frames
                 recovered = snapshot.recovered
-            lineage = lineage_states(invocation, child_states)
+                commit = snapshot.commit
+            lineage = lineage_states(invocation, child_runs)
             validate_context(graph, lineage, frames, recovered=recovered)
             planned_lineage, fences = plan_fences(graph, lineage)
             planned_lineage, candidate_frames, planned_resumes, facts = plan_resumes(
@@ -789,7 +820,7 @@ class Graph(Generic[GraphValueT]):
             root_admission = admit_continued_root(
                 graph,
                 invocation,
-                child_states,
+                child_runs,
                 frames,
                 limits,
                 commit,
@@ -827,6 +858,7 @@ class Graph(Generic[GraphValueT]):
                     evidence_reader,
                     disposition,
                     recovered=recovered,
+                    commit=commit,
                 )
             except asyncio.CancelledError as error:
                 if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
@@ -12,7 +13,6 @@ from mote_kernel.execution.graph.ports import (
     GraphOutputBindings,
     MaterializationPlan,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
@@ -104,7 +104,7 @@ class CompiledGraph(Generic[GraphValueT]):
     graph_output_descriptor: FrameDescriptor[GraphValueT]
     transition: FrontierTransitionPlan[GraphValueT]
     resources: FrozenMap[ResourceId, ResourceDefinition]
-    resume_input: ResumeInputBinding[GraphValueT] | None
+    resume_input: FrameCodec[GraphValueT] | None
 
 
 def _compiled_graph_at_scope(

@@ -25,6 +25,19 @@ from mote_kernel.execution.errors import FrameInstallationInvariantError, Result
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import GraphInputFrame, _public_values
+from mote_kernel.execution.graph_result import (
+    GraphAbortView,
+    GraphFailureView,
+    GraphInterruptView,
+    GraphResult,
+    _aborted_result,
+    _awaiting_result,
+    _CompiledFamilyIdentity,
+    _completed_result,
+    _failed_result,
+    _make_continuation,
+    _partial_commit_error,
+)
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
     ScopeRunCoordinate,
@@ -50,28 +63,19 @@ from mote_kernel.execution.result import (
     CompletedGraph,
     FailedChild,
     FailedGraph,
-    GraphAbortView,
     GraphBoundary,
-    GraphFailureView,
-    GraphInterruptView,
-    GraphResult,
     MissingChild,
     ReadyToResolve,
     TaskResult,
     WaitingForChildren,
-    _aborted_result,
-    _awaiting_result,
-    _completed_result,
-    _failed_result,
-    _partial_commit_error,
 )
 from mote_kernel.execution.run_context import (
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedChildBoundary,
     ScopedFrameIndex,
+    ScopedRunEvidence,
     ScopedStateBinding,
-    _CompiledFamilyIdentity,
-    _make_continuation,
+    UncreatedGraphRun,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -97,7 +101,7 @@ _ChildTerminal: TypeAlias = CompletedChild[GraphValueT] | FailedChild | AbortedC
 _ChildPhase: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminal[GraphValueT]
 _EvidenceReader: TypeAlias = Callable[
     [],
-    tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]],
+    tuple[tuple[ScopedRunEvidence, ...], ScopedFrameIndex[GraphValueT]],
 ]
 _EvidencePublisher: TypeAlias = Callable[[ScopedStateBinding, ScopedFrameIndex[GraphValueT]], None]
 
@@ -252,11 +256,13 @@ def _merge_frames(
 
 def _frames_for_owner(
     frames: ScopedFrameIndex[GraphValueT],
-    bindings: tuple[ScopedStateBinding, ...],
+    bindings: tuple[ScopedRunEvidence, ...],
     owner: ScopeRunCoordinate,
 ) -> ScopedFrameIndex[GraphValueT]:
     # Preserve the first binding if a malformed direct caller repeats a key.
-    bindings_by_scope = {binding.scope_run: binding for binding in reversed(bindings)}
+    bindings_by_scope = {
+        binding.scope_run: binding for binding in reversed(bindings) if isinstance(binding, ScopedStateBinding)
+    }
     child_boundaries: list[ConfirmedChildBoundary[GraphValueT]] = []
     for record in frames.child_boundaries:
         binding = bindings_by_scope.get(record.coordinate.child_scope_run)
@@ -276,15 +282,17 @@ def _frames_for_owner(
 
 
 def _evidence_adapter(
-    bindings: tuple[ScopedStateBinding, ...],
+    bindings: tuple[ScopedRunEvidence, ...],
     frames: ScopedFrameIndex[GraphValueT],
 ) -> tuple[_EvidencePublisher[GraphValueT], _EvidenceReader[GraphValueT]]:
     # The coordinate is the evidence identity; lineage admission guarantees
     # uniqueness and the adapter owns the current binding/frame value.
-    entries: dict[ScopeRunCoordinate, tuple[ScopedStateBinding, ScopedFrameIndex[GraphValueT]]] = {
+    entries: dict[ScopeRunCoordinate, tuple[ScopedRunEvidence, ScopedFrameIndex[GraphValueT]]] = {
         binding.scope_run: (
             binding,
-            _frames_for_owner(frames, bindings, binding.scope_run),
+            _frames_for_owner(frames, bindings, binding.scope_run)
+            if isinstance(binding, ScopedStateBinding)
+            else ScopedFrameIndex(),
         )
         for binding in reversed(bindings)
     }
@@ -293,7 +301,7 @@ def _evidence_adapter(
         _ = binding.parent_activation
         entries[binding.scope_run] = (binding, owner_frames)
 
-    def read() -> tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
+    def read() -> tuple[tuple[ScopedRunEvidence, ...], ScopedFrameIndex[GraphValueT]]:
         canonical = tuple(entries[coordinate] for coordinate in sorted(entries))
         return (
             tuple(binding for binding, _frames in canonical),
@@ -421,15 +429,16 @@ class _GraphRun(Generic[GraphValueT]):
         )
         if confirmed_frames is not None and (transition.writes.graph_inputs or transition.writes.publications):
             raise FrameInstallationInvariantError("a transition cannot stage frames and an admitted frame snapshot")
+        staged_frames = (
+            apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
+        )
         commit_task = asyncio.create_task(confirm_transition(transition, self._commit))
         confirmed, cancellation = await wait_for_owner_task(
             commit_task,
             self._mark_commit_origin_cancellation,
         )
         self._state = confirmed
-        self._frames = (
-            apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
-        )
+        self._frames = staged_frames
         if handoff_evidence and self._state.parent is not None:
             self.handoff_evidence()
         if cancellation is not None:
@@ -784,7 +793,7 @@ class _GraphRun(Generic[GraphValueT]):
     def freeze_root_evidence(
         self,
         evidence_reader: _EvidenceReader[GraphValueT],
-    ) -> tuple[GraphRunState, tuple[ScopedStateBinding, ...], ScopedFrameIndex[GraphValueT]]:
+    ) -> tuple[GraphRunState, tuple[ScopedRunEvidence, ...], ScopedFrameIndex[GraphValueT]]:
         if self._state.parent is not None:
             raise SnapshotMismatchError("child graph evidence cannot be exported as the root")
         if any(isinstance(call.phase, ActiveChild) for call in self._children):
@@ -918,9 +927,9 @@ def _make_child_constructor(
             graph=child_graph,
             graph_input=child_input,
         )
+        staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
         child_state = await confirm_transition(transition, child_commit)
         try:
-            staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
             child = _GraphRun(
                 child_graph,
                 coordinate,
@@ -957,7 +966,7 @@ def _make_child_constructor(
 async def admit_continued_root(
     graph: CompiledGraph[GraphValueT],
     state: GraphRunState,
-    child_states: tuple[ScopedStateBinding, ...],
+    child_runs: tuple[ScopedRunEvidence, ...],
     frames: ScopedFrameIndex[GraphValueT],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
@@ -970,7 +979,7 @@ async def admit_continued_root(
     scope_run = root_scope_run(state.run_id)
     fences_by_scope = {candidate.scope_run: candidate for candidate in fences}
     resumes_by_scope = {candidate.scope_run: candidate for candidate in resumes}
-    evidence_publisher, evidence_reader = _evidence_adapter(child_states, frames)
+    evidence_publisher, evidence_reader = _evidence_adapter(child_runs, frames)
     root_commit = scoped_commit(scope_run, commit)
     root: _GraphRun[GraphValueT] | None = None
     confirmed_prefix = False
@@ -984,7 +993,7 @@ async def admit_continued_root(
         owner_commit: GraphCommit[GraphValueT],
         position: tuple[int, ...],
     ) -> _GraphRun[GraphValueT]:
-        owner_frames = _frames_for_owner(frames, child_states, owner_scope_run)
+        owner_frames = _frames_for_owner(frames, child_runs, owner_scope_run)
         return _GraphRun(
             owner_graph,
             owner_scope_run,
@@ -1084,7 +1093,9 @@ async def admit_continued_root(
     ) -> None:
         nonlocal failed_scope
         # lineage_states validates coordinate order; filtering preserves child node order for this owner.
-        for binding in child_states:
+        for binding in child_runs:
+            if isinstance(binding, UncreatedGraphRun):
+                continue
             activation = binding.parent_activation
             if activation is None:
                 raise SnapshotMismatchError("nested child binding is missing its parent activation")
@@ -1160,6 +1171,7 @@ async def admit_continued_root(
                 confirmed_children,
                 _merge_frames((root.frames, child_frames)),
                 recovered=recovered,
+                commit=commit,
             )
             partial = _partial_commit_error(
                 root.state,
@@ -1202,13 +1214,14 @@ async def fresh_root(
         graph=graph,
         graph_input=input_frame,
     )
+    staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
     state = await confirm_transition(transition, root_commit)
     try:
         root = _GraphRun(
             graph,
             scope_run,
             state,
-            apply_commit_writes(ScopedFrameIndex(), transition.writes),
+            staged_frames,
             limits,
             root_commit,
             child_constructor,
@@ -1274,16 +1287,18 @@ def project_graph_result(
     disposition: GraphBoundary,
     *,
     recovered: bool,
+    commit: GraphCommit[GraphValueT] | None,
 ) -> GraphResult[GraphValueT]:
     if type(disposition) not in (CompletedGraph, FailedGraph, AbortedGraph, AwaitingResume):
         raise SnapshotMismatchError("graph driver returned an unsupported boundary")
-    state, child_states, frames = root.freeze_root_evidence(evidence_reader)
+    state, child_runs, frames = root.freeze_root_evidence(evidence_reader)
     continuation = _make_continuation(
         family_identity,
         state,
-        child_states,
+        child_runs,
         frames,
         recovered=recovered,
+        commit=commit,
     )
     if isinstance(disposition, CompletedGraph):
         view = project_graph_outputs(graph, root_scope_run(state.run_id), state.superstep, frames)
@@ -1294,7 +1309,11 @@ def project_graph_result(
         return _aborted_result(state, continuation, GraphAbortView((), state.abort.reason))
     scoped_states = (
         ((), state),
-        *((tuple(binding.scope_run.scope), binding.state) for binding in child_states),
+        *(
+            (tuple(binding.scope_run.scope), binding.state)
+            for binding in child_runs
+            if isinstance(binding, ScopedStateBinding)
+        ),
     )
     failures, interrupts = _project_result_views(scoped_states)
     if isinstance(disposition, FailedGraph):

@@ -540,9 +540,10 @@ async def test_resume_codec_errors_before_claim_leave_state_quiescent() -> None:
         return Graph.interrupt(b"question")
 
     graph = interrupt_graph(interrupt, codec=ValidatingCodec())
-    first = await graph.run(Graph.values(value="input"))
-    assert isinstance(first, Graph.AwaitingResumeResult)
     commits = CommitLog()
+    first = await graph.run(Graph.values(value="input"), commit=commits)
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    commits.transitions.clear()
 
     with pytest.raises(Graph.ValueAdmissionError, match="encoder rejected"):
         await graph.run(
@@ -576,9 +577,10 @@ async def test_interrupt_override_is_redelivered_after_error_and_exact_fence() -
         return values
 
     graph = interrupt_graph(operation, publish_output=True)
-    first = await graph.run(Graph.values(value="initial"))
-    assert isinstance(first, Graph.AwaitingResumeResult)
     commits = CommitLog()
+    first = await graph.run(Graph.values(value="initial"), commit=commits)
+    assert isinstance(first, Graph.AwaitingResumeResult)
+    commits.transitions.clear()
     with pytest.raises(RuntimeError, match="transient error"):
         await graph.run(
             state=first.state,

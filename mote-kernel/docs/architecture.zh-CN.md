@@ -42,15 +42,24 @@ resolver 或外部 operation receipt。
 版本化的 operation binding/resolver，并一次性迁移节点定义；不能在现有 NodeCallable 旁边再铺一条
 隐式 Invocation 执行路径。
 
-`Graph.run()` 从显式传入的 authoritative `GraphRunState` 启动或继续运行。failure、interrupt、skip、节点结果和
-Hook 变化都通过同一个 `GraphRunCommand` 入口处理，不存在第二个状态或 resume runner。未传 commit 回调时，
-`run()` 只在进程内应用纯状态转换；传入回调时，每条 command、candidate 和完整 typed write-set 都交给回调
+`Graph.run()` 从 typed values 新建运行，或从 authoritative state 与已准入的证据继续运行。failure、interrupt、skip、节点结果和
+Hook 变化都通过同一个 `GraphRunCommand` 入口处理，不存在第二个状态或 resume runner。新 run 或 control-only state
+调用未传 commit 时只在进程内应用纯状态转换；continuation 则继承原有 commit capability。存在回调时，
+每条 command、candidate 和完整 typed write-set 都交给回调
 完成统一状态的原子提交，且仅以回调精确返回的 candidate 继续执行。这是提交边界，不是具体 Store 或
 durability 承诺。
 
-提交边界的 typed `GraphTransition`、`GraphCommitWriteSet`、exact acknowledgement 和确认后的 frame staging 由
+提交边界的 typed `GraphTransition`、`GraphCommitWriteSet`、exact acknowledgement 和纯 frame projection 由
 `execution/commit.py` 作为一个完整 owner 管理；`execution/family_driver.py` 只负责 family owner 的驱动、child handoff、
-并发清理和结果投影，不复制提交规则或建立第二个 runner。两者通过窄的内部调用连接，公共入口仍只有 `Graph`。
+并发清理和结果投影，不复制提交规则或建立第二个 runner。driver 在提交前准备不可变 frame projection，仅在确认后
+替换运行中的 state/frame。两者通过窄的内部调用连接，公共入口仍只有 `Graph`。
+
+`execution/graph_result.py` 统一拥有 sealed family result、partial handoff 和 continuation provenance。
+不可变的 `ContinuationSnapshot` 保存 exact `GraphCommit` capability，不导入或识别具体持久化实现。
+省略 commit 或传 `None` 都继承原 capability；显式传入必须是原对象，字段相等的新对象也拒绝。
+transient continuation 不能中途增加 commit；需要换提交能力时必须重新读取权威 checkpoint。
+`run_context.py` 仍只拥有 frame/evidence，`result.py` 仍拥有 task outcome 与执行 disposition；不使用循环依赖或
+无类型 capability token 绕过 owner 边界。
 
 ## State 包与所有权
 
@@ -66,15 +75,48 @@ durability 承诺。
 `reduce_graph_run` 能生成下一个 `GraphRunState`。任何 flow、execution session 或 extension 都不得维护平行快照、
 第二个 reducer 或另一条状态存储路径。
 
-底层存储可以分别加载执行记录和结果记录，但必须通过共同的 `state_version` / `commit_id` 合并：
+底层存储可以分记录保存，但同一 scoped run 的 `GraphRunState` 与完整值写集必须属于同一个原子提交。
+root 和每个 child 各自使用已有 revision 与 `GraphCommitKey`；family 读取必须一致，不能假设所有 child revision 相等。
+`GraphCheckpoint` 只是这些既有 state 和值证据的一致性读响应，不是第二种 runtime state。
+Config payload 与能力解析仍归 Config owner；state/frame 只保存精确快照引用，不序列化 capability。
 
-```text
-执行记录 loader ─┐
-                 ├─ 校验同一版本 ─> GraphRunState 内存投影 ─> 节点 / Hook
-结果记录 loader ─┘
-```
+## 后端无关的持久化边界
 
-不能让两份独立快照分别对外可见。Role 配置仍由 Role/Config owner 管理，不是统一状态中的第二个状态模型。
+`execution/persistence.py` 拥有持久值证据、durable commit 适配和 checkpoint materialization；这些类型均为
+owner-internal 基础设施，不重新导出为平行公共入口，唯一执行门面仍是 `Graph`。
+
+- `graph/codec.py` 的 `FrameCodec` 同时复用在 resume input 与持久 frame。领域提供版本化、确定性的不可变值 codec；
+  持久材料保存完整 bytes、完整性摘要、精确 compiled 坐标和可选的精确 Config cursor。已解析 Config 能力不进入 codec。
+- `DurableGraphCommit` 将既有 sealed transition 投影为 `GraphPersistenceCommit`：scope、expected revision、
+  candidate state、commit key 与完整 graph input/publication 写集。command 仍留在 execution/reducer owner，后端
+  不解释执行命令。writer 必须原子写入并精确确认整个请求；不能以业务 DTO equality、仅 revision 或仅 state 代替值确认。
+- `GraphRecovery` 将已读取 checkpoint、必需的 `DurableGraphCommit` 与精确解析的 Config 绑定后交给同一个
+  `Graph.run()`。恢复和后续提交只能使用该 commit 持有的同一个 codec；`run(recovery=...)` 拒绝另外传入 commit。
+  材料解码复用 compiler
+  descriptor、scoped state validation、typed frame admission、lineage、routing 和 output projection，然后进入已有
+  fence/resume/preflight/family driver。缺失或冲突证据在任何恢复提交或节点调用前拒绝，不靠重跑已结算 producer、
+  查找 latest publication 或 latest Config 补齐。
+- 读取 envelope 和确认 receipt 时重新准入，不能假定反序列化曾执行构造器。`EncodedFrame.frame_digest` 是唯一摘要：
+  对带领域前缀的 canonical codec identity/version、Config cursor 元数据和 payload bytes 共同计算。
+  cursor 缺席也是明确元数据，不能跳过完整性证明；删除、插入或替换 cursor 会在解码、节点调用和写入前使原摘要失效。
+  不再接受只覆盖 payload 的摘要。非空 Frame Config 必须属于所属 state 的 Config definition/version，revision
+  不得超前，同 revision 的 digest 必须相同；同一不可变 Config revision 不能提供两个解析结果，即使暂未被引用。
+  历史上合法的无 Config frame 保持无 Config，不能用当前 state 或可用 capability 补齐。Config 更新只由 Observe
+  消费并随其 settlement 提交持久化；恢复不增加第二个更新入口。
+- 全部生命周期（含 completed）保留既有 `GraphRunState.settled_activations`，publication 集必须与全部成功账本
+  精确相等。中间 publication 缺失和从未结算的额外 publication 都拒绝；不另建 manifest 或终态压缩分支。
+  completed child 的输出仍由既有 projection 自底向上重建。
+- `GraphCheckpoint.child_runs` 只携带 `ScopedStateBinding` 或显式的 `UncreatedGraphRun` 读取证据。必需 child
+  来自 state 持有的历史成功/current nested activation；省略记录不等于从未创建。只有当前 pending child 的权威
+  negative read 能进入既有 create-if-absent 路径；确认创建后，由同一个 family evidence owner 替换该证据。
+  持久化冲突不能越过提交边界执行 leaf。完整一致读取与权威 CAS 仍由 Port 实现负责。
+
+`Graph.run(state=...)` 不读取 Store，也不恢复缺失 frame；opaque continuation 始终是不可序列化的进程内交接材料。
+两者都不能替代完整 checkpoint read。
+
+P1 交付 execution 接缝，不是 Agent loader 或具体后端。外部 load、精确 Config 解析、执行权限和未知的**持久化提交**
+对账统一留给 P2 的 `agent.py`，阶段状态以[实施计划](kernel-persistence-implementation-plan.zh-CN.md)为准。
+工具执行记录和工具崩溃对账归 Runtime；ReAct END 后的新任务接入归上层驱动，不进入这条持久化链路。
 
 ## Graph Frontier 执行
 
@@ -95,5 +137,5 @@ durability 承诺。
 `AdvanceGraphFrontier` 或 `CompleteGraphFrontier` 转换。Session queue 与 task handle 都是 transient runtime facts，不构成 Store、retry
 策略、exactly-once 保证或第二套 durable state。
 
-Frame/publication 只保存执行所需的值或引用以及对应的 `state_version` / activation 坐标，不拥有第二份事实。
-本文件记录稳定架构方向；权威类型与公共契约随实现同步维护。
+Publication 将值与已确认的 scoped revision、execution provenance、descriptor 和 activation 坐标一起保存。
+它是同一提交的不可变证据，不是可独立更新的第二份状态。

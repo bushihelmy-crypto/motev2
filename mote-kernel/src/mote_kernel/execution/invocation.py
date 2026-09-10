@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from itertools import groupby, pairwise
 from typing import Generic, TypeVar
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.engine.recovery import (
     AdmittedResumeFact,
     RecoveryInvocationSeed,
@@ -16,7 +17,7 @@ from mote_kernel.execution.engine.resume_input import (
     materialize_node_input,
     pending_node_input_available,
 )
-from mote_kernel.execution.engine.routing import graph_outputs_available, publication_availability_coordinate
+from mote_kernel.execution.engine.routing import graph_outputs_available
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import (
     FrameInstallationInvariantError,
@@ -52,12 +53,14 @@ from mote_kernel.execution.run_context import (
     ChildBoundaryAvailabilityCoordinate,
     ConfirmedChildBoundary,
     ConfirmedPublication,
-    ExecutionPublicationProvenance,
     GraphInputAvailabilityCoordinate,
     PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameIndex,
+    ScopedRunEvidence,
     ScopedStateBinding,
+    UncreatedGraphRun,
+    require_publication_confirmation,
 )
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
@@ -67,7 +70,6 @@ from mote_kernel.state.graph_state import (
     GraphRunStatus,
     OverrideGraphNodeInput,
     PendingGraphNode,
-    SucceededGraphNode,
     frontier_node,
     pending_node_ids,
     reduce_graph_run,
@@ -82,6 +84,7 @@ class _PlannedLineage:
     """Immutable lookup index over the canonical planned-state bindings."""
 
     bindings: tuple[ScopedStateBinding, ...]
+    uncreated: tuple[UncreatedGraphRun, ...] = ()
 
     def _position(self, coordinate: ScopeRunCoordinate) -> int:
         position = bisect_left(self.bindings, coordinate, key=lambda binding: binding.scope_run)
@@ -96,6 +99,7 @@ class _PlannedLineage:
         position = self._position(replacement.scope_run)
         return _PlannedLineage(
             (*self.bindings[:position], replacement, *self.bindings[position + 1 :]),
+            self.uncreated,
         )
 
 
@@ -138,22 +142,35 @@ def is_current_child_activation(
 
 def lineage_states(
     root_state: GraphRunState,
-    child_states: tuple[ScopedStateBinding, ...],
+    child_runs: tuple[ScopedRunEvidence, ...],
 ) -> _PlannedLineage:
-    if child_states != tuple(sorted(child_states, key=lambda binding: binding.scope_run)):
+    if type(child_runs) is not tuple or any(
+        type(binding) not in (ScopedStateBinding, UncreatedGraphRun)
+        or type(binding.scope_run) is not ScopeRunCoordinate
+        for binding in child_runs
+    ):
+        raise SnapshotMismatchError("child run evidence requires typed immutable records")
+    if child_runs != tuple(sorted(child_runs, key=lambda binding: binding.scope_run)):
         raise SnapshotMismatchError("continuation child bindings are not in canonical scoped order")
-    child_coordinates = tuple(binding.scope_run for binding in child_states)
+    child_coordinates = tuple(binding.scope_run for binding in child_runs)
     if len(child_coordinates) != len(set(child_coordinates)):
         raise SnapshotMismatchError("lineage repeats one scoped graph run")
     # A valid parent activation deterministically owns exactly one child
     # coordinate, so coordinate uniqueness also proves activation uniqueness.
-    for binding in child_states:
+    for binding in child_runs:
+        replace(binding.scope_run)
         if not binding.scope_run.scope:
             raise SnapshotMismatchError("child state binding requires a nested scope")
-        _ = binding.parent_activation
-    values = (ScopedStateBinding(root_scope_run(root_state.run_id), root_state), *child_states)
+        if isinstance(binding, ScopedStateBinding):
+            _ = binding.parent_activation
+    values = (
+        ScopedStateBinding(root_scope_run(root_state.run_id), root_state),
+        *(binding for binding in child_runs if isinstance(binding, ScopedStateBinding)),
+    )
     canonical = tuple(sorted(values, key=lambda binding: binding.scope_run))
-    return _PlannedLineage(canonical)
+    return _PlannedLineage(
+        canonical, tuple(binding for binding in child_runs if isinstance(binding, UncreatedGraphRun))
+    )
 
 
 def plan_fences(
@@ -274,7 +291,12 @@ def recovery_seed(
     facts: tuple[AdmittedResumeFact, ...],
 ) -> RecoveryInvocationSeed[GraphValueT]:
     root = lineage.bindings[0]
-    children = tuple(binding for binding in lineage.bindings if binding.scope_run.scope)
+    children: tuple[ScopedRunEvidence, ...] = tuple(
+        sorted(
+            (*(binding for binding in lineage.bindings if binding.scope_run.scope), *lineage.uncreated),
+            key=lambda binding: binding.scope_run,
+        )
+    )
     return RecoveryInvocationSeed(
         root,
         children,
@@ -307,15 +329,23 @@ def admit_state_owned_overrides(
                 )
 
 
+def _validate_frame_config(state: GraphRunState, config: Config | None) -> None:
+    if config is None:
+        return
+    try:
+        state.config_cursor.admit_history(require_config(config).config_cursor)
+    except (ConfigContractError, TypeError, ValueError) as error:
+        raise SnapshotMismatchError("frame Config must be exact history of its authoritative state") from error
+
+
 def _validate_graph_input_records(
     graph: CompiledGraph[GraphValueT],
-    coordinates: frozenset[ScopeRunCoordinate],
+    lineage: _PlannedLineage,
     records: tuple[AdmittedGraphInput[GraphValueT], ...],
 ) -> None:
     for record in records:
         coordinate = record.coordinate
-        if coordinate.scope_run not in coordinates:
-            raise SnapshotMismatchError("continuation graph input belongs to an unknown scoped run")
+        binding = lineage.binding_at(coordinate.scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
         if coordinate.descriptor != scoped_graph.graph_input_descriptor.identity:
             raise SnapshotMismatchError("continuation graph input descriptor does not match its scope")
@@ -323,6 +353,7 @@ def _validate_graph_input_records(
             _admit_graph_input_frame(record.frame, scoped_graph.graph_input_descriptor.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation graph input frame does not match its descriptor") from error
+        _validate_frame_config(binding.state, record.frame.activation_config)
 
 
 def _validate_publication_records(
@@ -339,16 +370,18 @@ def _validate_publication_records(
             publication is None
             or coordinate.descriptor != publication.identity
             or coordinate.activation.superstep > binding.state.superstep
-            or not 1 <= record.acknowledged_revision <= binding.state.revision
-            or type(record.provenance) is not ExecutionPublicationProvenance
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
-        if record.provenance.execution_token.generation < 1:
+        token = require_publication_confirmation(record.acknowledged_revision, record.provenance)
+        if record.acknowledged_revision > binding.state.revision:
+            raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
+        if token.generation > binding.state.execution_sequence:
             raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
         try:
             _admit_node_output_frame(record.frame, publication.declarations)
         except GraphValueAdmissionError as error:
             raise SnapshotMismatchError("continuation publication frame does not match its descriptor") from error
+        _validate_frame_config(binding.state, record.frame.activation_config)
 
 
 def _validate_resume_input_records(
@@ -398,7 +431,6 @@ def _validate_frame_index(
     lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
 ) -> None:
-    coordinates = frozenset(binding.scope_run for binding in lineage.bindings)
     if any(
         type(record) is not AdmittedGraphInput or type(record.coordinate) is not GraphInputAvailabilityCoordinate
         for record in frames.graph_inputs
@@ -427,10 +459,40 @@ def _validate_frame_index(
         raise SnapshotMismatchError("continuation resume input coordinates are not unique and canonical")
     if any(previous.coordinate >= current.coordinate for previous, current in pairwise(frames.child_boundaries)):
         raise SnapshotMismatchError("continuation child boundary coordinates are not unique and canonical")
-    _validate_graph_input_records(graph, coordinates, frames.graph_inputs)
+    _validate_graph_input_records(graph, lineage, frames.graph_inputs)
     _validate_publication_records(graph, lineage, frames.publications)
     _validate_resume_input_records(graph, lineage, frames.resume_inputs)
     _validate_child_boundary_records(graph, lineage, frames.child_boundaries)
+
+
+def _validate_child_run_evidence(
+    graph: CompiledGraph[GraphValueT],
+    lineage: _PlannedLineage,
+    *,
+    complete: bool,
+) -> None:
+    required: set[ScopeRunCoordinate] = set()
+    uncreated_allowed: set[ScopeRunCoordinate] = set()
+    for binding in lineage.bindings:
+        scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
+        state = binding.state
+        for reference in state.settled_activations:
+            if reference.activation.node_id in scoped_graph.nested_graphs:
+                required.add(child_scope_run_for_activation(binding.scope_run, reference.activation))
+        for node in state.frontier.nodes:
+            if node.node_id not in scoped_graph.nested_graphs:
+                continue
+            parent = GraphActivationIdentity(state.run_id, state.superstep, node.node_id)
+            coordinate = child_scope_run_for_activation(binding.scope_run, parent)
+            required.add(coordinate)
+            if isinstance(node.settlement, PendingGraphNode):
+                uncreated_allowed.add(coordinate)
+    existing = {binding.scope_run for binding in lineage.bindings if binding.scope_run.scope}
+    uncreated = {record.scope_run for record in lineage.uncreated}
+    if not uncreated <= uncreated_allowed or existing & uncreated or not existing <= required:
+        raise SnapshotMismatchError("child run evidence does not match an authoritative parent activation")
+    if complete and existing | uncreated != required:
+        raise SnapshotMismatchError("complete evidence requires each child snapshot or explicit uncreated proof")
 
 
 def _validate_complete_context(
@@ -441,31 +503,29 @@ def _validate_complete_context(
     admitted_inputs = frozenset(record.coordinate.scope_run for record in frames.graph_inputs)
     if admitted_inputs != frozenset(binding.scope_run for binding in lineage.bindings):
         raise SnapshotMismatchError("complete continuation must retain every scoped graph input")
+    expected_publications = {
+        stable_activation(binding.scope_run, reference.activation)
+        for binding in lineage.bindings
+        for reference in binding.state.settled_activations
+    }
+    if expected_publications != {record.coordinate.activation for record in frames.publications}:
+        raise SnapshotMismatchError("complete publications must exactly match the committed settlement ledger")
     for binding in lineage.bindings:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         state = binding.state
         for node in state.frontier.nodes:
-            if isinstance(node.settlement, SucceededGraphNode):
-                coordinate: PublicationAvailabilityCoordinate[GraphValueT] = publication_availability_coordinate(
-                    scoped_graph,
-                    binding.scope_run,
-                    GraphActivationIdentity(state.run_id, state.superstep, node.node_id),
-                )
-                if not frames.has_publication(coordinate):
-                    raise SnapshotMismatchError("complete continuation is missing a current success publication")
-            if isinstance(node.settlement, PendingGraphNode):
-                if node.node_id in scoped_graph.nested_graphs:
-                    parent = GraphActivationIdentity(state.run_id, state.superstep, node.node_id)
-                    child_coordinate = child_scope_run_for_activation(binding.scope_run, parent)
-                    lineage.binding_at(child_coordinate)
-                elif not pending_node_input_available(
+            if (
+                isinstance(node.settlement, PendingGraphNode)
+                and node.node_id not in scoped_graph.nested_graphs
+                and not pending_node_input_available(
                     scoped_graph,
                     state,
                     binding.scope_run,
                     frames,
                     node.node_id,
-                ):
-                    raise SnapshotMismatchError("complete continuation is missing a current node input source")
+                )
+            ):
+                raise SnapshotMismatchError("complete continuation is missing a current node input source")
         if state.status is GraphRunStatus.COMPLETED and not graph_outputs_available(
             scoped_graph,
             binding.scope_run,
@@ -489,6 +549,7 @@ def validate_context(
     *,
     recovered: bool,
 ) -> None:
+    _validate_child_run_evidence(graph, lineage, complete=not recovered)
     _validate_frame_index(graph, lineage, frames)
     if not recovered:
         _validate_complete_context(graph, lineage, frames)

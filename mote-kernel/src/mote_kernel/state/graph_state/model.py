@@ -86,6 +86,15 @@ class GraphConfigCursor:
             raise ValueError("node settlement Config revision cannot move backwards")
         raise ValueError("node settlement Config revision must advance exactly once")
 
+    def admit_history(self, reference: GraphConfigCursor, /) -> None:
+        reference = type(self).admit(reference)
+        if reference.definition_id != self.definition_id or reference.definition_version != self.definition_version:
+            raise ValueError("historical Config must belong to the same definition and version")
+        if reference.revision > self.revision:
+            raise ValueError("historical Config cannot be newer than its authoritative state")
+        if reference.revision == self.revision and reference.digest != self.digest:
+            raise ValueError("historical Config digest must match its authoritative revision")
+
 
 class GraphRunStatus(Enum):
     RUNNING = auto()
@@ -103,6 +112,16 @@ class GraphAbort:
 class GraphExecutionToken:
     generation: int
     attempt_id: GraphExecutionAttemptId
+
+    @classmethod
+    def admit(cls, token: GraphExecutionToken, /) -> Self:
+        if type(token) is not cls:
+            raise ValueError("execution token is malformed")
+        if type(token.generation) is not int or token.generation < 1:
+            raise ValueError("execution token generation must be an exact positive integer")
+        if not is_canonical_identity(token.attempt_id):
+            raise ValueError("execution attempt identity must be canonical")
+        return cls(token.generation, token.attempt_id)
 
 
 @dataclass(frozen=True, slots=True)

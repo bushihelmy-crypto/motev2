@@ -136,9 +136,7 @@ def _validate_definition(
     _validate_edges(definition, nodes_by_id)
     binding = definition.resume_input
     if binding is not None:
-        require_graph_identity(binding.codec_id, kind="resume input codec")
-        if type(binding.version) is not int or binding.version < 1:
-            raise InvalidGraphIdentityError("resume input codec version must be a positive integer")
+        binding.validate()
     for node in definition.nodes:
         if isinstance(node, NestedGraphNodeDefinition):
             _validate_definition(node.graph, visits)

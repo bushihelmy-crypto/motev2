@@ -1,11 +1,11 @@
-"""Invocation-local scoped frames and opaque continuation snapshots."""
+"""Invocation-local scoped frames and authoritative run evidence."""
 
 from __future__ import annotations
 
 from bisect import bisect_left
 from collections.abc import Callable
-from dataclasses import InitVar, dataclass, field, replace
-from typing import Generic, Never, Protocol, Self, SupportsIndex, TypeAlias, TypeVar, cast, final, overload
+from dataclasses import dataclass, field, replace
+from typing import Generic, Never, Protocol, Self, TypeAlias, TypeVar, cast, overload
 
 from mote_kernel.execution.errors import (
     GraphValuePublicationError,
@@ -107,6 +107,22 @@ class AdmittedGraphInput(Generic[GraphValueT]):
 @dataclass(frozen=True, slots=True)
 class ExecutionPublicationProvenance:
     execution_token: GraphExecutionToken
+
+
+def require_publication_confirmation(
+    acknowledged_revision: int,
+    provenance: ExecutionPublicationProvenance,
+) -> GraphExecutionToken:
+    if (
+        type(acknowledged_revision) is not int
+        or acknowledged_revision < 1
+        or type(provenance) is not ExecutionPublicationProvenance
+    ):
+        raise SnapshotMismatchError("publication has inconsistent coordinates")
+    try:
+        return GraphExecutionToken.admit(provenance.execution_token)
+    except ValueError as error:
+        raise SnapshotMismatchError("publication has inconsistent execution provenance") from error
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -325,11 +341,6 @@ class ScopedFrameIndex(Generic[GraphValueT]):
         )
 
 
-@dataclass(frozen=True, slots=True, eq=False)
-class _CompiledFamilyIdentity:
-    pass
-
-
 @dataclass(frozen=True, slots=True)
 class ScopedStateBinding:
     """Bind one scoped coordinate to its authoritative graph state.
@@ -360,82 +371,19 @@ class ScopedStateBinding:
         return parent_activation_for_child(self.scope_run, parent)
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
-class _ContinuationSnapshot(Generic[GraphValueT]):
-    """One immutable continuation payload with explicit provenance."""
+@dataclass(frozen=True, slots=True)
+class UncreatedGraphRun:
+    """An explicit authoritative negative read, never inferred from an omitted record."""
 
-    family_identity: _CompiledFamilyIdentity
-    root_state: GraphRunState
-    child_states: tuple[ScopedStateBinding, ...]
-    frames: ScopedFrameIndex[GraphValueT]
-    recovered: bool
+    scope_run: ScopeRunCoordinate
 
-
-ContinuationSnapshot: TypeAlias = _ContinuationSnapshot[GraphValueT]
+    def __post_init__(self) -> None:
+        if type(self.scope_run) is not ScopeRunCoordinate or not self.scope_run.scope:
+            raise SnapshotMismatchError("uncreated child evidence requires a nested scope-run coordinate")
+        replace(self.scope_run)
 
 
-class _ContinuationSeal:
-    __slots__ = ()
+ScopedRunEvidence: TypeAlias = ScopedStateBinding | UncreatedGraphRun
 
 
-_CONTINUATION_SEAL = _ContinuationSeal()
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True, eq=False, repr=False)
-class _GraphContinuation(Generic[GraphValueT]):
-    _snapshot: ContinuationSnapshot[GraphValueT]
-    _seal: InitVar[_ContinuationSeal]
-
-    def __post_init__(self, _seal: _ContinuationSeal) -> None:
-        if _seal is not _CONTINUATION_SEAL:
-            raise SnapshotMismatchError("continuations can only be produced by a Graph result")
-
-    def admit_snapshot(
-        self,
-        _seal: _ContinuationSeal,
-        family_identity: _CompiledFamilyIdentity,
-        state: GraphRunState,
-    ) -> ContinuationSnapshot[GraphValueT]:
-        if _seal is not _CONTINUATION_SEAL:
-            raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
-        snapshot = self._snapshot
-        if snapshot.family_identity is not family_identity or snapshot.root_state != state:
-            raise SnapshotMismatchError("state and continuation do not belong to the same compiled graph lineage")
-        return snapshot
-
-    def __copy__(self) -> Never:
-        raise SnapshotMismatchError("continuations do not provide a copy contract")
-
-    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
-        raise SnapshotMismatchError("continuations do not provide a serialization contract")
-
-
-def _admit_continuation(
-    family_identity: _CompiledFamilyIdentity,
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-) -> ContinuationSnapshot[GraphValueT]:
-    if type(continuation) is not _GraphContinuation:
-        raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
-    return continuation.admit_snapshot(_CONTINUATION_SEAL, family_identity, state)
-
-
-def _make_continuation(
-    family_identity: _CompiledFamilyIdentity,
-    root_state: GraphRunState,
-    child_states: tuple[ScopedStateBinding, ...],
-    frames: ScopedFrameIndex[GraphValueT],
-    *,
-    recovered: bool,
-) -> _GraphContinuation[GraphValueT]:
-    snapshot = _ContinuationSnapshot(family_identity, root_state, child_states, frames, recovered)
-    return _GraphContinuation(_snapshot=snapshot, _seal=_CONTINUATION_SEAL)
-
-
-__all__ = [
-    "_CompiledFamilyIdentity",
-    "_GraphContinuation",
-    "_admit_continuation",
-    "_make_continuation",
-]
+__all__: list[str] = []

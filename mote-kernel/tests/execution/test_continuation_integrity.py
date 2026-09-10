@@ -15,6 +15,7 @@ from mote_kernel.execution.graph.values import (
     _make_node_input_frame,
     _make_node_output_frame,
 )
+from mote_kernel.execution.graph_result import ContinuationSnapshot, _admit_continuation, _CompiledFamilyIdentity
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import AbortedGraph
@@ -23,11 +24,9 @@ from mote_kernel.execution.run_context import (
     AdmittedResumeInput,
     ConfirmedChildBoundary,
     ConfirmedPublication,
-    ContinuationSnapshot,
     ExecutionPublicationProvenance,
     ScopedFrameIndex,
-    _admit_continuation,
-    _CompiledFamilyIdentity,
+    ScopedStateBinding,
 )
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
@@ -82,6 +81,7 @@ class ContinuationAdmission(Protocol):
         seal: ForeignSeal,
         family: ForeignFamily,
         state: Graph.State,
+        commit: Graph.Commit[str] | None,
     ) -> None: ...
 
 
@@ -90,7 +90,7 @@ def test_continuation_adapter_rejects_a_foreign_runtime_value() -> None:
     continuation = cast(Graph.Continuation[str], object())
 
     with pytest.raises(Graph.SnapshotMismatchError, match="admitted by their Graph owner"):
-        _admit_continuation(_CompiledFamilyIdentity(), state, continuation)
+        _admit_continuation(_CompiledFamilyIdentity(), state, continuation, None)
 
 
 class LostSettlementError(RuntimeError):
@@ -226,7 +226,7 @@ async def test_continuation_admission_rejects_a_foreign_seal() -> None:
     admission = cast(ContinuationAdmission, completed.continuation)
 
     with pytest.raises(Graph.SnapshotMismatchError, match="admitted by their Graph owner"):
-        admission.admit_snapshot(ForeignSeal(), ForeignFamily(), completed.state)
+        admission.admit_snapshot(ForeignSeal(), ForeignFamily(), completed.state, None)
 
 
 @pytest.mark.asyncio
@@ -257,6 +257,7 @@ async def test_result_projection_rejects_an_aborted_boundary_without_canonical_a
             evidence_reader,
             AbortedGraph(),
             recovered=True,
+            commit=None,
         )
 
 
@@ -585,7 +586,7 @@ async def test_complete_continuation_rejects_a_foreign_graph_input_coordinate() 
     )
     layout.install(replace(snapshot, frames=replace(snapshot.frames, graph_inputs=(foreign,))))
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="unknown scoped run"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="lineage does not contain one state"):
         await graph.run(state=completed.state, continuation=completed.continuation)
 
 
@@ -971,12 +972,13 @@ async def test_complete_continuation_requires_each_current_success_publication()
     assert snapshot.frames.publications
     layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=())))
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="current success publication"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="settlement ledger"):
         await graph.run(state=paused.state, continuation=paused.continuation)
 
 
 @pytest.mark.asyncio
-async def test_complete_continuation_requires_a_pending_node_input_source() -> None:
+@pytest.mark.parametrize("erase_ledger", [False, True])
+async def test_complete_continuation_requires_a_pending_node_input_source(erase_ledger: bool) -> None:
     async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value="published")
 
@@ -1000,6 +1002,7 @@ async def test_complete_continuation_requires_a_pending_node_input_source() -> N
     pending = replace(
         paused.state,
         frontier=GraphFrontierState((replace(node, settlement=PendingGraphNode(UseStepRequestInput())),)),
+        settled_activations=() if erase_ledger else paused.state.settled_activations,
     )
     layout = _layout(paused.continuation)
     snapshot = layout.reveal()
@@ -1011,7 +1014,8 @@ async def test_complete_continuation_requires_a_pending_node_input_source() -> N
         )
     )
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="current node input source"):
+    message = "current node input source" if erase_ledger else "settlement ledger"
+    with pytest.raises(Graph.SnapshotMismatchError, match=message):
         await graph.run(state=pending, continuation=paused.continuation)
 
 
@@ -1060,7 +1064,8 @@ async def test_ordinary_input_consumer_settles_before_nested_child_awaits_resume
 
 
 @pytest.mark.asyncio
-async def test_complete_continuation_requires_historical_graph_output_publication() -> None:
+@pytest.mark.parametrize("erase_ledger", [False, True])
+async def test_complete_continuation_requires_historical_graph_output_publication(erase_ledger: bool) -> None:
     async def publish(_values: Graph.Values[str]) -> Graph.Values[str]:
         return Graph.values(value="published")
 
@@ -1078,9 +1083,35 @@ async def test_complete_continuation_requires_historical_graph_output_publicatio
         for publication in snapshot.frames.publications
         if publication.coordinate.activation.node_id != GraphNodeId("producer")
     )
-    layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=retained)))
+    state = (
+        replace(
+            completed.state,
+            settled_activations=tuple(
+                reference
+                for reference in completed.state.settled_activations
+                if reference.activation.node_id != GraphNodeId("producer")
+            ),
+        )
+        if erase_ledger
+        else completed.state
+    )
+    layout.install(replace(snapshot, root_state=state, frames=replace(snapshot.frames, publications=retained)))
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="completed graph output"):
+    message = "completed graph output" if erase_ledger else "settlement ledger"
+    with pytest.raises(Graph.SnapshotMismatchError, match=message):
+        await graph.run(state=state, continuation=completed.continuation)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "child_runs", [[], (None,), (ScopedStateBinding(cast(ScopeRunCoordinate, None), cast(GraphRunState, None)),)]
+)
+async def test_continuation_readmits_child_evidence_types(child_runs: object) -> None:
+    graph, completed = await _completed_empty("continuation.child-record-types")
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    layout.install(replace(snapshot, child_runs=child_runs))
+    with pytest.raises(Graph.SnapshotMismatchError, match="typed immutable records"):
         await graph.run(state=completed.state, continuation=completed.continuation)
 
 
@@ -1107,12 +1138,12 @@ async def test_recovered_continuation_rejects_an_unknown_child_scope() -> None:
     parent, recovered = await _recovered_nested()
     layout = _layout(recovered.continuation)
     snapshot = layout.reveal()
-    child = snapshot.child_states[0]
+    child = snapshot.child_runs[0]
     unknown = replace(
         child,
         scope_run=ScopeRunCoordinate((GraphNodeId("unknown"),), child.scope_run.graph_run_id),
     )
-    layout.install(replace(snapshot, child_states=(unknown,), frames=ScopedFrameIndex()))
+    layout.install(replace(snapshot, child_runs=(unknown,), frames=ScopedFrameIndex()))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="inconsistent parent coordinates"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
@@ -1147,8 +1178,8 @@ async def test_recovered_continuation_rejects_duplicate_child_run_coordinates() 
     parent, recovered = await _recovered_nested()
     layout = _layout(recovered.continuation)
     snapshot = layout.reveal()
-    child = snapshot.child_states[0]
-    layout.install(replace(snapshot, child_states=(child, child), frames=ScopedFrameIndex()))
+    child = snapshot.child_runs[0]
+    layout.install(replace(snapshot, child_runs=(child, child), frames=ScopedFrameIndex()))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="repeats one scoped graph run"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
@@ -1159,7 +1190,7 @@ async def test_continuation_rejects_noncanonical_child_binding_order() -> None:
     parent, completed = await _completed_parallel_children("continuation.child-binding-order")
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
-    layout.install(replace(snapshot, child_states=tuple(reversed(snapshot.child_states))))
+    layout.install(replace(snapshot, child_runs=tuple(reversed(snapshot.child_runs))))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="canonical scoped order"):
         await parent.run(state=completed.state, continuation=completed.continuation)
@@ -1170,11 +1201,11 @@ async def test_continuation_rejects_duplicate_child_scope() -> None:
     parent, completed = await _completed_parallel_children("continuation.duplicate-parent-activation")
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
-    left, right = snapshot.child_states
+    left, right = snapshot.child_runs
     layout.install(
         replace(
             snapshot,
-            child_states=(left, replace(right, scope_run=left.scope_run)),
+            child_runs=(left, replace(right, scope_run=left.scope_run)),
         )
     )
 
@@ -1187,12 +1218,12 @@ async def test_recovered_continuation_rejects_a_child_run_id_mismatch() -> None:
     parent, recovered = await _recovered_nested()
     layout = _layout(recovered.continuation)
     snapshot = layout.reveal()
-    child = snapshot.child_states[0]
+    child = snapshot.child_runs[0]
     mismatched = replace(
         child,
         scope_run=replace(child.scope_run, graph_run_id=GraphRunId("foreign-child-run")),
     )
-    layout.install(replace(snapshot, child_states=(mismatched,), frames=ScopedFrameIndex()))
+    layout.install(replace(snapshot, child_runs=(mismatched,), frames=ScopedFrameIndex()))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="scope-run coordinate"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)
@@ -1203,7 +1234,8 @@ async def test_recovered_continuation_rejects_inconsistent_parent_coordinates() 
     parent, recovered = await _recovered_nested()
     layout = _layout(recovered.continuation)
     snapshot = layout.reveal()
-    child = snapshot.child_states[0]
+    child = snapshot.child_runs[0]
+    assert isinstance(child, ScopedStateBinding)
     parent_activation = child.state.parent
     assert parent_activation is not None
     inconsistent = replace(
@@ -1213,7 +1245,7 @@ async def test_recovered_continuation_rejects_inconsistent_parent_coordinates() 
             parent=replace(parent_activation, superstep=parent_activation.superstep + 1),
         ),
     )
-    layout.install(replace(snapshot, child_states=(inconsistent,), frames=ScopedFrameIndex()))
+    layout.install(replace(snapshot, child_runs=(inconsistent,), frames=ScopedFrameIndex()))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="inconsistent parent coordinates"):
         await parent.run(state=recovered.state, continuation=recovered.continuation)

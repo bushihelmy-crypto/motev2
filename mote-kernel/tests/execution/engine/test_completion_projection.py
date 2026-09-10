@@ -17,11 +17,11 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.task import GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
 from mote_kernel.state.graph_state import (
@@ -92,7 +92,7 @@ def test_interrupt_result_projects_a_structured_identity() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = running_state(definition_id="graph")
@@ -299,7 +299,7 @@ def test_interrupt_projection_uses_the_current_execution_generation() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = replace(

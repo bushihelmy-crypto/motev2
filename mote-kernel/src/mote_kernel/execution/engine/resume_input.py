@@ -1,11 +1,13 @@
 """Scoped node-input materialization and graph-local resume codecs."""
 
-from typing import TypeVar, cast
+from typing import TypeVar
 
-from mote_kernel.config import Config, require_config
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.engine.routing import (
     binding_source_coordinate,
     frame_coordinate_available,
+    graph_input_availability_coordinate,
+    publication_availability_coordinate,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -17,19 +19,21 @@ from mote_kernel.execution.graph.ports import (
     CompiledPredecessorInput,
     GraphInputPort,
     MaterializationPlan,
+    ResolvedInputBinding,
+    ResolvedValueSource,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
-    GraphInputFrame,
     NamedValue,
     NodeInputFrame,
-    NodeOutputFrame,
     _frame_value,
     _GraphValues,
     _make_node_input_frame,
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, stable_activation
 from mote_kernel.execution.run_context import (
+    GraphInputAvailabilityCoordinate,
+    PublicationAvailabilityCoordinate,
     ResumeInputAvailabilityCoordinate,
     ScopedFrameAvailability,
     ScopedFrameIndex,
@@ -43,6 +47,8 @@ from mote_kernel.state.graph_state import (
     GraphRunState,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    RoutedActivationCause,
+    StartActivationCause,
     frontier_node,
 )
 
@@ -85,53 +91,92 @@ def encode_resume_input(
     binding = graph.resume_input
     if binding is None:
         raise SnapshotMismatchError("graph does not define a resume input codec")
-    try:
-        payload = binding.encoder(values)
-    except Exception as error:
-        raise GraphValueAdmissionError("resume input encoder rejected the value frame") from error
-    if type(payload) is not bytes:
-        raise GraphValueAdmissionError("resume input encoder must return bytes")
-    return OverrideGraphNodeInput(GraphResumeInputPayload(payload))
+    return OverrideGraphNodeInput(GraphResumeInputPayload(binding.encode(values)))
 
 
 def decode_resume_input(
     graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
     payload: bytes,
+    *,
+    activation_config: Config | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     binding = graph.resume_input
     if binding is None:
         raise SnapshotMismatchError("input override is missing its compiled graph decoder")
-    try:
-        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder(payload))
-    except Exception as error:
-        raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
-    if not isinstance(candidate, _GraphValues):
-        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
+    candidate = binding.decode(payload)
     plan = _require_node_materialization(graph, node_id)
+    inherited = _select_activation_config(
+        (activation_config, candidate.activation_config),
+        conflict_message="resume input and activation cause carry different Config snapshots",
+    )
     return _make_node_input_frame(
         tuple(NamedValue(name, value) for name, value in candidate.items()),
         plan.descriptor.declarations,
-        activation_config=candidate.activation_config,
+        activation_config=inherited,
     )
 
 
-def _activation_config_from_frames(
-    frames: tuple[GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT], ...],
+def _select_activation_config(
+    candidates: tuple[Config | None, ...],
+    *,
+    conflict_message: str,
 ) -> Config | None:
-    """Require one activation Config across all source frames."""
+    """Select one immutable Config from the current activation evidence."""
 
     selected: Config | None = None
-    for frame in frames:
-        candidate = frame.activation_config
+    for candidate in candidates:
         if candidate is None:
             continue
-        require_config(candidate)
+        try:
+            require_config(candidate)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("activation Config is malformed") from error
         if selected is None:
             selected = candidate
         elif selected != candidate:
-            raise SnapshotMismatchError("node inputs combine different activation Config snapshots")
+            raise SnapshotMismatchError(conflict_message)
     return selected
+
+
+def activation_config_for_cause(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    node: GraphFrontierNode,
+    frames: ScopedFrameIndex[GraphValueT],
+) -> Config | None:
+    """Project the one Config carried by a pending activation's cause."""
+
+    cause = node.cause
+    if type(cause) is StartActivationCause:
+        coordinates: tuple[
+            GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+            ...,
+        ] = (graph_input_availability_coordinate(graph, scope_run),)
+    elif type(cause) is RoutedActivationCause:
+        try:
+            coordinates = tuple(
+                publication_availability_coordinate(graph, scope_run, reference.activation)
+                for reference in cause.references
+            )
+        except (AttributeError, KeyError, TypeError) as error:
+            raise SnapshotMismatchError("pending activation cause references an unknown publication") from error
+    else:
+        raise SnapshotMismatchError("pending activation has an unsupported cause")
+
+    candidates: list[Config | None] = []
+    for coordinate in coordinates:
+        try:
+            candidates.append(frames.lookup(coordinate).frame.activation_config)
+        except SnapshotMismatchError:
+            # Config is optional execution metadata.  A recovered or manually
+            # assembled frame index may omit it while the node still has all
+            # business inputs required for execution.
+            continue
+    return _select_activation_config(
+        tuple(candidates),
+        conflict_message="node inputs combine different activation Config snapshots",
+    )
 
 
 def node_inputs_available(
@@ -145,15 +190,17 @@ def node_inputs_available(
     plan = _require_node_materialization(graph, node_id)
     has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
     cause: GraphActivationCause | None = None
+    node: GraphFrontierNode | None = None
     if state is not None:
+        node = frontier_node(state.frontier, node_id)
         if state.run_id != scope_run.graph_run_id:
             raise SnapshotMismatchError("predecessor input availability scope does not match authoritative state")
         if has_predecessor and activation_superstep != state.superstep:
             raise SnapshotMismatchError("predecessor input availability coordinate does not match authoritative state")
-        if has_predecessor:
-            node = frontier_node(state.frontier, node_id)
-            if node is None:
+        if node is None:
+            if has_predecessor:
                 raise SnapshotMismatchError("predecessor-bound activation is not present in the current frontier")
+        else:
             cause = node.cause
     elif has_predecessor:
         raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
@@ -230,15 +277,36 @@ def materialize_node_input(
     if isinstance(effective_input, OverrideGraphNodeInput):
         if has_predecessor:
             raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
-        return decode_resume_input(graph, node_id, bytes(effective_input.payload))
+        inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+        return decode_resume_input(
+            graph,
+            node_id,
+            bytes(effective_input.payload),
+            activation_config=inherited_config,
+        )
     resume_coordinate = _resume_input_coordinate(activation, plan)
     if not has_predecessor:
         try:
-            return frames.lookup(resume_coordinate).frame
+            cached = frames.lookup(resume_coordinate).frame
         except SnapshotMismatchError:
-            pass
-    entries: list[NamedValue[GraphValueT]] = []
-    source_frames: list[GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT]] = []
+            cached = None
+        if cached is not None:
+            inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+            return _make_node_input_frame(
+                cached.entries,
+                plan.descriptor.declarations,
+                activation_config=_select_activation_config(
+                    (inherited_config, cached.activation_config),
+                    conflict_message="node inputs combine different activation Config snapshots",
+                ),
+            )
+    resolved_bindings: list[
+        tuple[
+            ResolvedValueSource,
+            GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+            ResolvedInputBinding[GraphValueT],
+        ]
+    ] = []
     for binding in plan.bindings.entries:
         try:
             source, coordinate = binding_source_coordinate(
@@ -251,6 +319,10 @@ def materialize_node_input(
             )
         except InvalidRoutingCommandError as error:
             raise SnapshotMismatchError(str(error)) from error
+        resolved_bindings.append((source, coordinate, binding))
+    entries: list[NamedValue[GraphValueT]] = []
+    source_configs: list[Config | None] = []
+    for source, coordinate, binding in resolved_bindings:
         if isinstance(source, GraphInputPort):
             value_name = source.name
             unavailable = f"graph input {source.name!r}"
@@ -261,13 +333,17 @@ def materialize_node_input(
             frame = frames.lookup(coordinate).frame
         except SnapshotMismatchError as error:
             raise GraphValueUnavailableError(f"{unavailable} is unavailable at {scope_run!r}") from error
-        source_frames.append(frame)
+        source_configs.append(frame.activation_config)
         value = _frame_value(frame, value_name)
         entries.append(NamedValue(binding.destination.local_name, value))
+    inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
     return _make_node_input_frame(
         tuple(entries),
         plan.descriptor.declarations,
-        activation_config=_activation_config_from_frames(tuple(source_frames)),
+        activation_config=_select_activation_config(
+            (inherited_config, *source_configs),
+            conflict_message="node inputs combine different activation Config snapshots",
+        ),
     )
 
 

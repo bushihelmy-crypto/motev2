@@ -373,11 +373,12 @@ async def test_bounded_execution_fails_closed_before_a_sufficient_budget() -> No
 @pytest.mark.asyncio
 async def test_partial_commit_example_retries_only_the_unconfirmed_scope() -> None:
     graph = build_partial_commit_graph()
-    paused = await graph.run(Graph.values(left="", right=""), run_id="example-partial-commit")
+    faulty = FailOnScopeCommit()
+    paused = await graph.run(Graph.values(left="", right=""), run_id="example-partial-commit", commit=faulty)
     assert isinstance(paused, Graph.AwaitingResumeResult)
     interrupt_by_scope = {interrupt.scope: interrupt for interrupt in paused.interrupts}
 
-    faulty = FailOnScopeCommit(("right",))
+    faulty.failed_scope = ("right",)
     try:
         await graph.run(
             state=paused.state,
@@ -404,6 +405,7 @@ async def test_partial_commit_example_retries_only_the_unconfirmed_scope() -> No
     else:
         pytest.fail("the injected right-scope commit failure must produce a partial handoff")
 
+    faulty.failed_scope = None
     completed = await graph.run(
         state=partial.state,
         continuation=partial.continuation,

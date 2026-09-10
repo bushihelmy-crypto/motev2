@@ -2,10 +2,13 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
+from tests.execution.engine.factories import activation_config
 
 from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.resume_admission import prepare_resume
 from mote_kernel.execution.errors import GraphValueAdmissionError, SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
@@ -16,7 +19,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import _frame_value
 from mote_kernel.execution.graph_run import project_start_graph_command
@@ -28,7 +30,12 @@ from mote_kernel.execution.request import (
     ResumeNodeRequest,
     ResumeRequest,
 )
-from mote_kernel.execution.run_context import ResumeInputAvailabilityCoordinate, ScopedFrameIndex
+from mote_kernel.execution.run_context import (
+    AdmittedGraphInput,
+    GraphInputAvailabilityCoordinate,
+    ResumeInputAvailabilityCoordinate,
+    ScopedFrameIndex,
+)
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ActivationReference,
@@ -100,10 +107,10 @@ def interruptible_graph(
     codec: bool = True,
     codec_implementation: _Codec | None = None,
 ) -> CompiledGraph[str]:
-    binding: ResumeInputBinding[str] | None = None
+    binding: FrameCodec[str] | None = None
     if codec:
         implementation = _Codec() if codec_implementation is None else codec_implementation
-        binding = ResumeInputBinding(
+        binding = FrameCodec(
             GraphResumeInputCodecId("resume.input.v1"),
             1,
             implementation.encode,
@@ -158,7 +165,7 @@ def predecessor_interruptible_graph() -> CompiledGraph[str]:
             ),
             (),
             normalize_graph_output_declarations({"value": Graph.node_output("loop", "value")}),
-            resume_input=ResumeInputBinding(
+            resume_input=FrameCodec(
                 GraphResumeInputCodecId("resume.input.v1"),
                 1,
                 codec.encode,
@@ -281,6 +288,26 @@ def test_prepare_resume_admits_one_exact_interrupt_input_and_command() -> None:
     assert successor.frontier.nodes[0].settlement == PendingGraphNode(
         OverrideGraphNodeInput(GraphResumeInputPayload(b"answer"))
     )
+
+
+def test_prepare_resume_projects_the_pending_cause_config_into_the_override_frame() -> None:
+    graph = interruptible_graph("node")
+    state = interrupted_state(graph)
+    scope_run = root_scope_run(state.run_id)
+    config = activation_config(1)
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            admit_graph_input(graph, Graph.values(value="seed"), config),
+        )
+    )
+
+    prepared = prepare_resume(
+        graph,
+        ResumeRequest(state, scope_run, frames, (request_action(state, GraphNodeId("node"), "answer"),)),
+    )
+
+    assert prepared.inputs[0].frame.activation_config is config
 
 
 def test_prepare_resume_admits_multiple_interrupts_in_canonical_order() -> None:

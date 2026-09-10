@@ -1,12 +1,15 @@
 from collections.abc import Mapping
 from dataclasses import replace
+from typing import cast
 
 import pytest
 from tests.execution.engine.factories import activation_config, running_state
 
+from mote_kernel.config import Config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.resume_input import (
+    activation_config_for_cause,
     decode_resume_input,
     encode_resume_input,
     materialize_node_input,
@@ -18,6 +21,7 @@ from mote_kernel.execution.errors import (
     GraphValueUnavailableError,
     SnapshotMismatchError,
 )
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
@@ -30,9 +34,12 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph, frozen_map
-from mote_kernel.execution.graph.values import NamedValue, _make_node_input_frame, _make_node_output_frame
+from mote_kernel.execution.graph.values import (
+    NamedValue,
+    _make_node_input_frame,
+    _make_node_output_frame,
+)
 from mote_kernel.execution.identity import StableActivation, root_scope_run
 from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.run_context import (
@@ -47,6 +54,7 @@ from mote_kernel.execution.run_context import (
 )
 from mote_kernel.state.graph_state import (
     ActivationReference,
+    GraphActivationCause,
     GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -55,6 +63,7 @@ from mote_kernel.state.graph_state import (
     GraphFrontierNode,
     GraphFrontierState,
     GraphNodeId,
+    GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
     GraphRouteId,
@@ -126,7 +135,7 @@ def compiled_graph(*, codec: TextCodec | None = None, data_dependency: bool = Fa
         nodes = (source, consumer)
         edges = (DirectEdge(GraphNodeId("source"), GraphNodeId("consumer")),)
     resume_input = (
-        None if codec is None else ResumeInputBinding(GraphResumeInputCodecId("text.v1"), 1, codec.encode, codec.decode)
+        None if codec is None else FrameCodec(GraphResumeInputCodecId("text.v1"), 1, codec.encode, codec.decode)
     )
     return GraphCompiler(
         GraphDefinition(
@@ -715,7 +724,7 @@ def test_resume_decoder_must_return_graph_values() -> None:
     malformed_binding = replace(graph.resume_input, decoder=BytesDecoder().decode)
     malformed = replace(graph, resume_input=malformed_binding)
 
-    with pytest.raises(GraphValueAdmissionError, match=r"must return Graph\.Values"):
+    with pytest.raises(GraphValueAdmissionError, match=r"must be produced by Graph\.values"):
         decode_resume_input(malformed, GraphNodeId("source"), b"input")
 
 
@@ -834,6 +843,136 @@ def test_pending_input_availability_accepts_state_and_acknowledged_overrides() -
     )
 
     assert pending_node_input_available(graph, state, scope_run, frames, node_id)
+
+
+def test_state_owned_resume_override_inherits_the_pending_cause_config() -> None:
+    graph = compiled_graph(codec=TextCodec())
+    state = replace(
+        running_state(frontier=("source",)),
+        resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("text.v1"), 1),
+    )
+    node_id = GraphNodeId("source")
+    config = activation_config(1)
+    scope_run = root_scope_run(state.run_id)
+    graph_input = admit_graph_input(graph, Graph.values(value="seed"), config)
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            graph_input,
+        )
+    )
+    overridden = replace(
+        state,
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    node_id,
+                    PendingGraphNode(OverrideGraphNodeInput(GraphResumeInputPayload(b"answer"))),
+                    StartActivationCause(),
+                ),
+            )
+        ),
+    )
+
+    materialized = materialize_node_input(graph, overridden, scope_run, frames, node_id)
+
+    assert materialized.entries == (NamedValue("value", "answer"),)
+    assert materialized.activation_config is config
+
+
+def test_cached_resume_frame_inherits_the_pending_cause_config() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+    node_id = GraphNodeId("source")
+    config = activation_config(1)
+    scope_run = root_scope_run(state.run_id)
+    graph_input = admit_graph_input(graph, Graph.values(value="seed"), config)
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            graph_input,
+        )
+    )
+    plan = graph.transition.materializations[node_id]
+    cached = _make_node_input_frame((NamedValue("value", "cached"),), plan.descriptor.declarations)
+    frames = frames.add_resume_input(
+        AdmittedResumeInput(
+            ResumeInputAvailabilityCoordinate(
+                StableActivation(scope_run, state.superstep, node_id),
+                plan.descriptor.identity,
+            ),
+            cached,
+        )
+    )
+
+    materialized = materialize_node_input(graph, state, scope_run, frames, node_id)
+
+    assert materialized.entries == cached.entries
+    assert materialized.activation_config is config
+
+
+def test_activation_config_projection_rejects_a_malformed_cause_config() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+    scope_run = root_scope_run(state.run_id)
+    input_frame = admit_graph_input(graph, Graph.values(value="seed"))
+    object.__setattr__(input_frame, "activation_config", cast(Config, object()))
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            input_frame,
+        )
+    )
+
+    with pytest.raises(GraphValueAdmissionError, match="activation Config is malformed"):
+        activation_config_for_cause(graph, scope_run, state.frontier.nodes[0], frames)
+
+
+def test_activation_config_projection_rejects_an_unsupported_cause() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+    malformed = GraphFrontierNode(
+        GraphNodeId("source"),
+        PendingGraphNode(UseStepRequestInput()),
+        cast(GraphActivationCause, object()),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="unsupported cause"):
+        activation_config_for_cause(graph, root_scope_run(state.run_id), malformed, ScopedFrameIndex())
+
+
+def test_activation_config_projection_rejects_an_unknown_publication_cause() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=("source",))
+    cause = RoutedActivationCause(
+        (
+            ActivationReference(
+                GraphActivationIdentity(state.run_id, 0, GraphNodeId("ghost")),
+            ),
+        )
+    )
+    malformed = GraphFrontierNode(
+        GraphNodeId("source"),
+        PendingGraphNode(UseStepRequestInput()),
+        cause,
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="unknown publication"):
+        activation_config_for_cause(graph, root_scope_run(state.run_id), malformed, ScopedFrameIndex())
+
+
+def test_fixed_input_availability_does_not_require_a_frontier_node() -> None:
+    graph = compiled_graph()
+    state = running_state(frontier=())
+    scope_run = root_scope_run(state.run_id)
+    frames = ScopedFrameIndex().add_graph_input(
+        AdmittedGraphInput(
+            GraphInputAvailabilityCoordinate(scope_run, graph.graph_input_descriptor.identity),
+            admit_graph_input(graph, Graph.values(value="seed")),
+        )
+    )
+
+    assert node_inputs_available(graph, scope_run, 0, frames, GraphNodeId("source"), state)
 
 
 def test_materialization_requires_the_authoritative_graph_run_coordinate() -> None:

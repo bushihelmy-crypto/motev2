@@ -22,6 +22,7 @@ from mote_kernel.execution.errors import (
 )
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.family_driver import fresh_root
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
@@ -33,7 +34,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
@@ -142,7 +142,7 @@ def graph_with_nodes(
     entries: tuple[str, ...] = (),
     resources: tuple[ResourceDefinition, ...] = (),
     definition_id: str = "test.graph",
-    resume_input: ResumeInputBinding[str] | None = None,
+    resume_input: FrameCodec[str] | None = None,
 ) -> CompiledGraph[str]:
     return GraphCompiler(
         GraphDefinition(
@@ -522,7 +522,7 @@ async def test_claim_rejects_a_committed_state_with_a_different_pending_input() 
     codec = _Codec()
     graph = graph_with_nodes(
         node("a"),
-        resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+        resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
     )
     executor = GraphExecutor(graph)
     initial = started(graph)

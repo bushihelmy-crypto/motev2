@@ -394,7 +394,6 @@ def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier
             status=GraphRunStatus.COMPLETED,
             frontier=GraphFrontierState(()),
             join_progress=(),
-            settled_activations=(),
             completion_route=command.completion_route,
         )
     )

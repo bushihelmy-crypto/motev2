@@ -26,7 +26,13 @@ from mote_kernel.state.graph_state.identity import (
     child_graph_run_id,
     is_canonical_identity,
 )
-from mote_kernel.state.graph_state.model import GraphJoinProgress, GraphRunState, GraphRunStatus
+from mote_kernel.state.graph_state.model import (
+    GraphExecutionLease,
+    GraphExecutionToken,
+    GraphJoinProgress,
+    GraphRunState,
+    GraphRunStatus,
+)
 from mote_kernel.state.graph_state.resource_reducer import ResourceTransitionError, validate_resource_snapshot
 from mote_kernel.state.graph_state.routing import ContinueGraphRouting, GraphRoutingContribution, SelectGraphRoute
 
@@ -108,7 +114,7 @@ def _validate_settled_activations(state: GraphRunState) -> None:
         activation = _reference_activation(reference, "settled activation evidence")
         if activation.run_id != state.run_id or activation.superstep > state.superstep:
             raise GraphStateTransitionError("settled activation evidence has an invalid coordinate")
-        if activation.superstep == state.superstep:
+        if activation.superstep == state.superstep and state.status is not GraphRunStatus.COMPLETED:
             current = frontier_node(state.frontier, activation.node_id)
             if current is None or not isinstance(current.settlement, SucceededGraphNode):
                 raise GraphStateTransitionError("current settled activation evidence has no successful frontier node")
@@ -295,12 +301,17 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
 def validate_graph_run_state(state: GraphRunState) -> None:
     """Reject a recovered graph-run state that violates durable invariants."""
 
+    if type(state) is not GraphRunState:
+        raise GraphStateTransitionError("graph snapshot must be GraphRunState")
     _require_identity(state.run_id, "graph run identity")
     _require_identity(state.definition_id, "graph definition identity")
-    if state.definition_version < 1:
+    if type(state.definition_version) is not int or state.definition_version < 1:
         raise GraphStateTransitionError("graph definition version must be positive")
-    if state.superstep < 0 or state.revision < 0 or state.execution_sequence < 0:
-        raise GraphStateTransitionError("graph counters cannot be negative")
+    if any(
+        type(counter) is not int or counter < 0
+        for counter in (state.superstep, state.revision, state.execution_sequence)
+    ):
+        raise GraphStateTransitionError("graph counters must be non-negative integers")
     try:
         _ = state.config_cursor
     except (AttributeError, TypeError, ValueError) as error:
@@ -340,9 +351,14 @@ def validate_graph_run_state(state: GraphRunState) -> None:
     if execution is not None:
         if state.status is not GraphRunStatus.RUNNING:
             raise GraphStateTransitionError("only a running graph may retain an execution lease")
-        if execution.token.generation != state.execution_sequence or execution.token.generation < 1:
+        if type(execution) is not GraphExecutionLease:
+            raise GraphStateTransitionError("graph execution lease is malformed")
+        try:
+            token = GraphExecutionToken.admit(execution.token)
+        except ValueError as error:
+            raise GraphStateTransitionError(str(error)) from error
+        if token.generation != state.execution_sequence:
             raise GraphStateTransitionError("execution lease generation must match the graph sequence")
-        _require_identity(execution.token.attempt_id, "execution attempt identity")
         if not pending_node_ids(state.frontier):
             raise GraphStateTransitionError("an active execution lease requires pending nodes")
 
