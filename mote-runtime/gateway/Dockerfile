@@ -1,7 +1,7 @@
 # The command is intentionally a scaffold entry point until inbound invocation
 # wiring is supplied by mote-infra/invocation. Keep the image build reproducible
 # and free of CGO in the meantime.
-FROM golang:1.26.5-alpine AS build
+FROM golang:1.26.6-alpine AS build
 
 WORKDIR /workspace
 COPY src/go.mod ./src/go.mod

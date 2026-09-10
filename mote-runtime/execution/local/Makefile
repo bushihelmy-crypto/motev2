@@ -76,7 +76,7 @@ cargo-hygiene:
 	@bash scripts/check-cargo-hygiene.sh
 
 security: secret-scan
-	@$(CARGO) deny check --manifest-path $(MANIFEST) --locked
+	@$(CARGO) deny --manifest-path $(MANIFEST) --locked check
 
 secret-scan:
 	@bash scripts/check-secrets.sh

@@ -4,11 +4,11 @@ The Gateway uses one Go module rooted at `src/`. `src/go.mod` is the language
 toolchain source of truth:
 
 - `go 1.26.0` is the minimum supported language version;
-- `toolchain go1.26.5` is the reproducible runtime/development baseline;
+- `toolchain go1.26.6` is the reproducible runtime/development baseline;
 - `.go-version` repeats the baseline for version managers that understand the
   conventional file (the check script rejects drift).
 
-The quality workflow runs the complete gate on the pinned baseline (`1.26.5`).
+The quality workflow runs the complete gate on the pinned baseline (`1.26.6`).
 Its `gateway-tests` job runs the unit and deterministic integration suites on a
 Linux amd64 matrix of the baseline and current stable release (`1.27.1`). The
 second version is a compatibility check, not a second API promise; when Go

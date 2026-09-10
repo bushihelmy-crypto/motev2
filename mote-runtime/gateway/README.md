@@ -82,7 +82,7 @@ There are no third-party dependencies in the scaffold. Add a dependency only
 when a concrete owner and consumer need it, then commit the resulting module
 metadata and update the relevant quality gate.
 
-The Go baseline is Go 1.26.5 (`src/go.mod`, `toolchain` directive, and
+The Go baseline is Go 1.26.6 (`src/go.mod`, `toolchain` directive, and
 `.go-version`). CI tests the baseline and Go 1.27.1; see
 [`quality/toolchain.md`](quality/toolchain.md).
 
