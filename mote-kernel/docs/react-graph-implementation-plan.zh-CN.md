@@ -2,7 +2,13 @@
 
 最后更新：2026-09-07
 
-状态：**设计已收敛，可作为源码实施依据**
+状态：**历史设计记录（已被 2026-09-11 决策替代，不再作为源码实施依据）**
+
+> 2026-09-11 superseded note：本文保留早期 ReAct 拓扑讨论。当前实现不把 queue cursor
+> 放进 `ObserveRequest` 或 Hook state，`ObservationQueuePort.read()` 由 provider 自己维护消费
+> 位置；不实现独立 `ReActChain`。跨 run 的 Hook state 由 Runtime 调用方从上一 run 的结果保存，
+> 再作为下一 run 的 `ObserveRequest(hook_state)` 传入。当前 Observe 边界与实现以
+> `docs/observe-graph-implementation-plan.zh-CN.md` 及源码为准。
 
 本文只设计 ReAct 顶层 Graph。实现方式与现有 `ActNode`、`ThinkNode`、`ObserveNode`
 一致：定义 typed contract 和 admission，在构造函数中完成能力校验，然后通过

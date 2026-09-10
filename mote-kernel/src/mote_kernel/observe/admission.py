@@ -438,21 +438,6 @@ class ObservePayloadAdmission:
             return value
         raise ObserveContractError("queue read must be Available, Empty, or Conflict")
 
-    def admit_read_after(
-        self,
-        value: ObservationRead,
-        cursor: ObservationCursor,
-        /,
-    ) -> ObservationRead:
-        """Admit a read result whose boundary starts exactly at ``cursor``."""
-
-        read = self.admit_read(value)
-        self.admit_cursor(cursor)
-        boundary = read.boundary if type(read) is Available or type(read) is Empty else cast(Conflict, read).boundary
-        if boundary.stream_id != cursor.stream_id or boundary.cursor_before != cursor:
-            raise ObserveContractError("queue read boundary does not start at the requested cursor")
-        return read
-
     def admit_task_snapshot(self, value: BackgroundTaskSnapshot, /) -> BackgroundTaskSnapshot:
         _exact(value, BackgroundTaskSnapshot, "background task snapshot")
         canonical = _revalidate(
@@ -467,8 +452,7 @@ class ObservePayloadAdmission:
 
     def admit_request(self, value: ObserveRequest[AdmissionHookStateT], /) -> ObserveRequest[AdmissionHookStateT]:
         _exact(value, ObserveRequest, "Observe request")
-        _revalidate(lambda: ObserveRequest(value.cursor, value.hook_state), "Observe request")
-        self.admit_cursor(value.cursor)
+        _revalidate(lambda: ObserveRequest(value.hook_state), "Observe request")
         _concrete_state(value.hook_state, self.hook_state_type, "Observe request hook_state")
         return value
 

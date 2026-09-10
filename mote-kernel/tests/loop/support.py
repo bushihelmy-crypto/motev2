@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
 from mote_kernel.act.admission import ActPayloadAdmission
@@ -126,10 +126,13 @@ from mote_kernel.think.node import ThinkNode
 
 @dataclass(frozen=True, slots=True)
 class SharedState(ObserveHookStateProjection, ActHookStateProjection):
-    """One concrete state class intentionally shared by all three children."""
+    """One concrete business state shared by all three children.
+
+    Queue position is deliberately absent.  It belongs to the observation
+    provider, not to Hook state or a ReAct projector.
+    """
 
     marker: str = "state"
-    cursor: ObservationCursor = field(default_factory=lambda: ObservationCursor("stream", 0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,8 +295,7 @@ class ObservePorts:
         self.waits: list[ObservationWait] = []
         self._last_boundary: ObservationBoundary | None = None
 
-    async def read_after(self, requested: ObservationCursor, /) -> ObservationRead:
-        self.read_cursors.append(requested)
+    async def read(self, /) -> ObservationRead:
         if not self.reads:
             raise AssertionError("unexpected queue read")
         read = self.reads.pop(0)
@@ -301,8 +303,9 @@ class ObservePorts:
             boundary = cast(Available | Empty, read).boundary
         else:
             boundary = cast(Conflict, read).boundary
-        if boundary.cursor_before != requested:
-            raise AssertionError("queue read did not start at the requested cursor")
+        # The cursor is provider-owned; retain the returned boundary only as
+        # test evidence that the provider advanced its own position.
+        self.read_cursors.append(boundary.cursor_before)
         self._last_boundary = boundary
         return read
 
@@ -342,11 +345,10 @@ class ObservePorts:
 
     def encode_graph_input(self, values: Graph.Values[HookGraphValue], /) -> bytes:
         request = cast(ObserveRequest[SharedState], values["request"])
-        return f"{request.cursor.stream_id}:{request.cursor.sequence}:{request.hook_state.marker}".encode()
+        return request.hook_state.marker.encode()
 
     def decode_graph_input(self, payload: bytes, /) -> Graph.Values[HookGraphValue]:
-        stream, sequence, marker = payload.decode().split(":")
-        return Graph.values(request=ObserveRequest(ObservationCursor(stream, int(sequence)), SharedState(marker)))
+        return Graph.values(request=ObserveRequest(SharedState(payload.decode())))
 
     @property
     def codec_id(self) -> str:
@@ -603,7 +605,7 @@ def valid_observe_boundary(sequence: int = 0) -> HookResult[ObserveHookEnvelope,
     envelope = ObserveHookEnvelope(
         ObserveHookStage.AFTER_WRITE_OBSERVATION,
         WriteObservationStageValue(result),
-        SharedState(cursor=cursor(sequence)),
+        SharedState(),
     )
     return HookResult(envelope, (ObserveCommand(),), GraphNodeId("write_observation"))
 
@@ -660,5 +662,4 @@ def valid_act_boundary() -> HookResult[ActHookEnvelope, ActCommand]:
 
 
 def next_state(boundary: HookResult[ObserveHookEnvelope, ObserveCommand]) -> SharedState:
-    result = cast(WriteObservationStageValue, boundary.value.payload).result
-    return replace(cast(SharedState, boundary.value.hook_state), cursor=result.cursor_range.after)
+    return cast(SharedState, boundary.value.hook_state)

@@ -763,14 +763,18 @@ class DeliveryAck(HookGraphValue):
 
 @dataclass(frozen=True, slots=True)
 class ObserveRequest(HookGraphValue, Generic[ObserveRequestStateT]):
-    """Input to one Observe nested-graph activation."""
+    """Input to one Observe nested-graph activation.
 
-    cursor: ObservationCursor
+    The observation position is deliberately absent from this value.  It is
+    owned by the ``ObservationQueuePort`` provider, which can persist and
+    advance it together with its delivery acknowledgement.  Keeping the
+    position out of the request prevents callers (and Hook state) from
+    supplying a forged or stale read offset.
+    """
+
     hook_state: ObserveRequestStateT
 
     def __post_init__(self) -> None:
-        if type(self.cursor) is not ObservationCursor:
-            raise ObserveContractError("observe request cursor must be an ObservationCursor")
         state: HookGraphValue = self.hook_state
         if not _is_concrete_hook_state(state):
             raise ObserveContractError("observe request hook_state must be a concrete HookStateProjection")

@@ -21,7 +21,6 @@ from tests.loop.support import (
     ThinkPorts,
     act_admission,
     available,
-    cursor,
     delivery,
     hook_plan,
     next_state,
@@ -535,7 +534,7 @@ def _think_to_observe(
     /,
 ) -> ObserveRequest[SharedState]:
     state = value.value.hook_state
-    return ObserveRequest(state.cursor, state)
+    return ObserveRequest(state)
 
 
 def _act_to_observe(
@@ -543,7 +542,7 @@ def _act_to_observe(
     /,
 ) -> ObserveRequest[SharedState]:
     state = cast(SharedState, value.value.hook_state)
-    return ObserveRequest(state.cursor, state)
+    return ObserveRequest(state)
 
 
 def _react_config_fixture(observe_ports: ObservePorts | None = None) -> _ReActConfigFixture:
@@ -1641,7 +1640,7 @@ async def test_observe_successor_config_is_bound_without_reassembling_react() ->
     ports.successor = c18
 
     react = ReActNode[SharedState, ThinkPayload, SharedState, SharedState].from_config(c17)
-    request = ObserveRequest(cursor(0), SharedState(cursor=cursor(0)))
+    request = ObserveRequest(SharedState())
     result = await react.run(
         Graph.values(request=request),
         activation_config=c17,

@@ -289,7 +289,7 @@ def test_observe_projectors_reject_wrong_request_types_and_states() -> None:
 def test_think_completion_projection_requires_the_final_command_boundary() -> None:
     admission = react_admission()
     projected = admission.project_think_to_observe(
-        lambda _value: ObserveRequest(SharedState().cursor, SharedState()),
+        lambda _value: ObserveRequest(SharedState()),
         valid_think_boundary(),
     )
     assert type(projected) is ObserveRequest
@@ -297,7 +297,7 @@ def test_think_completion_projection_requires_the_final_command_boundary() -> No
     wrong_node = replace(valid_think_boundary(), node_id=GraphNodeId("inference"))
     with pytest.raises(ValueError, match=r"final command boundary|node_id"):
         admission.project_think_to_observe(
-            lambda _value: ObserveRequest(SharedState().cursor, SharedState()),
+            lambda _value: ObserveRequest(SharedState()),
             wrong_node,
         )
 
@@ -305,7 +305,7 @@ def test_think_completion_projection_requires_the_final_command_boundary() -> No
 def test_act_completion_projection_requires_the_final_settle_boundary() -> None:
     admission = react_admission()
     projected = admission.project_act_to_observe(
-        lambda _value: ObserveRequest(SharedState().cursor, SharedState()),
+        lambda _value: ObserveRequest(SharedState()),
         valid_act_boundary(),
     )
     assert type(projected) is ObserveRequest
@@ -313,7 +313,7 @@ def test_act_completion_projection_requires_the_final_settle_boundary() -> None:
     wrong_node = replace(valid_act_boundary(), node_id=GraphNodeId("execute"))
     with pytest.raises(ValueError, match="node_id does not match"):
         admission.project_act_to_observe(
-            lambda _value: ObserveRequest(SharedState().cursor, SharedState()),
+            lambda _value: ObserveRequest(SharedState()),
             wrong_node,
         )
 
@@ -465,7 +465,7 @@ def test_valid_state_and_projection_are_not_copied_or_reinterpreted() -> None:
         boundary,
     )
     assert request.hook_state is state
-    assert state.cursor == valid_observe_result().cursor_range.after
+    assert state is boundary.value.hook_state
 
 
 def test_admission_rejects_wrong_projector_result_without_invoking_downstream_logic() -> None:
@@ -793,11 +793,11 @@ def _observe_to_think(_value: object) -> ThinkRequest[ThinkPayload, SharedState]
 
 
 def _think_to_observe(_value: object) -> ObserveRequest[SharedState]:
-    return ObserveRequest(SharedState().cursor, SharedState())
+    return ObserveRequest(SharedState())
 
 
 def _act_to_observe(_value: object) -> ObserveRequest[SharedState]:
-    return ObserveRequest(SharedState().cursor, SharedState())
+    return ObserveRequest(SharedState())
 
 
 def _operations() -> _ReActOperationsView:

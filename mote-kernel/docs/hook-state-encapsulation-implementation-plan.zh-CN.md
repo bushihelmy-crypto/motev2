@@ -1,6 +1,10 @@
 # Hook 状态封装改造实施方案
 
-状态：**待实施，设计已冻结**
+状态：**历史设计记录（已被 2026-09-11 决策替代，不再作为实施依据）**
+
+> 2026-09-11 superseded note：本文中的 cursor-in-Hook-state 方案不再适用。当前 queue
+> 消费位置由 `ObservationQueuePort` provider 独占并持久化，`ObserveRequest` 只携带
+> `hook_state`；跨 run 的 state 接力由 Runtime 调用方负责。本文只保留作历史设计背景。
 
 规范来源：`docs/hook-state-encapsulation-requirements.zh-CN.md`
 

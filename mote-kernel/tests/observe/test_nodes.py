@@ -223,7 +223,7 @@ class _Ports:
     def set_boundary(self, boundary: ObservationBoundary, /) -> None:
         self._last_boundary = boundary
 
-    async def read_after(self, _cursor: ObservationCursor, /) -> ObservationRead:
+    async def read(self, /) -> ObservationRead:
         if not self.reads:
             raise AssertionError("unexpected queue read")
         read = self.reads.pop(0)
@@ -284,11 +284,10 @@ class _Ports:
 
     def encode_graph_input(self, values: Graph.Values[HookGraphValue], /) -> bytes:
         request = cast(ObserveRequest[_State], values["request"])
-        return f"{request.cursor.stream_id}|{request.cursor.sequence}|{request.hook_state.marker}".encode()
+        return request.hook_state.marker.encode()
 
     def decode_graph_input(self, payload: bytes, /) -> Graph.Values[HookGraphValue]:
-        stream, sequence, marker = payload.decode().split("|")
-        return Graph.values(request=ObserveRequest(ObservationCursor(stream, int(sequence)), _State(marker)))
+        return Graph.values(request=ObserveRequest(_State(payload.decode())))
 
     @property
     def codec_id(self) -> str:
@@ -388,8 +387,8 @@ def _observe_with_hook(
     )
 
 
-def _request(sequence: int = 0) -> ObserveRequest[_State]:
-    return ObserveRequest(_cursor(sequence), _State())
+def _request() -> ObserveRequest[_State]:
+    return ObserveRequest(_State())
 
 
 def _observation_payload(observation: Observation) -> object:
@@ -647,7 +646,7 @@ async def test_interleaved_config_and_user_projects_each_fifo_subset() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_queue_interrupts_and_resume_rereads_wait_cursor() -> None:
+async def test_empty_queue_resume_validates_wait_but_leaves_position_with_provider() -> None:
     ports = _Ports([_empty()])
     invocation = _HookInvocation()
     observe = _observe(ports, invocation)
@@ -658,11 +657,15 @@ async def test_empty_queue_interrupts_and_resume_rereads_wait_cursor() -> None:
     assert wait.after_cursor == _cursor(0)
 
     ports.reads.append(_available(_delivery(0, UserObservation("wake"), "wake-1")))
+    resumed_state = _State("runtime-state")
     action = observe.resume_observation(
         awaiting=awaiting,
         interrupt_id=str(awaiting.interrupts[0].interrupt_id),
-        hook_state=_State(),
+        hook_state=resumed_state,
     )
+    resumed_request = cast(ObserveRequest[_State], action.input.values["request"])
+    assert resumed_request.hook_state is resumed_state
+    assert not hasattr(resumed_request, "cursor")
     resumed = await observe.run(state=awaiting.state, continuation=awaiting.continuation, resume=(action,))
 
     assert isinstance(resumed, Graph.CompletedResult)
@@ -723,7 +726,7 @@ def test_resume_capability_is_required_for_a_durable_observe_graph() -> None:
     with pytest.raises(ObserveContractError, match="declared Ports"):
         GetObservationNode(cast(Never, object()), ports, _admission())
     queue_non_callable = _Ports()
-    queue_non_callable.read_after = None  # type: ignore[method-assign]
+    queue_non_callable.read = None  # type: ignore[method-assign]
     with pytest.raises(ObserveContractError, match="read/wait methods"):
         GetObservationNode(queue_non_callable, queue_non_callable, _admission())
     task_non_callable = _Ports()
@@ -1060,7 +1063,7 @@ async def test_get_observation_node_returns_a_durable_interrupt_for_empty_queue(
     empty = _empty(4)
     ports.reads.append(empty)
 
-    outcome = await _get_node(ports)(ConfigActivation(_request(4)))
+    outcome = await _get_node(ports)(ConfigActivation(_request()))
 
     assert isinstance(outcome, Graph.InterruptOutcome)
     assert ObservationWait.decode(outcome.request_payload) == empty.wait
@@ -1496,10 +1499,10 @@ async def test_get_observation_node_propagates_cancellation_while_reading() -> N
             self.entered = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def read_after(self, cursor: ObservationCursor, /) -> ObservationRead:
+        async def read(self, /) -> ObservationRead:
             self.entered.set()
             await self.release.wait()
-            return await super().read_after(cursor)
+            return await super().read()
 
     ports = BlockingQueue()
     ports.reads.append(_available(_delivery(0, UserObservation("user"), "user")))

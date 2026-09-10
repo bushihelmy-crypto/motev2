@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -21,9 +20,7 @@ from mote_kernel.observe.contract import (
     ObserveRequest,
     ObserveResult,
     UserObservation,
-    WriteObservationStageValue,
 )
-from mote_kernel.observe.identity import ObservationCursor
 from mote_kernel.think.contract import (
     ThinkFrame,
     ThinkRequest,
@@ -76,24 +73,20 @@ def _react(
         value: HookResult[ObserveHookEnvelope, ObserveCommand],
         /,
     ) -> ThinkRequest[ThinkPayload, SharedState]:
-        result = cast(WriteObservationStageValue, value.value.payload).result
-        state = replace(cast(SharedState, value.value.hook_state), cursor=result.cursor_range.after)
-        return ThinkRequest(ThinkPayload("think"), state)
+        return ThinkRequest(ThinkPayload("think"), cast(SharedState, value.value.hook_state))
 
     def observe_to_act(
         value: HookResult[ObserveHookEnvelope, ObserveCommand],
         /,
     ):
-        result = cast(WriteObservationStageValue, value.value.payload).result
-        state = replace(cast(SharedState, value.value.hook_state), cursor=result.cursor_range.after)
-        return valid_act_request(state)
+        return valid_act_request(cast(SharedState, value.value.hook_state))
 
     def think_to_observe(
         value: HookResult[ThinkFrame[ThinkStep, SharedState], ThinkCommand],
         /,
     ) -> ObserveRequest[SharedState]:
         state = value.value.hook_state
-        return ObserveRequest(state.cursor, state)
+        return ObserveRequest(state)
 
     def act_to_observe(
         value: HookResult[ActHookEnvelope, ActCommand],
@@ -102,7 +95,7 @@ def _react(
         # Act admission guarantees the concrete envelope and state before
         # this projector is called; the test keeps the projector pure.
         state = cast(SharedState, value.value.hook_state)
-        return ObserveRequest(state.cursor, state)
+        return ObserveRequest(state)
 
     node = ReActNode(
         "loop.integration",
@@ -118,8 +111,8 @@ def _react(
     return node, actual_think_ports, actual_act_ports, act
 
 
-def _request(sequence: int = 0) -> ObserveRequest[SharedState]:
-    return ObserveRequest(ObservationCursor("stream", sequence), SharedState(cursor=cursor(sequence)))
+def _request() -> ObserveRequest[SharedState]:
+    return ObserveRequest(SharedState())
 
 
 @pytest.mark.asyncio
@@ -150,7 +143,7 @@ async def test_assistant_observation_uses_the_other_terminal_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_think_route_cycles_through_think_then_observe_with_the_next_cursor() -> None:
+async def test_think_route_cycles_through_think_then_provider_uses_the_next_position() -> None:
     ports = ObservePorts(
         (
             available(delivery(0, UserObservation(ObservationText("question")), "user-1")),
@@ -173,7 +166,7 @@ async def test_think_route_cycles_through_think_then_observe_with_the_next_curso
     assert route_calls == 2
     assert ports.read_cursors == [cursor(0), cursor(1)]
     assert len(think_ports.requests) == 1
-    assert think_ports.requests[0].hook_state.cursor == cursor(1)
+    assert think_ports.requests[0].hook_state.marker == "state"
 
 
 @pytest.mark.asyncio
@@ -200,7 +193,7 @@ async def test_act_route_enters_the_nested_authorization_interrupt_with_projecte
     assert action.scope == ("act", "run")
     assert str(action.node_id) == "authorize"
     assert len(act_ports.requests) == 1
-    assert cast(SharedState, act_ports.requests[0].hook_state).cursor == cursor(1)
+    assert cast(SharedState, act_ports.requests[0].hook_state).marker == "state"
     assert ports.read_cursors == [cursor(0)]
 
 

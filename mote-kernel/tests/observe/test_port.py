@@ -24,7 +24,6 @@ from mote_kernel.observe.contract import (
 from mote_kernel.observe.identity import (
     DeliveryId,
     ObservationBoundary,
-    ObservationCursor,
     ObservationWait,
     WaitRegistration,
 )
@@ -43,8 +42,7 @@ from mote_kernel.observe.port import (
 
 
 class _CompleteBundle:
-    async def read_after(self, cursor: ObservationCursor, /) -> ObservationRead:
-        del cursor
+    async def read(self, /) -> ObservationRead:
         raise NotImplementedError
 
     async def register_wait(self, wait: ObservationWait, /) -> WaitRegistration:
@@ -94,7 +92,7 @@ class _Incomplete:
 
 
 class _NonCallableQueue(ObservationQueuePort):
-    read_after = None  # type: ignore[assignment]
+    read = None  # type: ignore[assignment]
     register_wait = None  # type: ignore[assignment]
 
 

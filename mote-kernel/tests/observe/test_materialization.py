@@ -9,7 +9,6 @@ from tests.loop.support import (
     ObservePorts,
     SharedState,
     available,
-    cursor,
     delivery,
     observe_admission,
 )
@@ -31,7 +30,7 @@ async def test_write_observation_consumes_a_direct_hook_result_activation() -> N
     read = available(delivery(0, UserObservation(ObservationText("question")), "user-1"))
     ports = ObservePorts((read,))
     admission = observe_admission()
-    request = ObserveRequest(cursor(0), SharedState(cursor=cursor(0)))
+    request = ObserveRequest(SharedState())
 
     get_request = await GetObservationNode[SharedState, ObserveCommand](ports, ports, admission)(
         ConfigActivation(request)

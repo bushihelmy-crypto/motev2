@@ -33,9 +33,6 @@ from tests.observe.test_nodes import (
 from tests.observe.test_nodes import (
     make_delivery as _delivery,
 )
-from tests.observe.test_nodes import (
-    make_empty as _empty,
-)
 
 from mote_kernel.hooks.contract import HookActivationRequest, HookResult, HookStageResult
 from mote_kernel.observe.admission import ObservePayloadAdmission
@@ -282,8 +279,6 @@ def test_admission_revalidates_forged_conflict_and_read_variants() -> None:
         _admission().admit_conflict(cast(Never, forged))
     with pytest.raises(ObserveContractError, match="queue read"):
         _admission().admit_read(cast(Never, object()))
-    with pytest.raises(ObserveContractError, match="does not start"):
-        _admission().admit_read_after(_empty(1), _cursor(0))
     with pytest.raises(ObserveContractError, match="conflicting"):
         conflicted = object.__new__(Available)
         object.__setattr__(conflicted, "batch", ObservationBatch(deliveries))

@@ -93,12 +93,12 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
         queue_port = decorators.queue_port(self.queue_port)
         background_task_port = decorators.background_task_port(self.background_task_port)
         try:
-            read_after = queue_port.read_after
+            read = queue_port.read
             register_wait = queue_port.register_wait
             snapshot = background_task_port.snapshot
         except AttributeError as error:
             raise ObserveContractError("GetObservationNode requires its declared Ports") from error
-        if not callable(read_after) or not callable(register_wait):
+        if not callable(read) or not callable(register_wait):
             raise ObserveContractError("ObservationQueuePort read/wait methods must be callable")
         if not callable(snapshot):
             raise ObserveContractError("GetObservationNode requires a BackgroundTaskPort")
@@ -127,7 +127,11 @@ class GetObservationNode(Generic[HookStateT, HookCommandT]):
             if self.assembly_snapshot_key is None or selected.snapshot_key != self.assembly_snapshot_key:
                 queue_port = decorators.queue_port(selected.capability.queue_port)
                 background_task_port = decorators.background_task_port(selected.capability.background_task_port)
-        read = self.admission.admit_read_after(await queue_port.read_after(request.cursor), request.cursor)
+        # The queue provider owns the durable read position.  Observe asks
+        # only for the next unconsumed window; any cursor included in the
+        # returned boundary is provider evidence used for settlement and
+        # recovery, never a value supplied by the caller.
+        read = self.admission.admit_read(await queue_port.read())
         if type(read) is Empty:
             # The provider performs an atomic recheck/registration.  The
             # registration receipt is intentionally not treated as a message;
@@ -622,12 +626,11 @@ class ObserveNode(
         interrupt_id: str,
         hook_state: HookStateT,
     ) -> Graph.ResumeAction[HookGraphValue]:
-        """Build a typed wake resume using the wait cursor carried by the interrupt.
+        """Build a typed wake resume after validating its durable wait payload.
 
-        A wake notification is not a business delivery.  Parsing its durable
-        ``ObservationWait`` payload here forces the resumed request to reread
-        from the provider-owned ``after_cursor`` and makes it impossible for a
-        caller to accidentally reuse the pre-wait cursor.
+        A wake notification is not a business delivery or a new read
+        position.  The provider retains that position; the decoded wait is
+        only validated as evidence for the selected interrupt.
         """
 
         matches = tuple(
@@ -639,10 +642,13 @@ class ObserveNode(
             raise ObserveContractError("interrupt_id must identify exactly one Observe get_observation interrupt")
         interrupt = matches[0]
         try:
-            wait = ObservationWait.decode(interrupt.request_payload)
+            ObservationWait.decode(interrupt.request_payload)
         except ObserveIdentityError as error:
             raise ObserveContractError("Observe interrupt payload is not a valid ObservationWait") from error
-        request = self._admission.admit_request(ObserveRequest(wait.after_cursor, hook_state))
+        # The provider will re-read from its own durable position after the
+        # wake.  The wait payload is only a wake/diagnostic coordinate; it is
+        # not copied into the resumed request.
+        request = self._admission.admit_request(ObserveRequest(hook_state))
         values = Graph.values(**{ObserveValueName.REQUEST: request})
         return self.resume_interrupted(
             ObserveNodeId.GET_OBSERVATION,

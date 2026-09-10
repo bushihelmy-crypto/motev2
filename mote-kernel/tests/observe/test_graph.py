@@ -29,9 +29,6 @@ from tests.observe.test_nodes import (
     make_available as _available,
 )
 from tests.observe.test_nodes import (
-    make_cursor as _cursor,
-)
-from tests.observe.test_nodes import (
     make_delivery as _delivery,
 )
 from tests.observe.test_nodes import (
@@ -77,7 +74,7 @@ from mote_kernel.observe.contract import (
     UserObservation,
     WriteObservationStageValue,
 )
-from mote_kernel.observe.identity import ObservationBoundary, ObservationCursor, ObserveHookStage
+from mote_kernel.observe.identity import ObservationBoundary, ObserveHookStage
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 
@@ -194,9 +191,9 @@ async def test_nested_parent_consumes_observe_only_at_its_terminal_route() -> No
 @pytest.mark.asyncio
 async def test_two_concurrent_observe_runs_keep_frames_and_hook_state_isolated() -> None:
     class IsolatedPorts(_Ports):
-        async def read_after(self, cursor: ObservationCursor, /) -> ObservationRead:
+        async def read(self, /) -> ObservationRead:
             await asyncio.sleep(0)
-            return await super().read_after(cursor)
+            return await super().read()
 
         async def snapshot(self, boundary: ObservationBoundary, /) -> BackgroundTaskSnapshot:
             await asyncio.sleep(0)
@@ -217,8 +214,8 @@ async def test_two_concurrent_observe_runs_keep_frames_and_hook_state_isolated()
     observe = _observe(ports, invocation)
 
     first, second = await asyncio.gather(
-        observe.run(Graph.values(request=ObserveRequest(_cursor(0), _State("first"))), run_id="observe-first"),
-        observe.run(Graph.values(request=ObserveRequest(_cursor(0), _State("second"))), run_id="observe-second"),
+        observe.run(Graph.values(request=ObserveRequest(_State("first"))), run_id="observe-first"),
+        observe.run(Graph.values(request=ObserveRequest(_State("second"))), run_id="observe-second"),
     )
 
     assert isinstance(first, Graph.CompletedResult)
@@ -233,6 +230,35 @@ async def test_two_concurrent_observe_runs_keep_frames_and_hook_state_isolated()
     }
 
 
+@pytest.mark.asyncio
+async def test_serial_observe_runs_reuse_only_the_state_handed_back_by_runtime() -> None:
+    ports = _Ports()
+    invocation = _HookInvocation()
+    ports.reads.extend(
+        (
+            _available(_delivery(0, UserObservation("first"), "first")),
+            _available(_delivery(1, AssistantObservation("second"), "second")),
+        )
+    )
+    observe = _observe(ports, invocation)
+
+    first_state = _State("first")
+    first = await observe.run(Graph.values(request=ObserveRequest(first_state)), run_id="observe-serial-first")
+    assert isinstance(first, Graph.CompletedResult)
+    first_output = cast(HookResult[ObserveHookEnvelope, _Command], first.outputs["result"])
+    handed_off = first_output.value.hook_state
+    assert handed_off is first_state
+
+    second = await observe.run(
+        Graph.values(request=ObserveRequest(cast(_State, handed_off))),
+        run_id="observe-serial-second",
+    )
+    assert isinstance(second, Graph.CompletedResult)
+    second_output = cast(HookResult[ObserveHookEnvelope, _Command], second.outputs["result"])
+    assert second_output.value.hook_state is handed_off
+    assert cast(_State, second_output.value.hook_state).marker == "first"
+
+
 class _FailingPorts(_Ports):
     def __init__(self, failure: str) -> None:
         super().__init__()
@@ -242,9 +268,9 @@ class _FailingPorts(_Ports):
         if self.failure == operation:
             raise RuntimeError(f"{operation} failure")
 
-    async def read_after(self, cursor: ObservationCursor, /) -> ObservationRead:
+    async def read(self, /) -> ObservationRead:
         self._fail("read")
-        return await super().read_after(cursor)
+        return await super().read()
 
     async def snapshot(self, boundary: ObservationBoundary, /) -> BackgroundTaskSnapshot:
         self._fail("snapshot")

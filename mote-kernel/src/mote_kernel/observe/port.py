@@ -29,7 +29,6 @@ from mote_kernel.observe.contract import (
 from mote_kernel.observe.identity import (
     DeliveryId,
     ObservationBoundary,
-    ObservationCursor,
     ObservationWait,
     WaitRegistration,
 )
@@ -37,9 +36,16 @@ from mote_kernel.observe.identity import (
 
 @runtime_checkable
 class ObservationQueuePort(Protocol):
-    """Read one complete FIFO window and register durable wake coordinates."""
+    """Read one complete FIFO window and register durable wake coordinates.
 
-    async def read_after(self, cursor: ObservationCursor, /) -> ObservationRead: ...
+    The provider owns the stream position.  Observe asks for the next
+    unconsumed window without supplying a cursor; the provider advances its
+    durable position when the matching ``ObservationAckPort`` confirms the
+    batch.  Cursor values that appear in returned boundaries are evidence
+    produced by the provider, not caller-owned state.
+    """
+
+    async def read(self, /) -> ObservationRead: ...
 
     async def register_wait(self, wait: ObservationWait, /) -> WaitRegistration: ...
 
@@ -82,11 +88,11 @@ class ObservationResumePort(Protocol):
     """Own the durable codec for an Observe graph-input resume frame.
 
     ``Graph.interrupt`` transports only opaque bytes.  The queue wait payload
-    tells the host *where* to reread, while this capability owns encoding and
+    identifies the wake boundary, while this capability owns encoding and
     decoding the concrete ``ObserveRequest`` (including the Hook state) that
-    the interrupted ``get_observation`` node needs when it is resumed.  The
-    codec is synchronous and deterministic; it must not keep an in-memory
-    token table.
+    the interrupted ``get_observation`` node needs when it is resumed.  It
+    does not encode a caller-controlled queue position.  The codec is
+    synchronous and deterministic; it must not keep an in-memory token table.
     """
 
     def encode_graph_input(self, values: Graph.Values[HookGraphValue], /) -> bytes: ...
@@ -236,7 +242,7 @@ def require_observe_port_contracts(
 
     if not isinstance(queue_port, ObservationQueuePort):
         raise ObserveContractError("ObserveNode requires a ObservationQueuePort")
-    if not callable(queue_port.read_after) or not callable(queue_port.register_wait):
+    if not callable(queue_port.read) or not callable(queue_port.register_wait):
         raise ObserveContractError("ObservationQueuePort read/wait methods must be callable")
 
     if not isinstance(task_port, BackgroundTaskPort):
