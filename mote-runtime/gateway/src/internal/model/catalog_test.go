@@ -335,6 +335,11 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	}
 
 	assertOperation(t, catalog, "gpt-6-astra", api.OperationGenerate)
+	assertOperation(t, catalog, "gpt-image-2.5-flare", api.OperationImageGeneration)
+	assertOperation(t, catalog, "glm-5.3-flash", api.OperationGenerate)
+	assertOperation(t, catalog, "deepseek-v4-flash", api.OperationGenerate)
+	assertOperation(t, catalog, "kimi-k3", api.OperationGenerate)
+	assertOperation(t, catalog, "claude-opus-5", api.OperationGenerate)
 	assertOperation(t, catalog, "dall-e-3", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gpt-image-1", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gemini-2.5-flash-image", api.OperationImageGeneration)
@@ -412,7 +417,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 			"bdef1175", "05247769", "268b2096", "65fb3ad7", "554c3da7",
 		}, ""),
 		"bifrost": strings.Join([]string{
-			"ec1dd920", "61995541", "5bd6d61a", "b9ecff71", "f170ee22",
+			"c5c02ae7", "47fe294a", "7f7f7652", "77aae08b", "bf0835fa",
 		}, ""),
 		"bifrost-model-parameters": strings.Join([]string{
 			"7ccfc3a9", "a98ffc09", "bff1ae37", "2bf574d8", "4cf2c336", "2c6493c8", "69978f14", "a6b41ea1",
@@ -554,6 +559,30 @@ func TestModelErrorsPreserveBoundaryFacts(t *testing.T) {
 	catalogErrorValue := (&CatalogDataError{Reason: "broken"}).Error()
 	if catalogErrorValue != "invalid embedded model catalog: broken" {
 		t.Fatalf("unexpected catalog error: %q", catalogErrorValue)
+	}
+}
+
+func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
+	catalog, err := NewCatalog(nil)
+	if err != nil {
+		t.Fatalf("load built-in catalog: %v", err)
+	}
+	for _, modelID := range []string{"claude-opus-4-8", "claude-opus-4.8", "claude-opus-5", "claude-sonnet-5"} {
+		definition, lookupErr := catalog.Lookup(modelID)
+		if lookupErr != nil {
+			t.Fatalf("lookup %q: %v", modelID, lookupErr)
+		}
+		capability, ok := definition.Capability(api.OperationGenerate)
+		if !ok {
+			t.Fatalf("%q has no generate capability", modelID)
+		}
+		resolved := capability.ResolveGenerationParameters(api.GenerationParameters{
+			Temperature: pointer(0.4),
+			TopP:        pointer(0.5),
+		})
+		if resolved.Temperature != nil || resolved.TopP != nil {
+			t.Fatalf("%q accepted unsupported sampling parameters: %+v", modelID, resolved)
+		}
 	}
 }
 
