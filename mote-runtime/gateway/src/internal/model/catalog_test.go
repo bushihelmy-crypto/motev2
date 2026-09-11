@@ -304,10 +304,19 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	if len(catalog.definitions) != 9120 {
+	if len(catalog.definitions) != 9248 {
 		t.Fatalf("unexpected built-in model count for the pinned snapshot: %d", len(catalog.definitions))
 	}
+	canonicalIDs := make(map[string]string, len(catalog.definitions))
 	for _, definition := range catalog.definitions {
+		if strings.Contains(definition.ID(), "/") {
+			t.Fatalf("generated model ID still contains a source prefix: %q", definition.ID())
+		}
+		folded := strings.ToLower(definition.ID())
+		if previous, duplicate := canonicalIDs[folded]; duplicate {
+			t.Fatalf("generated model IDs were not deduplicated: %q and %q", previous, definition.ID())
+		}
+		canonicalIDs[folded] = definition.ID()
 		if len(definition.config.Operations) == 0 {
 			t.Fatalf("generated model %q has no authoritative operation", definition.ID())
 		}
@@ -335,7 +344,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	for _, generated := range []string{
 		"claude-3-5-sonnet-20241022", "gpt-4o",
 		"gemini-1.5-pro", "llama-3.2-11b-vision-instruct",
-		"amazon/nova-pro-v1",
+		"nova-pro-v1",
 	} {
 		assertOperation(t, catalog, generated, api.OperationGenerate)
 	}
@@ -401,9 +410,9 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	}
 	for _, validEmbedding := range []string{
 		"amazon.titan-embed-text-v2:0",
-		"cohere/embed-v4.0",
-		"mistral/codestral-embed",
-		"mistral/mistral-embed",
+		"embed-v4.0",
+		"codestral-embed",
+		"mistral-embed",
 	} {
 		assertOperation(t, catalog, validEmbedding, api.OperationEmbedding)
 	}

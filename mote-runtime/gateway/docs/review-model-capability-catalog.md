@@ -43,14 +43,14 @@
 | 规则/事实 | 唯一 owner | 评审应看到的证据 |
 | --- | --- | --- |
 | 模型 ID 的存在与精确查找 | `Catalog` | `Lookup` 只按完整字符串查 map，不 trim、alias、prefix、fallback |
-| 跨来源模型身份归一化 | `compileModels` 的 `identityIndex` | 只在构建期去掉明确的服务包装（包括 `openai/`）；模型命名空间如 `mistral/...`、`cohere/...` 保留；runtime 不再做别名查找 |
+| 跨来源模型身份归一化 | `compileModels` 的 `identityIndex` | 只在构建期取每个来源 ID 的最后一段；所有 `/` 前缀都删除，大小写不敏感相同的裸 ID 合并去重；runtime 不再做别名查找 |
 | 默认配置与 Kernel 配置的合并 | `newCatalog` / `applyOverride` | 构造时合并一次；调用期间不再次 patch |
 | 配置合法性和集合规范化 | `normalizeConfig` / `normalizeOperationConfig` | enum、重复 operation、重复集合、边界和 operation 形状集中校验 |
 | 生成参数支持状态、默认值和边界 | 选中 operation 的 `GenerationPolicy` | `Capability.ResolveGenerationParameters` 只有一条解析路径 |
 | structured-output 模型兼容性证据 | 选中 operation 的 `Features` | `supports_response_schema` / `supports_native_structured_output` 只投影为中立的 `structured_output` 证据；协议和服务准入仍必须再次通过 |
 | Embedding 维度 | `EmbeddingPolicy` | fixed 与 adjustable 互斥；默认值和边界不复制到别处 |
 | operation shape（mode/modality/policy 组合） | `src/internal/model/shape.go` 的 `ValidateOperationShape` | 生成器和 runtime 复用同一个 typed 校验，不各自维护规则表 |
-| 来源抽取和快照生成 | `src/cmd/update-model-catalog` | 输入 revision/hash 只记录在 catalog；输出不携带 service/protocol/pricing 字段；rejection 写入机器可读 sidecar |
+| 来源抽取和快照生成 | `src/cmd/update-model-catalog` | 输入 revision/hash 只记录在 catalog；输出不携带 service/protocol/pricing 字段；rejection 写入机器可读 sidecar，并与 catalog 先全部 staging 后成对替换 |
 | 服务、协议、凭据、价格 | 各自的 service/protocol/receipt owner | `internal/model` 和 catalog 中不存在这些执行事实 |
 
 ### 组合调用链
@@ -131,8 +131,9 @@ Protocol adapter encodes the resolved neutral request
 生成器必须保持可重现、可解释，而不是把上游资料原样搬进 Gateway。请重点检查：
 
 1. `compileModels` 是否先形成一个稳定的 canonical model identity，再按 semantic
-   operation 分桶；同一模型的不同 operation 必须并存，不能互相覆盖。精确 canonical
-   记录拥有 token、参数、维度和生命周期；明确的 `:batch` 变体只补充同 operation
+   operation 分桶；同一模型的不同 operation 必须并存，不能互相覆盖。canonical identity
+   永远是来源 ID 的最后一段（例如 `openrouter/cohere/command` → `command`），因此
+   目录中不得出现 `/`，相同裸 ID 只能有一份。明确的 `:batch` 变体只补充同 operation
    的交付模式，冲突 batch 只拒绝该变体。模态 supplemental fact 不得扩大主记录；主
    记录缺失时只能确定性采用一致的观察，冲突记录写入 rejection manifest，不能静默
    丢弃或 union 出来源未声明的能力。
@@ -149,29 +150,30 @@ Protocol adapter encodes the resolved neutral request
    不被消费；Gateway 的 4096 运行时策略是唯一默认 owner，只采纳来源声明的边界。
 6. 生成的 gzip 文件是否经过 `gzip -t`，来源 revision/hash 是否与输入一致，且目录
    不含 `provider`、`protocol`、`endpoint`、`credential`、`price`、`pricing`、
-   `family` 等越权字段。
+   `family` 等越权字段；catalog 与 rejection sidecar 是否由同一个 staging/rollback
+   事务发布。
 
-固定 revision/hash 的当前快照发布 9120 个 canonical 模型；其中 25 个模型有多个
+固定 revision/hash 的当前快照发布 9248 个 canonical 模型；其中 23 个模型有多个
 独立 semantic operation。下面的 operation 数量用于人工核对；它们不是可替代模型
 事实的第二份能力状态：
 
 | operation | 数量 |
 | --- | ---: |
-| `generate` | 8510 |
-| `embedding` | 159 |
-| `rerank` | 31 |
-| `image_generation` | 250 |
+| `generate` | 8685 |
+| `embedding` | 160 |
+| `rerank` | 32 |
+| `image_generation` | 190 |
 | `audio_generation` | 40 |
-| `audio_transcription` | 72 |
+| `audio_transcription` | 75 |
 | `music_generation` | 0 |
-| `video_generation` | 72 |
-| `realtime` | 11 |
+| `video_generation` | 77 |
+| `realtime` | 12 |
 
 原始快照中的 `:batch` 请求变体只补充基础模型的 `async` 能力，不发布为模型。当前
-rejection manifest 有 87 条：15 条是顶层 output maximum 与参数 range maximum 冲突，
+rejection manifest 有 89 条：19 条是顶层 output maximum 与参数 range maximum 冲突，
 4 条是非法 output-token range（minimum 大于 maximum），8 条是来源声明了 Gateway
-未知的 `code` modality，16 条是 Gateway 不拥有的 `search`/`ocr`/`moderation`/`3d`
-等未知 operation，另有 22 条 supplemental modality 冲突；这些记录都不会静默消失，
+未知的 `code` modality，53 条是 Gateway 不拥有的 `search`/`ocr`/`moderation`/`3d`
+等未知 operation，另有 5 条 supplemental modality 冲突；这些记录都不会静默消失，
 完整集合写入 `src/internal/model/catalog_rejections.json`。无 authoritative source
 的模型才允许按明确的名称规则推断 operation；有 source row 但 mode 缺失或未知时
 直接 rejection。`fallback_generalizations` 是 Bifrost 的规则元数据，不是模型记录，
@@ -257,9 +259,8 @@ git diff --check
 只有在设计本身清晰且唯一、关键不变量有测试、所有适用门禁通过，并且剩余限制已被
 明确记录时，才建议批准。
 
-本次复杂度基线记录为 163 个 decision points / 52 个函数：新增的
-`ValidateOperationShape` 是 runtime 与 build-time compiler 共用的唯一 typed shape
-owner；它替代了两套分散规则，因此增加的是一份真实规则，而不是 wrapper 或兼容路径。
-`cmd/update-model-catalog` 是构建期 compiler，虽位于同一 Go module 以便导入该 owner，
-但不属于部署后的 runtime call path，runtime complexity ratchet 明确不把它混入；它由
-自己的 deterministic unit tests 和生成产物校验保护。
+本次复杂度基线记录为 703 个 decision points / 131 个函数（最大 cyclomatic 为 51，
+最大嵌套深度为 4）：`cmd/update-model-catalog` 也纳入同一 radar，因为它是生产的
+source-to-artifact compiler；这不是把 compiler 拆成 wrapper 或兼容路径，而是让后续
+修改有真实的完整调用链基线。新增的 `ValidateOperationShape` 仍是 runtime 与
+build-time compiler 共用的唯一 typed shape owner。

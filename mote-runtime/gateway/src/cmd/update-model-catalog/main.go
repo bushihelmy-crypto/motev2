@@ -239,17 +239,22 @@ func run(configured options) error {
 		Sources:       sources,
 		Models:        models,
 	}
-	if err := writeCatalog(configured.output, document); err != nil {
-		return err
-	}
 	manifestPath := configured.rejections
 	if manifestPath == "" {
 		manifestPath = defaultRejectionManifestPath(configured.output)
 	}
-	if err := writeRejectionManifest(manifestPath, rejectionManifest{
+	catalogData, err := encodeCatalog(document)
+	if err != nil {
+		return err
+	}
+	manifestData, err := encodeRejectionManifest(rejectionManifest{
 		SchemaVersion: rejectionManifestSchemaVersion,
 		Rejections:    rejected,
-	}); err != nil {
+	})
+	if err != nil {
+		return err
+	}
+	if err := publishArtifactPair(configured.output, catalogData, manifestPath, manifestData); err != nil {
 		return err
 	}
 	for _, rejection := range rejected {
@@ -452,128 +457,65 @@ func (err *compileError) Error() string {
 	return fmt.Sprintf("invalid model source %q %s: %s", err.ModelID, err.Field, err.Reason)
 }
 
-// identityIndex contains only deterministic identity hints. It deliberately
-// does not treat BaseModel as a family alias: an exact, versioned source key
-// remains its own identity, while a qualified provider key may use a matching
-// bare model or an unambiguous BaseModel value to remove the provider prefix.
+// identityIndex owns the one catalog-ID rule: every slash-qualified source ID
+// becomes its final path segment, and equal segments are deduplicated without
+// consulting provider or BaseModel metadata.
 type identityIndex struct {
-	bare            map[string]string
-	anchors         map[string]string
-	baseFallback    map[string]string
-	servicePrefixes map[string]struct{}
-	preferred       map[string]string
+	canonical map[string]string
 }
 
 func buildIdentityIndex(records []recordRef, newModels map[string]struct{}) identityIndex {
-	bareCandidates := make(map[string][]string)
-	anchorCandidates := make(map[string][]string)
-	baseCandidates := make(map[string][]string)
-	baseLeaves := make(map[string]map[string]struct{})
-	servicePrefixes := make(map[string]struct{})
-	preferred := make(map[string]string)
-	modelNamespaces := map[string]struct{}{
-		// These prefixes are part of the public model identifier in the source
-		// catalogs (for example mistral/codestral-embed), not transport wrappers.
-		"cohere":  {},
-		"mistral": {},
+	type candidate struct {
+		value string
+		rank  int
 	}
-	for _, prefix := range []string{
-		"aiml", "anthropic", "azure", "bedrock", "bedrock_mantle", "chatgpt", "cloudflare",
-		"databricks", "deepinfra", "deepseek", "fal_ai", "fireworks_ai", "gemini",
-		"gmi", "google", "groq", "huggingface", "litellm", "novita", "openai",
-		"opencode-zen", "openrouter", "palm", "perplexity", "publishers", "replicate", "stability",
-		"together", "together_ai", "vertex_ai", "vercel_ai_gateway", "xai",
-	} {
-		servicePrefixes[strings.ToLower(prefix)] = struct{}{}
-	}
-	add := func(target map[string][]string, value string) {
-		value = stripBatchSuffix(strings.TrimSpace(value))
+	candidates := make(map[string][]candidate)
+	add := func(value string, rank int) {
+		value = modelIDLeaf(value)
 		if value == "" {
 			return
 		}
 		folded := strings.ToLower(value)
-		for _, existing := range target[folded] {
-			if existing == value {
+		for _, existing := range candidates[folded] {
+			if existing.value == value && existing.rank == rank {
 				return
 			}
 		}
-		target[folded] = append(target[folded], value)
+		candidates[folded] = append(candidates[folded], candidate{value: value, rank: rank})
 	}
 	for _, ref := range records {
-		key := stripBatchSuffix(strings.TrimSpace(ref.key))
+		key := strings.TrimSpace(ref.key)
 		if key == "" || nonModelSourceRecord(key) || (syntheticModelID(key) && !strings.HasSuffix(strings.ToLower(key), ":batch")) {
 			continue
 		}
-		add(anchorCandidates, key)
-		if !strings.Contains(key, "/") {
-			add(bareCandidates, key)
+		rank := 2
+		if !strings.Contains(stripBatchSuffix(key), "/") {
+			rank = 0 // an already-bare source ID wins after case normalization
 		}
-		base := stripBatchSuffix(strings.TrimSpace(ref.record.BaseModel))
-		if base != "" {
-			add(anchorCandidates, base)
-			if !strings.Contains(base, "/") {
-				add(baseCandidates, base)
-				leaf := strings.ToLower(key)
-				if slash := strings.LastIndexByte(leaf, '/'); slash >= 0 {
-					leaf = leaf[slash+1:]
-				}
-				if baseLeaves[strings.ToLower(base)] == nil {
-					baseLeaves[strings.ToLower(base)] = make(map[string]struct{})
-				}
-				baseLeaves[strings.ToLower(base)][leaf] = struct{}{}
-			}
-		}
-		if provider := strings.ToLower(strings.TrimSpace(ref.record.Provider)); provider != "" {
-			if _, namespace := modelNamespaces[provider]; !namespace {
-				servicePrefixes[provider] = struct{}{}
-				servicePrefixes[strings.ReplaceAll(provider, "_", "-")] = struct{}{}
-			}
-		}
+		add(key, rank)
 	}
 	for modelID := range newModels {
-		modelID = stripBatchSuffix(strings.TrimSpace(modelID))
-		if modelID == "" || syntheticModelID(modelID) {
+		if strings.TrimSpace(modelID) == "" || syntheticModelID(modelID) {
 			continue
 		}
-		add(anchorCandidates, modelID)
-		if current, exists := preferred[strings.ToLower(modelID)]; !exists || modelID < current {
-			preferred[strings.ToLower(modelID)] = modelID
-		}
-		if !strings.Contains(modelID, "/") {
-			add(bareCandidates, modelID)
-		}
+		add(modelID, 1)
 	}
-	choose := func(candidates map[string][]string) map[string]string {
-		result := make(map[string]string, len(candidates))
-		for folded, values := range candidates {
-			sort.Slice(values, func(left, right int) bool {
-				leftParts, rightParts := strings.Count(values[left], "/"), strings.Count(values[right], "/")
-				if leftParts != rightParts {
-					return leftParts < rightParts
-				}
-				leftLower, rightLower := strings.ToLower(values[left]), strings.ToLower(values[right])
-				if leftLower != rightLower {
-					return leftLower < rightLower
-				}
-				return values[left] < values[right]
-			})
-			result[folded] = values[0]
-		}
-		return result
+	canonical := make(map[string]string, len(candidates))
+	for folded, values := range candidates {
+		sort.Slice(values, func(left, right int) bool {
+			leftLower := values[left].value == strings.ToLower(values[left].value)
+			rightLower := values[right].value == strings.ToLower(values[right].value)
+			if leftLower != rightLower {
+				return leftLower
+			}
+			if values[left].rank != values[right].rank {
+				return values[left].rank < values[right].rank
+			}
+			return values[left].value < values[right].value
+		})
+		canonical[folded] = values[0].value
 	}
-	baseFallbackCandidates := make(map[string][]string)
-	for folded, values := range baseCandidates {
-		if len(baseLeaves[folded]) == 1 {
-			baseFallbackCandidates[folded] = values
-		}
-	}
-	return identityIndex{
-		bare:            choose(bareCandidates),
-		anchors:         choose(anchorCandidates),
-		baseFallback:    choose(baseFallbackCandidates),
-		servicePrefixes: servicePrefixes,
-		preferred:       preferred,
-	}
+	return identityIndex{canonical: canonical}
 }
 
 func stripBatchSuffix(value string) string {
@@ -583,97 +525,23 @@ func stripBatchSuffix(value string) string {
 	return value
 }
 
-func canonicalRecordID(ref recordRef, index identityIndex) string {
-	raw := stripBatchSuffix(strings.TrimSpace(ref.key))
-	if raw == "" {
-		return ""
-	}
-	if canonical, ok := index.preferred[strings.ToLower(raw)]; ok {
-		parts := strings.Split(raw, "/")
-		if len(parts) == 1 || !isServicePrefix(parts[0], index) {
-			return canonical
-		}
-	}
-	if canonical, ok := index.bare[strings.ToLower(raw)]; ok {
-		return canonical
-	}
-	base := stripBatchSuffix(strings.TrimSpace(ref.record.BaseModel))
-	if strings.Contains(raw, "/") {
-		if canonical := canonicalSuffix(raw, index); canonical != "" {
-			return canonical
-		}
-		if base != "" {
-			if canonical, ok := index.bare[strings.ToLower(base)]; ok {
-				return preferredCanonical(canonical, index)
-			}
-			if !strings.Contains(base, "/") {
-				if canonical, ok := index.baseFallback[strings.ToLower(base)]; ok {
-					return preferredCanonical(canonical, index)
-				}
-				return base
-			}
-			if canonical := canonicalSuffix(base, index); canonical != "" {
-				return canonical
-			}
-			return stripServicePrefix(base, index)
-		}
-	}
-	if canonical := canonicalSuffix(raw, index); canonical != "" {
-		return canonical
-	}
-	return stripServicePrefix(raw, index)
-}
-
-func preferredCanonical(value string, index identityIndex) string {
-	if canonical, ok := index.preferred[strings.ToLower(value)]; ok {
-		return canonical
+func modelIDLeaf(value string) string {
+	value = stripBatchSuffix(strings.TrimSpace(value))
+	if slash := strings.LastIndexByte(value, '/'); slash >= 0 {
+		value = value[slash+1:]
 	}
 	return value
 }
 
-func canonicalSuffix(value string, index identityIndex) string {
-	parts := strings.Split(value, "/")
-	// A qualified model namespace such as mistral/<model> or cohere/<model>
-	// is itself an authoritative identity.  Do not let a bare New-API listing
-	// erase that namespace; only strip a known service wrapper (openrouter/,
-	// vercel_ai_gateway/, openai/, ...).
-	if len(parts) > 1 && !isServicePrefix(parts[0], index) {
-		if canonical, ok := index.preferred[strings.ToLower(value)]; ok {
-			return canonical
-		}
-		if canonical, ok := index.anchors[strings.ToLower(value)]; ok {
-			return canonical
-		}
+func canonicalRecordID(ref recordRef, index identityIndex) string {
+	leaf := modelIDLeaf(ref.key)
+	if leaf == "" {
+		return ""
 	}
-	for start := len(parts) - 1; start >= 0; start-- {
-		candidate := strings.Join(parts[start:], "/")
-		if canonical, ok := index.preferred[strings.ToLower(candidate)]; ok {
-			candidateParts := strings.Split(candidate, "/")
-			if len(candidateParts) == 1 || !isServicePrefix(candidateParts[0], index) {
-				return canonical
-			}
-		}
-		if canonical, ok := index.bare[strings.ToLower(candidate)]; ok {
-			return canonical
-		}
-		if canonical, ok := index.anchors[strings.ToLower(candidate)]; ok && !isServicePrefix(parts[start], index) {
-			return canonical
-		}
+	if canonical, ok := index.canonical[strings.ToLower(leaf)]; ok {
+		return canonical
 	}
-	return ""
-}
-
-func stripServicePrefix(value string, index identityIndex) string {
-	parts := strings.Split(value, "/")
-	for len(parts) > 1 && isServicePrefix(parts[0], index) {
-		parts = parts[1:]
-	}
-	return strings.Join(parts, "/")
-}
-
-func isServicePrefix(value string, index identityIndex) bool {
-	_, ok := index.servicePrefixes[strings.ToLower(strings.TrimSpace(value))]
-	return ok
+	return leaf
 }
 
 func isBatchRecord(ref recordRef) bool {
@@ -758,6 +626,7 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 	groups := make(map[api.Operation][]recordRef)
 	nonBatchOperations := make(map[api.Operation]struct{})
 	rejected := make([]*compileError, 0)
+	hasMalformedSource := false
 	for _, ref := range matches {
 		// Rows produced by the pricing CSV merger carry a mode for display, not
 		// an authoritative model operation.  They may identify a candidate
@@ -767,6 +636,7 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 		}
 		operation, reason := authoritativeOperation(ref)
 		if reason != "" {
+			hasMalformedSource = true
 			if isBatchRecord(ref) || !isExactCanonicalKey(modelID, ref) {
 				rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("source record %q: %s", ref.key, reason)})
 				continue
@@ -788,6 +658,12 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 	}
 
 	if len(groups) == 0 {
+		if hasMalformedSource {
+			// A source row with a missing or unknown mode is evidence about this
+			// identity, even when it is qualified or batch-only. Do not hide that
+			// fact by publishing a name-inferred operation.
+			return modelConfig{}, false, rejected
+		}
 		// A model represented only by metadata rows still gets one operation,
 		// but the operation is inferred from its canonical ID because no source
 		// record claimed an authoritative fact.
@@ -838,7 +714,22 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 	for _, operation := range operations {
 		records := groups[operation]
 		primary := chooseOperationPrimary(modelID, records)
-		rejected = append(rejected, modalityConflictRejections(modelID, operation, records, primary)...)
+		// A bare canonical source row is the only authoritative owner of an
+		// explicit modality set. If all observations are qualified (or
+		// batch-only), no row may win by sorting order; those sets must agree.
+		modalityOwner := primary
+		hasAuthoritativeOwner := false
+		for _, ref := range records {
+			if !isMetadataRecord(ref) && isExactCanonicalKey(modelID, ref) {
+				hasAuthoritativeOwner = true
+				break
+			}
+		}
+		if hasAuthoritativeOwner {
+			rejected = append(rejected, modalityConflictRejections(modelID, operation, records, modalityOwner)...)
+		} else {
+			modalityOwner = recordRef{}
+		}
 		if !hasLifecycleOwner || rankLess(primaryRank(modelID, primary), primaryRank(modelID, lifecycleOwner)) {
 			lifecycleOwner, hasLifecycleOwner = primary, true
 		}
@@ -847,7 +738,7 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 			rejected = append(rejected, &compileError{ModelID: modelID, Field: "token_limits", Reason: fmt.Sprintf("operation %q: %s", operation, limitErr)})
 			continue
 		}
-		compiledOperation, operationErr := compileOperation(operation, primary.record.Mode, records, primary, outputTokensSupported)
+		compiledOperation, operationErr := compileOperation(operation, primary.record.Mode, records, primary, modalityOwner, outputTokensSupported)
 		if operationErr != nil {
 			rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("operation %q: %s", operation, operationErr)})
 			continue
@@ -892,7 +783,7 @@ func compileInferredModel(modelID string) (modelConfig, bool, []*compileError) {
 	if operation == "" {
 		return modelConfig{}, false, nil
 	}
-	compiled, err := compileOperation(operation, "", nil, recordRef{}, false)
+	compiled, err := compileOperation(operation, "", nil, recordRef{}, recordRef{}, false)
 	if err != nil {
 		return modelConfig{}, false, []*compileError{{ModelID: modelID, Field: "operation", Reason: err.Error()}}
 	}
@@ -1183,8 +1074,15 @@ func compileTokenLimits(operation api.Operation, primary recordRef) (tokenLimits
 	return limits, parameterFound || maxOutput > 0, nil
 }
 
-func compileOperation(operation api.Operation, sourceMode string, records []recordRef, primary recordRef, outputTokensSupported bool) (operationConfig, error) {
-	inputs, outputs, modalityErr := compileModalities(operation, sourceMode, records, primary)
+func compileOperation(
+	operation api.Operation,
+	sourceMode string,
+	records []recordRef,
+	primary recordRef,
+	modalityOwner recordRef,
+	outputTokensSupported bool,
+) (operationConfig, error) {
+	inputs, outputs, modalityErr := compileModalities(operation, sourceMode, records, modalityOwner)
 	if modalityErr != nil {
 		return operationConfig{}, modalityErr
 	}
@@ -1388,7 +1286,7 @@ func compileSourceModalities(
 				return nil, false, fmt.Errorf("%s: %w", field, err)
 			}
 		}
-		if primary.key != "" && ref.key == primary.key {
+		if primary.key != "" && strings.EqualFold(ref.key, primary.key) {
 			primarySet = set
 			primaryDeclared = true
 			continue
@@ -1473,7 +1371,7 @@ func modalityConflictRejections(modelID string, operation api.Operation, records
 			continue
 		}
 		for _, ref := range records {
-			if ref.key == primary.key {
+			if strings.EqualFold(ref.key, primary.key) {
 				continue
 			}
 			raw := spec.values(ref)
@@ -1977,19 +1875,22 @@ func resolveCommit(repo, ref string) (string, error) {
 	return resolved, nil
 }
 
-func writeCatalog(path string, document catalogDocument) error {
+func encodeCatalog(document catalogDocument) ([]byte, error) {
 	var output bytes.Buffer
 	fmt.Fprintf(&output, "{\n  \"schema_version\": %d,\n  \"sources\": ", document.SchemaVersion)
 	sources, err := json.Marshal(document.Sources)
 	if err != nil {
-		return fmt.Errorf("encode catalog sources: %w", err)
+		return nil, fmt.Errorf("encode catalog sources: %w", err)
 	}
 	output.Write(sources)
 	output.WriteString(",\n  \"models\": [\n")
 	for index, model := range document.Models {
+		if model.ID == "" || strings.Contains(model.ID, "/") {
+			return nil, fmt.Errorf("encode model %q: canonical ID must be a non-empty final path segment", model.ID)
+		}
 		encoded, encodeErr := json.Marshal(model)
 		if encodeErr != nil {
-			return fmt.Errorf("encode model %q: %w", model.ID, encodeErr)
+			return nil, fmt.Errorf("encode model %q: %w", model.ID, encodeErr)
 		}
 		output.WriteString("    ")
 		output.Write(encoded)
@@ -2002,18 +1903,15 @@ func writeCatalog(path string, document catalogDocument) error {
 	var compressed bytes.Buffer
 	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
 	if err != nil {
-		return fmt.Errorf("create catalog compressor: %w", err)
+		return nil, fmt.Errorf("create catalog compressor: %w", err)
 	}
 	if _, err := writer.Write(output.Bytes()); err != nil {
-		return fmt.Errorf("compress catalog: %w", err)
+		return nil, fmt.Errorf("compress catalog: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("close catalog compressor: %w", err)
+		return nil, fmt.Errorf("close catalog compressor: %w", err)
 	}
-	if err := os.WriteFile(path, compressed.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("write catalog: %w", err)
-	}
-	return nil
+	return compressed.Bytes(), nil
 }
 
 func defaultRejectionManifestPath(catalogPath string) string {
@@ -2025,20 +1923,178 @@ func defaultRejectionManifestPath(catalogPath string) string {
 	return catalogPath + ".rejections.json"
 }
 
-func writeRejectionManifest(path string, manifest rejectionManifest) error {
+func encodeRejectionManifest(manifest rejectionManifest) ([]byte, error) {
 	if manifest.Rejections == nil {
 		manifest.Rejections = []*compileError{}
+	} else {
+		manifest.Rejections = append([]*compileError(nil), manifest.Rejections...)
 	}
 	sortCompileErrors(manifest.Rejections)
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode rejection manifest: %w", err)
+		return nil, fmt.Errorf("encode rejection manifest: %w", err)
 	}
 	encoded = append(encoded, '\n')
-	if err := os.WriteFile(path, encoded, 0o644); err != nil {
-		return fmt.Errorf("write rejection manifest: %w", err)
+	return encoded, nil
+}
+
+type pendingArtifact struct {
+	path         string
+	stagedPath   string
+	rollbackPath string
+	existed      bool
+	replaced     bool
+}
+
+// publishArtifactPair stages both outputs before replacing either target. The
+// commit phase retains rollback copies until both renames succeed, so an
+// ordinary filesystem failure cannot leave a new catalog paired with an old
+// rejection manifest (or the reverse).
+func publishArtifactPair(catalogPath string, catalogData []byte, manifestPath string, manifestData []byte) error {
+	catalogAbsolute, err := filepath.Abs(catalogPath)
+	if err != nil {
+		return fmt.Errorf("resolve catalog output path: %w", err)
+	}
+	manifestAbsolute, err := filepath.Abs(manifestPath)
+	if err != nil {
+		return fmt.Errorf("resolve rejection manifest path: %w", err)
+	}
+	if catalogAbsolute == manifestAbsolute {
+		return errors.New("catalog and rejection manifest paths must be different")
+	}
+
+	pair := [2]pendingArtifact{{path: catalogAbsolute}, {path: manifestAbsolute}}
+	data := [2][]byte{catalogData, manifestData}
+	for index := range pair {
+		if err := prepareArtifact(&pair[index], data[index]); err != nil {
+			cleanupPendingArtifacts(&pair)
+			return err
+		}
+	}
+	if err := commitArtifactPair(&pair, os.Rename); err != nil {
+		cleanupPendingArtifacts(&pair)
+		return err
+	}
+	return discardRollbackArtifacts(&pair)
+}
+
+func prepareArtifact(artifact *pendingArtifact, data []byte) error {
+	info, err := os.Lstat(artifact.path)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("publish artifact %q: existing target is not a regular file", artifact.path)
+		}
+		previous, readErr := os.ReadFile(artifact.path)
+		if readErr != nil {
+			return fmt.Errorf("read current artifact %q: %w", artifact.path, readErr)
+		}
+		artifact.rollbackPath, err = stageArtifact(artifact.path, previous, info.Mode().Perm(), "rollback")
+		if err != nil {
+			return err
+		}
+		artifact.existed = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect artifact %q: %w", artifact.path, err)
+	}
+	artifact.stagedPath, err = stageArtifact(artifact.path, data, 0o644, "stage")
+	return err
+}
+
+func stageArtifact(target string, data []byte, mode os.FileMode, kind string) (string, error) {
+	directory := filepath.Dir(target)
+	file, err := os.CreateTemp(directory, "."+filepath.Base(target)+"."+kind+"-*")
+	if err != nil {
+		return "", fmt.Errorf("stage artifact %q: %w", target, err)
+	}
+	path := file.Name()
+	remove := true
+	defer func() {
+		if remove {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("set staged artifact mode %q: %w", target, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("write staged artifact %q: %w", target, err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("sync staged artifact %q: %w", target, err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close staged artifact %q: %w", target, err)
+	}
+	remove = false
+	return path, nil
+}
+
+type renameArtifact func(string, string) error
+
+func commitArtifactPair(pair *[2]pendingArtifact, rename renameArtifact) error {
+	for index := range pair {
+		artifact := &pair[index]
+		if err := rename(artifact.stagedPath, artifact.path); err != nil {
+			publishErr := fmt.Errorf("replace artifact %q: %w", artifact.path, err)
+			return errors.Join(publishErr, rollbackArtifactPair(pair, rename))
+		}
+		artifact.stagedPath = ""
+		artifact.replaced = true
 	}
 	return nil
+}
+
+func rollbackArtifactPair(pair *[2]pendingArtifact, rename renameArtifact) error {
+	var rollbackErrors []error
+	for index := len(pair) - 1; index >= 0; index-- {
+		artifact := &pair[index]
+		if !artifact.replaced {
+			continue
+		}
+		if artifact.existed {
+			if err := rename(artifact.rollbackPath, artifact.path); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore artifact %q: %w", artifact.path, err))
+				continue
+			}
+			artifact.rollbackPath = ""
+		} else if err := os.Remove(artifact.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove new artifact %q: %w", artifact.path, err))
+			continue
+		}
+		artifact.replaced = false
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+func cleanupPendingArtifacts(pair *[2]pendingArtifact) {
+	for index := range pair {
+		if pair[index].stagedPath != "" {
+			_ = os.Remove(pair[index].stagedPath)
+		}
+		// If rollback itself failed, keep the old bytes on disk for manual
+		// recovery instead of deleting the only remaining copy.
+		if !pair[index].replaced && pair[index].rollbackPath != "" {
+			_ = os.Remove(pair[index].rollbackPath)
+		}
+	}
+}
+
+func discardRollbackArtifacts(pair *[2]pendingArtifact) error {
+	var cleanupErrors []error
+	for index := range pair {
+		if pair[index].rollbackPath == "" {
+			continue
+		}
+		if err := os.Remove(pair[index].rollbackPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove rollback artifact %q: %w", pair[index].rollbackPath, err))
+			continue
+		}
+		pair[index].rollbackPath = ""
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 func sortCompileErrors(values []*compileError) {

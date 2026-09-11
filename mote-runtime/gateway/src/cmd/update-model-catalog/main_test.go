@@ -5,6 +5,7 @@ import (
 	"errors"
 	"go/ast"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -115,6 +116,20 @@ func TestSupplementalModalitiesAreConsumedWithoutWideningPrimaryFacts(t *testing
 	}
 }
 
+func TestQualifiedOnlyIdentityRejectsConflictingModalityFacts(t *testing.T) {
+	records := []recordRef{
+		{key: "first/model", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}},
+		{key: "second/model", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"text"}}},
+	}
+	models, rejected := compileModels(records, nil)
+	if len(models) != 0 {
+		t.Fatalf("qualified observations with no authoritative owner were published: %+v", models)
+	}
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "conflicting supplemental modality facts") {
+		t.Fatalf("qualified modality conflict was not rejected once: %v", rejected)
+	}
+}
+
 func TestSupplementalOperationConflictIsRejected(t *testing.T) {
 	primary := recordRef{key: "model", record: sourceRecord{Mode: "chat"}}
 	batch := recordRef{key: "provider/model:batch", record: sourceRecord{Mode: "embedding"}}
@@ -128,7 +143,7 @@ func TestSupplementalOperationConflictIsRejected(t *testing.T) {
 	}
 }
 
-func TestCanonicalIdentityNormalizesWrappersWithoutErasingModelNamespaces(t *testing.T) {
+func TestCanonicalIdentityRemovesEveryPrefixAndDeduplicatesByLeaf(t *testing.T) {
 	records := []recordRef{
 		{key: "gpt-4.1", record: sourceRecord{Mode: "chat"}},
 		{key: "openai/gpt-4.1", record: sourceRecord{Mode: "image_generation", Source: "merged_from_llm_models_csv"}},
@@ -143,14 +158,71 @@ func TestCanonicalIdentityNormalizesWrappersWithoutErasingModelNamespaces(t *tes
 	for _, model := range models {
 		seen[model.ID] = model
 	}
-	if _, ok := seen["openai/gpt-4.1"]; ok {
-		t.Fatal("openai wrapper leaked into the canonical catalog")
+	for modelID := range seen {
+		if strings.Contains(modelID, "/") {
+			t.Fatalf("qualified prefix leaked into canonical model ID %q", modelID)
+		}
 	}
 	if _, ok := seen["gpt-4.1"]; !ok {
 		t.Fatal("bare canonical model was lost")
 	}
-	if _, ok := seen["mistral/codestral-embed"]; !ok {
-		t.Fatal("model namespace was erased while removing service wrappers")
+	if model, ok := seen["codestral-embed"]; !ok || len(model.Operations) != 2 {
+		t.Fatalf("same leaf was not deduplicated with independent operations: %+v", model)
+	}
+}
+
+func TestCanonicalIdentityAlwaysUsesFinalPathSegment(t *testing.T) {
+	records := []recordRef{
+		{key: "openrouter/cohere/command", record: sourceRecord{BaseModel: "cohere/command", Provider: "litellm", Mode: "chat"}},
+		{key: "vercel_ai_gateway/mistral/codestral", record: sourceRecord{BaseModel: "codestral", Provider: "vercel_ai_gateway", Mode: "chat"}},
+		{key: "vercel_ai_gateway/mistral/devstral-small", record: sourceRecord{BaseModel: "devstral-small", Provider: "vercel_ai_gateway", Mode: "chat"}},
+		{key: "openrouter/openai/gpt-5", record: sourceRecord{BaseModel: "gpt-5", Provider: "openrouter", Mode: "chat"}},
+		{key: "DeepSeek-V4-Flash", record: sourceRecord{Mode: "chat"}},
+	}
+	newModels := map[string]struct{}{"command": {}, "codestral": {}, "deepseek-v4-flash": {}, "devstral-small": {}, "gpt-5": {}}
+	index := buildIdentityIndex(records, newModels)
+	cases := []struct {
+		key      string
+		expected string
+	}{
+		{key: "openrouter/cohere/command", expected: "command"},
+		{key: "vercel_ai_gateway/mistral/codestral", expected: "codestral"},
+		{key: "vercel_ai_gateway/mistral/devstral-small", expected: "devstral-small"},
+		{key: "openrouter/openai/gpt-5", expected: "gpt-5"},
+		{key: "DeepSeek-V4-Flash", expected: "deepseek-v4-flash"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.key, func(t *testing.T) {
+			ref := records[0]
+			for _, candidate := range records {
+				if candidate.key == testCase.key {
+					ref = candidate
+					break
+				}
+			}
+			if got := canonicalRecordID(ref, index); got != testCase.expected {
+				t.Fatalf("canonicalRecordID(%q) = %q, want %q", testCase.key, got, testCase.expected)
+			}
+		})
+	}
+}
+
+func TestMalformedQualifiedAndBatchSourcesBlockInference(t *testing.T) {
+	cases := []recordRef{
+		{key: "apiserpent/deep-search", record: sourceRecord{Provider: "apiserpent", Mode: "search"}},
+		{key: "vertex_ai/deepseek-ocr:batch", record: sourceRecord{Provider: "vertex_ai", Mode: "ocr"}},
+		{key: "azure/guardrails", record: sourceRecord{Provider: "azure"}},
+	}
+	for _, source := range cases {
+		t.Run(source.key, func(t *testing.T) {
+			models, rejected := compileModels([]recordRef{source}, nil)
+			if len(models) != 0 {
+				t.Fatalf("malformed source was published through inference: %+v", models)
+			}
+			if len(rejected) != 1 {
+				t.Fatalf("malformed source rejection count = %d, want 1: %v", len(rejected), rejected)
+			}
+		})
 	}
 }
 
@@ -478,7 +550,6 @@ func TestRejectionManifestIsDeterministicAndMachineReadable(t *testing.T) {
 	if got := defaultRejectionManifestPath("src/internal/model/catalog_data.json.gz"); got != "src/internal/model/catalog_rejections.json" {
 		t.Fatalf("default rejection path = %q", got)
 	}
-	path := t.TempDir() + "/rejections.json"
 	manifest := rejectionManifest{
 		SchemaVersion: 1,
 		Rejections: []*compileError{
@@ -486,10 +557,7 @@ func TestRejectionManifestIsDeterministicAndMachineReadable(t *testing.T) {
 			{ModelID: "a", Field: "mode", Reason: "missing"},
 		},
 	}
-	if err := writeRejectionManifest(path, manifest); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
+	data, err := encodeRejectionManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,6 +567,84 @@ func TestRejectionManifestIsDeterministicAndMachineReadable(t *testing.T) {
 	}
 	if len(decoded.Rejections) != 2 || decoded.Rejections[0].ModelID != "a" || decoded.Rejections[1].ModelID != "z" {
 		t.Fatalf("manifest was not deterministically sorted: %+v", decoded.Rejections)
+	}
+}
+
+func TestCatalogEncodingRejectsQualifiedModelIDs(t *testing.T) {
+	_, err := encodeCatalog(catalogDocument{
+		SchemaVersion: 1,
+		Models:        []modelConfig{{ID: "provider/model"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "final path segment") {
+		t.Fatalf("qualified model ID was accepted by the artifact boundary: %v", err)
+	}
+}
+
+func TestArtifactPairPublishesTogether(t *testing.T) {
+	directory := t.TempDir()
+	catalogPath := filepath.Join(directory, "catalog.json.gz")
+	manifestPath := filepath.Join(directory, "rejections.json")
+	if err := os.WriteFile(catalogPath, []byte("old catalog"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("old manifest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishArtifactPair(catalogPath, []byte("new catalog"), manifestPath, []byte("new manifest")); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, catalogPath, "new catalog")
+	assertFileContent(t, manifestPath, "new manifest")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("publication left staging or rollback files: %v", entries)
+	}
+}
+
+func TestArtifactPairRollsBackWhenSecondReplacementFails(t *testing.T) {
+	directory := t.TempDir()
+	catalogPath := filepath.Join(directory, "catalog.json.gz")
+	manifestPath := filepath.Join(directory, "rejections.json")
+	if err := os.WriteFile(catalogPath, []byte("old catalog"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("old manifest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pair := [2]pendingArtifact{{path: catalogPath}, {path: manifestPath}}
+	for index, data := range [2][]byte{[]byte("new catalog"), []byte("new manifest")} {
+		if err := prepareArtifact(&pair[index], data); err != nil {
+			cleanupPendingArtifacts(&pair)
+			t.Fatal(err)
+		}
+	}
+	renameCalls := 0
+	err := commitArtifactPair(&pair, func(source, target string) error {
+		renameCalls++
+		if renameCalls == 2 {
+			return errors.New("injected second replacement failure")
+		}
+		return os.Rename(source, target)
+	})
+	cleanupPendingArtifacts(&pair)
+	if err == nil || !strings.Contains(err.Error(), "injected second replacement failure") {
+		t.Fatalf("replacement failure was not returned: %v", err)
+	}
+	assertFileContent(t, catalogPath, "old catalog")
+	assertFileContent(t, manifestPath, "old manifest")
+}
+
+func assertFileContent(t *testing.T, path, expected string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != expected {
+		t.Fatalf("%s = %q, want %q", path, data, expected)
 	}
 }
 
@@ -520,7 +666,7 @@ func TestExplicitBatchVariantDoesNotBecomeBaseModelAlias(t *testing.T) {
 	}
 }
 
-func TestQualifiedNonBatchRecordsStayIndependent(t *testing.T) {
+func TestBareSourceOwnsDeduplicatedQualifiedRecords(t *testing.T) {
 	primary := recordRef{key: "model", record: sourceRecord{Mode: "chat", SupportsNativeStreaming: true}}
 	qualified := recordRef{key: "provider/model", record: sourceRecord{Mode: "chat", SupportsNativeStreaming: false}}
 	compiled, rejected := compileModels([]recordRef{primary, qualified}, nil)
