@@ -1,0 +1,440 @@
+{
+  "schema_version": 1,
+  "rejections": [
+    {
+      "model_id": "DeepSeek-R1-Distill-Llama-70B",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "Kimi-K2.6",
+      "field": "operation",
+      "reason": "operation \"generate\" supported_modalities from \"moonshot/kimi-k2.6\" conflicts with primary record \"azure/kimi-k2.6\""
+    },
+    {
+      "model_id": "Kimi-K2.7-Code",
+      "field": "operation",
+      "reason": "operation \"generate\" supported_modalities from \"moonshot/kimi-k2.7-code\" conflicts with primary record \"azure/kimi-k2.7-code\""
+    },
+    {
+      "model_id": "codestral-embed",
+      "field": "token_limits",
+      "reason": "operation \"generate\": output minimum must not exceed maximum"
+    },
+    {
+      "model_id": "cohere/embed-v4.0",
+      "field": "token_limits",
+      "reason": "operation \"generate\": output minimum must not exceed maximum"
+    },
+    {
+      "model_id": "cohere/parse-v5.0",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "deep-search",
+      "field": "operation",
+      "reason": "source record \"apiserpent/deep_search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "deepseek-ocr",
+      "field": "operation",
+      "reason": "source record \"vertex_ai/deepseek-ai/deepseek-ocr-maas\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "doc-intelligence/prebuilt-document",
+      "field": "operation",
+      "reason": "source record \"azure/doc-intelligence/prebuilt-document\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "doc-intelligence/prebuilt-layout",
+      "field": "operation",
+      "reason": "source record \"azure/doc-intelligence/prebuilt-layout\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "doc-intelligence/prebuilt-read",
+      "field": "operation",
+      "reason": "source record \"azure/doc-intelligence/prebuilt-read\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "gemini-2.5-flash",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-2.5-flash-lite",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-2.5-pro",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-3-flash-preview",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-3-pro-preview",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-flash-latest",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-flash-lite-latest",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "gemini-pro-latest",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "glm-5.2",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "glm-5p2",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "guardrails",
+      "field": "operation",
+      "reason": "source record \"bedrock/guardrails\": source mode \"guardrail\" is unsupported"
+    },
+    {
+      "model_id": "hunyuan-3d-3.1",
+      "field": "operation",
+      "reason": "source record \"replicate/tencent/hunyuan-3d-3.1\": source mode \"3d\" is unsupported"
+    },
+    {
+      "model_id": "llama-4-maverick-17b-128e-instruct",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "llama-4-maverick-17b-16e-instruct",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "llama-4-scout-17b-128e-instruct",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "llama-4-scout-17b-16e-instruct",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "meta.llama4-maverick-17b-instruct-v1:0",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "meta.llama4-scout-17b-instruct-v1:0",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "mistral-document-ai",
+      "field": "operation",
+      "reason": "source record \"azure/mistral-document-ai-2505\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "mistral-document-ai",
+      "field": "operation",
+      "reason": "source record \"azure/mistral-document-ai-2512\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "mistral-embed",
+      "field": "token_limits",
+      "reason": "operation \"generate\": output minimum must not exceed maximum"
+    },
+    {
+      "model_id": "mistral-ocr",
+      "field": "operation",
+      "reason": "source record \"vertex_ai/mistral-ocr-2505\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "mistral-ocr-4-0",
+      "field": "operation",
+      "reason": "source record \"azure/mistral-ocr-4-0\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "mistral-small-3.1-24b-instruct",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "mistral/mistral-moderation-2603",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-2505-completion",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-2512",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-3",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-3-0",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-4",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-4-0",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-4-1",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "mistral/mistral-ocr-latest",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"ocr\""
+    },
+    {
+      "model_id": "o3",
+      "field": "operation",
+      "reason": "operation \"generate\" supported_modalities from \"gradient_ai/openai-o3\" conflicts with primary record \"o3\""
+    },
+    {
+      "model_id": "omni-moderation-2024-09-26",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "omni-moderation-latest",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "omni-moderation-latest-intents",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "parse-legacy",
+      "field": "operation",
+      "reason": "source record \"reducto/parse-legacy\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "parse-v3",
+      "field": "operation",
+      "reason": "source record \"reducto/parse-v3\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "parse-v5",
+      "field": "operation",
+      "reason": "source record \"azure/Cohere-parse-v5\": source mode \"ocr\" is unsupported"
+    },
+    {
+      "model_id": "qwen3-32b",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "remm-slerp-l2-13b",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"agentcore/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"apiserpent/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"bing_grounding/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"dataforseo/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"duckduckgo/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"exa_ai/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"firecrawl/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"google_pse/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"linkup/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"nimble/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"parallel_ai/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"perplexity/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"searxng/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"serper/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"tavily/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"tinyfish/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search",
+      "field": "operation",
+      "reason": "source record \"you_com/search\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search-advanced",
+      "field": "operation",
+      "reason": "source record \"tavily/search-advanced\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search-api",
+      "field": "operation",
+      "reason": "source record \"vertex_ai/search_api\": source mode \"vector_store\" is unsupported"
+    },
+    {
+      "model_id": "search-deep",
+      "field": "operation",
+      "reason": "source record \"linkup/search-deep\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search-fast",
+      "field": "operation",
+      "reason": "source record \"parallel_ai/search-fast\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search-pro",
+      "field": "operation",
+      "reason": "source record \"parallel_ai/search-pro\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "search-turbo",
+      "field": "operation",
+      "reason": "source record \"parallel_ai/search-turbo\": source mode \"search\" is unsupported"
+    },
+    {
+      "model_id": "sora-2",
+      "field": "operation",
+      "reason": "operation \"video_generation\" supported_modalities from \"azure/sora-2\" conflicts with primary record \"sora-2\""
+    },
+    {
+      "model_id": "sora-2-pro",
+      "field": "operation",
+      "reason": "operation \"video_generation\" supported_modalities from \"azure/sora-2-pro\" conflicts with primary record \"sora-2-pro\""
+    },
+    {
+      "model_id": "sora-2-pro-high-res",
+      "field": "operation",
+      "reason": "operation \"video_generation\" supported_modalities from \"azure/sora-2-pro-high-res\" conflicts with primary record \"sora-2-pro-high-res\""
+    },
+    {
+      "model_id": "text-moderation-007",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "text-moderation-latest",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "text-moderation-stable",
+      "field": "operation",
+      "reason": "exact source record declares unsupported mode \"moderation\""
+    },
+    {
+      "model_id": "titan-embed-text-v2",
+      "field": "token_limits",
+      "reason": "operation \"generate\": output minimum must not exceed maximum"
+    },
+    {
+      "model_id": "us.meta.llama4-maverick-17b-instruct-v1:0",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "us.meta.llama4-scout-17b-instruct-v1:0",
+      "field": "operation",
+      "reason": "operation \"generate\": supported_output_modalities: unsupported modality \"code\""
+    },
+    {
+      "model_id": "veo-3.1-lite-generate",
+      "field": "operation",
+      "reason": "operation \"video_generation\" supported_modalities from \"gemini/veo-3.1-lite-generate-preview\" conflicts with primary record \"vertex_ai/veo-3.1-lite-generate-001\""
+    },
+    {
+      "model_id": "weaver",
+      "field": "token_limits",
+      "reason": "operation \"generate\": model output maximum conflicts with parameter range maximum"
+    }
+  ]
+}

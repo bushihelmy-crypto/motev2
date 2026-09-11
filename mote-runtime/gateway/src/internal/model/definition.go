@@ -19,8 +19,7 @@ const (
 	// gatewayDefaultMaxOutputTokens is a Gateway policy, not a
 	// provider/model fact. A model's own minimum and maximum remain owned by
 	// TokenLimits.
-	gatewayDefaultMaxOutputTokens   int64 = 4096
-	operationEmbeddingMismatchError       = "non-embedding operation must not declare embedding parameters"
+	gatewayDefaultMaxOutputTokens int64 = 4096
 )
 
 // TokenLimits contains independently known model-native limits. Zero means
@@ -181,8 +180,15 @@ func normalizeOperationConfig(modelID string, config OperationConfig) (Operation
 	if err != nil {
 		return OperationConfig{}, configError(modelID, "operations.features", err.Error())
 	}
-	if reason := operationPolicyError(config); reason != "" {
-		return OperationConfig{}, configError(modelID, "operations", reason)
+	if err := ValidateOperationShape(OperationShape{
+		Operation:        config.Operation,
+		Modes:            config.Modes,
+		InputModalities:  config.InputModalities,
+		OutputModalities: config.OutputModalities,
+		HasGeneration:    config.Generation != nil,
+		HasEmbedding:     config.Embedding != nil,
+	}); err != nil {
+		return OperationConfig{}, configError(modelID, "operations", err.Error())
 	}
 
 	generation, field, reason := normalizeGenerationPolicy(config.Generation)
@@ -196,69 +202,6 @@ func normalizeOperationConfig(modelID string, config OperationConfig) (Operation
 	}
 	config.Embedding = embedding
 	return config, nil
-}
-
-// operationPolicies is the one operation-shape rule table. It is read-only;
-// callers cannot mutate it because the package exposes no map accessor.
-var operationPolicies = map[api.Operation]struct {
-	requiredOutput  api.Modality
-	exactOutput     bool
-	embedding       bool
-	embeddingError  string
-	generationError string
-}{
-	api.OperationGenerate:           {embeddingError: operationEmbeddingMismatchError},
-	api.OperationEmbedding:          {exactOutput: true, embedding: true, embeddingError: "embedding must declare its embedding capability", generationError: "embedding must not declare generation parameters"},
-	api.OperationRerank:             {requiredOutput: api.ModalityText, generationError: "rerank must not declare generation parameters", embeddingError: operationEmbeddingMismatchError},
-	api.OperationImageGeneration:    {requiredOutput: api.ModalityImage, embeddingError: operationEmbeddingMismatchError},
-	api.OperationAudioGeneration:    {requiredOutput: api.ModalityAudio, embeddingError: operationEmbeddingMismatchError},
-	api.OperationAudioTranscription: {requiredOutput: api.ModalityText, embeddingError: operationEmbeddingMismatchError},
-	api.OperationMusicGeneration:    {requiredOutput: api.ModalityMusic, embeddingError: operationEmbeddingMismatchError},
-	api.OperationVideoGeneration:    {requiredOutput: api.ModalityVideo, embeddingError: operationEmbeddingMismatchError},
-	api.OperationRealtime:           {embeddingError: operationEmbeddingMismatchError},
-}
-
-func operationPolicyError(config OperationConfig) string {
-	if slices.Contains(config.InputModalities, api.ModalityEmbedding) {
-		return "embedding cannot be an operation input modality"
-	}
-	if config.Operation == api.OperationRealtime {
-		if reason := realtimeOperationPolicyError(config); reason != "" {
-			return reason
-		}
-	} else if slices.Contains(config.Modes, api.ModeDuplex) {
-		return "only realtime may use duplex mode"
-	}
-	policy := operationPolicies[config.Operation]
-	if policy.requiredOutput != "" && !slices.Contains(config.OutputModalities, policy.requiredOutput) {
-		return fmt.Sprintf("%s must produce %s", config.Operation, policy.requiredOutput)
-	}
-	if policy.exactOutput && !slices.Equal(config.OutputModalities, []api.Modality{api.ModalityEmbedding}) {
-		return "embedding must produce only the embedding modality"
-	}
-	if (config.Embedding != nil) != policy.embedding {
-		return policy.embeddingError
-	}
-	if config.Generation != nil && policy.generationError != "" {
-		return policy.generationError
-	}
-	if !policy.embedding && slices.Contains(config.OutputModalities, api.ModalityEmbedding) {
-		return "non-embedding operation must not produce the embedding modality"
-	}
-	return ""
-}
-
-func realtimeOperationPolicyError(config OperationConfig) string {
-	if !slices.Equal(config.Modes, []api.DeliveryMode{api.ModeDuplex}) {
-		return "realtime must use duplex mode only"
-	}
-	if !slices.Contains(config.InputModalities, api.ModalityText) && !slices.Contains(config.InputModalities, api.ModalityAudio) {
-		return "realtime must accept text or audio input"
-	}
-	if !slices.Contains(config.OutputModalities, api.ModalityText) && !slices.Contains(config.OutputModalities, api.ModalityAudio) {
-		return "realtime must produce text or audio output"
-	}
-	return ""
 }
 
 func normalizeSet[T ~string](values []T, valid func(T) bool) ([]T, error) {

@@ -14,8 +14,14 @@
 | [`src/internal/model/capability.go`](../src/internal/model/capability.go) | operation 能力、默认参数、参数过滤、已知边界 clamp、Embedding 维度 |
 | [`src/internal/model/catalog.go`](../src/internal/model/catalog.go) | 内置目录加载、来源校验、精确 ID 查找、typed error |
 | [`src/api/operation.go`](../src/api/operation.go) | 中立的 operation/modality/mode/feature 词汇 |
-| [`scripts/update-model-catalog.go`](../scripts/update-model-catalog.go) | 从 new-api/Bifrost 快照生成纯模型目录 |
+| [`src/cmd/update-model-catalog`](../src/cmd/update-model-catalog) | 从 new-api/Bifrost 快照生成纯模型目录，并复用 runtime 的 typed operation-shape owner |
 | `src/internal/model/catalog_data.json.gz` | 生成后的模型事实快照，不应被手工编辑 |
+| `src/internal/model/catalog_rejections.json` | 同一输入快照中被 fail-closed 拒绝的模型集合，不是第二份能力目录 |
+
+本目录采用“真实模型能力优先”的语义：目录记录来源能够证明的完整模型能力，
+不因为当前 `gateway_invocation` v1 的请求 DTO 或某个调用 profile 暂时较窄就删掉
+能力。v1 的 admission/调用入口负责拦截尚未发布的请求形状；目录不能把“当前入口
+不会调用”改写成“模型本身不会”。
 
 明确不在本次范围内：
 
@@ -37,11 +43,14 @@
 | 规则/事实 | 唯一 owner | 评审应看到的证据 |
 | --- | --- | --- |
 | 模型 ID 的存在与精确查找 | `Catalog` | `Lookup` 只按完整字符串查 map，不 trim、alias、prefix、fallback |
+| 跨来源模型身份归一化 | `compileModels` 的 `identityIndex` | 只在构建期去掉明确的服务包装（包括 `openai/`）；模型命名空间如 `mistral/...`、`cohere/...` 保留；runtime 不再做别名查找 |
 | 默认配置与 Kernel 配置的合并 | `newCatalog` / `applyOverride` | 构造时合并一次；调用期间不再次 patch |
 | 配置合法性和集合规范化 | `normalizeConfig` / `normalizeOperationConfig` | enum、重复 operation、重复集合、边界和 operation 形状集中校验 |
 | 生成参数支持状态、默认值和边界 | 选中 operation 的 `GenerationPolicy` | `Capability.ResolveGenerationParameters` 只有一条解析路径 |
+| structured-output 模型兼容性证据 | 选中 operation 的 `Features` | `supports_response_schema` / `supports_native_structured_output` 只投影为中立的 `structured_output` 证据；协议和服务准入仍必须再次通过 |
 | Embedding 维度 | `EmbeddingPolicy` | fixed 与 adjustable 互斥；默认值和边界不复制到别处 |
-| 来源抽取和快照生成 | `update-model-catalog.go` | 输入 revision/hash 被记录，输出不携带 service/protocol/pricing 字段 |
+| operation shape（mode/modality/policy 组合） | `src/internal/model/shape.go` 的 `ValidateOperationShape` | 生成器和 runtime 复用同一个 typed 校验，不各自维护规则表 |
+| 来源抽取和快照生成 | `src/cmd/update-model-catalog` | 输入 revision/hash 只记录在 catalog；输出不携带 service/protocol/pricing 字段；rejection 写入机器可读 sidecar |
 | 服务、协议、凭据、价格 | 各自的 service/protocol/receipt owner | `internal/model` 和 catalog 中不存在这些执行事实 |
 
 ### 组合调用链
@@ -52,7 +61,7 @@
 new-api tree + Bifrost parameter snapshot
         │
         ▼
-update-model-catalog.go
+src/cmd/update-model-catalog
         │  deterministic sort + provenance
         ▼
 catalog_data.json.gz
@@ -79,8 +88,8 @@ Protocol adapter encodes the resolved neutral request
 
 - `Definition` 建立后，调用方修改构造输入的 slice、pointer 或 stop 列表，不得改变
   已建立的定义。
-- 每个模型的 operation 唯一；集合排序且不含重复项；所有枚举值都来自 `api` 的
-  中立词汇。
+- 每个模型的同一 operation 唯一；一个真实模型可以同时发布多个独立 operation，集合
+  排序且不含重复项；所有枚举值都来自 `api` 的中立词汇。
 - `Lookup("model ")` 不得命中 `Lookup("model")`；不允许 alias、大小写折叠、
   家族推断或隐式 fallback。
 - 已有模型的 `nil` override 字段继承默认值；非 nil 的 operation 集合整体替换，
@@ -121,13 +130,20 @@ Protocol adapter encodes the resolved neutral request
 
 生成器必须保持可重现、可解释，而不是把上游资料原样搬进 Gateway。请重点检查：
 
-1. `compileModels` 是否只形成一个 authoritative operation，是否会把不同服务记录
-   错误地合并成模型能力。
+1. `compileModels` 是否先形成一个稳定的 canonical model identity，再按 semantic
+   operation 分桶；同一模型的不同 operation 必须并存，不能互相覆盖。精确 canonical
+   记录拥有 token、参数、维度和生命周期；明确的 `:batch` 变体只补充同 operation
+   的交付模式，冲突 batch 只拒绝该变体。模态 supplemental fact 不得扩大主记录；主
+   记录缺失时只能确定性采用一致的观察，冲突记录写入 rejection manifest，不能静默
+   丢弃或 union 出来源未声明的能力。
 2. `sortRecords` 的优先级是否稳定；同一输入重复生成时，输出顺序和字段应一致。
-3. `inferOperation`、图像/视频/Embedding 名称判定只是缺失来源事实时的保守补足；
-   新增启发式必须有针对性测试，不能用一个名称规则覆盖整个服务商。
+3. `inferOperation`、图像/视频/Embedding 名称判定只是完全没有来源记录时的保守
+   补足；有精确来源记录时，显式 `mode` 直接拥有 operation，模型名称不能覆盖它；
+   `mode` 缺失或未知时必须 rejection，不能回退到名称推断。新增启发式必须有针对性
+   测试，不能用一个名称规则覆盖整个服务商。
 4. batch-only 记录是否只暴露 `async`；普通模型有 batch 能力时是否保留 `unary`
-   并额外声明 `async`；`:batch` key 只能补充基础模型，不能成为另一个模型 ID。
+   并额外声明 `async`；`:batch` 行在 canonical 分组后只能补充同 operation，不能成为
+   另一个模型 ID，也不能把不同 operation 的主模型拒绝掉。
 5. `compileTokenLimits`、参数默认值和维度信息是否来自模型事实，而不是价格行、
    provider 字段或 protocol endpoint。`model_parameters` 中的 output-token UI 默认值
    不被消费；Gateway 的 4096 运行时策略是唯一默认 owner，只采纳来源声明的边界。
@@ -135,27 +151,31 @@ Protocol adapter encodes the resolved neutral request
    不含 `provider`、`protocol`、`endpoint`、`credential`、`price`、`pricing`、
    `family` 等越权字段。
 
-固定 revision/hash 的当前快照发布 12324 个模型；下面的 operation 数量用于人工核对。
-它们不是可替代模型事实的第二份能力状态，测试只把快照总数和每个模型一个
-authoritative operation 作为回归信号：
+固定 revision/hash 的当前快照发布 9120 个 canonical 模型；其中 25 个模型有多个
+独立 semantic operation。下面的 operation 数量用于人工核对；它们不是可替代模型
+事实的第二份能力状态：
 
 | operation | 数量 |
 | --- | ---: |
-| `generate` | 11445 |
-| `embedding` | 216 |
-| `rerank` | 35 |
-| `image_generation` | 371 |
-| `audio_generation` | 48 |
-| `audio_transcription` | 93 |
+| `generate` | 8510 |
+| `embedding` | 159 |
+| `rerank` | 31 |
+| `image_generation` | 250 |
+| `audio_generation` | 40 |
+| `audio_transcription` | 72 |
 | `music_generation` | 0 |
-| `video_generation` | 99 |
-| `realtime` | 17 |
+| `video_generation` | 72 |
+| `realtime` | 11 |
 
-原始快照另有 81 个 `:batch` 请求变体，它们只补充基础模型的 `async` 能力，不发布为
-模型；还有 4 条 `vercel_ai_gateway/...embed...` 记录同时声明 `mode=chat` 和非法的
-output-token 范围 `1..0`，生成器按模型 fail-closed 并明确报告 rejection。有效的底层
-Embedding 模型由其他精确来源 key 覆盖，生成器没有用名称猜测去改写这 4 条记录。
-
+原始快照中的 `:batch` 请求变体只补充基础模型的 `async` 能力，不发布为模型。当前
+rejection manifest 有 87 条：15 条是顶层 output maximum 与参数 range maximum 冲突，
+4 条是非法 output-token range（minimum 大于 maximum），8 条是来源声明了 Gateway
+未知的 `code` modality，16 条是 Gateway 不拥有的 `search`/`ocr`/`moderation`/`3d`
+等未知 operation，另有 22 条 supplemental modality 冲突；这些记录都不会静默消失，
+完整集合写入 `src/internal/model/catalog_rejections.json`。无 authoritative source
+的模型才允许按明确的名称规则推断 operation；有 source row 但 mode 缺失或未知时
+直接 rejection。`fallback_generalizations` 是 Bifrost 的规则元数据，不是模型记录，
+按 source adapter 规则排除，不计入模型或 rejection。
 数量变化本身不一定是缺陷，但必须能由来源 revision、生成器规则或明确的模型事实
 解释；不能只改测试期望值。
 
@@ -210,8 +230,8 @@ make vulncheck
 还应检查：
 
 ```bash
-go test ./...
-go vet scripts/update-model-catalog.go scripts/update-model-catalog_test.go
+go -C src test ./...
+go -C src vet ./cmd/update-model-catalog
 git diff --check
 ```
 
@@ -237,6 +257,9 @@ git diff --check
 只有在设计本身清晰且唯一、关键不变量有测试、所有适用门禁通过，并且剩余限制已被
 明确记录时，才建议批准。
 
-本次复杂度基线从 161 个 decision points / 52 个函数下调到 155 / 51：原因是删除了
-重复的 output-token 校验和空 marker 克隆路径，并将 operation 形状和 Embedding 正数
-边界改成单一规则表/循环。这个下降对应真实删除和合并，不是为了绕过门禁拆出转发函数。
+本次复杂度基线记录为 163 个 decision points / 52 个函数：新增的
+`ValidateOperationShape` 是 runtime 与 build-time compiler 共用的唯一 typed shape
+owner；它替代了两套分散规则，因此增加的是一份真实规则，而不是 wrapper 或兼容路径。
+`cmd/update-model-catalog` 是构建期 compiler，虽位于同一 Go module 以便导入该 owner，
+但不属于部署后的 runtime call path，runtime complexity ratchet 明确不把它混入；它由
+自己的 deterministic unit tests 和生成产物校验保护。

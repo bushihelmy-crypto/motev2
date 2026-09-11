@@ -19,7 +19,11 @@ import (
 // The measured set is explicit. Test infrastructure and the process shell do
 // not inflate the production architecture budget.
 var measuredRoots = map[string]bool{
-	".":   true,
+	".": true,
+	// cmd/update-model-catalog is a build-time source compiler. It lives in
+	// this module so it can import the typed model-shape owner, but it is not a
+	// runtime call path and therefore has its own unit tests rather than
+	// inflating the runtime complexity budget below.
 	"api": true, "internal/application": true, "internal/admission": true,
 	"internal/plan": true, "internal/model": true, "internal/protocol": true,
 	"internal/service": true, "internal/cache": true, "internal/usage": true,

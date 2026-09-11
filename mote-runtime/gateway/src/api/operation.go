@@ -70,11 +70,16 @@ const (
 	ModeAsync        DeliveryMode = "async"
 )
 
-// Feature is a required model capability, not a routing preference.
+// Feature is a required invocation feature, not a routing preference. A
+// catalog entry may publish model-side compatibility evidence, but admission
+// must still intersect it with the selected protocol and service capabilities.
 type Feature string
 
 const (
-	FeatureToolCalls   Feature = "tool_calls"
+	FeatureToolCalls Feature = "tool_calls"
+	// FeatureStructured requests schema-constrained JSON. The model catalog may
+	// retain model compatibility evidence for it, but this bit alone never
+	// promises that a selected protocol/service path enforces the schema.
 	FeatureStructured  Feature = "structured_output"
 	FeaturePromptCache Feature = "prompt_cache"
 	FeatureUsage       Feature = "usage"

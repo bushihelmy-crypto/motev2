@@ -103,7 +103,7 @@ test test-unit: test-catalog
 		$(GO) -C $(GO_DIR) test -race -count=1 -covermode=atomic -coverprofile=../$(COVERAGE_FILE) $$packages
 
 test-catalog:
-	@$(GO) test scripts/update-model-catalog.go scripts/update-model-catalog_test.go
+	@$(GO) -C $(GO_DIR) test ./cmd/update-model-catalog
 
 test-integration:
 	@$(GO) -C $(GO_DIR) test -race -count=1 -tags=integration ./integration/...

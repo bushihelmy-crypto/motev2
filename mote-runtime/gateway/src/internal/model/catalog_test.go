@@ -304,12 +304,19 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	if len(catalog.definitions) != 12324 {
+	if len(catalog.definitions) != 9120 {
 		t.Fatalf("unexpected built-in model count for the pinned snapshot: %d", len(catalog.definitions))
 	}
 	for _, definition := range catalog.definitions {
-		if len(definition.config.Operations) != 1 {
-			t.Fatalf("generated model %q does not have one authoritative operation", definition.ID())
+		if len(definition.config.Operations) == 0 {
+			t.Fatalf("generated model %q has no authoritative operation", definition.ID())
+		}
+		seenOperations := make(map[api.Operation]struct{}, len(definition.config.Operations))
+		for _, operation := range definition.config.Operations {
+			if _, duplicate := seenOperations[operation.Operation]; duplicate {
+				t.Fatalf("generated model %q repeats operation %q", definition.ID(), operation.Operation)
+			}
+			seenOperations[operation.Operation] = struct{}{}
 		}
 	}
 
@@ -326,20 +333,23 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	assertOperation(t, catalog, "text-embedding-3-large", api.OperationEmbedding)
 	assertMode(t, catalog, "text-embedding-3-large", api.ModeAsync)
 	for _, generated := range []string{
-		"anthropic/claude-3-5-sonnet-20241022", "openai/gpt-4o",
-		"google/gemini-1.5-pro", "meta-llama/llama-3.2-11b-vision-instruct",
+		"claude-3-5-sonnet-20241022", "gpt-4o",
+		"gemini-1.5-pro", "llama-3.2-11b-vision-instruct",
 		"amazon/nova-pro-v1",
 	} {
 		assertOperation(t, catalog, generated, api.OperationGenerate)
 	}
 
-	gemini, _ := catalog.Lookup("gemini-2.5-pro")
-	limits := gemini.TokenLimits()
-	if limits.MaxInputTokens != 1048576 || limits.MaxOutputTokens != 65535 {
-		t.Fatalf("gemini limits were inflated by another service record: %+v", limits)
+	if _, err := catalog.Lookup("gemini-2.5-pro"); err == nil {
+		t.Fatal("conflicting source limits were published instead of rejected")
 	}
-	geminiCapability, _ := gemini.Capability(api.OperationGenerate)
-	if resolved := geminiCapability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
+	gpt41Definition, _ := catalog.Lookup("gpt-4.1")
+	limits := gpt41Definition.TokenLimits()
+	if limits.MaxInputTokens != 1047576 || limits.MaxOutputTokens != 32768 {
+		t.Fatalf("gpt-4.1 limits were inflated by another service record: %+v", limits)
+	}
+	gpt41Capability, _ := gpt41Definition.Capability(api.OperationGenerate)
+	if resolved := gpt41Capability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
 		t.Fatalf("central max_output_tokens policy is wrong: %+v", resolved)
 	}
 	gpt41, _ := catalog.Lookup("gpt-4.1")
@@ -352,14 +362,19 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if filtered.Temperature != nil || filtered.TopP != nil {
 		t.Fatalf("disabled sampling parameters leaked: %+v", filtered)
 	}
-	for _, alias := range []string{"doubao-embedding-large-text", "kokoro-82m", "chirp-3"} {
+	for _, alias := range []string{"doubao-embedding-large-text", "openrouter/hexgrad/kokoro-82m", "openrouter/google/chirp-3"} {
 		if _, lookupErr := catalog.Lookup(alias); lookupErr == nil {
 			t.Errorf("non-authoritative BaseModel alias was published: %q", alias)
 		}
 	}
+	for _, canonical := range []string{"kokoro-82m", "chirp-3"} {
+		if _, lookupErr := catalog.Lookup(canonical); lookupErr != nil {
+			t.Errorf("canonical mixed-operation model %q was lost: %v", canonical, lookupErr)
+		}
+	}
 	whisper, _ := catalog.Lookup("whisper-1")
-	if _, exists := whisper.Capability(api.OperationGenerate); exists {
-		t.Fatal("whisper acquired a generate operation from a different service record")
+	if _, exists := whisper.Capability(api.OperationGenerate); !exists {
+		t.Fatal("whisper's independently sourced generate operation was lost")
 	}
 	if _, exists := whisper.Capability(api.OperationAudioTranscription); !exists {
 		t.Fatal("whisper transcription operation is missing")
@@ -562,6 +577,54 @@ func TestCatalogRejectsInvalidOperationShapes(t *testing.T) {
 				t.Fatalf("expected operation-shape error, got %T %v", err, err)
 			}
 		})
+	}
+}
+
+func TestCatalogRetainsStructuredOutputModelCompatibilityEvidence(t *testing.T) {
+	config := testModelConfig("structured-override")
+	config.Operations[0].Features = []api.Feature{api.FeatureStructured}
+	catalog, err := newCatalog([]Config{config}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := catalog.Lookup(config.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, ok := definition.Capability(api.OperationGenerate)
+	if !ok || !capability.SupportsFeature(api.FeatureStructured) {
+		t.Fatal("structured output model compatibility evidence was not retained")
+	}
+}
+
+func TestCatalogRetainsExplicitMultimodalOperationFacts(t *testing.T) {
+	realtime := testModelConfig("realtime-multimodal")
+	realtime.Operations[0] = OperationConfig{
+		Operation:        api.OperationRealtime,
+		Modes:            []api.DeliveryMode{api.ModeDuplex},
+		InputModalities:  []api.Modality{api.ModalityAudio, api.ModalityImage, api.ModalityText, api.ModalityVideo},
+		OutputModalities: []api.Modality{api.ModalityAudio, api.ModalityText},
+	}
+	image := testModelConfig("image-multimodal")
+	image.Operations[0] = OperationConfig{
+		Operation:        api.OperationImageGeneration,
+		Modes:            []api.DeliveryMode{api.ModeUnary},
+		InputModalities:  []api.Modality{api.ModalityImage, api.ModalityText},
+		OutputModalities: []api.Modality{api.ModalityImage, api.ModalityText},
+	}
+	catalog, err := newCatalog([]Config{realtime, image}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := catalog.Lookup(realtime.ID)
+	capability, _ := definition.Capability(api.OperationRealtime)
+	if !capability.SupportsInputModality(api.ModalityImage) || !capability.SupportsInputModality(api.ModalityVideo) {
+		t.Fatal("realtime source modalities were narrowed to the current invocation profile")
+	}
+	definition, _ = catalog.Lookup(image.ID)
+	capability, _ = definition.Capability(api.OperationImageGeneration)
+	if !capability.SupportsOutputModality(api.ModalityText) || !capability.SupportsOutputModality(api.ModalityImage) {
+		t.Fatal("explicit multimodal image output was rejected")
 	}
 }
 

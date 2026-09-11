@@ -34,8 +34,9 @@ type Message struct {
 	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
 }
 
-// ResponseFormat requests a model-native structured response. The schema is
-// model-owned JSON and is intentionally not interpreted by the Gateway.
+// ResponseFormat requests a schema-constrained response. The Gateway carries
+// the caller-owned schema through; strict success requires compatible model,
+// protocol, and service owners and is not implied by ordinary JSON output.
 type ResponseFormat struct {
 	Type   string          `json:"type"`
 	Schema json.RawMessage `json:"schema,omitempty"`

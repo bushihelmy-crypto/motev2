@@ -89,9 +89,9 @@ func (capability Capability) SupportsOutputModality(modality api.Modality) bool 
 	return slices.Contains(operation.OutputModalities, modality)
 }
 
-// SupportsFeature reports whether this operation supports the required model
-// feature. Unsupported required features are rejected by admission rather than
-// silently removed.
+// SupportsFeature reports whether this operation publishes the model-side
+// compatibility evidence for a required feature. For structured output,
+// admission must additionally verify protocol and service support.
 func (capability Capability) SupportsFeature(feature api.Feature) bool {
 	operation := capability.definition.config.Operations[capability.operationIndex]
 	return slices.Contains(operation.Features, feature)

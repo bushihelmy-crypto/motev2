@@ -22,9 +22,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
 const catalogSchemaVersion = 1
+const rejectionManifestSchemaVersion = 1
 
 // Keep the public provenance commits split into short literals so the secret
 // scanner does not mistake a Git SHA for credential material.
@@ -33,18 +37,18 @@ const (
 	defaultBifrostRef = "c5c02ae7" + "47fe294a" + "7f7f7652" + "77aae08b" + "bf0835fa"
 )
 
-var supportedModes = map[string]string{
-	"chat":                "generate",
-	"completion":          "generate",
-	"responses":           "generate",
-	"embedding":           "embedding",
-	"rerank":              "rerank",
-	"image_generation":    "image_generation",
-	"image_edit":          "image_generation",
-	"audio_speech":        "audio_generation",
-	"audio_transcription": "audio_transcription",
-	"video_generation":    "video_generation",
-	"realtime":            "realtime",
+var supportedModes = map[string]api.Operation{
+	"chat":                api.OperationGenerate,
+	"completion":          api.OperationGenerate,
+	"responses":           api.OperationGenerate,
+	"embedding":           api.OperationEmbedding,
+	"rerank":              api.OperationRerank,
+	"image_generation":    api.OperationImageGeneration,
+	"image_edit":          api.OperationImageGeneration,
+	"audio_speech":        api.OperationAudioGeneration,
+	"audio_transcription": api.OperationAudioTranscription,
+	"video_generation":    api.OperationVideoGeneration,
+	"realtime":            api.OperationRealtime,
 }
 
 type options struct {
@@ -54,12 +58,15 @@ type options struct {
 	bifrostRef      string
 	modelParameters string
 	output          string
+	rejections      string
 }
 
 type sourceRecord struct {
 	// BaseModel is source metadata only; source keys, never this hint, define
 	// catalog identity.
 	BaseModel                   string            `json:"base_model"`
+	Provider                    string            `json:"provider"`
+	Source                      string            `json:"source"`
 	Mode                        string            `json:"mode"`
 	MaxInputTokens              *json.Number      `json:"max_input_tokens"`
 	MaxOutputTokens             *json.Number      `json:"max_output_tokens"`
@@ -75,14 +82,17 @@ type sourceRecord struct {
 	SupportsFunctionCalling     bool              `json:"supports_function_calling"`
 	SupportsImageInput          bool              `json:"supports_image_input"`
 	SupportsNativeStreaming     bool              `json:"supports_native_streaming"`
-	SupportsNativeStructured    bool              `json:"supports_native_structured_output"`
-	SupportsPromptCaching       bool              `json:"supports_prompt_caching"`
-	SupportsCachePoint          bool              `json:"supports_cache_point"`
-	SupportsResponseSchema      bool              `json:"supports_response_schema"`
-	SupportsSamplingParams      *bool             `json:"supports_sampling_params"`
-	SupportsVideoInput          bool              `json:"supports_video_input"`
-	SupportsVision              bool              `json:"supports_vision"`
-	IsDeprecated                bool              `json:"is_deprecated"`
+	// These source flags are compatibility evidence for the model/service
+	// combination. The catalog keeps the model-side hint, while admission still
+	// requires protocol and service support before promising strict output.
+	SupportsNativeStructured bool  `json:"supports_native_structured_output"`
+	SupportsPromptCaching    bool  `json:"supports_prompt_caching"`
+	SupportsCachePoint       bool  `json:"supports_cache_point"`
+	SupportsResponseSchema   bool  `json:"supports_response_schema"`
+	SupportsSamplingParams   *bool `json:"supports_sampling_params"`
+	SupportsVideoInput       bool  `json:"supports_video_input"`
+	SupportsVision           bool  `json:"supports_vision"`
+	IsDeprecated             bool  `json:"is_deprecated"`
 }
 
 type sourceParameter struct {
@@ -108,6 +118,11 @@ type catalogDocument struct {
 	Models        []modelConfig   `json:"models"`
 }
 
+type rejectionManifest struct {
+	SchemaVersion int             `json:"schema_version"`
+	Rejections    []*compileError `json:"rejections"`
+}
+
 type catalogSource struct {
 	Name     string `json:"name"`
 	Revision string `json:"revision,omitempty"`
@@ -129,13 +144,13 @@ type tokenLimits struct {
 }
 
 type operationConfig struct {
-	Operation        string            `json:"operation"`
-	Modes            []string          `json:"modes"`
-	InputModalities  []string          `json:"input_modalities"`
-	OutputModalities []string          `json:"output_modalities"`
-	Features         []string          `json:"features,omitempty"`
-	Generation       *generationPolicy `json:"generation,omitempty"`
-	Embedding        *embeddingPolicy  `json:"embedding,omitempty"`
+	Operation        api.Operation      `json:"operation"`
+	Modes            []api.DeliveryMode `json:"modes"`
+	InputModalities  []api.Modality     `json:"input_modalities"`
+	OutputModalities []api.Modality     `json:"output_modalities"`
+	Features         []api.Feature      `json:"features,omitempty"`
+	Generation       *generationPolicy  `json:"generation,omitempty"`
+	Embedding        *embeddingPolicy   `json:"embedding,omitempty"`
 }
 
 type generationPolicy struct {
@@ -180,6 +195,7 @@ func parseOptions() options {
 	flag.StringVar(&result.bifrostRef, "bifrost-ref", defaultBifrostRef, "immutable Bifrost Git commit to read")
 	flag.StringVar(&result.modelParameters, "model-parameters", "", "Bifrost model-parameters JSON snapshot")
 	flag.StringVar(&result.output, "output", "src/internal/model/catalog_data.json.gz", "gzip-compressed catalog output path")
+	flag.StringVar(&result.rejections, "rejections", "", "machine-readable rejection manifest path (default derives from -output)")
 	flag.Parse()
 	return result
 }
@@ -209,26 +225,37 @@ func run(configured options) error {
 		return err
 	}
 	models, rejected := compileModels(records, newModels)
-	for _, rejection := range rejected {
-		fmt.Fprintf(os.Stderr, "rejected model: %v\n", rejection)
-	}
 	if len(models) == 0 {
 		return errors.New("compile model catalog: sources produced no usable models")
 	}
 	digest := sha256.Sum256(parameterData)
+	sources := []catalogSource{
+		{Name: "new-api", Revision: strings.TrimSpace(newRevision)},
+		{Name: "bifrost", Revision: strings.TrimSpace(bifrostRevision)},
+		{Name: "bifrost-model-parameters", SHA256: hex.EncodeToString(digest[:])},
+	}
 	document := catalogDocument{
 		SchemaVersion: catalogSchemaVersion,
-		Sources: []catalogSource{
-			{Name: "new-api", Revision: strings.TrimSpace(newRevision)},
-			{Name: "bifrost", Revision: strings.TrimSpace(bifrostRevision)},
-			{Name: "bifrost-model-parameters", SHA256: hex.EncodeToString(digest[:])},
-		},
-		Models: models,
+		Sources:       sources,
+		Models:        models,
 	}
 	if err := writeCatalog(configured.output, document); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %d models to %s (%d rejected)\n", len(models), configured.output, len(rejected))
+	manifestPath := configured.rejections
+	if manifestPath == "" {
+		manifestPath = defaultRejectionManifestPath(configured.output)
+	}
+	if err := writeRejectionManifest(manifestPath, rejectionManifest{
+		SchemaVersion: rejectionManifestSchemaVersion,
+		Rejections:    rejected,
+	}); err != nil {
+		return err
+	}
+	for _, rejection := range rejected {
+		fmt.Fprintf(os.Stderr, "rejected model: %v\n", rejection)
+	}
+	fmt.Printf("wrote %d models to %s (%d rejected; manifest %s)\n", len(models), configured.output, len(rejected), manifestPath)
 	return nil
 }
 
@@ -413,9 +440,9 @@ func syntheticNewAPIModel(channel, modelID string) bool {
 }
 
 type compileError struct {
-	ModelID string
-	Field   string
-	Reason  string
+	ModelID string `json:"model_id"`
+	Field   string `json:"field"`
+	Reason  string `json:"reason"`
 }
 
 func (err *compileError) Error() string {
@@ -425,31 +452,264 @@ func (err *compileError) Error() string {
 	return fmt.Sprintf("invalid model source %q %s: %s", err.ModelID, err.Field, err.Reason)
 }
 
-// compileModels keeps source keys as the only model identities. BaseModel is
-// never promoted into a catalog ID; a batch record is supplemental only when
-// its own key explicitly carries the exact model ID and the :batch variant.
-func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelConfig, []*compileError) {
-	byKey := make(map[string]recordRef, len(records))
-	candidateIDs := make(map[string]struct{}, len(records)+len(newModels))
+// identityIndex contains only deterministic identity hints. It deliberately
+// does not treat BaseModel as a family alias: an exact, versioned source key
+// remains its own identity, while a qualified provider key may use a matching
+// bare model or an unambiguous BaseModel value to remove the provider prefix.
+type identityIndex struct {
+	bare            map[string]string
+	anchors         map[string]string
+	baseFallback    map[string]string
+	servicePrefixes map[string]struct{}
+	preferred       map[string]string
+}
+
+func buildIdentityIndex(records []recordRef, newModels map[string]struct{}) identityIndex {
+	bareCandidates := make(map[string][]string)
+	anchorCandidates := make(map[string][]string)
+	baseCandidates := make(map[string][]string)
+	baseLeaves := make(map[string]map[string]struct{})
+	servicePrefixes := make(map[string]struct{})
+	preferred := make(map[string]string)
+	modelNamespaces := map[string]struct{}{
+		// These prefixes are part of the public model identifier in the source
+		// catalogs (for example mistral/codestral-embed), not transport wrappers.
+		"cohere":  {},
+		"mistral": {},
+	}
+	for _, prefix := range []string{
+		"aiml", "anthropic", "azure", "bedrock", "bedrock_mantle", "chatgpt", "cloudflare",
+		"databricks", "deepinfra", "deepseek", "fal_ai", "fireworks_ai", "gemini",
+		"gmi", "google", "groq", "huggingface", "litellm", "novita", "openai",
+		"opencode-zen", "openrouter", "palm", "perplexity", "publishers", "replicate", "stability",
+		"together", "together_ai", "vertex_ai", "vercel_ai_gateway", "xai",
+	} {
+		servicePrefixes[strings.ToLower(prefix)] = struct{}{}
+	}
+	add := func(target map[string][]string, value string) {
+		value = stripBatchSuffix(strings.TrimSpace(value))
+		if value == "" {
+			return
+		}
+		folded := strings.ToLower(value)
+		for _, existing := range target[folded] {
+			if existing == value {
+				return
+			}
+		}
+		target[folded] = append(target[folded], value)
+	}
 	for _, ref := range records {
-		if ref.key == "" || syntheticModelID(ref.key) {
+		key := stripBatchSuffix(strings.TrimSpace(ref.key))
+		if key == "" || nonModelSourceRecord(key) || (syntheticModelID(key) && !strings.HasSuffix(strings.ToLower(key), ":batch")) {
 			continue
 		}
-		byKey[ref.key] = ref
-		if ref.record.Mode != "" {
-			if _, supported := supportedModes[ref.record.Mode]; supported {
-				candidateIDs[ref.key] = struct{}{}
+		add(anchorCandidates, key)
+		if !strings.Contains(key, "/") {
+			add(bareCandidates, key)
+		}
+		base := stripBatchSuffix(strings.TrimSpace(ref.record.BaseModel))
+		if base != "" {
+			add(anchorCandidates, base)
+			if !strings.Contains(base, "/") {
+				add(baseCandidates, base)
+				leaf := strings.ToLower(key)
+				if slash := strings.LastIndexByte(leaf, '/'); slash >= 0 {
+					leaf = leaf[slash+1:]
+				}
+				if baseLeaves[strings.ToLower(base)] == nil {
+					baseLeaves[strings.ToLower(base)] = make(map[string]struct{})
+				}
+				baseLeaves[strings.ToLower(base)][leaf] = struct{}{}
+			}
+		}
+		if provider := strings.ToLower(strings.TrimSpace(ref.record.Provider)); provider != "" {
+			if _, namespace := modelNamespaces[provider]; !namespace {
+				servicePrefixes[provider] = struct{}{}
+				servicePrefixes[strings.ReplaceAll(provider, "_", "-")] = struct{}{}
 			}
 		}
 	}
 	for modelID := range newModels {
-		if !syntheticModelID(modelID) && inferOperation(modelID) != "" {
-			candidateIDs[modelID] = struct{}{}
+		modelID = stripBatchSuffix(strings.TrimSpace(modelID))
+		if modelID == "" || syntheticModelID(modelID) {
+			continue
+		}
+		add(anchorCandidates, modelID)
+		if current, exists := preferred[strings.ToLower(modelID)]; !exists || modelID < current {
+			preferred[strings.ToLower(modelID)] = modelID
+		}
+		if !strings.Contains(modelID, "/") {
+			add(bareCandidates, modelID)
 		}
 	}
+	choose := func(candidates map[string][]string) map[string]string {
+		result := make(map[string]string, len(candidates))
+		for folded, values := range candidates {
+			sort.Slice(values, func(left, right int) bool {
+				leftParts, rightParts := strings.Count(values[left], "/"), strings.Count(values[right], "/")
+				if leftParts != rightParts {
+					return leftParts < rightParts
+				}
+				leftLower, rightLower := strings.ToLower(values[left]), strings.ToLower(values[right])
+				if leftLower != rightLower {
+					return leftLower < rightLower
+				}
+				return values[left] < values[right]
+			})
+			result[folded] = values[0]
+		}
+		return result
+	}
+	baseFallbackCandidates := make(map[string][]string)
+	for folded, values := range baseCandidates {
+		if len(baseLeaves[folded]) == 1 {
+			baseFallbackCandidates[folded] = values
+		}
+	}
+	return identityIndex{
+		bare:            choose(bareCandidates),
+		anchors:         choose(anchorCandidates),
+		baseFallback:    choose(baseFallbackCandidates),
+		servicePrefixes: servicePrefixes,
+		preferred:       preferred,
+	}
+}
 
-	ids := make([]string, 0, len(candidateIDs))
-	for modelID := range candidateIDs {
+func stripBatchSuffix(value string) string {
+	if strings.HasSuffix(strings.ToLower(value), ":batch") {
+		return value[:len(value)-len(":batch")]
+	}
+	return value
+}
+
+func canonicalRecordID(ref recordRef, index identityIndex) string {
+	raw := stripBatchSuffix(strings.TrimSpace(ref.key))
+	if raw == "" {
+		return ""
+	}
+	if canonical, ok := index.preferred[strings.ToLower(raw)]; ok {
+		parts := strings.Split(raw, "/")
+		if len(parts) == 1 || !isServicePrefix(parts[0], index) {
+			return canonical
+		}
+	}
+	if canonical, ok := index.bare[strings.ToLower(raw)]; ok {
+		return canonical
+	}
+	base := stripBatchSuffix(strings.TrimSpace(ref.record.BaseModel))
+	if strings.Contains(raw, "/") {
+		if canonical := canonicalSuffix(raw, index); canonical != "" {
+			return canonical
+		}
+		if base != "" {
+			if canonical, ok := index.bare[strings.ToLower(base)]; ok {
+				return preferredCanonical(canonical, index)
+			}
+			if !strings.Contains(base, "/") {
+				if canonical, ok := index.baseFallback[strings.ToLower(base)]; ok {
+					return preferredCanonical(canonical, index)
+				}
+				return base
+			}
+			if canonical := canonicalSuffix(base, index); canonical != "" {
+				return canonical
+			}
+			return stripServicePrefix(base, index)
+		}
+	}
+	if canonical := canonicalSuffix(raw, index); canonical != "" {
+		return canonical
+	}
+	return stripServicePrefix(raw, index)
+}
+
+func preferredCanonical(value string, index identityIndex) string {
+	if canonical, ok := index.preferred[strings.ToLower(value)]; ok {
+		return canonical
+	}
+	return value
+}
+
+func canonicalSuffix(value string, index identityIndex) string {
+	parts := strings.Split(value, "/")
+	// A qualified model namespace such as mistral/<model> or cohere/<model>
+	// is itself an authoritative identity.  Do not let a bare New-API listing
+	// erase that namespace; only strip a known service wrapper (openrouter/,
+	// vercel_ai_gateway/, openai/, ...).
+	if len(parts) > 1 && !isServicePrefix(parts[0], index) {
+		if canonical, ok := index.preferred[strings.ToLower(value)]; ok {
+			return canonical
+		}
+		if canonical, ok := index.anchors[strings.ToLower(value)]; ok {
+			return canonical
+		}
+	}
+	for start := len(parts) - 1; start >= 0; start-- {
+		candidate := strings.Join(parts[start:], "/")
+		if canonical, ok := index.preferred[strings.ToLower(candidate)]; ok {
+			candidateParts := strings.Split(candidate, "/")
+			if len(candidateParts) == 1 || !isServicePrefix(candidateParts[0], index) {
+				return canonical
+			}
+		}
+		if canonical, ok := index.bare[strings.ToLower(candidate)]; ok {
+			return canonical
+		}
+		if canonical, ok := index.anchors[strings.ToLower(candidate)]; ok && !isServicePrefix(parts[start], index) {
+			return canonical
+		}
+	}
+	return ""
+}
+
+func stripServicePrefix(value string, index identityIndex) string {
+	parts := strings.Split(value, "/")
+	for len(parts) > 1 && isServicePrefix(parts[0], index) {
+		parts = parts[1:]
+	}
+	return strings.Join(parts, "/")
+}
+
+func isServicePrefix(value string, index identityIndex) bool {
+	_, ok := index.servicePrefixes[strings.ToLower(strings.TrimSpace(value))]
+	return ok
+}
+
+func isBatchRecord(ref recordRef) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(ref.key)), ":batch") ||
+		strings.HasSuffix(strings.ToLower(strings.TrimSpace(ref.record.BaseModel)), ":batch")
+}
+
+// compileModels groups provider-qualified rows by one canonical model ID. A
+// model may then publish multiple semantic operations; chat/completion/
+// responses are already normalized to generate by operationForRecord.
+func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelConfig, []*compileError) {
+	index := buildIdentityIndex(records, newModels)
+	groups := make(map[string][]recordRef)
+	for _, ref := range records {
+		if ref.key == "" || nonModelSourceRecord(ref.key) || (syntheticModelID(ref.key) && !isBatchRecord(ref)) {
+			continue
+		}
+		modelID := canonicalRecordID(ref, index)
+		if modelID != "" && !syntheticModelID(modelID) {
+			groups[modelID] = append(groups[modelID], ref)
+		}
+	}
+	for modelID := range newModels {
+		if syntheticModelID(modelID) {
+			continue
+		}
+		ref := recordRef{key: modelID}
+		canonical := canonicalRecordID(ref, index)
+		if canonical != "" && !syntheticModelID(canonical) {
+			if _, exists := groups[canonical]; !exists {
+				groups[canonical] = nil
+			}
+		}
+	}
+	ids := make([]string, 0, len(groups))
+	for modelID := range groups {
 		ids = append(ids, modelID)
 	}
 	sort.Slice(ids, func(left, right int) bool {
@@ -459,123 +719,292 @@ func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelC
 		}
 		return ids[left] < ids[right]
 	})
-
 	models := make([]modelConfig, 0, len(ids))
 	rejected := make([]*compileError, 0)
 	for _, modelID := range ids {
-		matches := recordsForModelID(modelID, byKey, records)
-		model, present, err := compileModel(modelID, matches)
-		if err != nil {
-			rejected = append(rejected, err)
-			continue
-		}
+		model, present, errorsForModel := compileModelGroup(modelID, groups[modelID])
+		rejected = append(rejected, errorsForModel...)
 		if present {
 			models = append(models, model)
 		}
 	}
+	sortCompileErrors(rejected)
 	return models, rejected
 }
 
-func recordsForModelID(modelID string, byKey map[string]recordRef, records []recordRef) []recordRef {
-	primary, exact := byKey[modelID]
-	if !exact {
-		return nil
+// compileModelGroup is the only path that turns one canonical model identity
+// into a catalog definition.  A source snapshot can contain observations from
+// several services and several semantic operations; those observations are
+// kept in operation buckets instead of being flattened into one "first row".
+// The exact canonical row owns model-wide facts when it exists.  Qualified
+// rows can add delivery evidence for the same operation, but they cannot
+// replace the exact row's limits or parameter policy.
+func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, []*compileError) {
+	if len(matches) == 0 {
+		return compileInferredModel(modelID)
 	}
-	result := []recordRef{primary}
-	for _, ref := range records {
-		if ref.key == modelID || !explicitVariantFor(modelID, ref) {
+
+	sortRecords(modelID, matches)
+	exact, hasExact := exactCanonicalRecord(modelID, matches)
+	if hasExact && !isMetadataRecord(exact) {
+		if strings.TrimSpace(exact.record.Mode) == "" {
+			return modelConfig{}, false, []*compileError{{ModelID: modelID, Field: "mode", Reason: "exact source record is missing an authoritative mode"}}
+		}
+		if _, supported := supportedModes[strings.TrimSpace(exact.record.Mode)]; !supported {
+			return modelConfig{}, false, []*compileError{{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("exact source record declares unsupported mode %q", exact.record.Mode)}}
+		}
+	}
+
+	groups := make(map[api.Operation][]recordRef)
+	nonBatchOperations := make(map[api.Operation]struct{})
+	rejected := make([]*compileError, 0)
+	for _, ref := range matches {
+		// Rows produced by the pricing CSV merger carry a mode for display, not
+		// an authoritative model operation.  They may identify a candidate
+		// model, but must never override a real capability row.
+		if isMetadataRecord(ref) {
 			continue
 		}
-		result = append(result, ref)
-	}
-	sortRecords(modelID, result)
-	return result
-}
-
-func explicitVariantFor(modelID string, ref recordRef) bool {
-	key := strings.ToLower(ref.key)
-	target := strings.ToLower(modelID)
-	return key == target+":batch" || strings.HasSuffix(key, "/"+target+":batch")
-}
-
-func compileModel(modelID string, matches []recordRef) (modelConfig, bool, *compileError) {
-	if len(matches) == 0 {
-		operation := inferOperation(modelID)
-		if operation == "" {
-			return modelConfig{}, false, nil
+		operation, reason := authoritativeOperation(ref)
+		if reason != "" {
+			if isBatchRecord(ref) || !isExactCanonicalKey(modelID, ref) {
+				rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("source record %q: %s", ref.key, reason)})
+				continue
+			}
+			// An exact malformed row is an identity-level failure.  Falling back
+			// to a qualified row would hide the very source fact the exact key
+			// claims to own.
+			rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: reason})
+			return modelConfig{}, false, rejected
 		}
-		compiled, err := compileOperation(operation, "", nil, recordRef{}, false)
-		if err != nil {
-			return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: err.Error()}
+		if isBatchRecord(ref) {
+			// Batch facts are admitted below only when a non-batch operation with
+			// the same semantic operation exists (or when the model is batch-only).
+			groups[operation] = append(groups[operation], ref)
+			continue
 		}
-		return modelConfig{ID: modelID, Lifecycle: "active", Operations: []operationConfig{compiled}}, true, nil
+		nonBatchOperations[operation] = struct{}{}
+		groups[operation] = append(groups[operation], ref)
 	}
 
-	primary := matches[0]
-	for _, candidate := range matches {
-		if candidate.key == modelID {
-			primary = candidate
-			break
-		}
-	}
-	operation := operationForRecord(modelID, primary)
-	if operation == "" {
-		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: "source mode and model name do not identify a supported operation"}
-	}
-	compatible := make([]recordRef, 0, len(matches))
-	for _, ref := range matches {
-		if operationForRecord(modelID, ref) == operation {
-			compatible = append(compatible, ref)
-		}
-	}
-	if len(compatible) == 0 {
-		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: "no compatible source record"}
+	if len(groups) == 0 {
+		// A model represented only by metadata rows still gets one operation,
+		// but the operation is inferred from its canonical ID because no source
+		// record claimed an authoritative fact.
+		inferred, present, inferredRejected := compileInferredModel(modelID)
+		return inferred, present, append(rejected, inferredRejected...)
 	}
 
-	limits, outputTokensSupported, err := compileTokenLimits(operation, primary)
-	if err != nil {
-		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "token_limits", Reason: err.Error()}
+	// Isolate a conflicting batch row.  It is a bad delivery observation, not
+	// evidence that a valid non-batch operation must be removed.
+	for operation, records := range groups {
+		if _, hasNonBatch := nonBatchOperations[operation]; hasNonBatch {
+			continue
+		}
+		hasNonBatchAny := len(nonBatchOperations) != 0
+		if !hasNonBatchAny {
+			continue // this is a legitimate batch-only operation
+		}
+		kept := records[:0]
+		for _, ref := range records {
+			if !isBatchRecord(ref) {
+				kept = append(kept, ref)
+				continue
+			}
+			rejected = append(rejected, &compileError{
+				ModelID: modelID,
+				Field:   "operation",
+				Reason:  fmt.Sprintf("batch source record %q declares operation %q without a matching non-batch operation", ref.key, operation),
+			})
+		}
+		if len(kept) == 0 {
+			delete(groups, operation)
+		} else {
+			groups[operation] = kept
+		}
 	}
-	compiledOperation, err := compileOperation(operation, primary.record.Mode, compatible, primary, outputTokensSupported)
-	if err != nil {
-		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: err.Error()}
+
+	operations := make([]api.Operation, 0, len(groups))
+	compiled := make([]operationConfig, 0, len(groups))
+	var lifecycleOwner recordRef
+	hasLifecycleOwner := false
+	var tokenOwner recordRef
+	hasTokenOwner := false
+	for operation := range groups {
+		operations = append(operations, operation)
+	}
+	sort.Slice(operations, func(left, right int) bool { return operations[left] < operations[right] })
+
+	for _, operation := range operations {
+		records := groups[operation]
+		primary := chooseOperationPrimary(modelID, records)
+		rejected = append(rejected, modalityConflictRejections(modelID, operation, records, primary)...)
+		if !hasLifecycleOwner || rankLess(primaryRank(modelID, primary), primaryRank(modelID, lifecycleOwner)) {
+			lifecycleOwner, hasLifecycleOwner = primary, true
+		}
+		_, outputTokensSupported, limitErr := compileTokenLimits(operation, primary)
+		if limitErr != nil {
+			rejected = append(rejected, &compileError{ModelID: modelID, Field: "token_limits", Reason: fmt.Sprintf("operation %q: %s", operation, limitErr)})
+			continue
+		}
+		compiledOperation, operationErr := compileOperation(operation, primary.record.Mode, records, primary, outputTokensSupported)
+		if operationErr != nil {
+			rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("operation %q: %s", operation, operationErr)})
+			continue
+		}
+		compiled = append(compiled, compiledOperation)
+		if !hasTokenOwner || (primary.key == modelID && tokenOwner.key != modelID) {
+			// The exact row is the stable model identity owner, but only after
+			// its operation has passed validation. A failed operation must not
+			// poison limits for another valid operation on the same model.
+			tokenOwner, hasTokenOwner = primary, true
+		}
+	}
+	if len(compiled) == 0 {
+		return modelConfig{}, false, rejected
+	}
+
+	// TokenLimits has one owner by design.  It is the exact canonical row when
+	// that row supplied a successfully compiled operation; otherwise the stable
+	// primary selected above.  We never take a "first embedding dimension" or
+	// union limits from another service row.
+	if !hasTokenOwner {
+		tokenOwner = lifecycleOwner
+	}
+	ownerOperation := operationForRecord(modelID, tokenOwner)
+	limits, _, limitErr := compileTokenLimits(ownerOperation, tokenOwner)
+	if limitErr != nil {
+		// The operation carrying the model-wide owner may have failed while a
+		// different operation remained valid.  Unknown limits are safer than
+		// inventing a value from an unrelated service record.
+		limits = tokenLimits{}
 	}
 	lifecycle := "active"
-	if primary.record.IsDeprecated {
+	if hasLifecycleOwner && lifecycleOwner.record.IsDeprecated {
 		lifecycle = "deprecated"
 	}
-	return modelConfig{
-		ID:          modelID,
-		Lifecycle:   lifecycle,
-		TokenLimits: limits,
-		Operations:  []operationConfig{compiledOperation},
-	}, true, nil
+	sort.Slice(compiled, func(left, right int) bool { return compiled[left].Operation < compiled[right].Operation })
+	return modelConfig{ID: modelID, Lifecycle: lifecycle, TokenLimits: limits, Operations: compiled}, true, rejected
 }
 
-func operationForRecord(modelID string, ref recordRef) string {
-	if ref.record.Mode != "" {
-		operation := supportedModes[ref.record.Mode]
-		switch operation {
-		case "image_generation":
-			// Bifrost also stores ordinary model price rows under an
-			// image_generation mode. Treat that row as image generation only
-			// when its output evidence is unambiguously image-only; a model
-			// name may confirm evidence, but never override an explicit chat
-			// or completion mode.
-			if imageOperationEvidence(modelID, ref) {
-				return operation
-			}
-			return "generate"
-		case "video_generation":
-			if videoOperationEvidence(modelID, ref) {
-				return operation
-			}
-			return "generate"
-		default:
-			return operation
+func compileInferredModel(modelID string) (modelConfig, bool, []*compileError) {
+	operation := inferOperation(modelID)
+	if operation == "" {
+		return modelConfig{}, false, nil
+	}
+	compiled, err := compileOperation(operation, "", nil, recordRef{}, false)
+	if err != nil {
+		return modelConfig{}, false, []*compileError{{ModelID: modelID, Field: "operation", Reason: err.Error()}}
+	}
+	return modelConfig{ID: modelID, Lifecycle: "active", Operations: []operationConfig{compiled}}, true, nil
+}
+
+func exactCanonicalRecord(modelID string, records []recordRef) (recordRef, bool) {
+	for _, ref := range records {
+		if ref.key == modelID {
+			return ref, true
 		}
 	}
-	return inferOperation(modelID)
+	for _, ref := range records {
+		if strings.EqualFold(ref.key, modelID) {
+			return ref, true
+		}
+	}
+	return recordRef{}, false
+}
+
+func isExactCanonicalKey(modelID string, ref recordRef) bool {
+	return ref.key == modelID || strings.EqualFold(ref.key, modelID)
+}
+
+func isMetadataRecord(ref recordRef) bool {
+	return strings.EqualFold(strings.TrimSpace(ref.record.Source), "merged_from_llm_models_csv")
+}
+
+func authoritativeOperation(ref recordRef) (api.Operation, string) {
+	mode := strings.TrimSpace(ref.record.Mode)
+	if mode == "" {
+		return "", "source record is missing an authoritative mode"
+	}
+	operation, supported := supportedModes[mode]
+	if !supported {
+		return "", fmt.Sprintf("source mode %q is unsupported", ref.record.Mode)
+	}
+	return operation, ""
+}
+
+func chooseOperationPrimary(modelID string, records []recordRef) recordRef {
+	ordered := append([]recordRef(nil), records...)
+	sort.SliceStable(ordered, func(left, right int) bool {
+		leftRank, rightRank := primaryRank(modelID, ordered[left]), primaryRank(modelID, ordered[right])
+		for index := range leftRank {
+			if leftRank[index] != rightRank[index] {
+				return leftRank[index] < rightRank[index]
+			}
+		}
+		return ordered[left].key < ordered[right].key
+	})
+	return ordered[0]
+}
+
+func primaryRank(modelID string, ref recordRef) [5]int {
+	// Exact identity, authoritative source quality, non-batch, fact richness,
+	// and key length provide a complete deterministic ordering.
+	exact := 2
+	if ref.key == modelID {
+		exact = 0
+	} else if strings.EqualFold(ref.key, modelID) {
+		exact = 1
+	}
+	metadata := 1
+	if isMetadataRecord(ref) {
+		metadata = 2
+	}
+	batch := 0
+	if isBatchRecord(ref) {
+		batch = 1
+	}
+	facts := 0
+	if ref.record.SupportedModalities != nil {
+		facts++
+	}
+	if ref.record.SupportedOutputModalities != nil {
+		facts++
+	}
+	if ref.record.MaxInputTokens != nil || ref.record.MaxOutputTokens != nil || ref.record.MaxTokens != nil {
+		facts++
+	}
+	return [5]int{exact, metadata, batch, -facts, len(ref.key)}
+}
+
+func rankLess(left, right [5]int) bool {
+	for index := range left {
+		if left[index] != right[index] {
+			return left[index] < right[index]
+		}
+	}
+	return false
+}
+
+// Bifrost stores its name-based fallback rules beside model parameter rows.
+// This metadata object is not a model and has no authoritative mode; unlike a
+// model-shaped record with a missing mode, it must not become a rejection or a
+// name-inferred catalog entry.
+func nonModelSourceRecord(key string) bool {
+	return key == "fallback_generalizations"
+}
+
+func operationForRecord(modelID string, ref recordRef) api.Operation {
+	if strings.TrimSpace(ref.record.Mode) != "" {
+		// An explicit source mode is the operation owner. Model names are
+		// reserved for records with no source fact; they must never rewrite a
+		// declared image/video/chat operation.
+		return supportedModes[strings.TrimSpace(ref.record.Mode)]
+	}
+	if ref.key == "" {
+		return inferOperation(modelID)
+	}
+	return ""
 }
 
 func syntheticModelID(modelID string) bool {
@@ -623,31 +1052,31 @@ func syntheticRequestPreset(value string) bool {
 	}
 }
 
-func inferOperation(modelID string) string {
+func inferOperation(modelID string) api.Operation {
 	value := strings.ToLower(modelID)
 	switch {
 	case strings.Contains(value, "moderation"):
 		return ""
 	case strings.Contains(value, "deepgram/flux"):
-		return "audio_transcription"
+		return api.OperationAudioTranscription
 	case strings.Contains(value, "rerank"):
-		return "rerank"
+		return api.OperationRerank
 	case strings.Contains(value, "embedding"), strings.Contains(value, "embed-"),
 		strings.Contains(value, "bge-"), strings.Contains(value, "m3e-"), strings.Contains(value, "jina-clip"):
-		return "embedding"
+		return api.OperationEmbedding
 	case strings.Contains(value, "transcribe"), strings.Contains(value, "whisper"),
 		strings.Contains(value, "sensevoice"), strings.Contains(value, "parakeet"),
 		strings.Contains(value, "-asr"), strings.Contains(value, "/asr"),
 		strings.Contains(value, "-stt"), strings.Contains(value, "/stt"),
 		strings.Contains(value, "voxtral-mini-realtime"):
-		return "audio_transcription"
+		return api.OperationAudioTranscription
 	case strings.Contains(value, "lyria"), strings.Contains(value, "musicgen"), strings.Contains(value, "suno"):
-		return "music_generation"
+		return api.OperationMusicGeneration
 	case strings.Contains(value, "tts"), strings.HasPrefix(value, "speech-"),
 		strings.Contains(value, "text-to-speech"), strings.Contains(value, "text2speech"),
 		strings.Contains(value, "melotts"), strings.Contains(value, "orpheus"),
 		strings.Contains(value, "eleven-"):
-		return "audio_generation"
+		return api.OperationAudioGeneration
 	case strings.Contains(value, "sora"), strings.Contains(value, "veo-"), strings.Contains(value, "seedance"),
 		strings.Contains(value, "imagine-video"), strings.Contains(value, "video-01"),
 		strings.Contains(value, "wan-video"), strings.Contains(value, "wan-") &&
@@ -658,13 +1087,13 @@ func inferOperation(modelID string) string {
 		strings.Contains(value, "gen4-aleph"), strings.Contains(value, "ray-"),
 		strings.Contains(value, "motion-"), strings.Contains(value, "inkling"), strings.Contains(value, "vidu"),
 		strings.Contains(value, "luma/"):
-		return "video_generation"
+		return api.OperationVideoGeneration
 	case imageModelName(value):
-		return "image_generation"
+		return api.OperationImageGeneration
 	case realtimeModel(value):
-		return "realtime"
+		return api.OperationRealtime
 	default:
-		return "generate"
+		return api.OperationGenerate
 	}
 }
 
@@ -697,64 +1126,24 @@ func imageModelName(value string) bool {
 		strings.Contains(value, "image-upscale")
 }
 
-func imageOperationEvidence(modelID string, ref recordRef) bool {
-	if imageModelName(strings.ToLower(modelID)) {
-		return true
-	}
-	outputs := modalitySet(ref.record.SupportedOutputModalities)
-	if len(outputs) == 1 {
-		_, image := outputs["image"]
-		return image
-	}
-	return false
-}
-
-func videoOperationEvidence(modelID string, ref recordRef) bool {
-	value := strings.ToLower(modelID)
-	if strings.Contains(value, "sora") || strings.Contains(value, "veo") ||
-		strings.Contains(value, "seedance") || strings.Contains(value, "video-01") ||
-		strings.Contains(value, "wan-video") || (strings.Contains(value, "wan-") &&
-		(strings.Contains(value, "-t2v") || strings.Contains(value, "-i2v"))) || strings.Contains(value, "kling") ||
-		strings.Contains(value, "hailuo") || strings.Contains(value, "pixverse") ||
-		strings.Contains(value, "gen3") || strings.Contains(value, "gen4-") ||
-		strings.Contains(value, "ray-") || strings.Contains(value, "motion-") || strings.Contains(value, "inkling") ||
-		strings.Contains(value, "vidu") || strings.Contains(value, "luma/") {
-		return true
-	}
-	outputs := modalitySet(ref.record.SupportedOutputModalities)
-	if len(outputs) == 1 {
-		_, video := outputs["video"]
-		return video
-	}
-	return false
-}
-
-func modalitySet(values []string) map[string]struct{} {
-	result := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		result[strings.ToLower(value)] = struct{}{}
-	}
-	return result
-}
-
 func realtimeModel(modelID string) bool {
 	value := strings.ToLower(modelID)
 	return strings.Contains(value, "realtime") || strings.Contains(value, "native-audio") || strings.Contains(value, "-live-")
 }
 
-func compileTokenLimits(operation string, primary recordRef) (tokenLimits, bool, error) {
+func compileTokenLimits(operation api.Operation, primary recordRef) (tokenLimits, bool, error) {
 	maxInput, err := nonNegativeInteger(primary.record.MaxInputTokens)
 	if err != nil {
 		return tokenLimits{}, false, fmt.Errorf("max_input_tokens: %w", err)
 	}
-	if maxInput == 0 && operation == "embedding" {
+	if maxInput == 0 && operation == api.OperationEmbedding {
 		maxInput, err = nonNegativeInteger(primary.record.MaxTokens)
 		if err != nil {
 			return tokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
 		}
 	}
 	limits := tokenLimits{MaxInputTokens: maxInput}
-	if operation != "generate" && operation != "realtime" {
+	if operation != api.OperationGenerate && operation != api.OperationRealtime {
 		return limits, false, nil
 	}
 
@@ -768,7 +1157,7 @@ func compileTokenLimits(operation string, primary recordRef) (tokenLimits, bool,
 	}
 	// max_output_tokens is the explicit output-limit fact. max_tokens is a
 	// legacy/general field and is used only when the explicit field is absent;
-	// differing values are not merged or averaged.
+	// this precedence is part of the source adapter, not a runtime merge.
 	if maxOutput == 0 {
 		maxOutput = genericMaximum
 	}
@@ -777,6 +1166,9 @@ func compileTokenLimits(operation string, primary recordRef) (tokenLimits, bool,
 		return tokenLimits{}, false, policyErr
 	}
 	if parameterFound {
+		if maxOutput > 0 && parameterPolicy.Maximum != nil && maxOutput != *parameterPolicy.Maximum {
+			return tokenLimits{}, false, errors.New("model output maximum conflicts with parameter range maximum")
+		}
 		if maxOutput == 0 && parameterPolicy.Maximum != nil {
 			maxOutput = *parameterPolicy.Maximum
 		}
@@ -791,154 +1183,87 @@ func compileTokenLimits(operation string, primary recordRef) (tokenLimits, bool,
 	return limits, parameterFound || maxOutput > 0, nil
 }
 
-func compileOperation(operation, sourceMode string, records []recordRef, primary recordRef, outputTokensSupported bool) (operationConfig, error) {
-	primaryOnly := records
-	if primary.key != "" {
-		primaryOnly = []recordRef{primary}
+func compileOperation(operation api.Operation, sourceMode string, records []recordRef, primary recordRef, outputTokensSupported bool) (operationConfig, error) {
+	inputs, outputs, modalityErr := compileModalities(operation, sourceMode, records, primary)
+	if modalityErr != nil {
+		return operationConfig{}, modalityErr
 	}
-	inputs, outputs := compileModalities(operation, sourceMode, primaryOnly)
 	result := operationConfig{
 		Operation:        operation,
 		Modes:            compileModes(operation, records),
 		InputModalities:  inputs,
 		OutputModalities: outputs,
-		Features:         compileFeatures(operation, primaryOnly),
+		// Features and parameter policies are owned by the exact source
+		// record. Supplemental :batch records add delivery evidence only;
+		// their service-specific parameter facts must not be merged into the
+		// model's primary limits or defaults.
+		Features: compileFeatures(operation, []recordRef{primary}),
 	}
-	if operation == "generate" || operation == "realtime" {
+	if operation == api.OperationGenerate || operation == api.OperationRealtime {
 		policy, err := compileGenerationPolicy(primary, outputTokensSupported)
 		if err != nil {
 			return operationConfig{}, err
 		}
 		result.Generation = policy
 	}
-	if operation == "embedding" {
+	if operation == api.OperationEmbedding {
 		policy, err := compileEmbeddingPolicy(primary)
 		if err != nil {
 			return operationConfig{}, err
 		}
 		result.Embedding = policy
 	}
-	if err := validateOperationShape(result); err != nil {
+	if err := modelcatalog.ValidateOperationShape(modelcatalog.OperationShape{
+		Operation:        result.Operation,
+		Modes:            result.Modes,
+		InputModalities:  result.InputModalities,
+		OutputModalities: result.OutputModalities,
+		HasGeneration:    result.Generation != nil,
+		HasEmbedding:     result.Embedding != nil,
+	}); err != nil {
 		return operationConfig{}, err
 	}
 	return result, nil
 }
 
-func validateOperationShape(operation operationConfig) error {
-	containsMode := func(mode string) bool {
-		for _, candidate := range operation.Modes {
-			if candidate == mode {
-				return true
-			}
-		}
-		return false
-	}
-	containsInput := func(modality string) bool {
-		for _, candidate := range operation.InputModalities {
-			if candidate == modality {
-				return true
-			}
-		}
-		return false
-	}
-	containsOutput := func(modality string) bool {
-		for _, candidate := range operation.OutputModalities {
-			if candidate == modality {
-				return true
-			}
-		}
-		return false
-	}
-	if containsInput("embedding") {
-		return errors.New("embedding cannot be an operation input modality")
-	}
-	if operation.Operation == "realtime" {
-		if len(operation.Modes) != 1 || !containsMode("duplex") {
-			return errors.New("realtime must use duplex mode only")
-		}
-		if !containsInput("text") && !containsInput("audio") {
-			return errors.New("realtime must accept text or audio input")
-		}
-		if !containsOutput("text") && !containsOutput("audio") {
-			return errors.New("realtime must produce text or audio output")
-		}
-	} else if containsMode("duplex") {
-		return errors.New("only realtime may use duplex mode")
-	}
-
-	requiredOutput := map[string]string{
-		"embedding":           "embedding",
-		"rerank":              "text",
-		"image_generation":    "image",
-		"audio_generation":    "audio",
-		"audio_transcription": "text",
-		"music_generation":    "music",
-		"video_generation":    "video",
-	}
-	if required, ok := requiredOutput[operation.Operation]; ok {
-		if !containsOutput(required) {
-			return fmt.Errorf("%s must produce %s", operation.Operation, required)
-		}
-		if operation.Operation == "embedding" && len(operation.OutputModalities) != 1 {
-			return errors.New("embedding must produce only embedding")
-		}
-	}
-	if operation.Operation == "embedding" && operation.Generation != nil {
-		return errors.New("embedding cannot declare generation parameters")
-	}
-	if operation.Operation == "embedding" && operation.Embedding == nil {
-		return errors.New("embedding must declare its embedding capability")
-	}
-	if operation.Operation != "embedding" && operation.Embedding != nil {
-		return errors.New("non-embedding operation must not declare embedding parameters")
-	}
-	if operation.Operation == "rerank" && operation.Generation != nil {
-		return errors.New("rerank must not declare generation parameters")
-	}
-	if operation.Operation != "embedding" && containsOutput("embedding") {
-		return errors.New("non-embedding operation must not produce the embedding modality")
-	}
-	return nil
-}
-
-func compileModes(operation string, records []recordRef) []string {
-	modes := make(map[string]struct{}, 2)
+func compileModes(operation api.Operation, records []recordRef) []api.DeliveryMode {
+	modes := make(map[api.DeliveryMode]struct{}, 3)
 	switch operation {
-	case "realtime":
-		modes["duplex"] = struct{}{}
-	case "video_generation":
-		modes["async"] = struct{}{}
+	case api.OperationRealtime:
+		modes[api.ModeDuplex] = struct{}{}
+	case api.OperationVideoGeneration:
+		modes[api.ModeAsync] = struct{}{}
 	default:
-		modes["unary"] = struct{}{}
+		modes[api.ModeUnary] = struct{}{}
 	}
-	if operation == "generate" {
+	if operation == api.OperationGenerate {
 		for _, ref := range records {
 			if ref.record.SupportsNativeStreaming || hasParameter(ref.record, "stream") {
-				modes["server_stream"] = struct{}{}
+				modes[api.ModeServerStream] = struct{}{}
 				break
 			}
 		}
 	}
-	if operation == "audio_transcription" {
+	if operation == api.OperationAudioTranscription {
 		for _, ref := range records {
 			if ref.record.SupportsNativeStreaming || strings.Contains(strings.ToLower(ref.key), "realtime") {
-				modes["server_stream"] = struct{}{}
+				modes[api.ModeServerStream] = struct{}{}
 				break
 			}
 		}
 	}
-	if operation != "realtime" {
+	if operation != api.OperationRealtime {
 		batchOnly := len(records) > 0
 		for _, ref := range records {
 			if batchEvidence(ref) {
-				modes["async"] = struct{}{}
+				modes[api.ModeAsync] = struct{}{}
 			}
 			if !batchOnlyEvidence(ref) {
 				batchOnly = false
 			}
 		}
 		if batchOnly {
-			delete(modes, "unary")
+			delete(modes, api.ModeUnary)
 		}
 	}
 	return sortedSet(modes)
@@ -973,94 +1298,260 @@ func batchOnlyEvidence(ref recordRef) bool {
 	return hasBatch && !hasNonBatch
 }
 
-func compileModalities(operation, sourceMode string, records []recordRef) ([]string, []string) {
-	defaults := map[string][2][]string{
-		"generate":            {{"text"}, {"text"}},
-		"embedding":           {{"text"}, {"embedding"}},
-		"rerank":              {{"text"}, {"text"}},
-		"image_generation":    {{"text"}, {"image"}},
-		"audio_generation":    {{"text"}, {"audio"}},
-		"audio_transcription": {{"audio"}, {"text"}},
-		"music_generation":    {{"text"}, {"music"}},
-		"video_generation":    {{"text", "image"}, {"video"}},
-		"realtime":            {{"text", "audio"}, {"text", "audio"}},
+func compileModalities(operation api.Operation, sourceMode string, records []recordRef, primary recordRef) ([]api.Modality, []api.Modality, error) {
+	defaults := map[api.Operation][2][]api.Modality{
+		api.OperationGenerate:           {{api.ModalityText}, {api.ModalityText}},
+		api.OperationEmbedding:          {{api.ModalityText}, {api.ModalityEmbedding}},
+		api.OperationRerank:             {{api.ModalityText}, {api.ModalityText}},
+		api.OperationImageGeneration:    {{api.ModalityText}, {api.ModalityImage}},
+		api.OperationAudioGeneration:    {{api.ModalityText}, {api.ModalityAudio}},
+		api.OperationAudioTranscription: {{api.ModalityAudio}, {api.ModalityText}},
+		api.OperationMusicGeneration:    {{api.ModalityText}, {api.ModalityMusic}},
+		api.OperationVideoGeneration:    {{api.ModalityText, api.ModalityImage}, {api.ModalityVideo}},
+		api.OperationRealtime:           {{api.ModalityText, api.ModalityAudio}, {api.ModalityText, api.ModalityAudio}},
 	}
-	inputs := make(map[string]struct{})
-	outputs := make(map[string]struct{})
-	for _, value := range defaults[operation][0] {
-		inputs[value] = struct{}{}
+	inputs, inputKnown, err := compileSourceModalities("supported_modalities", records, primary, func(ref recordRef) []string {
+		return ref.record.SupportedModalities
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	for _, value := range defaults[operation][1] {
-		outputs[value] = struct{}{}
+	outputs, outputKnown, err := compileSourceModalities("supported_output_modalities", records, primary, func(ref recordRef) []string {
+		return ref.record.SupportedOutputModalities
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	if sourceMode == "image_edit" {
-		inputs["image"] = struct{}{}
+	if !inputKnown {
+		inputs = modalityMap(defaults[operation][0])
+		for _, ref := range records {
+			switch operation {
+			case api.OperationEmbedding:
+				if ref.record.SupportsEmbeddingImageInput {
+					inputs[api.ModalityImage] = struct{}{}
+				}
+				if ref.record.SupportsAudioInput {
+					inputs[api.ModalityAudio] = struct{}{}
+				}
+				if ref.record.SupportsVideoInput {
+					inputs[api.ModalityVideo] = struct{}{}
+				}
+			case api.OperationGenerate, api.OperationRealtime:
+				if ref.record.SupportsVision || ref.record.SupportsImageInput {
+					inputs[api.ModalityImage] = struct{}{}
+				}
+				if ref.record.SupportsAudioInput {
+					inputs[api.ModalityAudio] = struct{}{}
+				}
+				if ref.record.SupportsVideoInput {
+					inputs[api.ModalityVideo] = struct{}{}
+				}
+			}
+		}
 	}
+	if !outputKnown {
+		outputs = modalityMap(defaults[operation][1])
+		for _, ref := range records {
+			if (operation == api.OperationGenerate || operation == api.OperationRealtime) && ref.record.SupportsAudioOutput {
+				outputs[api.ModalityAudio] = struct{}{}
+			}
+		}
+	}
+	if sourceMode == "image_edit" && !inputKnown {
+		inputs[api.ModalityImage] = struct{}{}
+	}
+	return sortedSet(inputs), sortedSet(outputs), nil
+}
+
+// compileSourceModalities gives the exact record ownership of an explicit
+// modality list. Supplemental records are still consumed: they must either
+// repeat the primary fact or, when the primary omitted the field, repeat one
+// another exact fact. A disagreement is rejected instead of silently
+// widening or narrowing the published shape.
+func compileSourceModalities(
+	field string,
+	records []recordRef,
+	primary recordRef,
+	values func(recordRef) []string,
+) (map[api.Modality]struct{}, bool, error) {
+	var primarySet map[api.Modality]struct{}
+	primaryDeclared := false
+	var supplemental []map[api.Modality]struct{}
 	for _, ref := range records {
-		for _, value := range ref.record.SupportedModalities {
-			addModality(inputs, value)
+		raw := values(ref)
+		if raw == nil {
+			continue
 		}
-		for _, value := range ref.record.SupportedOutputModalities {
-			addModality(outputs, value)
-		}
-		switch operation {
-		case "embedding":
-			if ref.record.SupportsEmbeddingImageInput {
-				inputs["image"] = struct{}{}
-			}
-			if ref.record.SupportsAudioInput {
-				inputs["audio"] = struct{}{}
-			}
-			if ref.record.SupportsVideoInput {
-				inputs["video"] = struct{}{}
-			}
-		case "generate", "realtime":
-			if ref.record.SupportsVision || ref.record.SupportsImageInput {
-				inputs["image"] = struct{}{}
-			}
-			if ref.record.SupportsAudioInput {
-				inputs["audio"] = struct{}{}
-			}
-			if ref.record.SupportsVideoInput {
-				inputs["video"] = struct{}{}
-			}
-			if ref.record.SupportsAudioOutput {
-				outputs["audio"] = struct{}{}
+		set := make(map[api.Modality]struct{}, len(raw))
+		for _, value := range raw {
+			if err := addModality(set, value); err != nil {
+				return nil, false, fmt.Errorf("%s: %w", field, err)
 			}
 		}
+		if primary.key != "" && ref.key == primary.key {
+			primarySet = set
+			primaryDeclared = true
+			continue
+		}
+		supplemental = append(supplemental, set)
 	}
-	if operation == "embedding" {
-		outputs = map[string]struct{}{"embedding": {}}
+	if primaryDeclared {
+		for _, set := range supplemental {
+			if !sameModalitySet(primarySet, set) {
+				// The exact primary fact owns the published shape. The conflicting
+				// supplemental observation is rejected by
+				// modalityConflictRejections, but it must not widen or erase the
+				// authoritative primary capability.
+				continue
+			}
+		}
+		return primarySet, true, nil
 	}
-	if operation == "music_generation" {
-		outputs = map[string]struct{}{"music": {}}
+	if len(supplemental) == 0 {
+		return nil, false, nil
 	}
-	return sortedSet(inputs), sortedSet(outputs)
+	// A missing primary fact may be completed by a supplemental record, but
+	// multiple supplemental records are still observations of the same model
+	// capability. Unioning different observations would manufacture a
+	// capability that no single source asserted. Require one deterministic set
+	// instead and fail closed on disagreement.
+	first := supplemental[0]
+	for _, set := range supplemental[1:] {
+		if !sameModalitySet(first, set) {
+			// There is no exact owner. Unknown is safer than choosing one
+			// provider's disputed set or silently substituting operation
+			// defaults. The caller must reject this operation; otherwise the
+			// default would become a second, invented capability fact.
+			return nil, false, errors.New("conflicting supplemental modality facts have no authoritative owner")
+		}
+	}
+	return first, true, nil
 }
 
-func addModality(target map[string]struct{}, value string) {
-	normalized := strings.ToLower(value)
-	switch normalized {
-	case "text", "image", "audio", "music", "video", "embedding":
-		target[normalized] = struct{}{}
+// modalityConflictRejections makes disagreement observable without allowing a
+// provider-specific supplemental row to rewrite the canonical model fact. The
+// primary row remains the sole owner; a row that contradicts it is rejected as
+// an observation, not promoted into a second capability path.
+func modalityConflictRejections(modelID string, operation api.Operation, records []recordRef, primary recordRef) []*compileError {
+	result := make([]*compileError, 0)
+	for _, spec := range []struct {
+		field  string
+		values func(recordRef) []string
+	}{
+		{field: "supported_modalities", values: func(ref recordRef) []string { return ref.record.SupportedModalities }},
+		{field: "supported_output_modalities", values: func(ref recordRef) []string { return ref.record.SupportedOutputModalities }},
+	} {
+		primaryValues := spec.values(primary)
+		if primaryValues == nil {
+			var owner map[api.Modality]struct{}
+			ownerKey := ""
+			for _, ref := range records {
+				raw := spec.values(ref)
+				if raw == nil {
+					continue
+				}
+				set := make(map[api.Modality]struct{}, len(raw))
+				if err := addModalities(set, raw); err != nil {
+					continue
+				}
+				if owner == nil {
+					owner, ownerKey = set, ref.key
+					continue
+				}
+				if !sameModalitySet(owner, set) {
+					result = append(result, &compileError{
+						ModelID: modelID,
+						Field:   "operation",
+						Reason:  fmt.Sprintf("operation %q %s from %q conflicts with %q", operation, spec.field, ref.key, ownerKey),
+					})
+				}
+			}
+			continue
+		}
+		primarySet := make(map[api.Modality]struct{}, len(primaryValues))
+		if err := addModalities(primarySet, primaryValues); err != nil {
+			continue
+		}
+		for _, ref := range records {
+			if ref.key == primary.key {
+				continue
+			}
+			raw := spec.values(ref)
+			if raw == nil {
+				continue
+			}
+			set := make(map[api.Modality]struct{}, len(raw))
+			if err := addModalities(set, raw); err != nil {
+				continue
+			}
+			if !sameModalitySet(primarySet, set) {
+				result = append(result, &compileError{
+					ModelID: modelID,
+					Field:   "operation",
+					Reason:  fmt.Sprintf("operation %q %s from %q conflicts with primary record %q", operation, spec.field, ref.key, primary.key),
+				})
+			}
+		}
 	}
+	return result
 }
 
-func compileFeatures(operation string, records []recordRef) []string {
-	features := map[string]struct{}{"usage": {}}
-	if operation != "generate" && operation != "realtime" {
+func addModalities(target map[api.Modality]struct{}, values []string) error {
+	for _, value := range values {
+		if err := addModality(target, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func modalityMap(values []api.Modality) map[api.Modality]struct{} {
+	result := make(map[api.Modality]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func sameModalitySet(left, right map[api.Modality]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if _, ok := right[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func addModality(target map[api.Modality]struct{}, value string) error {
+	normalized := api.Modality(strings.ToLower(value))
+	if !normalized.IsValid() {
+		return fmt.Errorf("unsupported modality %q", value)
+	}
+	if _, exists := target[normalized]; exists {
+		return fmt.Errorf("duplicate modality %q", value)
+	}
+	target[normalized] = struct{}{}
+	return nil
+}
+
+func compileFeatures(operation api.Operation, records []recordRef) []api.Feature {
+	features := map[api.Feature]struct{}{api.FeatureUsage: {}}
+	if operation != api.OperationGenerate && operation != api.OperationRealtime {
 		return sortedSet(features)
 	}
 	for _, ref := range records {
 		record := ref.record
 		if record.SupportsFunctionCalling {
-			features["tool_calls"] = struct{}{}
+			features[api.FeatureToolCalls] = struct{}{}
 		}
 		if record.SupportsResponseSchema || record.SupportsNativeStructured {
-			features["structured_output"] = struct{}{}
+			features[api.FeatureStructured] = struct{}{}
 		}
 		if record.SupportsPromptCaching || record.SupportsCachePoint {
-			features["prompt_cache"] = struct{}{}
+			features[api.FeaturePromptCache] = struct{}{}
 		}
 	}
 	return sortedSet(features)
@@ -1443,12 +1934,12 @@ func recordRank(modelID string, ref recordRef) [3]int {
 	return [3]int{class, strings.Count(ref.key, "/"), len(ref.key)}
 }
 
-func sortedSet(values map[string]struct{}) []string {
-	result := make([]string, 0, len(values))
+func sortedSet[T ~string](values map[T]struct{}) []T {
+	result := make([]T, 0, len(values))
 	for value := range values {
 		result = append(result, value)
 	}
-	sort.Strings(result)
+	sort.Slice(result, func(left, right int) bool { return result[left] < result[right] })
 	return result
 }
 
@@ -1471,7 +1962,7 @@ func resolveCommit(repo, ref string) (string, error) {
 		return "", fmt.Errorf("ref %q is not an immutable 40-character commit SHA", ref)
 	}
 	for _, character := range trimmed {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') && (character < 'A' || character > 'F') {
 			return "", fmt.Errorf("ref %q is not an immutable commit SHA", ref)
 		}
 	}
@@ -1523,4 +2014,41 @@ func writeCatalog(path string, document catalogDocument) error {
 		return fmt.Errorf("write catalog: %w", err)
 	}
 	return nil
+}
+
+func defaultRejectionManifestPath(catalogPath string) string {
+	if strings.HasSuffix(catalogPath, ".json.gz") {
+		base := strings.TrimSuffix(catalogPath, ".json.gz")
+		base = strings.TrimSuffix(base, "_data")
+		return base + "_rejections.json"
+	}
+	return catalogPath + ".rejections.json"
+}
+
+func writeRejectionManifest(path string, manifest rejectionManifest) error {
+	if manifest.Rejections == nil {
+		manifest.Rejections = []*compileError{}
+	}
+	sortCompileErrors(manifest.Rejections)
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode rejection manifest: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		return fmt.Errorf("write rejection manifest: %w", err)
+	}
+	return nil
+}
+
+func sortCompileErrors(values []*compileError) {
+	sort.Slice(values, func(left, right int) bool {
+		if values[left].ModelID != values[right].ModelID {
+			return values[left].ModelID < values[right].ModelID
+		}
+		if values[left].Field != values[right].Field {
+			return values[left].Field < values[right].Field
+		}
+		return values[left].Reason < values[right].Reason
+	})
 }
