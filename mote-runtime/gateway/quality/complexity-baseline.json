@@ -3,8 +3,8 @@
   "metrics": {
     "production_files": 82,
     "top_level_declarations": 153,
-    "function_definitions": 52,
-    "decision_points": 161,
+    "function_definitions": 51,
+    "decision_points": 155,
     "max_cyclomatic": 14,
     "max_nesting_depth": 2,
     "import_edges": 18,

@@ -21,11 +21,10 @@ type NumericParameter[T number] struct {
 	Default *T `json:"default,omitempty"`
 }
 
-// OutputTokenParameter declares support and an optional model default for
-// max_output_tokens. Its independently known bounds have one owner:
-// Config.TokenLimits.
+// OutputTokenParameter is a presence marker declaring model support for
+// max_output_tokens. The effective default is Gateway policy; independently
+// known model bounds have one owner: Config.TokenLimits.
 type OutputTokenParameter struct {
-	Default *int64 `json:"default,omitempty"`
 }
 
 // StopParameter declares support for stop sequences and an optional default.
@@ -191,7 +190,8 @@ func resolveOutputTokens(
 	if policy == nil {
 		return nil
 	}
-	value := policy.Default
+	defaultValue := gatewayDefaultMaxOutputTokens
+	value := &defaultValue
 	if requested != nil {
 		value = requested
 	}
@@ -222,7 +222,7 @@ func resolveStop(policy *StopParameter, requested []string) []string {
 	return append([]string{}, value...)
 }
 
-func normalizeGenerationPolicy(policy *GenerationPolicy, limits TokenLimits) (*GenerationPolicy, string, string) {
+func normalizeGenerationPolicy(policy *GenerationPolicy) (*GenerationPolicy, string, string) {
 	if policy == nil {
 		return nil, "", ""
 	}
@@ -232,9 +232,6 @@ func normalizeGenerationPolicy(policy *GenerationPolicy, limits TokenLimits) (*G
 	}
 	if field, reason := validateFloatParameter(normalized.TopP); reason != "" {
 		return nil, "top_p." + field, reason
-	}
-	if field, reason := validateOutputTokenParameter(normalized.MaxOutputTokens, limits); reason != "" {
-		return nil, "max_output_tokens." + field, reason
 	}
 	if field, reason := validateNumericParameter(normalized.Seed); reason != "" {
 		return nil, "seed." + field, reason
@@ -256,15 +253,21 @@ func normalizeEmbeddingPolicy(policy *EmbeddingPolicy) (*EmbeddingPolicy, string
 	if field, reason := validateNumericParameter(normalized.Dimensions); reason != "" {
 		return nil, "dimensions." + field, reason
 	}
-	if dimensions := normalized.Dimensions; dimensions != nil {
-		if dimensions.Minimum != nil && *dimensions.Minimum < 1 {
-			return nil, "dimensions.minimum", "must be positive"
-		}
-		if dimensions.Maximum != nil && *dimensions.Maximum < 1 {
-			return nil, "dimensions.maximum", "must be positive"
-		}
-		if dimensions.Default != nil && *dimensions.Default < 1 {
-			return nil, "dimensions.default", "must be positive"
+	dimensions := NumericParameter[int64]{}
+	if normalized.Dimensions != nil {
+		dimensions = *normalized.Dimensions
+	}
+	for _, candidate := range [...]struct {
+		field string
+		value *int64
+	}{
+		{field: "fixed_dimensions", value: normalized.FixedDimensions},
+		{field: "dimensions.minimum", value: dimensions.Minimum},
+		{field: "dimensions.maximum", value: dimensions.Maximum},
+		{field: "dimensions.default", value: dimensions.Default},
+	} {
+		if candidate.value != nil && *candidate.value < 1 {
+			return nil, candidate.field, "must be positive"
 		}
 	}
 	return normalized, "", ""
@@ -298,19 +301,6 @@ func validateNumericParameter[T number](policy *NumericParameter[T]) (string, st
 	return "", ""
 }
 
-func validateOutputTokenParameter(policy *OutputTokenParameter, limits TokenLimits) (string, string) {
-	if policy == nil || policy.Default == nil {
-		return "", ""
-	}
-	if limits.MinOutputTokens > 0 && *policy.Default < limits.MinOutputTokens {
-		return "default", "must not be below the model output-token minimum"
-	}
-	if limits.MaxOutputTokens > 0 && *policy.Default > limits.MaxOutputTokens {
-		return "default", "must not exceed the model output-token maximum"
-	}
-	return "", ""
-}
-
 func cloneGenerationPolicy(policy *GenerationPolicy) *GenerationPolicy {
 	if policy == nil {
 		return nil
@@ -318,7 +308,6 @@ func cloneGenerationPolicy(policy *GenerationPolicy) *GenerationPolicy {
 	cloned := *policy
 	cloned.Temperature = cloneNumericParameter(policy.Temperature)
 	cloned.TopP = cloneNumericParameter(policy.TopP)
-	cloned.MaxOutputTokens = cloneOutputTokenParameter(policy.MaxOutputTokens)
 	if policy.Stop != nil {
 		stop := *policy.Stop
 		if stop.Default != nil {
@@ -349,13 +338,6 @@ func cloneNumericParameter[T number](policy *NumericParameter[T]) *NumericParame
 		Maximum: clonePointer(policy.Maximum),
 		Default: clonePointer(policy.Default),
 	}
-}
-
-func cloneOutputTokenParameter(policy *OutputTokenParameter) *OutputTokenParameter {
-	if policy == nil {
-		return nil
-	}
-	return &OutputTokenParameter{Default: clonePointer(policy.Default)}
 }
 
 func clonePointer[T any](value *T) *T {

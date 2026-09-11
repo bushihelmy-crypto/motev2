@@ -87,14 +87,16 @@ Protocol adapter encodes the resolved neutral request
   不能同时存在“逐项 patch”和“整体替换”两种语义。
 - 未知模型只有在 override 提供完整、可校验的 operation 集合时才可加入目录。
 - 生命周期、token limit、默认值和 numeric bounds 在构造时失败即返回 typed error，
-  不能为了“尽量可用”在运行时偷偷修正。
+  不能为了“尽量可用”在运行时偷偷修正。生成阶段以模型为发布单元：非法记录不会
+  进入目录，并输出确定性的 rejection；一条坏的服务别名不会阻断其余独立模型。
 
 ### Generation 参数
 
 - 解析顺序必须是：模型默认值 → Kernel 显式值；显式值存在时覆盖默认值，显式空
   列表可以清空默认 stop。
-- 生成目录的 `max_output_tokens` 目标默认值统一为 4096；如果模型已知最大输出小于
-  4096，目录中的有效默认值必须被夹到该模型上限，不能生成越界默认值。
+- Gateway 运行时的 `max_output_tokens` 目标默认值统一为 4096；如果模型已知最大输出小于
+  4096，`Capability` 解析出的有效值会夹到该模型上限。4096 不写入目录，因为它是
+  Gateway 策略而不是 provider/model 事实。
 - 模型明确不支持的、但已经存在于中立 DTO 的可选字段，结果中应为 nil/缺省，
   不得传给 protocol adapter。
 - 已知 minimum/maximum 时，低于 minimum 映射到 minimum，高于 maximum 映射到
@@ -125,26 +127,34 @@ Protocol adapter encodes the resolved neutral request
 3. `inferOperation`、图像/视频/Embedding 名称判定只是缺失来源事实时的保守补足；
    新增启发式必须有针对性测试，不能用一个名称规则覆盖整个服务商。
 4. batch-only 记录是否只暴露 `async`；普通模型有 batch 能力时是否保留 `unary`
-   并额外声明 `async`。
+   并额外声明 `async`；`:batch` key 只能补充基础模型，不能成为另一个模型 ID。
 5. `compileTokenLimits`、参数默认值和维度信息是否来自模型事实，而不是价格行、
-   provider 字段或 protocol endpoint。
+   provider 字段或 protocol endpoint。`model_parameters` 中的 output-token UI 默认值
+   不被消费；Gateway 的 4096 运行时策略是唯一默认 owner，只采纳来源声明的边界。
 6. 生成的 gzip 文件是否经过 `gzip -t`，来源 revision/hash 是否与输入一致，且目录
    不含 `provider`、`protocol`、`endpoint`、`credential`、`price`、`pricing`、
    `family` 等越权字段。
 
-当前快照的 operation 数量由测试固定验证：
+固定 revision/hash 的当前快照发布 12324 个模型；下面的 operation 数量用于人工核对。
+它们不是可替代模型事实的第二份能力状态，测试只把快照总数和每个模型一个
+authoritative operation 作为回归信号：
 
 | operation | 数量 |
 | --- | ---: |
-| `generate` | 8892 |
-| `embedding` | 149 |
-| `rerank` | 32 |
-| `image_generation` | 201 |
-| `audio_generation` | 45 |
-| `audio_transcription` | 81 |
-| `music_generation` | 6 |
-| `video_generation` | 80 |
-| `realtime` | 29 |
+| `generate` | 11445 |
+| `embedding` | 216 |
+| `rerank` | 35 |
+| `image_generation` | 371 |
+| `audio_generation` | 48 |
+| `audio_transcription` | 93 |
+| `music_generation` | 0 |
+| `video_generation` | 99 |
+| `realtime` | 17 |
+
+原始快照另有 81 个 `:batch` 请求变体，它们只补充基础模型的 `async` 能力，不发布为
+模型；还有 4 条 `vercel_ai_gateway/...embed...` 记录同时声明 `mode=chat` 和非法的
+output-token 范围 `1..0`，生成器按模型 fail-closed 并明确报告 rejection。有效的底层
+Embedding 模型由其他精确来源 key 覆盖，生成器没有用名称猜测去改写这 4 条记录。
 
 数量变化本身不一定是缺陷，但必须能由来源 revision、生成器规则或明确的模型事实
 解释；不能只改测试期望值。
@@ -226,3 +236,7 @@ git diff --check
 
 只有在设计本身清晰且唯一、关键不变量有测试、所有适用门禁通过，并且剩余限制已被
 明确记录时，才建议批准。
+
+本次复杂度基线从 161 个 decision points / 52 个函数下调到 155 / 51：原因是删除了
+重复的 output-token 校验和空 marker 克隆路径，并将 operation 形状和 Embedding 正数
+边界改成单一规则表/循环。这个下降对应真实删除和合并，不是为了绕过门禁拆出转发函数。

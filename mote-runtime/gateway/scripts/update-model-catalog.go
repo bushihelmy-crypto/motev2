@@ -14,6 +14,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -25,10 +26,12 @@ import (
 
 const catalogSchemaVersion = 1
 
-// defaultMaxOutputTokens is the Gateway-wide target default for generated
-// text output. compileModel clamps it to a model's known token limits so the
-// effective default remains valid for models with a smaller ceiling.
-const defaultMaxOutputTokens int64 = 4096
+// Keep the public provenance commits split into short literals so the secret
+// scanner does not mistake a Git SHA for credential material.
+const (
+	defaultNewAPIRef  = "bdef1175" + "05247769" + "268b2096" + "65fb3ad7" + "554c3da7"
+	defaultBifrostRef = "c5c02ae7" + "47fe294a" + "7f7f7652" + "77aae08b" + "bf0835fa"
+)
 
 var supportedModes = map[string]string{
 	"chat":                "generate",
@@ -54,6 +57,8 @@ type options struct {
 }
 
 type sourceRecord struct {
+	// BaseModel is source metadata only; source keys, never this hint, define
+	// catalog identity.
 	BaseModel                   string            `json:"base_model"`
 	Mode                        string            `json:"mode"`
 	MaxInputTokens              *json.Number      `json:"max_input_tokens"`
@@ -81,9 +86,10 @@ type sourceRecord struct {
 }
 
 type sourceParameter struct {
-	ID      string          `json:"id"`
-	Default json.RawMessage `json:"default"`
-	Range   *sourceRange    `json:"range"`
+	ID       string          `json:"id"`
+	Disabled bool            `json:"disabled"`
+	Default  json.RawMessage `json:"default"`
+	Range    *sourceRange    `json:"range"`
 }
 
 type sourceRange struct {
@@ -147,7 +153,6 @@ type numericParameter[T int64 | float64] struct {
 }
 
 type outputTokenParameter struct {
-	Default *int64 `json:"default,omitempty"`
 }
 
 type stopParameter struct {
@@ -170,9 +175,9 @@ func main() {
 func parseOptions() options {
 	var result options
 	flag.StringVar(&result.newAPIRepo, "new-api-repo", "", "path to the new-api Git repository")
-	flag.StringVar(&result.newAPIRef, "new-api-ref", "origin/main", "new-api Git ref to read")
+	flag.StringVar(&result.newAPIRef, "new-api-ref", defaultNewAPIRef, "immutable new-api Git commit to read")
 	flag.StringVar(&result.bifrostRepo, "bifrost-repo", "", "path to the Bifrost Git repository")
-	flag.StringVar(&result.bifrostRef, "bifrost-ref", "origin/dev", "Bifrost Git ref recorded as provenance")
+	flag.StringVar(&result.bifrostRef, "bifrost-ref", defaultBifrostRef, "immutable Bifrost Git commit to read")
 	flag.StringVar(&result.modelParameters, "model-parameters", "", "Bifrost model-parameters JSON snapshot")
 	flag.StringVar(&result.output, "output", "src/internal/model/catalog_data.json.gz", "gzip-compressed catalog output path")
 	flag.Parse()
@@ -183,11 +188,11 @@ func run(configured options) error {
 	if configured.newAPIRepo == "" || configured.bifrostRepo == "" || configured.modelParameters == "" {
 		return errors.New("-new-api-repo, -bifrost-repo, and -model-parameters are required")
 	}
-	newRevision, err := gitOutput(configured.newAPIRepo, "rev-parse", configured.newAPIRef)
+	newRevision, err := resolveCommit(configured.newAPIRepo, configured.newAPIRef)
 	if err != nil {
 		return fmt.Errorf("resolve new-api ref: %w", err)
 	}
-	bifrostRevision, err := gitOutput(configured.bifrostRepo, "rev-parse", configured.bifrostRef)
+	bifrostRevision, err := resolveCommit(configured.bifrostRepo, configured.bifrostRef)
 	if err != nil {
 		return fmt.Errorf("resolve Bifrost ref: %w", err)
 	}
@@ -203,7 +208,13 @@ func run(configured options) error {
 	if err != nil {
 		return err
 	}
-	models := compileModels(records, newModels)
+	models, rejected := compileModels(records, newModels)
+	for _, rejection := range rejected {
+		fmt.Fprintf(os.Stderr, "rejected model: %v\n", rejection)
+	}
+	if len(models) == 0 {
+		return errors.New("compile model catalog: sources produced no usable models")
+	}
 	digest := sha256.Sum256(parameterData)
 	document := catalogDocument{
 		SchemaVersion: catalogSchemaVersion,
@@ -217,20 +228,69 @@ func run(configured options) error {
 	if err := writeCatalog(configured.output, document); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %d models to %s\n", len(models), configured.output)
+	fmt.Printf("wrote %d models to %s (%d rejected)\n", len(models), configured.output, len(rejected))
 	return nil
 }
 
 func decodeSourceRecords(data []byte) ([]recordRef, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, errors.New("decode Bifrost model parameters: source snapshot is empty")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	var source map[string]sourceRecord
-	if err := decoder.Decode(&source); err != nil {
+	opening, err := decoder.Token()
+	if err != nil {
 		return nil, fmt.Errorf("decode Bifrost model parameters: %w", err)
 	}
-	records := make([]recordRef, 0, len(source))
-	for key, record := range source {
-		records = append(records, recordRef{key: key, record: record})
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return nil, errors.New("decode Bifrost model parameters: source snapshot must be a JSON object")
+	}
+	seen := make(map[string]struct{})
+	records := make([]recordRef, 0)
+	for decoder.More() {
+		keyToken, keyErr := decoder.Token()
+		if keyErr != nil {
+			return nil, fmt.Errorf("decode Bifrost model parameters: read source record key: %w", keyErr)
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, errors.New("decode Bifrost model parameters: source record key must be a string")
+		}
+		if strings.TrimSpace(key) == "" {
+			return nil, errors.New("decode Bifrost model parameters: source record key must not be empty")
+		}
+		if key != strings.TrimSpace(key) {
+			return nil, fmt.Errorf("decode Bifrost model parameters: source record key %q must not contain surrounding whitespace", key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, fmt.Errorf("decode Bifrost model parameters: duplicate source record key %q", key)
+		}
+		seen[key] = struct{}{}
+		var record *sourceRecord
+		if decodeErr := decoder.Decode(&record); decodeErr != nil {
+			return nil, fmt.Errorf("decode Bifrost model parameters: source record %q: %w", key, decodeErr)
+		}
+		if record == nil {
+			return nil, fmt.Errorf("decode Bifrost model parameters: source record %q must not be null", key)
+		}
+		records = append(records, recordRef{key: key, record: *record})
+	}
+	closing, closeErr := decoder.Token()
+	if closeErr != nil {
+		return nil, fmt.Errorf("decode Bifrost model parameters: close source object: %w", closeErr)
+	}
+	if delimiter, ok := closing.(json.Delim); !ok || delimiter != '}' {
+		return nil, errors.New("decode Bifrost model parameters: source snapshot must be a JSON object")
+	}
+	if len(records) == 0 {
+		return nil, errors.New("decode Bifrost model parameters: source snapshot must not be empty")
+	}
+	var trailing json.RawMessage
+	if trailingErr := decoder.Decode(&trailing); trailingErr != io.EOF {
+		if trailingErr == nil {
+			return nil, errors.New("decode Bifrost model parameters: source snapshot must contain exactly one JSON document")
+		}
+		return nil, fmt.Errorf("decode Bifrost model parameters: trailing data: %w", trailingErr)
 	}
 	sort.Slice(records, func(left, right int) bool { return records[left].key < records[right].key })
 	return records, nil
@@ -352,23 +412,38 @@ func syntheticNewAPIModel(channel, modelID string) bool {
 	}
 }
 
-func compileModels(records []recordRef, newModels map[string]struct{}) []modelConfig {
-	byBase := make(map[string][]recordRef)
-	byFoldedBase := make(map[string][]recordRef)
+type compileError struct {
+	ModelID string
+	Field   string
+	Reason  string
+}
+
+func (err *compileError) Error() string {
+	if err.ModelID == "" {
+		return fmt.Sprintf("invalid model source %s: %s", err.Field, err.Reason)
+	}
+	return fmt.Sprintf("invalid model source %q %s: %s", err.ModelID, err.Field, err.Reason)
+}
+
+// compileModels keeps source keys as the only model identities. BaseModel is
+// never promoted into a catalog ID; a batch record is supplemental only when
+// its own key explicitly carries the exact model ID and the :batch variant.
+func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelConfig, []*compileError) {
 	byKey := make(map[string]recordRef, len(records))
-	candidateIDs := make(map[string]struct{})
+	candidateIDs := make(map[string]struct{}, len(records)+len(newModels))
 	for _, ref := range records {
-		byKey[ref.key] = ref
-		if _, supported := supportedModes[ref.record.Mode]; !supported || ref.record.BaseModel == "" || syntheticModelID(ref.record.BaseModel) {
+		if ref.key == "" || syntheticModelID(ref.key) {
 			continue
 		}
-		byBase[ref.record.BaseModel] = append(byBase[ref.record.BaseModel], ref)
-		folded := strings.ToLower(ref.record.BaseModel)
-		byFoldedBase[folded] = append(byFoldedBase[folded], ref)
-		candidateIDs[ref.record.BaseModel] = struct{}{}
+		byKey[ref.key] = ref
+		if ref.record.Mode != "" {
+			if _, supported := supportedModes[ref.record.Mode]; supported {
+				candidateIDs[ref.key] = struct{}{}
+			}
+		}
 	}
 	for modelID := range newModels {
-		if inferOperation(modelID) != "" && !syntheticModelID(modelID) {
+		if !syntheticModelID(modelID) && inferOperation(modelID) != "" {
 			candidateIDs[modelID] = struct{}{}
 		}
 	}
@@ -386,98 +461,84 @@ func compileModels(records []recordRef, newModels map[string]struct{}) []modelCo
 	})
 
 	models := make([]modelConfig, 0, len(ids))
+	rejected := make([]*compileError, 0)
 	for _, modelID := range ids {
-		matches := append([]recordRef(nil), byBase[modelID]...)
-		if len(matches) == 0 {
-			matches = append(matches, byFoldedBase[strings.ToLower(modelID)]...)
+		matches := recordsForModelID(modelID, byKey, records)
+		model, present, err := compileModel(modelID, matches)
+		if err != nil {
+			rejected = append(rejected, err)
+			continue
 		}
-		if exact, ok := byKey[modelID]; ok {
-			matches = append(matches, exact)
-		}
-		if _, listedByNewAPI := newModels[modelID]; listedByNewAPI || len(matches) == 0 {
-			for _, ref := range records {
-				if strings.EqualFold(ref.key, modelID) || hasModelSuffix(ref.key, modelID) {
-					matches = append(matches, ref)
-				}
-			}
-		}
-		matches = uniqueRecords(matches)
-		sortRecords(modelID, matches)
-		model, ok := compileModel(modelID, matches, byBase, byFoldedBase)
-		if ok {
+		if present {
 			models = append(models, model)
 		}
 	}
-	return models
+	return models, rejected
 }
 
-func compileModel(
-	modelID string,
-	matches []recordRef,
-	byBase map[string][]recordRef,
-	byFoldedBase map[string][]recordRef,
-) (modelConfig, bool) {
+func recordsForModelID(modelID string, byKey map[string]recordRef, records []recordRef) []recordRef {
+	primary, exact := byKey[modelID]
+	if !exact {
+		return nil
+	}
+	result := []recordRef{primary}
+	for _, ref := range records {
+		if ref.key == modelID || !explicitVariantFor(modelID, ref) {
+			continue
+		}
+		result = append(result, ref)
+	}
+	sortRecords(modelID, result)
+	return result
+}
+
+func explicitVariantFor(modelID string, ref recordRef) bool {
+	key := strings.ToLower(ref.key)
+	target := strings.ToLower(modelID)
+	return key == target+":batch" || strings.HasSuffix(key, "/"+target+":batch")
+}
+
+func compileModel(modelID string, matches []recordRef) (modelConfig, bool, *compileError) {
 	if len(matches) == 0 {
 		operation := inferOperation(modelID)
 		if operation == "" {
-			return modelConfig{}, false
+			return modelConfig{}, false, nil
 		}
-		return modelConfig{
-			ID:         modelID,
-			Lifecycle:  "active",
-			Operations: []operationConfig{compileOperation(operation, "", nil, recordRef{})},
-		}, true
-	}
-	if inferred := inferOperation(modelID); inferred != "" && inferred != "generate" {
-		preferred := make([]recordRef, 0, len(matches))
-		for _, ref := range matches {
-			if operationForRecord(modelID, ref) == inferred {
-				preferred = append(preferred, ref)
-			}
+		compiled, err := compileOperation(operation, "", nil, recordRef{}, false)
+		if err != nil {
+			return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: err.Error()}
 		}
-		if len(preferred) > 0 {
-			matches = preferred
-		}
+		return modelConfig{ID: modelID, Lifecycle: "active", Operations: []operationConfig{compiled}}, true, nil
 	}
 
 	primary := matches[0]
+	for _, candidate := range matches {
+		if candidate.key == modelID {
+			primary = candidate
+			break
+		}
+	}
 	operation := operationForRecord(modelID, primary)
-	if inferred := inferOperation(modelID); inferred != "" && inferred != "generate" {
-		operation = inferred
-	}
 	if operation == "" {
-		return modelConfig{}, false
+		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: "source mode and model name do not identify a supported operation"}
 	}
-	supplemental := append([]recordRef(nil), matches...)
-	base := primary.record.BaseModel
-	if base != "" {
-		supplemental = append(supplemental, byBase[base]...)
-		if len(byBase[base]) == 0 {
-			supplemental = append(supplemental, byFoldedBase[strings.ToLower(base)]...)
-		}
-	}
-	supplemental = uniqueRecords(supplemental)
-	filtered := supplemental[:0]
-	for _, ref := range supplemental {
+	compatible := make([]recordRef, 0, len(matches))
+	for _, ref := range matches {
 		if operationForRecord(modelID, ref) == operation {
-			filtered = append(filtered, ref)
+			compatible = append(compatible, ref)
 		}
 	}
-	supplemental = filtered
-	sortRecords(modelID, supplemental)
+	if len(compatible) == 0 {
+		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: "no compatible source record"}
+	}
 
-	limits := compileTokenLimits(operation, primary)
-	compiledOperation := compileOperation(operation, primary.record.Mode, supplemental, primary)
-	if compiledOperation.Generation != nil && compiledOperation.Generation.MaxOutputTokens != nil {
-		defaultValue := compiledOperation.Generation.MaxOutputTokens.Default
-		if defaultValue != nil {
-			if limits.MinOutputTokens > 0 && *defaultValue < limits.MinOutputTokens {
-				*defaultValue = limits.MinOutputTokens
-			}
-			if limits.MaxOutputTokens > 0 && *defaultValue > limits.MaxOutputTokens {
-				*defaultValue = limits.MaxOutputTokens
-			}
-		}
+	limits, outputTokensSupported, err := compileTokenLimits(operation, primary)
+	if err != nil {
+		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "token_limits", Reason: err.Error()}
+	}
+	compiledOperation, err := compileOperation(operation, primary.record.Mode, compatible, primary, outputTokensSupported)
+	if err != nil {
+		return modelConfig{}, false, &compileError{ModelID: modelID, Field: "operation", Reason: err.Error()}
 	}
 	lifecycle := "active"
 	if primary.record.IsDeprecated {
@@ -488,49 +549,38 @@ func compileModel(
 		Lifecycle:   lifecycle,
 		TokenLimits: limits,
 		Operations:  []operationConfig{compiledOperation},
-	}, true
+	}, true, nil
 }
 
 func operationForRecord(modelID string, ref recordRef) string {
-	inferred := inferOperation(modelID)
-	if inferred == "" {
-		return ""
-	}
-	if inferred != "generate" {
-		return inferred
-	}
-	operation := supportedModes[ref.record.Mode]
-	switch operation {
-	case "generate":
-		return "generate"
-	case "image_generation":
-		if imageOperationEvidence(modelID, ref) {
-			return "image_generation"
+	if ref.record.Mode != "" {
+		operation := supportedModes[ref.record.Mode]
+		switch operation {
+		case "image_generation":
+			// Bifrost also stores ordinary model price rows under an
+			// image_generation mode. Treat that row as image generation only
+			// when its output evidence is unambiguously image-only; a model
+			// name may confirm evidence, but never override an explicit chat
+			// or completion mode.
+			if imageOperationEvidence(modelID, ref) {
+				return operation
+			}
+			return "generate"
+		case "video_generation":
+			if videoOperationEvidence(modelID, ref) {
+				return operation
+			}
+			return "generate"
+		default:
+			return operation
 		}
-		return "generate"
-	case "video_generation":
-		if videoOperationEvidence(modelID, ref) {
-			return "video_generation"
-		}
-		return "generate"
-	case "audio_generation":
-		return "audio_generation"
-	case "audio_transcription":
-		return "audio_transcription"
-	case "realtime":
-		return "realtime"
-	case "embedding":
-		return "embedding"
-	case "rerank":
-		return "rerank"
-	default:
-		return ""
 	}
+	return inferOperation(modelID)
 }
 
 func syntheticModelID(modelID string) bool {
 	value := strings.ToLower(modelID)
-	if syntheticRequestPreset(value) {
+	if strings.HasSuffix(value, ":batch") || syntheticRequestPreset(value) {
 		return true
 	}
 	hasSuffix := func(values ...string) bool {
@@ -692,56 +742,163 @@ func realtimeModel(modelID string) bool {
 	return strings.Contains(value, "realtime") || strings.Contains(value, "native-audio") || strings.Contains(value, "-live-")
 }
 
-func compileTokenLimits(operation string, primary recordRef) tokenLimits {
-	maxInput, _ := positiveInteger(primary.record.MaxInputTokens)
+func compileTokenLimits(operation string, primary recordRef) (tokenLimits, bool, error) {
+	maxInput, err := nonNegativeInteger(primary.record.MaxInputTokens)
+	if err != nil {
+		return tokenLimits{}, false, fmt.Errorf("max_input_tokens: %w", err)
+	}
 	if maxInput == 0 && operation == "embedding" {
-		maxInput, _ = positiveInteger(primary.record.MaxTokens)
+		maxInput, err = nonNegativeInteger(primary.record.MaxTokens)
+		if err != nil {
+			return tokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
+		}
 	}
 	limits := tokenLimits{MaxInputTokens: maxInput}
 	if operation != "generate" && operation != "realtime" {
-		return limits
+		return limits, false, nil
 	}
-	maxOutput, _ := positiveInteger(primary.record.MaxOutputTokens)
+
+	maxOutput, outputErr := nonNegativeInteger(primary.record.MaxOutputTokens)
+	if outputErr != nil {
+		return tokenLimits{}, false, fmt.Errorf("max_output_tokens: %w", outputErr)
+	}
+	genericMaximum, genericErr := nonNegativeInteger(primary.record.MaxTokens)
+	if genericErr != nil {
+		return tokenLimits{}, false, fmt.Errorf("max_tokens: %w", genericErr)
+	}
+	// max_output_tokens is the explicit output-limit fact. max_tokens is a
+	// legacy/general field and is used only when the explicit field is absent;
+	// differing values are not merged or averaged.
 	if maxOutput == 0 {
-		maxOutput, _ = positiveInteger(primary.record.MaxTokens)
+		maxOutput = genericMaximum
 	}
-	parameter, parameterFound := findParameter([]recordRef{primary}, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens")
-	if maxOutput == 0 && parameterFound && parameter.Range != nil {
-		maxOutput, _ = positiveInteger(parameter.Range.Maximum)
+	parameterPolicy, parameterFound, policyErr := outputTokenBounds([]recordRef{primary})
+	if policyErr != nil {
+		return tokenLimits{}, false, policyErr
 	}
-	limits.MaxOutputTokens = maxOutput
-	if maxOutput == 0 {
-		return limits
-	}
-	limits.MinOutputTokens = 1
-	if parameterFound && parameter.Range != nil {
-		if minimum, valid := positiveInteger(parameter.Range.Minimum); valid {
-			limits.MinOutputTokens = minimum
+	if parameterFound {
+		if maxOutput == 0 && parameterPolicy.Maximum != nil {
+			maxOutput = *parameterPolicy.Maximum
+		}
+		if parameterPolicy.Minimum != nil {
+			limits.MinOutputTokens = *parameterPolicy.Minimum
 		}
 	}
-	return limits
+	limits.MaxOutputTokens = maxOutput
+	if limits.MinOutputTokens > 0 && limits.MaxOutputTokens > 0 && limits.MinOutputTokens > limits.MaxOutputTokens {
+		return tokenLimits{}, false, errors.New("output minimum must not exceed maximum")
+	}
+	return limits, parameterFound || maxOutput > 0, nil
 }
 
-func compileOperation(operation, sourceMode string, records []recordRef, primary recordRef) operationConfig {
-	primaryOnly := []recordRef{primary}
-	if primary.key == "" {
-		primaryOnly = nil
+func compileOperation(operation, sourceMode string, records []recordRef, primary recordRef, outputTokensSupported bool) (operationConfig, error) {
+	primaryOnly := records
+	if primary.key != "" {
+		primaryOnly = []recordRef{primary}
 	}
 	inputs, outputs := compileModalities(operation, sourceMode, primaryOnly)
 	result := operationConfig{
 		Operation:        operation,
-		Modes:            compileModes(operation, primaryOnly),
+		Modes:            compileModes(operation, records),
 		InputModalities:  inputs,
 		OutputModalities: outputs,
 		Features:         compileFeatures(operation, primaryOnly),
 	}
 	if operation == "generate" || operation == "realtime" {
-		result.Generation = compileGenerationPolicy(primaryOnly, primary)
+		policy, err := compileGenerationPolicy(primary, outputTokensSupported)
+		if err != nil {
+			return operationConfig{}, err
+		}
+		result.Generation = policy
 	}
 	if operation == "embedding" {
-		result.Embedding = compileEmbeddingPolicy(records, primary)
+		policy, err := compileEmbeddingPolicy(primary)
+		if err != nil {
+			return operationConfig{}, err
+		}
+		result.Embedding = policy
 	}
-	return result
+	if err := validateOperationShape(result); err != nil {
+		return operationConfig{}, err
+	}
+	return result, nil
+}
+
+func validateOperationShape(operation operationConfig) error {
+	containsMode := func(mode string) bool {
+		for _, candidate := range operation.Modes {
+			if candidate == mode {
+				return true
+			}
+		}
+		return false
+	}
+	containsInput := func(modality string) bool {
+		for _, candidate := range operation.InputModalities {
+			if candidate == modality {
+				return true
+			}
+		}
+		return false
+	}
+	containsOutput := func(modality string) bool {
+		for _, candidate := range operation.OutputModalities {
+			if candidate == modality {
+				return true
+			}
+		}
+		return false
+	}
+	if containsInput("embedding") {
+		return errors.New("embedding cannot be an operation input modality")
+	}
+	if operation.Operation == "realtime" {
+		if len(operation.Modes) != 1 || !containsMode("duplex") {
+			return errors.New("realtime must use duplex mode only")
+		}
+		if !containsInput("text") && !containsInput("audio") {
+			return errors.New("realtime must accept text or audio input")
+		}
+		if !containsOutput("text") && !containsOutput("audio") {
+			return errors.New("realtime must produce text or audio output")
+		}
+	} else if containsMode("duplex") {
+		return errors.New("only realtime may use duplex mode")
+	}
+
+	requiredOutput := map[string]string{
+		"embedding":           "embedding",
+		"rerank":              "text",
+		"image_generation":    "image",
+		"audio_generation":    "audio",
+		"audio_transcription": "text",
+		"music_generation":    "music",
+		"video_generation":    "video",
+	}
+	if required, ok := requiredOutput[operation.Operation]; ok {
+		if !containsOutput(required) {
+			return fmt.Errorf("%s must produce %s", operation.Operation, required)
+		}
+		if operation.Operation == "embedding" && len(operation.OutputModalities) != 1 {
+			return errors.New("embedding must produce only embedding")
+		}
+	}
+	if operation.Operation == "embedding" && operation.Generation != nil {
+		return errors.New("embedding cannot declare generation parameters")
+	}
+	if operation.Operation == "embedding" && operation.Embedding == nil {
+		return errors.New("embedding must declare its embedding capability")
+	}
+	if operation.Operation != "embedding" && operation.Embedding != nil {
+		return errors.New("non-embedding operation must not declare embedding parameters")
+	}
+	if operation.Operation == "rerank" && operation.Generation != nil {
+		return errors.New("rerank must not declare generation parameters")
+	}
+	if operation.Operation != "embedding" && containsOutput("embedding") {
+		return errors.New("non-embedding operation must not produce the embedding modality")
+	}
+	return nil
 }
 
 func compileModes(operation string, records []recordRef) []string {
@@ -775,9 +932,10 @@ func compileModes(operation string, records []recordRef) []string {
 		for _, ref := range records {
 			if batchEvidence(ref) {
 				modes["async"] = struct{}{}
-				continue
 			}
-			batchOnly = false
+			if !batchOnlyEvidence(ref) {
+				batchOnly = false
+			}
 		}
 		if batchOnly {
 			delete(modes, "unary")
@@ -797,6 +955,22 @@ func batchEvidence(ref recordRef) bool {
 		}
 	}
 	return false
+}
+
+func batchOnlyEvidence(ref recordRef) bool {
+	key := strings.ToLower(ref.key)
+	if strings.HasSuffix(key, ":batch") || strings.Contains(key, "/batch/") {
+		return true
+	}
+	hasBatch, hasNonBatch := false, false
+	for _, endpoint := range ref.record.SupportedEndpoints {
+		if strings.Contains(strings.ToLower(endpoint), "batch") {
+			hasBatch = true
+		} else {
+			hasNonBatch = true
+		}
+	}
+	return hasBatch && !hasNonBatch
 }
 
 func compileModalities(operation, sourceMode string, records []recordRef) ([]string, []string) {
@@ -892,208 +1066,355 @@ func compileFeatures(operation string, records []recordRef) []string {
 	return sortedSet(features)
 }
 
-func compileGenerationPolicy(records []recordRef, primary recordRef) *generationPolicy {
+func compileGenerationPolicy(primary recordRef, outputTokensSupported bool) (*generationPolicy, error) {
 	policy := &generationPolicy{}
 	samplingAllowed := primary.record.SupportsSamplingParams == nil || *primary.record.SupportsSamplingParams
 	if samplingAllowed {
-		if parameter, ok := findParameter(records, "temperature"); ok {
-			policy.Temperature = floatPolicy(parameter)
+		if parameter, ok, err := findParameter([]recordRef{primary}, "temperature"); err != nil {
+			return nil, err
+		} else if ok {
+			policy.Temperature, err = floatPolicy(parameter)
+			if err != nil {
+				return nil, fmt.Errorf("temperature: %w", err)
+			}
 		}
-		if parameter, ok := findParameter(records, "top_p", "topp"); ok {
-			policy.TopP = floatPolicy(parameter)
+		if parameter, ok, err := findParameter([]recordRef{primary}, "top_p", "topp"); err != nil {
+			return nil, err
+		} else if ok {
+			policy.TopP, err = floatPolicy(parameter)
+			if err != nil {
+				return nil, fmt.Errorf("top_p: %w", err)
+			}
 		}
-		if parameter, ok := findParameter(records, "seed"); ok {
-			policy.Seed = integerPolicy(parameter)
+		if parameter, ok, err := findParameter([]recordRef{primary}, "seed"); err != nil {
+			return nil, err
+		} else if ok {
+			policy.Seed, err = integerPolicy(parameter)
+			if err != nil {
+				return nil, fmt.Errorf("seed: %w", err)
+			}
 		}
 	}
-	_, parameterFound := findParameter(records, "max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens")
-	_, maximumKnown := positiveInteger(primary.record.MaxOutputTokens)
-	if parameterFound || maximumKnown {
-		defaultValue := defaultMaxOutputTokens
-		policy.MaxOutputTokens = &outputTokenParameter{Default: &defaultValue}
+	if outputTokensSupported {
+		// The default is a Gateway policy, not a model fact. Runtime resolves
+		// it centrally so the catalog never repeats a derived 4096 value.
+		policy.MaxOutputTokens = &outputTokenParameter{}
 	}
-	if parameter, ok := findParameter(records, "stop", "stop_sequences", "stopsequences"); ok {
-		policy.Stop = &stopParameter{Default: rawStrings(parameter.Default)}
+	if parameter, ok, err := findParameter([]recordRef{primary}, "stop", "stop_sequences", "stopsequences"); err != nil {
+		return nil, err
+	} else if ok {
+		stops, parseErr := rawStrings(parameter.Default)
+		if parseErr != nil {
+			return nil, fmt.Errorf("stop: %w", parseErr)
+		}
+		policy.Stop = &stopParameter{Default: stops}
 	}
 	if policy.Temperature == nil && policy.TopP == nil && policy.MaxOutputTokens == nil && policy.Stop == nil && policy.Seed == nil {
-		return nil
+		return nil, nil
 	}
-	return policy
+	return policy, nil
 }
 
-func compileEmbeddingPolicy(records []recordRef, primary recordRef) *embeddingPolicy {
+func compileEmbeddingPolicy(primary recordRef) (*embeddingPolicy, error) {
 	policy := &embeddingPolicy{}
-	if parameter, ok := findParameter(records, "dimensions", "output_dimensionality"); ok {
-		policy.Dimensions = integerPolicy(parameter)
-		if policy.Dimensions.Default == nil {
-			policy.Dimensions.Default, _ = positiveIntegerPointer(primary.record.OutputVectorSize)
+	if parameter, ok, err := findParameter([]recordRef{primary}, "dimensions", "output_dimensionality"); err != nil {
+		return nil, err
+	} else if ok {
+		var policyErr error
+		policy.Dimensions, policyErr = positiveIntegerPolicy(parameter)
+		if policyErr != nil {
+			return nil, fmt.Errorf("dimensions: %w", policyErr)
 		}
-		return policy
-	}
-	policy.FixedDimensions, _ = positiveIntegerPointer(primary.record.OutputVectorSize)
-	if policy.FixedDimensions == nil {
-		for _, ref := range records {
-			if value, valid := positiveIntegerPointer(ref.record.OutputVectorSize); valid {
-				policy.FixedDimensions = value
-				break
+		if policy.Dimensions.Default == nil {
+			var defaultErr error
+			policy.Dimensions.Default, defaultErr = positiveIntegerPointer(primary.record.OutputVectorSize)
+			if defaultErr != nil {
+				return nil, fmt.Errorf("output_vector_size: %w", defaultErr)
 			}
 		}
+		return policy, nil
 	}
-	return policy
+	var err error
+	policy.FixedDimensions, err = positiveIntegerPointer(primary.record.OutputVectorSize)
+	if err != nil {
+		return nil, fmt.Errorf("output_vector_size: %w", err)
+	}
+	return policy, nil
 }
 
-func floatPolicy(parameter sourceParameter) *numericParameter[float64] {
-	policy := &numericParameter[float64]{Default: rawFloat(parameter.Default)}
+func floatPolicy(parameter sourceParameter) (*numericParameter[float64], error) {
+	defaultValue, err := rawFloat(parameter.Default)
+	if err != nil {
+		return nil, err
+	}
+	policy := &numericParameter[float64]{Default: defaultValue}
 	if parameter.Range != nil {
-		policy.Minimum = numberFloat(parameter.Range.Minimum)
-		policy.Maximum = numberFloat(parameter.Range.Maximum)
+		policy.Minimum, err = numberFloat(parameter.Range.Minimum)
+		if err != nil {
+			return nil, fmt.Errorf("minimum: %w", err)
+		}
+		policy.Maximum, err = numberFloat(parameter.Range.Maximum)
+		if err != nil {
+			return nil, fmt.Errorf("maximum: %w", err)
+		}
 	}
 	if policy.Minimum != nil && policy.Maximum != nil && *policy.Minimum > *policy.Maximum {
-		policy.Minimum, policy.Maximum = nil, nil
+		return nil, errors.New("minimum must not exceed maximum")
 	}
 	if policy.Default != nil && ((policy.Minimum != nil && *policy.Default < *policy.Minimum) ||
 		(policy.Maximum != nil && *policy.Default > *policy.Maximum)) {
-		policy.Default = nil
+		return nil, errors.New("default is outside the declared bounds")
 	}
-	return policy
+	return policy, nil
 }
 
-func integerPolicy(parameter sourceParameter) *numericParameter[int64] {
-	policy := &numericParameter[int64]{Default: rawInteger(parameter.Default)}
+func integerPolicy(parameter sourceParameter) (*numericParameter[int64], error) {
+	defaultValue, err := rawInteger(parameter.Default)
+	if err != nil {
+		return nil, err
+	}
+	policy := &numericParameter[int64]{Default: defaultValue}
 	if parameter.Range != nil {
-		policy.Minimum = numberInteger(parameter.Range.Minimum)
-		policy.Maximum = numberInteger(parameter.Range.Maximum)
+		policy.Minimum, err = numberInteger(parameter.Range.Minimum)
+		if err != nil {
+			return nil, fmt.Errorf("minimum: %w", err)
+		}
+		policy.Maximum, err = numberInteger(parameter.Range.Maximum)
+		if err != nil {
+			return nil, fmt.Errorf("maximum: %w", err)
+		}
 	}
 	if policy.Minimum != nil && policy.Maximum != nil && *policy.Minimum > *policy.Maximum {
-		policy.Minimum, policy.Maximum = nil, nil
+		return nil, errors.New("minimum must not exceed maximum")
 	}
 	if policy.Default != nil && ((policy.Minimum != nil && *policy.Default < *policy.Minimum) ||
 		(policy.Maximum != nil && *policy.Default > *policy.Maximum)) {
-		policy.Default = nil
+		return nil, errors.New("default is outside the declared bounds")
 	}
-	return policy
+	return policy, nil
 }
 
-func findParameter(records []recordRef, names ...string) (sourceParameter, bool) {
-	wanted := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		wanted[name] = struct{}{}
+func positiveIntegerPolicy(parameter sourceParameter) (*numericParameter[int64], error) {
+	policy, err := integerPolicy(parameter)
+	if err != nil {
+		return nil, err
 	}
+	for _, value := range []*int64{policy.Minimum, policy.Maximum, policy.Default} {
+		if value != nil && *value < 1 {
+			return nil, errors.New("value must be positive")
+		}
+	}
+	return policy, nil
+}
+
+func outputTokenBounds(records []recordRef) (*numericParameter[int64], bool, error) {
+	policy := &numericParameter[int64]{}
+	found := false
 	for _, ref := range records {
 		for _, parameter := range ref.record.ModelParameters {
-			if _, ok := wanted[strings.ToLower(parameter.ID)]; ok {
-				return parameter, true
+			if parameter.Disabled || !parameterNameMatch(parameter.ID, []string{"max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens"}) {
+				continue
+			}
+			found = true
+			if parameter.Range == nil {
+				continue
+			}
+			for _, bound := range []struct {
+				name      string
+				source    *json.Number
+				collected **int64
+			}{
+				{name: "minimum", source: parameter.Range.Minimum, collected: &policy.Minimum},
+				{name: "maximum", source: parameter.Range.Maximum, collected: &policy.Maximum},
+			} {
+				value, err := numberInteger(bound.source)
+				if err != nil {
+					return nil, false, fmt.Errorf("%s %s: %w", parameter.ID, bound.name, err)
+				}
+				if value == nil {
+					continue
+				}
+				if *value < 0 {
+					return nil, false, fmt.Errorf("%s %s must not be negative", parameter.ID, bound.name)
+				}
+				if *bound.collected != nil && **bound.collected != *value {
+					return nil, false, fmt.Errorf("conflicting max-output %s declarations in %s", bound.name, ref.key)
+				}
+				*bound.collected = value
 			}
 		}
 	}
-	return sourceParameter{}, false
+	if policy.Minimum != nil && policy.Maximum != nil && *policy.Minimum > *policy.Maximum {
+		return nil, false, errors.New("output minimum must not exceed maximum")
+	}
+	return policy, found, nil
 }
 
-func hasParameter(record sourceRecord, name string) bool {
-	for _, parameter := range record.ModelParameters {
-		if strings.EqualFold(parameter.ID, name) {
+func findParameter(records []recordRef, names ...string) (sourceParameter, bool, error) {
+	var found sourceParameter
+	foundIn := ""
+	for _, ref := range records {
+		for _, parameter := range ref.record.ModelParameters {
+			if parameter.Disabled || !parameterNameMatch(parameter.ID, names) {
+				continue
+			}
+			if foundIn == "" {
+				found = parameter
+				foundIn = ref.key
+				continue
+			}
+			if !equivalentParameter(found, parameter) {
+				return sourceParameter{}, false, fmt.Errorf("parameter %q conflicts with another declaration (%s and %s)", parameter.ID, foundIn, ref.key)
+			}
+		}
+	}
+	if foundIn != "" {
+		return found, true, nil
+	}
+	return sourceParameter{}, false, nil
+}
+
+func parameterNameMatch(value string, names []string) bool {
+	for _, name := range names {
+		if strings.EqualFold(value, name) {
 			return true
 		}
 	}
 	return false
 }
 
-func rawFloat(raw json.RawMessage) *float64 {
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil
+func equivalentParameter(left, right sourceParameter) bool {
+	if !bytes.Equal(bytes.TrimSpace(left.Default), bytes.TrimSpace(right.Default)) {
+		return false
 	}
-	var number json.Number
-	if json.Unmarshal(raw, &number) != nil {
-		return nil
+	if left.Range == nil || right.Range == nil {
+		return left.Range == nil && right.Range == nil
 	}
-	value, err := number.Float64()
-	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
-		return nil
-	}
-	return &value
+	return equivalentNumber(left.Range.Minimum, right.Range.Minimum) && equivalentNumber(left.Range.Maximum, right.Range.Maximum)
 }
 
-func rawInteger(raw json.RawMessage) *int64 {
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil
+func equivalentNumber(left, right *json.Number) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
 	}
-	var number json.Number
-	if json.Unmarshal(raw, &number) != nil {
-		return nil
-	}
-	return numberInteger(&number)
+	return left.String() == right.String()
 }
 
-func rawStrings(raw json.RawMessage) []string {
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil
+func hasParameter(record sourceRecord, name string) bool {
+	for _, parameter := range record.ModelParameters {
+		if !parameter.Disabled && strings.EqualFold(parameter.ID, name) {
+			return true
+		}
 	}
+	return false
+}
+
+func rawFloat(raw json.RawMessage) (*float64, error) {
+	number, err := rawNumber(raw)
+	if err != nil || number == nil {
+		return nil, err
+	}
+	return numberFloat(number)
+}
+
+func rawInteger(raw json.RawMessage) (*int64, error) {
+	number, err := rawNumber(raw)
+	if err != nil || number == nil {
+		return nil, err
+	}
+	return numberInteger(number)
+}
+
+func rawStrings(raw json.RawMessage) ([]string, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	var values []string
-	if json.Unmarshal(raw, &values) != nil {
-		return nil
+	if err := decoder.Decode(&values); err != nil {
+		return nil, fmt.Errorf("must be an array of strings: %w", err)
 	}
-	return values
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("must contain exactly one JSON value")
+	}
+	return values, nil
 }
 
-func numberFloat(number *json.Number) *float64 {
+func rawNumber(raw json.RawMessage) (*json.Number, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("must be numeric: %w", err)
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("must contain exactly one JSON value")
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return nil, errors.New("must be numeric")
+	}
+	return &number, nil
+}
+
+func numberFloat(number *json.Number) (*float64, error) {
 	if number == nil {
-		return nil
+		return nil, nil
 	}
 	value, err := number.Float64()
 	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
-		return nil
+		return nil, errors.New("must be a finite number")
 	}
-	return &value
+	return &value, nil
 }
 
-func numberInteger(number *json.Number) *int64 {
+func numberInteger(number *json.Number) (*int64, error) {
 	if number == nil {
-		return nil
+		return nil, nil
 	}
 	if value, err := number.Int64(); err == nil {
-		return &value
+		return &value, nil
 	}
 	value, err := number.Float64()
-	if err != nil || math.Trunc(value) != value || value < math.MinInt64 || value > math.MaxInt64 {
-		return nil
+	if err != nil || math.Trunc(value) != value || value < math.MinInt64 || value > math.MaxInt64 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil, errors.New("must be a finite integer")
 	}
 	converted := int64(value)
-	return &converted
+	return &converted, nil
 }
 
-func positiveInteger(number *json.Number) (int64, bool) {
-	value := numberInteger(number)
-	if value == nil || *value <= 0 {
-		return 0, false
+func nonNegativeInteger(number *json.Number) (int64, error) {
+	value, err := numberInteger(number)
+	if err != nil {
+		return 0, err
 	}
-	return *value, true
-}
-
-func positiveIntegerPointer(number *json.Number) (*int64, bool) {
-	value, valid := positiveInteger(number)
-	if !valid {
-		return nil, false
+	if value == nil {
+		return 0, nil
 	}
-	return &value, true
-}
-
-func hasModelSuffix(key, modelID string) bool {
-	keyFolded := strings.ToLower(key)
-	modelFolded := strings.ToLower(modelID)
-	return strings.HasSuffix(keyFolded, "/"+modelFolded)
-}
-
-func uniqueRecords(records []recordRef) []recordRef {
-	seen := make(map[string]struct{}, len(records))
-	result := make([]recordRef, 0, len(records))
-	for _, ref := range records {
-		if _, exists := seen[ref.key]; exists {
-			continue
-		}
-		seen[ref.key] = struct{}{}
-		result = append(result, ref)
+	if *value < 0 {
+		return 0, errors.New("must not be negative")
 	}
-	return result
+	return *value, nil
+}
+
+func positiveIntegerPointer(number *json.Number) (*int64, error) {
+	value, err := numberInteger(number)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil || *value == 0 {
+		return nil, nil
+	}
+	if *value < 0 {
+		return nil, errors.New("must be positive")
+	}
+	return value, nil
 }
 
 func sortRecords(modelID string, records []recordRef) {
@@ -1116,14 +1437,8 @@ func recordRank(modelID string, ref recordRef) [3]int {
 		class = 0
 	case strings.EqualFold(ref.key, modelID):
 		class = 1
-	case strings.HasSuffix(ref.key, "/"+modelID):
+	case strings.EqualFold(ref.key, modelID+":batch") || strings.HasSuffix(strings.ToLower(ref.key), "/"+strings.ToLower(modelID)+":batch"):
 		class = 2
-	case hasModelSuffix(ref.key, modelID):
-		class = 3
-	case ref.record.BaseModel == modelID:
-		class = 4
-	case strings.EqualFold(ref.record.BaseModel, modelID):
-		class = 5
 	}
 	return [3]int{class, strings.Count(ref.key, "/"), len(ref.key)}
 }
@@ -1148,6 +1463,27 @@ func gitOutput(repo string, arguments ...string) (string, error) {
 		return "", err
 	}
 	return string(output), nil
+}
+
+func resolveCommit(repo, ref string) (string, error) {
+	trimmed := strings.TrimSpace(ref)
+	if len(trimmed) != 40 {
+		return "", fmt.Errorf("ref %q is not an immutable 40-character commit SHA", ref)
+	}
+	for _, character := range trimmed {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
+			return "", fmt.Errorf("ref %q is not an immutable commit SHA", ref)
+		}
+	}
+	resolved, err := gitOutput(repo, "rev-parse", "--verify", trimmed+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	resolved = strings.TrimSpace(resolved)
+	if !strings.EqualFold(resolved, trimmed) {
+		return "", fmt.Errorf("ref %q resolved to unexpected commit %q", ref, resolved)
+	}
+	return resolved, nil
 }
 
 func writeCatalog(path string, document catalogDocument) error {

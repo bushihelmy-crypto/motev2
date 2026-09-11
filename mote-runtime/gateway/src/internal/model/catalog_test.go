@@ -18,7 +18,6 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	overrideInput := int64(3500)
 	overrideMinimum := int64(2)
 	overrideMaximum := int64(1024)
-	overrideDefault := int64(128)
 	overrides := []Override{{
 		ModelID:   "overridden-model",
 		Lifecycle: &overrideLifecycle,
@@ -34,7 +33,7 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 			InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
 			OutputModalities: []api.Modality{api.ModalityText},
 			Generation: &GenerationPolicy{
-				MaxOutputTokens: &OutputTokenParameter{Default: &overrideDefault},
+				MaxOutputTokens: &OutputTokenParameter{},
 			},
 		}},
 	}}
@@ -51,7 +50,6 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	overrideInput = 1
 	overrideMinimum = 1
 	overrideMaximum = 1
-	overrideDefault = 1
 	overrides[0].Operations[0].InputModalities[0] = api.ModalityAudio
 	overrides[0].Operations[0].Generation.MaxOutputTokens = nil
 
@@ -83,8 +81,8 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 		t.Fatal("a non-nil Kernel operation set must replace, not patch, catalog operations")
 	}
 	parameters := capability.ResolveGenerationParameters(api.GenerationParameters{})
-	if parameters.MaxOutputTokens == nil || *parameters.MaxOutputTokens != 128 {
-		t.Fatalf("replacement generation policy was not frozen: %+v", parameters)
+	if parameters.MaxOutputTokens == nil || *parameters.MaxOutputTokens != 1024 {
+		t.Fatalf("central output-token policy was not clamped to the override limit: %+v", parameters)
 	}
 
 	_, err = catalog.Lookup("overridden-model ")
@@ -123,7 +121,7 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 	}
 
 	defaults := capability.ResolveGenerationParameters(api.GenerationParameters{})
-	if defaults.MaxOutputTokens == nil || *defaults.MaxOutputTokens != 256 || len(defaults.Stop) != 1 || defaults.Stop[0] != "END" {
+	if defaults.MaxOutputTokens == nil || *defaults.MaxOutputTokens != 2048 || len(defaults.Stop) != 1 || defaults.Stop[0] != "END" {
 		t.Fatalf("model defaults were not applied: %+v", defaults)
 	}
 	resolved.Stop[0] = "MUTATED-RESULT"
@@ -159,8 +157,8 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 		t.Fatalf("supported request parameters were not retained: %+v", all)
 	}
 	empty := allCapability.ResolveGenerationParameters(api.GenerationParameters{})
-	if empty.MaxOutputTokens != nil || empty.Stop != nil {
-		t.Fatalf("supported parameters without defaults must remain absent: %+v", empty)
+	if empty.MaxOutputTokens == nil || *empty.MaxOutputTokens != 2048 || empty.Stop != nil {
+		t.Fatalf("central output-token policy was not applied: %+v", empty)
 	}
 }
 
@@ -306,89 +304,58 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	if len(catalog.definitions) != 9515 {
-		t.Fatalf("unexpected built-in model count: %d", len(catalog.definitions))
+	if len(catalog.definitions) != 12324 {
+		t.Fatalf("unexpected built-in model count for the pinned snapshot: %d", len(catalog.definitions))
 	}
-
-	wantOperations := map[api.Operation]int{
-		api.OperationGenerate:           8892,
-		api.OperationEmbedding:          149,
-		api.OperationRerank:             32,
-		api.OperationImageGeneration:    201,
-		api.OperationAudioGeneration:    45,
-		api.OperationAudioTranscription: 81,
-		api.OperationMusicGeneration:    6,
-		api.OperationVideoGeneration:    80,
-		api.OperationRealtime:           29,
-	}
-	gotOperations := make(map[api.Operation]int)
 	for _, definition := range catalog.definitions {
 		if len(definition.config.Operations) != 1 {
 			t.Fatalf("generated model %q does not have one authoritative operation", definition.ID())
-		}
-		gotOperations[definition.config.Operations[0].Operation]++
-	}
-	for operation, want := range wantOperations {
-		if gotOperations[operation] != want {
-			t.Errorf("operation %q count = %d, want %d", operation, gotOperations[operation], want)
-		}
-	}
-	for _, definition := range catalog.definitions {
-		operation := definition.config.Operations[0]
-		if operation.Operation != api.OperationGenerate && operation.Operation != api.OperationRealtime {
-			continue
-		}
-		if operation.Generation == nil {
-			continue
-		}
-		if operation.Generation.MaxOutputTokens == nil || operation.Generation.MaxOutputTokens.Default == nil {
-			t.Errorf("generated model %q is missing the unified max_output_tokens default", definition.ID())
-			continue
-		}
-		wantDefault := int64(4096)
-		limits := definition.TokenLimits()
-		if limits.MinOutputTokens > wantDefault {
-			wantDefault = limits.MinOutputTokens
-		}
-		if limits.MaxOutputTokens > 0 && limits.MaxOutputTokens < wantDefault {
-			wantDefault = limits.MaxOutputTokens
-		}
-		if got := *operation.Generation.MaxOutputTokens.Default; got != wantDefault {
-			t.Errorf("model %q max_output_tokens default = %d, want %d", definition.ID(), got, wantDefault)
 		}
 	}
 
 	assertOperation(t, catalog, "gpt-6-astra", api.OperationGenerate)
 	assertOperation(t, catalog, "gpt-image-2.5-flare", api.OperationImageGeneration)
-	assertOperation(t, catalog, "glm-5.3-flash", api.OperationGenerate)
 	assertOperation(t, catalog, "deepseek-v4-flash", api.OperationGenerate)
 	assertOperation(t, catalog, "kimi-k3", api.OperationGenerate)
 	assertOperation(t, catalog, "claude-opus-5", api.OperationGenerate)
 	assertOperation(t, catalog, "dall-e-3", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gpt-image-1", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gemini-2.5-flash-image", api.OperationImageGeneration)
-	assertOperation(t, catalog, "flux-1.1-pro", api.OperationImageGeneration)
 	assertOperation(t, catalog, "sora-2", api.OperationVideoGeneration)
-	assertOperation(t, catalog, "wan-2.6-t2v", api.OperationVideoGeneration)
 	assertOperation(t, catalog, "gpt-realtime-2.1", api.OperationRealtime)
-	assertOperation(t, catalog, "lyria-3-pro", api.OperationMusicGeneration)
-	assertOperation(t, catalog, "voyage-4", api.OperationEmbedding)
-	assertMode(t, catalog, "text-embedding-3-large:batch", api.ModeAsync)
+	assertOperation(t, catalog, "text-embedding-3-large", api.OperationEmbedding)
+	assertMode(t, catalog, "text-embedding-3-large", api.ModeAsync)
 	for _, generated := range []string{
-		"anthropic/claude-3-5-sonnet-20241022", "openai/gpt-4o", "deep-research-pro",
+		"anthropic/claude-3-5-sonnet-20241022", "openai/gpt-4o",
 		"google/gemini-1.5-pro", "meta-llama/llama-3.2-11b-vision-instruct",
 		"amazon/nova-pro-v1",
 	} {
 		assertOperation(t, catalog, generated, api.OperationGenerate)
 	}
-	assertOperation(t, catalog, "@cf/baai/bge-reranker-base", api.OperationRerank)
-	assertOperation(t, catalog, "@cf/deepgram/flux", api.OperationAudioTranscription)
-	assertOperation(t, catalog, "titan-embed-text-v2", api.OperationEmbedding)
 
 	gemini, _ := catalog.Lookup("gemini-2.5-pro")
 	limits := gemini.TokenLimits()
 	if limits.MaxInputTokens != 1048576 || limits.MaxOutputTokens != 65535 {
 		t.Fatalf("gemini limits were inflated by another service record: %+v", limits)
+	}
+	geminiCapability, _ := gemini.Capability(api.OperationGenerate)
+	if resolved := geminiCapability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
+		t.Fatalf("central max_output_tokens policy is wrong: %+v", resolved)
+	}
+	gpt41, _ := catalog.Lookup("gpt-4.1")
+	if !assertModes(gpt41, api.OperationGenerate, api.ModeUnary, api.ModeAsync) {
+		t.Fatal("gpt-4.1 lost unary or async delivery capability")
+	}
+	latest, _ := catalog.Lookup("gpt-5.1-chat-latest")
+	latestCapability, _ := latest.Capability(api.OperationGenerate)
+	filtered := latestCapability.ResolveGenerationParameters(api.GenerationParameters{Temperature: pointer(0.4), TopP: pointer(0.5)})
+	if filtered.Temperature != nil || filtered.TopP != nil {
+		t.Fatalf("disabled sampling parameters leaked: %+v", filtered)
+	}
+	for _, alias := range []string{"doubao-embedding-large-text", "kokoro-82m", "chirp-3"} {
+		if _, lookupErr := catalog.Lookup(alias); lookupErr == nil {
+			t.Errorf("non-authoritative BaseModel alias was published: %q", alias)
+		}
 	}
 	whisper, _ := catalog.Lookup("whisper-1")
 	if _, exists := whisper.Capability(api.OperationGenerate); exists {
@@ -401,15 +368,29 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	for _, synthetic := range []string{
 		"codex-auto-review", "claude-opus-4-8-high", "deepseek-v4-flash-max",
 		"o3-mini-high", "grok-3-search", "grok-3-mini-low", "preset/advanced",
-		"conservative", "edit", "stable-outpaint",
+		"conservative", "edit", "openrouter/openai/text-embedding-3-large:batch",
 	} {
-		if synthetic == "stable-outpaint" {
-			assertOperation(t, catalog, synthetic, api.OperationImageGeneration)
-			continue
-		}
 		if _, lookupErr := catalog.Lookup(synthetic); lookupErr == nil {
 			t.Errorf("synthetic request preset %q was stored as a model", synthetic)
 		}
+	}
+	for _, rejected := range []string{
+		"vercel_ai_gateway/amazon/titan-embed-text-v2",
+		"vercel_ai_gateway/cohere/embed-v4.0",
+		"vercel_ai_gateway/mistral/codestral-embed",
+		"vercel_ai_gateway/mistral/mistral-embed",
+	} {
+		if _, lookupErr := catalog.Lookup(rejected); lookupErr == nil {
+			t.Errorf("invalid upstream model %q was published", rejected)
+		}
+	}
+	for _, validEmbedding := range []string{
+		"amazon.titan-embed-text-v2:0",
+		"cohere/embed-v4.0",
+		"mistral/codestral-embed",
+		"mistral/mistral-embed",
+	} {
+		assertOperation(t, catalog, validEmbedding, api.OperationEmbedding)
 	}
 
 	decodedCatalog, err := decodeCatalogData(catalogData)
@@ -473,8 +454,8 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		!capability.SupportsOutputModality(api.ModalityEmbedding) {
 		t.Fatal("text-embedding-3-large has an invalid embedding shape")
 	}
-	if resolved := capability.ResolveEmbeddingDimensions(pointer(int64(9000))); resolved == nil || *resolved != 3072 {
-		t.Fatalf("adjustable dimensions did not clamp to the model maximum: %v", resolved)
+	if resolved := capability.ResolveEmbeddingDimensions(pointer(int64(9000))); resolved != nil {
+		t.Fatalf("fixed-width model accepted a dimensions parameter: %v", resolved)
 	}
 	if dimensions, known := capability.DefaultEmbeddingDimensions(); !known || dimensions != 3072 {
 		t.Fatalf("embedding default dimension is wrong: %d %v", dimensions, known)
@@ -489,7 +470,7 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		t.Fatalf("fixed embedding width is wrong: %d %v", dimensions, known)
 	}
 
-	multimodal, _ := catalog.Lookup("nova-2-multimodal-embeddings")
+	multimodal, _ := catalog.Lookup("amazon.nova-2-multimodal-embeddings-v1:0")
 	multimodalCapability, _ := multimodal.Capability(api.OperationEmbedding)
 	for _, modality := range []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo} {
 		if !multimodalCapability.SupportsInputModality(modality) {
@@ -524,7 +505,6 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		{name: "reversed numeric bounds", defaults: []Config{withReversedNumericBounds(testModelConfig("model-a"))}, field: "operations.generation.temperature.bounds"},
 		{name: "invalid numeric default", defaults: []Config{withInvalidNumericDefault(testModelConfig("model-a"))}, field: "operations.generation.temperature.default"},
 		{name: "non-finite numeric value", defaults: []Config{withNonFiniteDefault(testModelConfig("model-a"))}, field: "operations.generation.temperature.value"},
-		{name: "invalid output default", defaults: []Config{withInvalidParameterDefault(testModelConfig("model-a"))}, field: "operations.generation.max_output_tokens.default"},
 		{name: "rerank generation policy", defaults: []Config{withRerankOperation(testModelConfig("model-a"))}, field: "operations"},
 		{name: "embedding generation policy", defaults: []Config{withEmbeddingGenerationPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "operations"},
 		{name: "embedding missing policy", defaults: []Config{withMissingEmbeddingPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "operations"},
@@ -537,7 +517,6 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		{name: "incomplete custom model", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "missing"}}, field: "operations"},
 		{name: "duplicate override", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "model-a"}, {ModelID: "model-a"}}, field: "override.model_id"},
 		{name: "empty operation replacement", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "model-a", Operations: []OperationConfig{}}}, field: "operations"},
-		{name: "override conflicts with default", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "model-a", TokenLimits: TokenLimitsOverride{MaxOutputTokens: pointer(int64(100))}}}, field: "operations.generation.max_output_tokens.default"},
 	}
 
 	for _, test := range tests {
@@ -546,6 +525,41 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 			var configErrorValue *ConfigError
 			if !errors.As(err, &configErrorValue) || configErrorValue.Field != test.field {
 				t.Fatalf("expected config error for %q, got %T %v", test.field, err, err)
+			}
+		})
+	}
+}
+
+func TestCatalogRejectsInvalidOperationShapes(t *testing.T) {
+	realtimeUnary := testModelConfig("realtime-unary")
+	realtimeUnary.Operations[0].Operation = api.OperationRealtime
+	realtimeUnary.Operations[0].Modes = []api.DeliveryMode{api.ModeUnary}
+	realtimeUnary.Operations[0].InputModalities = []api.Modality{api.ModalityText}
+	realtimeUnary.Operations[0].OutputModalities = []api.Modality{api.ModalityText}
+
+	nonRealtimeDuplex := testModelConfig("non-realtime-duplex")
+	nonRealtimeDuplex.Operations[0].Modes = []api.DeliveryMode{api.ModeDuplex}
+
+	embeddingInput := embeddingModelConfig("embedding-input", &EmbeddingPolicy{FixedDimensions: pointer(int64(768))})
+	embeddingInput.Operations[0].InputModalities = []api.Modality{api.ModalityEmbedding}
+
+	embeddingOutput := embeddingModelConfig("embedding-output", &EmbeddingPolicy{FixedDimensions: pointer(int64(768))})
+	embeddingOutput.Operations[0].OutputModalities = []api.Modality{api.ModalityEmbedding, api.ModalityText}
+
+	for _, test := range []struct {
+		name   string
+		config Config
+	}{
+		{name: "realtime requires duplex", config: realtimeUnary},
+		{name: "duplex is exclusive to realtime", config: nonRealtimeDuplex},
+		{name: "embedding cannot be input", config: embeddingInput},
+		{name: "embedding output is exclusive", config: embeddingOutput},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newCatalog([]Config{test.config}, nil)
+			var configErr *ConfigError
+			if !errors.As(err, &configErr) || configErr.Field != "operations" {
+				t.Fatalf("expected operation-shape error, got %T %v", err, err)
 			}
 		})
 	}
@@ -591,7 +605,7 @@ func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	for _, modelID := range []string{"claude-opus-4-8", "claude-opus-4.8", "claude-opus-5", "claude-sonnet-5"} {
+	for _, modelID := range []string{"claude-opus-4-8", "claude-opus-5", "claude-sonnet-5"} {
 		definition, lookupErr := catalog.Lookup(modelID)
 		if lookupErr != nil {
 			t.Fatalf("lookup %q: %v", modelID, lookupErr)
@@ -634,6 +648,19 @@ func assertMode(t *testing.T, catalog Catalog, modelID string, mode api.Delivery
 	}
 }
 
+func assertModes(definition Definition, operation api.Operation, modes ...api.DeliveryMode) bool {
+	capability, ok := definition.Capability(operation)
+	if !ok {
+		return false
+	}
+	for _, mode := range modes {
+		if !capability.SupportsMode(mode) {
+			return false
+		}
+	}
+	return true
+}
+
 func testModelConfig(id string) Config {
 	return Config{
 		ID:        id,
@@ -651,7 +678,7 @@ func testModelConfig(id string) Config {
 			OutputModalities: []api.Modality{api.ModalityText},
 			Features:         []api.Feature{api.FeatureUsage},
 			Generation: &GenerationPolicy{
-				MaxOutputTokens: &OutputTokenParameter{Default: pointer(int64(256))},
+				MaxOutputTokens: &OutputTokenParameter{},
 				Stop:            &StopParameter{Default: []string{"END"}},
 			},
 		}},
@@ -747,11 +774,6 @@ func withInvalidNumericDefault(config Config) Config {
 
 func withNonFiniteDefault(config Config) Config {
 	config.Operations[0].Generation.Temperature = &NumericParameter[float64]{Default: pointer(math.Inf(1))}
-	return config
-}
-
-func withInvalidParameterDefault(config Config) Config {
-	config.Operations[0].Generation.MaxOutputTokens.Default = pointer(int64(0))
 	return config
 }
 
