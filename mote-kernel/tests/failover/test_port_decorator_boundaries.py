@@ -150,7 +150,7 @@ class _UniversalPort:
     async def build_command(self, _request: object, /) -> object:
         return object()
 
-    async def read_after(self, _cursor: object, /) -> object:
+    async def read(self, /) -> object:
         return object()
 
     async def register_wait(self, _wait: object, /) -> object:
