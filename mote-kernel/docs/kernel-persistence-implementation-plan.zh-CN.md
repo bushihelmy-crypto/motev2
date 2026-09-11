@@ -4,7 +4,7 @@
 
 - 日期：2026-09-11。
 - 调研提交基线：`e4ef968`；工作树另有用户正在进行的 routing/recovery 治理改动。
-- 当前阶段：**P1 已验收；P2 复审意见已闭环，等待再次 code review；P3 未开始。详见第 11 节。**
+- 当前阶段：**P1、P2、P3 已验收；P4 全链路复核与最终门禁已完成，等待 code review。详见第 11 节。**
 - 范围：只修改 `mote-kernel/`。不实现或修改 Rust、Cloudflare、数据库、网络传输和部署代码。
 - 恢复装配唯一入口：`src/mote_kernel/agent.py`。
 - 执行唯一入口：`mote_kernel.execution.Graph`；Agent 不实现 runner、scheduler 或 reducer。
@@ -15,7 +15,7 @@
 P0 之后按用户的“继续吧”进入 P1；该授权不跨过 P1 完成后的评审停点。
 
 状态使用：`未开始`、`实施中`、`待评审`、`已验收`。发现阻塞或评审修改意见时，留在当前阶段处理。
-任何阶段不得提交 Git commit、push、覆盖用户改动或放宽门禁来掩盖设计问题。
+未经用户明确授权，任何阶段不得提交 Git commit 或 push；任何情况下都不得覆盖用户改动或放宽门禁来掩盖设计问题。
 
 ## 1. 目标与完成定义
 
@@ -392,9 +392,9 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 | --- | --- | --- |
 | P0 设计与计划 | 已验收 | 用户明确上层调度边界，并以“继续吧”授权进入 P1 |
 | P1 值证据与恢复准入 | 已验收 | 两轮复审意见均已闭环；独立复审与完整门禁通过，按用户“通过则提交”的授权验收 |
-| P2 Agent 统一装配 | 待评审 | 实现、边界测试、示例文档与全部规定门禁完成；停下等待用户 review |
-| P3 组合故障验收 | 未开始 | P2 review 通过后开始 |
-| P4 最终复核交接 | 未开始 | P3 review 通过后开始 |
+| P2 Agent 统一装配 | 已验收 | 两轮证据契约复审、整改和完整门禁通过；用户明确验收并授权进入 P3 |
+| P3 组合故障验收 | 已验收 | P1/P2 边界审计、跨进程组合故障矩阵和全部门禁完成；用户明确授权继续 P4 |
+| P4 最终复核交接 | 待评审 | 完整调用链、公开说明、重复路径与全部最终门禁已复核 |
 
 ### P0 / 2026-09-10
 
@@ -529,8 +529,8 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 - `--all-files` 不含未跟踪文件，因此对所有 Kernel 新文件另跑根目录 `pre-commit run --files ...`：**通过**。
   其中固定测试 SHA 曾触发 secrets 误报，改成从测试 payload 计算 digest；没有新增 allowlist 或修改 secrets baseline。
 - `git diff --check`：**通过**；本阶段没有修改 Kernel 之外的文件。保留用户原有 staged/unstaged 内容，没有 stage 或 commit。
-- 本阶段恢复验证使用内存测试 Port 和新 Graph 对象，**不冒称跨进程、真实后端或 Agent 已打通**。P2 才实现
-  `agent.py` 的 load/Config/authority/commit reconciliation，P3 才进行独立进程退出与组合故障验证。
+- P1 当阶段恢复验证使用内存测试 Port 和新 Graph 对象，**不冒称跨进程、真实后端或 Agent 已打通**。P1 当时
+  尚未实现 `agent.py` 的 load/Config/authority/commit reconciliation；独立进程与组合故障后来由 P2、P3 闭环。
 
 #### 二轮回归与最终门禁
 
@@ -564,7 +564,7 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 
 **P1 验收时停在 P2 前；后续用户已明确授权 P2，以下记录承接该授权。**
 
-### P2 / 统一 Agent 接线 / 待评审
+### P2 / 统一 Agent 接线 / 已验收
 
 #### 开工基线与授权
 
@@ -713,7 +713,7 @@ snapshot 与 receipt-journal 两种测试存储表示执行同一套 Agent 行�
 独立进程基本证明已在 P2 完成：capture 子进程写入完整 publication 后、返回 acknowledgement 前 `os._exit(23)`，
 另一个进程以新 Agent/Graph/codec 恢复，再由第三个进程回放终态。测试核对不同 PID、producer 只执行一次、恢复输出
 精确相同和权限 generation 前进。此证明使用 test-only 顺序进程文件适配器，不证明真实数据库、断电/fsync、并发租约
-服务或工具副作用 exactly-once；更广的 P3 组合故障验收仍未开始。
+服务或工具副作用 exactly-once；它在 P2 当时只是一项基本证明，后续 P3 组合故障验收记录见下文。
 
 #### 复杂度复核结论
 
@@ -761,6 +761,124 @@ snapshot 与 receipt-journal 两种测试存储表示执行同一套 Agent 行�
 - monorepo 根目录 `pre-commit run --all-files` 全通过；由于该命令不覆盖 untracked 文件，另对 Kernel 全部
   **21 个 untracked 文件**执行定向 pre-commit，所有适用 hook 全通过。
 - 最终计划文档的仓库级定向 pre-commit 与 `git diff --check` 均通过。
-- 本记录只证明 P2 复审整改后的实现与门禁状态。P2 仍为**待再次评审**，未获得用户验收，不得进入 P3。
+- 本记录只证明 P2 复审整改后的实现与门禁状态；后续验收由用户独立裁决。
 
-**P2 在此停止等待 code review；只有用户 review 通过并明确授权，才进入 P3。**
+#### P2 验收
+
+- 2026-09-11，用户明确“P2 已通过，开始 P3”，并要求 P3 同时复审、补齐 P1/P2 仍有价值的边界条件。
+- P2 据此标记为已验收；该授权只启动 P3，不跨过 P3 的评审停点。
+
+### P3 / 2026-09-11 / 跨进程与组合故障验收 / 待评审
+
+- 复用 P1/P2 的唯一 commit、State、Config、routing、family 与 Agent owner；测试适配器只提供隔离进程和故障注入，
+  不进入生产 API，也不形成第二恢复路径。
+- 先审计现有边界矩阵，已有精确证明不机械复制；新增测试优先覆盖边界交叉、故障时序和多级关联。
+- Runtime 仍唯一负责工具执行记录与对账；Kernel 仅验证类型化工具结果进入 Graph 后的持久化边界，不查询工具账本。
+- P3 完成实现、全量门禁和实测记录后停止，等待用户 code review；未验收前不进入 P4。
+
+#### 边界审计与迁移范围
+
+- P1/P2 的单项契约、恶意 typed re-admission、全部 commit revision 三态、Config cursor、publication settlement、
+  continuation binding、family cleanup 和取消矩阵已经完整参数化，不为增加测试数量机械复制同一证明。
+- 将 P2 的单一 linear 子进程脚本原地迁移为一个统一 process-fault harness；仍只通过公开 `Agent`、`Graph`、
+  `PersistencePort`、`AuthorityPort`、Config Port 和既有 `invoke_typed` 运行。没有新增生产 API、runner、状态 owner
+  或后端 selector。
+- P3 只修改 `tests/agent/subprocess_worker.py`、`tests/agent/test_process_recovery.py` 和本计划文档；生产代码零修改。
+  当前其它 Observe/session、Failover 和 Runtime 工作树改动均由用户并行拥有，本阶段未修改或回滚。
+- test-only journal 每次跨 pickle 边界后先把容器收窄为 `tuple[object, ...]`，再逐项要求 exact
+  `GraphPersistenceCommit` 并调用其 owner admission。它没有复制 checkpoint、State 或 evidence 校验。
+- P1/P2/P3 持久化相关测试族合并执行 **704 passed**；新增的 16 个 P3 case 不是替代既有单边界测试，
+  而是证明真实进程退出时多个边界交叉后仍由同一 owner 得出结果。
+
+#### 跨进程故障矩阵实测
+
+| 注入点 | 期望 | 实测 |
+| --- | --- | --- |
+| linear `first` publication 原子写前退出 | 新进程只重做未提交 `first`，再执行 `second` | 输出精确；`first` 共调用两次，不存在伪 durable fact |
+| linear `first` publication 原子写后、ack 前退出 | 新进程不重做 `first` | `first` 只调用一次；从持久 publication 执行 `second` |
+| 并发 sibling 中 `left` publication 写前退出 | 只恢复未确认 frontier；Join 等待两侧 | `left` 重做，`right`/Join 各一次，输出按 descriptor 关联 |
+| 并发 sibling 中 `left` publication 写后退出 | 已确认 sibling 不重做 | `left`、`right`、Join 各一次，终态 replay 无调用和写入 |
+| causal loop 第二轮 settlement 写前退出 | 恢复上一轮 publication，重做当前 activation | 只重复输入为 `1` 的第二轮；随后按同一 routing 进入 fan-out/Join |
+| causal loop 第二轮 settlement 写后、routing 前退出 | 从已结算 activation 继续 routing | 第二轮不重做；两轮历史 publication 未被“最新值”覆盖 |
+| 两级 nested family 的 middle→leaf settlement 写前/写后退出 | child、parent 边界按 scoped run 精确恢复 | 两种时序均不重做已完成 leaf；middle/root 各自只结算一次 |
+| nested Observe 把 Config 1 推进到 2 后退出 | 新 Agent 精确加载历史 1、2，不采用可用的 latest 9 | recover/replay 均只 load 1、2；后续 child/parent state 最终引用 revision 2 |
+| 删除 nested history 的 Config 2 | Config owner 在节点和 durable write 前 fail closed | 新进程失败；journal、调用日志和结果文件均不改变 |
+| child StartGraphRun 原子写前退出 | 完整 family reread给出同一 child 的 never-created 负证据后才创建 | child 只在恢复进程执行；带一次明确 child read |
+| child StartGraphRun 原子写后退出 | 已存在 child 不产生负证据、不重复创建 | 新进程沿已有 child state 完成；业务节点仍各执行一次 |
+| 两个 interrupt child 分三次新进程回答 | 每个精确问题只消费一次，partial 后只保留另一问题 | left/right 各恢复一次；第四个新进程只读终态，无调用或写入 |
+| journal 非 pickle / tuple 内错误 record | 在 Graph assembly、decode、node 和 write 前拒绝 | 两种 corruption 均 fail closed，原 bytes 和调用记录不变 |
+| live 旧 owner 节点返回前，新进程取得 generation 2 | 旧 generation 1 在提交前被 fencing 拒绝 | successor 完成并持久化；旧进程记录 typed rejection，journal 不被覆盖 |
+| typed Runtime invocation 后、Graph publication 前进程退出 | Kernel 不推断工具执行状态，恢复后仍把调用交给 Runtime | 复用 `InvocationTypeContract`/`invoke_typed`；Kernel 只 load/commit Graph fact，从不 reconcile 或查询工具账本；终态 replay 不再调用 |
+
+每个完成场景都再启动一个全新 Agent 进程做终态 replay，并逐 byte 核对 journal 不变；执行过业务节点的进程 PID
+必须不同，authority generation 必须按调用次数单调前进。写前/写后退出都由 `os._exit` 实际终止进程，不用异常模拟。
+
+#### Port 行为断言与限制
+
+- 外部 Authority Port 必须在每次 load/commit/reconcile 原子校验当前 grant；旧 grant release 不得覆盖 successor。
+- 外部 Persistence Port 必须提供同一 authority 下完整一致的 family read，原子约束 absent/revision、完整写集与 receipt，
+  并对相同 key/content 精确重放、不同内容冲突、未知结果返回 `CommitUnknown`。Kernel 不接受 adapter 猜测 absence。
+- Config Store 必须按 exact key 提供不可变 snapshot 并保留历史；Resolver 必须返回同一 snapshot 的完整 Config。
+- 文件 journal、generation 和信号只属于顺序可控的测试适配器。P3 不宣称真实数据库事务、断电/fsync、网络分区、
+  多主租约服务或具体 Rust/Cloudflare 适配器已经通过；这些外部实现必须用上述 Port 断言自行验收。
+- Runtime 工具副作用 exactly-once 仍不属于 Kernel。测试只证明“没有 Graph publication 时 Kernel 不伪造工具事实，
+  再次抵达工具调用仍交给 Runtime”；工具是否已经执行、如何查询 receipt 和是否重试只由 Runtime 契约决定。
+
+#### P3 门禁
+
+- 新增跨进程组合矩阵 **16 passed**；P1/P2/P3 持久化相关测试族 **704 passed**。
+- Kernel `make check` 全通过：Ruff/format、strict Pyright（0 errors / 0 warnings）、architecture、正负类型 fixture、
+  complexity ratchet、zero-debt health、全量行为测试、sdist/wheel 构建与 Twine 均通过。
+- 完整测试 **3009 passed**；生产代码 **100% 行与分支覆盖**（13772 statements、4370 branches，无遗漏）。
+- complexity **22 passed**；结构 ratchet 保持 `top_level_definitions=1156`、`type_definitions=721`、
+  `semantic_nodes=75445`、`attribute_writes=105`、`exception_handlers=223`、`internal_call_edges=1559`；最大圈/认知
+  复杂度 `48/58`、最大 nesting `6`、最大调用链深度 `19`，zero-debt health PASS。测试 harness 未进入生产指标。
+- monorepo 根目录 `pre-commit run --all-files` 在默认沙箱首次仅因 Kernel 之外路径只读而失败；获得写权限后原命令
+  全部通过，包括 Kernel complexity、Rust/Local Execution、Cloudflare 静态检查和 detect-secrets。这里只记录门禁，
+  未修改或验收这些项目的实现。日志：`/tmp/mote-kernel-p3-root-precommit.log`。
+- 最终 `make check` 日志：`/tmp/mote-kernel-p3-final-check.log`。对本阶段三份文件执行的仓库级定向 pre-commit
+  与最终 `git diff --check` 均通过。
+
+**P3 在此停止等待 code review；只有用户 review 通过并明确授权，才进入 P4。**
+
+#### P3 验收
+
+- 2026-09-11，用户在 P3 实现、故障矩阵和完整门禁记录后明确要求继续完成 P4，并授权完成后提交。
+- P3 据此标记为已验收；该授权启动 P4 并允许提交本项变更，不授权修改或代为提交用户并行的 Observe/session、
+  Failover、Runtime、Rust 或 Cloudflare 工作树。
+
+### P4 / 2026-09-11 / 全链路复核与最终交接 / 待评审
+
+- 从 `Agent.run()` 入口按 acquire → load → checkpoint/Config admission → Graph assembly → child reread →
+  `Graph.run()` → durable commit/reconcile → business projection → task convergence → authority release 顺序复核；
+  每一步继续由 P1/P2 已有唯一 owner 承担，没有新增生产抽象、状态、缓存、runner 或恢复路径。
+- 复查中英文 README、架构说明和全部 Graph 示例。进程内 state/continuation 示例已经明确不等于持久冷恢复；
+  `durable_agent_import` 只演示后端无关 Port 装配，不选择数据库、协议或 Runtime 工具对账路径。
+- 未使用类型、重复 codec/validation、兼容入口、隐藏 backend selector/latest fallback 与具体存储依赖审计未发现
+  待删除生产路径。P4 不以复核名义重写已经闭合的 P1/P2 调用链，也不机械复制已有单边界测试。
+- 发现并修正的唯一过时事实是中英文架构文档仍把跨进程测试描述成 P3 之前的单场景证明；统一更新为已经完成的
+  组合故障矩阵，同时继续明确测试适配器不代表真实生产后端验收。
+
+#### P4 最终证据与限制
+
+- 本阶段实际修改仅为 `docs/architecture.md`、`docs/architecture.zh-CN.md` 和本计划；连同 P3 尚未提交的
+  `tests/agent/subprocess_worker.py`、`tests/agent/test_process_recovery.py` 构成本次提交的完整五文件集合。
+  P4 没有生产代码变更，也未修改、暂存或提交用户并行的 Observe/session、Failover、Runtime、Rust、Cloudflare 文件。
+- P1/P2 单边界测试继续覆盖 exact typed re-admission、完整 evidence commitment、Config 历史、continuation commit
+  binding、child 负证据、全部 commit outcome、权限/取消/family cleanup 与错误优先级；P3 用 16 个跨进程 case
+  补齐写前/写后和组合时序。P4 再次运行该 16-case 矩阵，结果 **16 passed**。
+- Kernel `make check` 最终全通过：Ruff、format、strict Pyright（0 errors / 0 warnings）、architecture、正负类型 fixture、
+  complexity ratchet、zero-debt health、全量测试、100% 覆盖率、sdist/wheel 和 Twine 均通过。完整测试
+  **3009 passed**；生产代码覆盖 **13772 statements / 4370 branches，均无遗漏**。日志：
+  `/tmp/mote-kernel-p4-final-check.log`。
+- complexity **22 passed**；结构 ratchet 仍为 `top_level_definitions=1156`、`type_definitions=721`、
+  `semantic_nodes=75445`、`attribute_writes=105`、`exception_handlers=223`、`internal_call_edges=1559`；最大圈/认知
+  复杂度 `48/58`、最大 nesting `6`、最大调用链深度 `19`，zero-debt health PASS。热点均按真实调用链复核，
+  没有新增薄转发、豁免或排除项。
+- monorepo 根目录 `pre-commit run --all-files` 全通过，包含 Kernel、Rust/Local Execution、Cloudflare 静态检查与
+  detect-secrets；这里只记录仓库门禁，不认领或验收 Kernel 外实现。最终五文件定向 pre-commit 与
+  `git diff --check` 也通过。
+- 已知边界保持不变：Kernel 只冻结后端无关 Port 和恢复语义，不证明任何具体数据库的 fsync、网络分区、租约服务
+  或部署适配器；Runtime 独占工具执行记录与对账；ReAct END 后的新任务由上层驱动。这些不是 Kernel P4 遗留债务。
+- P4 至此为待评审状态。用户已明确授权创建本次 Git commit；commit 不等于最终验收，最终 review 前不把 P4 标为
+  已验收，也不进入新的持久化阶段。

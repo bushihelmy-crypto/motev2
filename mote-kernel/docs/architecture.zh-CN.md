@@ -150,10 +150,11 @@ receipt 准入。每次读取、提交与对账都携带同一 opaque authority�
 该分类，包括构造、交接、fence 和 abort 期间的提交失败。祖先/sibling 不再从旧内存写 cleanup transition。
 普通非提交错误的优先级、caller/node 取消边界继续独立；权限释放失败不覆盖原有执行错误。
 
-snapshot 与 receipt-journal 两种测试适配器经过同一个 Agent API。独立进程测试在 publication 已落盘、ack 尚未返回时
-退出，以全新的 Agent/Graph/codec 恢复且不重跑 producer。这不等于生产后端接入或 P3 的组合故障验收；阶段证据以
-[实施计划](kernel-persistence-implementation-plan.zh-CN.md)为准。工具执行记录与崩溃对账归 Runtime；ReAct END 后的
-新任务仍由上层驱动。
+snapshot 与 receipt-journal 两种测试适配器经过同一个 Agent API。独立进程故障矩阵覆盖 linear、并发 sibling、loop、
+nested family、Config、interrupt、旧权限 fencing 与 Runtime 类型化结果边界的写前/写后退出，每次都以全新的
+Agent/Graph/codec 恢复。这些适配器不是生产后端，也不证明真实数据库断电持久性、网络分区或外部权限服务；精确
+验收证据与限制以[实施计划](kernel-persistence-implementation-plan.zh-CN.md)为准。工具执行记录与崩溃对账归 Runtime；
+ReAct END 后的新任务仍由上层驱动。
 
 ## Graph Frontier 执行
 

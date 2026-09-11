@@ -136,11 +136,13 @@ including failures during construction, handoff, fencing or abort. No ancestor o
 from stale memory. Ordinary non-commit error priority and caller/node cancellation boundaries remain distinct;
 authority release failure never replaces an earlier execution error.
 
-Snapshot and receipt-journal test adapters exercise the same Agent API. A separate-process test persists a publication,
-exits before acknowledging it, and recovers with fresh Agent/Graph/codec objects without rerunning its producer.
-This is not a concrete production backend or the broader P3 fault-combination acceptance; current phase evidence lives
-in the [implementation plan](kernel-persistence-implementation-plan.zh-CN.md). Runtime owns tool execution records and
-crash reconciliation. The upper driver owns the next task after ReAct END.
+Snapshot and receipt-journal test adapters exercise the same Agent API. The separate-process fault matrix covers
+pre-write and post-write exits across linear, sibling, loop, nested-family, Config, interrupt, fencing, and typed
+Runtime-result boundaries, always recovering with fresh Agent/Graph/codec objects. These adapters are not concrete
+production backends and do not prove database durability, network-partition behavior, or an external authority service;
+the exact acceptance evidence and limits live in the
+[implementation plan](kernel-persistence-implementation-plan.zh-CN.md). Runtime owns tool execution records and crash
+reconciliation. The upper driver owns the next task after ReAct END.
 
 ## Graph frontier execution
 
