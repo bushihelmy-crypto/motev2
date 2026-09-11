@@ -116,6 +116,27 @@ class _GraphValues(Generic[GraphValueT_co]):
     def items(self) -> tuple[tuple[str, GraphValueT_co], ...]:
         return tuple((entry.name, entry.value) for entry in self._entries)
 
+    def admit(self) -> None:
+        try:
+            entries = self._entries
+            activation_config = self.activation_config
+            if type(entries) is not tuple or any(type(entry) is not NamedValue for entry in entries):
+                raise GraphValueAdmissionError("graph values contain malformed canonical entries")
+            names = tuple(entry.name for entry in entries)
+            if any(
+                type(name) is not str or not name or name.strip() != name or "\n" in name or "\r" in name
+                for name in names
+            ) or names != tuple(sorted(set(names))):
+                raise GraphValueAdmissionError("graph values contain malformed canonical names")
+            _admit_activation_config(
+                activation_config,
+                error_message="graph values carry a malformed activation Config",
+            )
+        except GraphValueAdmissionError:
+            raise
+        except (AttributeError, TypeError, ValueError) as error:
+            raise GraphValueAdmissionError("graph values are malformed") from error
+
 
 class _FrameSeal:
     __slots__ = ()
@@ -213,11 +234,7 @@ def _make_single_graph_value(
 def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[GraphValueT]:
     if type(values) is not _GraphValues:
         raise GraphValueAdmissionError("graph values must be produced by Graph.values()")
-    names = values.keys()
-    if any(
-        type(name) is not str or not name or name.strip() != name or "\n" in name or "\r" in name for name in names
-    ) or names != tuple(sorted(set(names))):
-        raise GraphValueAdmissionError("graph values contain malformed canonical names")
+    values.admit()
     return values
 
 

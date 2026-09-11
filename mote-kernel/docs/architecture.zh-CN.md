@@ -13,7 +13,7 @@ routing、lease、resource、恢复坐标和 revision）。以后增加节点/Ho
 
 同一并发 frontier 中的所有节点接收同一个不可变输入快照。节点和 Port 必须只读该快照，通过类型化结果表达变化，Kernel 不会隐式复制任意领域 DTO；DTO 所有者必须将其定义为不可变值。
 
-`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面。它在第一次 `run()` 前是 topology builder，第一次运行时完成校验并冻结为 immutable compiled runtime。门面实例不保存 run snapshot、session 或 transient output，因此同一张已组装图可以驱动相互独立的 run，而不会成为第二份状态真相。
+`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面。它在第一次成功编译前是 topology builder；`run()` 或只读的 `recovery_child_reads()` 投影触发编译，完成校验并冻结为 immutable compiled runtime。门面实例不保存 run snapshot、session 或 transient output，因此同一张已组装图可以驱动相互独立的 run，而不会成为第二份状态真相。
 
 ### Graph 节点与 Runtime Invocation 的边界
 
@@ -86,26 +86,31 @@ Config payload 与能力解析仍归 Config owner；state/frame 只保存精确�
 owner-internal 基础设施，不重新导出为平行公共入口，唯一执行门面仍是 `Graph`。
 
 - `graph/codec.py` 的 `FrameCodec` 同时复用在 resume input 与持久 frame。领域提供版本化、确定性的不可变值 codec；
-  持久材料保存完整 bytes、完整性摘要、精确 compiled 坐标和可选的精确 Config cursor。已解析 Config 能力不进入 codec。
+  持久记录保存完整 bytes、精确 compiled 坐标、birth commit 和可选的精确 Config cursor。已解析 Config 能力不进入 codec。
 - `DurableGraphCommit` 将既有 sealed transition 投影为 `GraphPersistenceCommit`：scope、expected revision、
   candidate state、commit key 与完整 graph input/publication 写集。command 仍留在 execution/reducer owner，后端
   不解释执行命令。writer 必须原子写入并精确确认整个请求；不能以业务 DTO equality、仅 revision 或仅 state 代替值确认。
+  跨 writer 边界前，commit owner 保存独立的已准入 baseline；调用后的原请求和返回 receipt 都必须与其精确相等，
+  原地 mutation 不能重定义 acknowledgement。
 - `GraphRecovery` 将已读取 checkpoint、必需的 `DurableGraphCommit` 与精确解析的 Config 绑定后交给同一个
   `Graph.run()`。恢复和后续提交只能使用该 commit 持有的同一个 codec；`run(recovery=...)` 拒绝另外传入 commit。
   材料解码复用 compiler
   descriptor、scoped state validation、typed frame admission、lineage、routing 和 output projection，然后进入已有
   fence/resume/preflight/family driver。缺失或冲突证据在任何恢复提交或节点调用前拒绝，不靠重跑已结算 producer、
   查找 latest publication 或 latest Config 补齐。
-- 读取 envelope 和确认 receipt 时重新准入，不能假定反序列化曾执行构造器。`EncodedFrame.frame_digest` 是唯一摘要：
-  对带领域前缀的 canonical codec identity/version、Config cursor 元数据和 payload bytes 共同计算。
-  cursor 缺席也是明确元数据，不能跳过完整性证明；删除、插入或替换 cursor 会在解码、节点调用和写入前使原摘要失效。
-  不再接受只覆盖 payload 的摘要。非空 Frame Config 必须属于所属 state 的 Config definition/version，revision
+- 读取 envelope、嵌套 record 和 receipt 时完整重新准入，不能假定反序列化曾执行构造器。每个值只有一份
+  State-owned `GraphEvidenceCommitment`，由 execution commit owner 对带领域前缀的 canonical evidence tuple 计算：
+  scope/run 与 activation 坐标、descriptor identity、birth commit、codec identity/version、Config cursor 元数据
+  （含缺席）和 payload bytes；publication 还绑定精确 settlement execution provenance。同一 commitment 同时进入
+  权威 State 账本和持久记录；交换 payload 或重分配坐标不能靠只重建 frame 取得合法身份。非空 Frame Config 必须属于所属 state 的 Config definition/version，revision
   不得超前，同 revision 的 digest 必须相同；同一不可变 Config revision 不能提供两个解析结果，即使暂未被引用。
   历史上合法的无 Config frame 保持无 Config，不能用当前 state 或可用 capability 补齐。Config 更新只由 Observe
-  消费并随其 settlement 提交持久化；恢复不增加第二个更新入口。
-- 全部生命周期（含 completed）保留既有 `GraphRunState.settled_activations`，publication 集必须与全部成功账本
-  精确相等。中间 publication 缺失和从未结算的额外 publication 都拒绝；不另建 manifest 或终态压缩分支。
-  completed child 的输出仍由既有 projection 自底向上重建。
+  消费并随其 settlement 提交持久化；恢复不增加第二个更新入口。这里的 Config snapshot cursor 与已删除的
+  Observe 调用方 cursor 无关。
+- 全部生命周期（含 completed）保留 `GraphRunState.settled_publications`。每项唯一持有 activation reference、
+  真实 settlement commit revision、execution token 和可选 durable value commitment。checkpoint publication 集必须
+  与完整成功账本精确相等；中间 publication 缺失和从未结算的额外 publication 都拒绝，不另建 manifest 或终态
+  压缩分支。completed child 的输出仍由既有 projection 自底向上重建。
 - `GraphCheckpoint.child_runs` 只携带 `ScopedStateBinding` 或显式的 `UncreatedGraphRun` 读取证据。必需 child
   来自 state 持有的历史成功/current nested activation；省略记录不等于从未创建。只有当前 pending child 的权威
   negative read 能进入既有 create-if-absent 路径；确认创建后，由同一个 family evidence owner 替换该证据。
@@ -114,9 +119,41 @@ owner-internal 基础设施，不重新导出为平行公共入口，唯一执�
 `Graph.run(state=...)` 不读取 Store，也不恢复缺失 frame；opaque continuation 始终是不可序列化的进程内交接材料。
 两者都不能替代完整 checkpoint read。
 
-P1 交付 execution 接缝，不是 Agent loader 或具体后端。外部 load、精确 Config 解析、执行权限和未知的**持久化提交**
-对账统一留给 P2 的 `agent.py`，阶段状态以[实施计划](kernel-persistence-implementation-plan.zh-CN.md)为准。
-工具执行记录和工具崩溃对账归 Runtime；ReAct END 后的新任务接入归上层驱动，不进入这条持久化链路。
+## Agent 权限与恢复接线
+
+`agent.py` 是唯一外部恢复装配入口。`Agent` 只持有 frozen capabilities，不保留运行 state、continuation、权限缓存或
+第二个 scheduler。`AgentStart` 只创建从未存在的 run；`AgentResume` 继续已有 run，或回放其终态业务结果。
+回答保留精确 interrupt 问题和 typed 业务值；结果只暴露输出、失败、待回答问题或 abort，不暴露恢复快照。
+
+每次调用只有一条完整链路：
+
+1. 经 `AuthorityPort` 为 `AgentRunKey(agent_id, run_id)` 获取排他的 `ExecutionAuthority`。
+2. `PersistencePort.load` 返回完整一致的 family 或明确的 `NeverCreated`。不可用、tombstone、记录丢失与身份冲突
+   均不能转换成新建运行。
+3. 精确解析 checkpoint 全部 Config 引用后装配 Graph。可选 `AgentConfig.initial` 仅决定新 run 的初始快照；
+   Agent 不保存 Config、不拿 latest 替换历史，Observe 仍是唯一更新消费方。
+4. `Graph.recovery_child_reads` 复用 compiled topology 和 lineage 推导缺少的 pending child 坐标。仅当需要时，
+   Agent 在同一权限下重读；`GraphCheckpoint.admit_child_reads` 要求全部已有事实不变且负证据恰好对应请求。
+   后端不解释 Graph 拓扑。
+5. 以 codec 绑定的 `DurableGraphCommit` 调用同一个 `Graph.run()`，投影业务结果，等待执行任务清理完成后释放权限。
+   部分提交交接只以原始异常离开 Agent，不交付另一条 continuation 恢复路径。
+
+根级 `persistence.py` 拥有后端无关 Port 契约；`execution/persistence.py` 继续独占 Graph 编码、checkpoint 和精确
+receipt 准入。每次读取、提交与对账都携带同一 opaque authority。Adapter 必须原子检查权限、scope 的 absence/revision、
+完整请求身份，并一起提交 state/value/receipt；同 key 同内容是精确重放，不同内容是冲突。Kernel 不建立租约时钟、锁、
+后端选择器、传输、数据库 schema 或工具执行账本。获取权限无法返回 grant 时，其 Port 自行收敛获取的不确定结果；
+释放旧权限不得撤销后继权限。
+
+`CommitUnknown` 只对账同一不可变请求，不重新编码或执行节点。只有 `CommitNotApplied` 才能在显式
+`max_commit_attempts`（默认 3）内重发。结果仍未知、权限失效、冲突或非精确 acknowledgement 均停止推进。
+提交 owner 用 `GraphCommitError` 保留错误来源，直到 Graph 边界还原原始异常；worker fan-in 等待全部任务后仍保留
+该分类，包括构造、交接、fence 和 abort 期间的提交失败。祖先/sibling 不再从旧内存写 cleanup transition。
+普通非提交错误的优先级、caller/node 取消边界继续独立；权限释放失败不覆盖原有执行错误。
+
+snapshot 与 receipt-journal 两种测试适配器经过同一个 Agent API。独立进程测试在 publication 已落盘、ack 尚未返回时
+退出，以全新的 Agent/Graph/codec 恢复且不重跑 producer。这不等于生产后端接入或 P3 的组合故障验收；阶段证据以
+[实施计划](kernel-persistence-implementation-plan.zh-CN.md)为准。工具执行记录与崩溃对账归 Runtime；ReAct END 后的
+新任务仍由上层驱动。
 
 ## Graph Frontier 执行
 

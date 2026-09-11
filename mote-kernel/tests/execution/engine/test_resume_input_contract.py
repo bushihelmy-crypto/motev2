@@ -63,6 +63,7 @@ from mote_kernel.state.graph_state import (
     GraphFrontierNode,
     GraphFrontierState,
     GraphNodeId,
+    GraphPublicationSettlement,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
@@ -76,6 +77,8 @@ from mote_kernel.state.graph_state import (
     StartActivationCause,
     UseStepRequestInput,
 )
+
+PUBLICATION_EXECUTION = GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))
 
 
 async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -261,7 +264,9 @@ def predecessor_state(
         GraphFrontierState(
             (GraphFrontierNode(node_id, PendingGraphNode(UseStepRequestInput()), RoutedActivationCause((reference,))),)
         ),
-        settled_activations=(reference,),
+        execution_sequence=1,
+        settled_publications=(GraphPublicationSettlement(reference, 1, PUBLICATION_EXECUTION),),
+        revision=1,
     )
     scope_run = root_scope_run(run_id)
     frames: ScopedFrameIndex[int] = ScopedFrameIndex()
@@ -281,7 +286,7 @@ def predecessor_state(
                 ),
                 _make_node_output_frame(Graph.values(value=11), descriptor.declarations),
                 1,
-                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+                ExecutionPublicationProvenance(PUBLICATION_EXECUTION),
             )
         )
     return state, frames
@@ -303,7 +308,9 @@ def multiple_predecessor_state(
         GraphFrontierState(
             (GraphFrontierNode(loop_id, PendingGraphNode(UseStepRequestInput()), RoutedActivationCause((reference,))),)
         ),
-        settled_activations=(reference,),
+        execution_sequence=1,
+        settled_publications=(GraphPublicationSettlement(reference, 1, PUBLICATION_EXECUTION),),
+        revision=1,
     )
     scope_run = root_scope_run(run_id)
     descriptor = graph.transition.publications[initialize_id]
@@ -322,7 +329,7 @@ def multiple_predecessor_state(
             ),
             _make_node_output_frame(Graph.values(left=11, right=22), descriptor.declarations),
             1,
-            ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+            ExecutionPublicationProvenance(PUBLICATION_EXECUTION),
         )
     )
     return state, frames
@@ -360,7 +367,9 @@ def test_materialization_requires_one_activation_config_across_source_frames() -
                 ),
             )
         ),
-        settled_activations=(reference,),
+        settled_publications=(GraphPublicationSettlement(reference, 1, PUBLICATION_EXECUTION),),
+        revision=1,
+        execution_sequence=1,
     )
     scope_run = root_scope_run(run_id)
     first = activation_config(1)
@@ -388,7 +397,7 @@ def test_materialization_requires_one_activation_config_across_source_frames() -
                 ),
                 output_frame,
                 1,
-                ExecutionPublicationProvenance(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
+                ExecutionPublicationProvenance(PUBLICATION_EXECUTION),
             )
         )
     )

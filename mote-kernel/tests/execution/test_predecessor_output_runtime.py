@@ -1,7 +1,7 @@
 import pytest
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.commit import GraphTransition
+from mote_kernel.execution.commit import GraphCommitError, GraphTransition
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.errors import GraphValueUnavailableError
 from mote_kernel.execution.family_driver import admit_continued_root, fresh_root, project_graph_result
@@ -298,8 +298,10 @@ async def test_recovery_requires_the_exact_loop_publication_after_a_lost_repeat_
         lost,
     )
     try:
-        with pytest.raises(RuntimeError, match="acknowledgement was lost"):
+        with pytest.raises(GraphCommitError) as caught:
             await root.drive_quantum()
+        assert isinstance(caught.value.cause, RuntimeError)
+        assert str(caught.value.cause) == "advance acknowledgement was lost"
         assert lost.candidate is not None
         candidate = lost.candidate
         transient_frames = root.frames

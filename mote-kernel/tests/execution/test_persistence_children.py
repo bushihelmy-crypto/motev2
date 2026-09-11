@@ -95,7 +95,8 @@ async def test_completed_parent_requires_its_created_child_snapshot(proof: str) 
     checkpoint = store.checkpoint()
     child = checkpoint.child_runs[0]
     if proof == "conflicting":
-        changed = replace(checkpoint, child_runs=(child, UncreatedGraphRun(child.scope_run)))
+        changed = deepcopy(checkpoint)
+        object.__setattr__(changed, "child_runs", (child, UncreatedGraphRun(child.scope_run)))
     else:
         changed = replace(
             checkpoint,
@@ -158,7 +159,7 @@ async def test_uncreated_read_is_readmitted_at_recovery_boundary() -> None:
         deepcopy(store.checkpoint(child_reads=(coordinate,))), DurableGraphCommit(STRING_CODEC, store)
     )
     object.__setattr__(recovery.checkpoint.child_runs[0], "scope_run", root_scope_run(GraphRunId("run")))
-    with pytest.raises(Graph.SnapshotMismatchError, match="nested scope-run coordinate"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="child states"):
         await nested_graph([]).run(recovery=recovery)
 
 

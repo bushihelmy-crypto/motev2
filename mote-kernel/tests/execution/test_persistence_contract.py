@@ -6,6 +6,7 @@ import pytest
 from tests.execution.persistence_fixtures import (
     STRING_CODEC,
     MemoryPersistence,
+    capture_graph_input,
     decode_strings,
     encode_strings,
     linear_graph,
@@ -33,11 +34,11 @@ from mote_kernel.state.graph_state import (
 def changed_input(request: GraphPersistenceCommit[str]) -> GraphPersistenceCommit[str]:
     original = request.writes.graph_inputs[0]
     payload = b'{"value":"different"}'
-    frame = EncodedFrame.capture(
-        original.frame.codec_id, original.frame.codec_version, payload, original.frame.config_cursor
-    )
-    writes = replace(request.writes, graph_inputs=(replace(original, frame=frame),))
-    return replace(request, writes=writes)
+    frame = EncodedFrame(original.frame.codec_id, original.frame.codec_version, payload, original.frame.config_cursor)
+    changed = capture_graph_input(original.coordinate, frame, original.birth)
+    writes = replace(request.writes, graph_inputs=(changed,))
+    candidate = replace(request.candidate_state, graph_input_evidence=changed.evidence)
+    return replace(request, candidate_state=candidate, writes=writes)
 
 
 COMMIT_CHANGES: tuple[Callable[[GraphPersistenceCommit[str]], GraphPersistenceCommit[str]], ...] = (
@@ -67,7 +68,7 @@ async def test_exact_confirmation_covers_every_commit_fact(
     async def writer(request: GraphPersistenceCommit[str], /) -> GraphPersistenceCommit[str]:
         return change(request)
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="exact state"):
+    with pytest.raises(Graph.SnapshotMismatchError):
         await linear_graph(calls).run(Graph.values(value="input"), commit=DurableGraphCommit(STRING_CODEC, writer))
     assert calls == []
 
@@ -170,12 +171,10 @@ async def test_nondeterministic_encoder_cannot_commit(stable_calls: int) -> None
         {"codec_version": True},
         {"codec_version": 0},
         {"payload": bytearray(b"{}")},
-        {"frame_digest": "0" * 64},
-        {"frame_digest": None},
     ],
 )
 def test_encoded_evidence_rejects_noncanonical_or_corrupt_fields(values: dict[str, object]) -> None:
-    frame = EncodedFrame.capture("strings", 1, b"{}")
+    frame = EncodedFrame("strings", 1, b"{}")
     with pytest.raises(Graph.SnapshotMismatchError):
         replace(frame, **values)
 
@@ -232,15 +231,15 @@ async def test_confirmation_rejects_an_untyped_snapshot_at_the_state_owner() -> 
         await linear_graph([]).run(Graph.values(value="input"), commit=DurableGraphCommit(STRING_CODEC, writer))
 
 
-PUBLICATION_ACK_CHANGES: tuple[Callable[[PersistedPublication[str]], PersistedPublication[str]], ...] = (
+PUBLICATION_RECEIPT_CHANGES: tuple[Callable[[PersistedPublication[str]], PersistedPublication[str]], ...] = (
     lambda item: replace(
         item,
-        frame=EncodedFrame.capture(
+        frame=EncodedFrame(
             item.frame.codec_id, item.frame.codec_version, b'{"value":"other"}', item.frame.config_cursor
         ),
     ),
-    lambda item: replace(item, acknowledged_revision=item.acknowledged_revision - 1),
-    lambda item: replace(item, acknowledged_revision=cast(int, float(item.acknowledged_revision))),
+    lambda item: replace(item, birth=replace(item.birth, revision=item.birth.revision - 1)),
+    lambda item: replace(item, birth=replace(item.birth, revision=cast(int, float(item.birth.revision)))),
     lambda item: replace(
         item,
         provenance=ExecutionPublicationProvenance(
@@ -261,8 +260,8 @@ PUBLICATION_ACK_CHANGES: tuple[Callable[[PersistedPublication[str]], PersistedPu
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change",
-    PUBLICATION_ACK_CHANGES,
-    ids=["bytes", "revision", "float-revision", "attempt", "bool-generation", "descriptor", "codec"],
+    PUBLICATION_RECEIPT_CHANGES,
+    ids=["bytes", "birth-revision", "float-birth-revision", "attempt", "bool-generation", "descriptor", "codec"],
 )
 async def test_nonexact_publication_confirmation_never_exposes_values_to_a_successor(
     change: Callable[[PersistedPublication[str]], PersistedPublication[str]],

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+import asyncio
+from dataclasses import InitVar, dataclass, replace
 from typing import Generic, Protocol, TypeVar, final
 
 from mote_kernel.execution.engine.routing import (
@@ -33,18 +34,32 @@ from mote_kernel.execution.run_context import (
 )
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
+    GraphEvidenceCommitment,
+    GraphPublicationSettlement,
     GraphRunCommand,
     GraphRunId,
     GraphRunState,
     GraphStateTransitionError,
     SettleGraphNode,
     StartGraphRun,
+    SucceededGraphNodeOutcome,
+    admit_graph_run_confirmation,
     reduce_graph_run,
     validate_graph_run_state,
 )
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
+
+
+class GraphCommitError(Exception):
+    """Owner-internal source classification, unwrapped only at the Graph facade."""
+
+    __slots__ = ("cause",)
+
+    def __init__(self, cause: Exception | asyncio.CancelledError) -> None:
+        super().__init__("Graph commit did not produce an exact authoritative confirmation")
+        self.cause = cause
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -131,6 +146,8 @@ class GraphTransition(Generic[GraphValueT]):
                 raise SnapshotMismatchError("StartGraphRun cannot carry settlement output evidence")
             if len(self.writes.graph_inputs) != 1:
                 raise SnapshotMismatchError("StartGraphRun requires exactly one graph input evidence")
+            if self.candidate_state.graph_input_evidence != self.command.graph_input_evidence:
+                raise SnapshotMismatchError("StartGraphRun candidate is not bound to its graph input evidence")
         elif self.writes.graph_inputs:
             raise SnapshotMismatchError("only StartGraphRun can carry graph input evidence")
         if isinstance(self.command, SettleGraphNode):
@@ -140,6 +157,28 @@ class GraphTransition(Generic[GraphValueT]):
             if type(settlement) is _GraphSuccessResult:
                 if len(self.writes.publications) != 1:
                     raise SnapshotMismatchError("successful settlement requires exactly one publication evidence")
+                outcome = self.command.outcome
+                if not isinstance(outcome, SucceededGraphNodeOutcome):
+                    raise SnapshotMismatchError("successful settlement evidence requires a successful state outcome")
+                matches = tuple(
+                    item
+                    for item in self.candidate_state.settled_publications
+                    if item.reference.activation
+                    == GraphActivationIdentity(
+                        self.candidate_state.run_id,
+                        self.candidate_state.superstep,
+                        outcome.node_id,
+                    )
+                )
+                if len(matches) != 1 or matches[0] != GraphPublicationSettlement(
+                    matches[0].reference,
+                    self.candidate_state.revision,
+                    self.command.execution,
+                    self.command.publication_evidence,
+                ):
+                    raise SnapshotMismatchError(
+                        "successful settlement candidate is not bound to its publication evidence"
+                    )
             elif self.writes.publications:
                 raise SnapshotMismatchError("failed or interrupted settlement cannot publish output evidence")
         elif self.writes.settlement is not None or self.writes.publications:
@@ -224,18 +263,61 @@ def prepare_transition(
     )
 
 
+def bind_transition_evidence(
+    transition: GraphTransition[GraphValueT],
+    /,
+    *,
+    graph_input: GraphEvidenceCommitment | None = None,
+    publication: GraphEvidenceCommitment | None = None,
+) -> GraphTransition[GraphValueT]:
+    """Finalize one reducer transition with its protocol-neutral value commitments."""
+
+    command = transition.command
+    if isinstance(command, StartGraphRun):
+        if graph_input is None or publication is not None:
+            raise SnapshotMismatchError("StartGraphRun requires exactly one graph input commitment")
+        graph_input = GraphEvidenceCommitment.admit(graph_input)
+        if command.graph_input_evidence not in (None, graph_input):
+            raise SnapshotMismatchError("StartGraphRun graph input commitment cannot be replaced")
+        command = replace(command, graph_input_evidence=graph_input)
+    elif isinstance(command, SettleGraphNode) and isinstance(command.outcome, SucceededGraphNodeOutcome):
+        if graph_input is not None or publication is None:
+            raise SnapshotMismatchError("successful settlement requires exactly one publication commitment")
+        publication = GraphEvidenceCommitment.admit(publication)
+        if command.publication_evidence not in (None, publication):
+            raise SnapshotMismatchError("settlement publication commitment cannot be replaced")
+        command = replace(command, publication_evidence=publication)
+    elif graph_input is not None or publication is not None:
+        raise SnapshotMismatchError("only value-producing transitions can bind durable evidence")
+    else:
+        return transition
+    candidate = reduce_graph_run(transition.previous_state, command)
+    return GraphTransition(
+        scope=transition.scope,
+        previous_state=transition.previous_state,
+        command=command,
+        candidate_state=candidate,
+        writes=transition.writes,
+        _seal=_TRANSITION_SEAL,
+    )
+
+
 async def confirm_transition(
     transition: GraphTransition[GraphValueT],
     commit: GraphCommit[GraphValueT],
 ) -> GraphRunState:
-    confirmed = await commit(transition)
     try:
-        validate_graph_run_state(confirmed)
-    except GraphStateTransitionError as error:
-        raise SnapshotMismatchError("commit must return the exact authoritative reducer successor") from error
-    if confirmed != transition.candidate_state:
-        raise SnapshotMismatchError("commit must return the exact authoritative reducer successor")
-    return confirmed
+        confirmed = await commit(transition)
+        try:
+            validate_graph_run_state(confirmed)
+        except GraphStateTransitionError as error:
+            raise SnapshotMismatchError("commit must return the exact authoritative reducer successor") from error
+        try:
+            return admit_graph_run_confirmation(transition.previous_state, transition.command, confirmed)
+        except GraphStateTransitionError as error:
+            raise SnapshotMismatchError("commit must return the exact authoritative reducer successor") from error
+    except (Exception, asyncio.CancelledError) as error:
+        raise GraphCommitError(error) from error
 
 
 async def commit_transition(

@@ -37,6 +37,7 @@ from mote_kernel.state.graph_state import (
     GraphJoinOccurrenceIdentity,
     GraphJoinProgress,
     GraphNodeId,
+    GraphPublicationSettlement,
     GraphRouteId,
     GraphRunId,
     GraphRunState,
@@ -171,6 +172,19 @@ def join_progress(
     )
 
 
+def publication_settlements(
+    references: tuple[ActivationReference, ...],
+    *,
+    first_revision: int = 1,
+    execution: GraphExecutionToken | None = None,
+) -> tuple[GraphPublicationSettlement, ...]:
+    token = execution or GraphExecutionToken(1, GraphExecutionAttemptId("test-settlement"))
+    return tuple(
+        GraphPublicationSettlement(reference, first_revision + offset, token)
+        for offset, reference in enumerate(sorted(references, key=ActivationReference.canonical_key))
+    )
+
+
 def running_state(
     *,
     superstep: int = 0,
@@ -183,7 +197,7 @@ def running_state(
 ) -> GraphRunState:
     canonical_run_id = GraphRunId(run_id)
 
-    settled_activations = tuple(
+    settled_references = tuple(
         sorted(
             {reference for progress in join_progress for reference in progress.arrived}
             | {
@@ -194,6 +208,7 @@ def running_state(
             key=ActivationReference.canonical_key,
         )
     )
+    settlements = publication_settlements(settled_references)
 
     def cause(node_id: GraphNodeId) -> GraphActivationCause:
         if superstep == 0:
@@ -219,8 +234,9 @@ def running_state(
             )
         ),
         join_progress=join_progress,
-        settled_activations=settled_activations,
-        revision=revision,
+        settled_publications=settlements,
+        execution_sequence=1 if settlements else 0,
+        revision=max(revision, len(settlements)),
     )
 
 

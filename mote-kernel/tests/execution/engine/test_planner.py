@@ -1,7 +1,14 @@
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
-from tests.execution.engine.factories import callable_node, compiled_graph, join_progress, running_state, terminal_state
+from tests.execution.engine.factories import (
+    callable_node,
+    compiled_graph,
+    join_progress,
+    publication_settlements,
+    running_state,
+    terminal_state,
+)
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.planner import plan_tasks
@@ -48,6 +55,11 @@ def test_planner_materializes_only_pending_nodes_in_canonical_order() -> None:
     state = running_state(frontier=("a", "b", "c"))
     state = replace(
         state,
+        execution_sequence=1,
+        revision=1,
+        settled_publications=publication_settlements(
+            (ActivationReference(GraphActivationIdentity(state.run_id, 0, GraphNodeId("c"))),),
+        ),
         frontier=GraphFrontierState(
             (
                 state.frontier.nodes[0],
@@ -97,6 +109,10 @@ def test_planner_excludes_every_nonpending_settlement_variant() -> None:
     state = replace(
         state,
         execution_sequence=1,
+        revision=1,
+        settled_publications=publication_settlements(
+            (ActivationReference(GraphActivationIdentity(state.run_id, 0, GraphNodeId("d"))),),
+        ),
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("input.v1"), 1),
         frontier=GraphFrontierState(
             (

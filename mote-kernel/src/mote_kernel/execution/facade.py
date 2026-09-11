@@ -11,12 +11,14 @@ from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
+    GraphCommitError,
     GraphCommitKey,
     GraphCommitWriteSet,
     GraphTransition,
 )
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.recovery import preflight_recovery
+from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import (
     ExecutionError,
     ExecutionLimitError,
@@ -66,7 +68,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph, _compiled_graph_at_scope
 from mote_kernel.execution.graph.validation import require_graph_identity
 from mote_kernel.execution.graph.values import (
     FactoryValueT,
@@ -86,10 +88,12 @@ from mote_kernel.execution.graph_result import (
     _PartialCommitError,
 )
 from mote_kernel.execution.identity import (
+    ScopeRunCoordinate,
     root_scope_run,
 )
 from mote_kernel.execution.invocation import (
     admit_state_owned_overrides,
+    child_run_reads,
     lineage_states,
     plan_fences,
     plan_resumes,
@@ -98,7 +102,7 @@ from mote_kernel.execution.invocation import (
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import TypedNodeAssembly, make_node_invoker, make_typed_node_assembly
-from mote_kernel.execution.persistence import GraphRecovery, restore_checkpoint
+from mote_kernel.execution.persistence import GraphCheckpoint, GraphRecovery, restore_checkpoint
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -232,6 +236,19 @@ class Graph(Generic[GraphValueT]):
         if self._compiled_owner is not None:
             raise GraphValidationError("a graph definition is immutable after its first successful compile")
         return self._builder_state
+
+    def recovery_child_reads(self, checkpoint: GraphCheckpoint[GraphValueT]) -> tuple[ScopeRunCoordinate, ...]:
+        """Project missing child lookups without fencing, decoding or executing."""
+
+        if type(checkpoint) is not GraphCheckpoint:
+            raise SnapshotMismatchError("recovery child lookup requires an exact typed checkpoint")
+        checkpoint = checkpoint.admit()
+        graph = self._compile().graph
+        lineage = lineage_states(checkpoint.root_state, checkpoint.child_runs)
+        for binding in lineage.bindings:
+            scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
+            require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
+        return child_run_reads(graph, lineage, complete=False)
 
     def _commit_builder(
         self,
@@ -755,7 +772,7 @@ class Graph(Generic[GraphValueT]):
                 raise SnapshotMismatchError(
                     "durable recovery cannot replace its input, state, identity, Config or commit capability"
                 )
-            recovery = replace(recovery)
+            recovery = recovery.admit()
             commit = recovery.commit
             invocation = recovery.checkpoint.root_state
         elif isinstance(values, _GraphValues):
@@ -829,7 +846,10 @@ class Graph(Generic[GraphValueT]):
                 owner.family_identity,
                 recovered=recovered,
             )
-        (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))
+        try:
+            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))
+        except GraphCommitError as error:
+            raise error.cause from None
 
         async def finish_root(abort_reason: GraphAbortReason | None) -> None:
             primary: BaseException | None = None
@@ -860,8 +880,12 @@ class Graph(Generic[GraphValueT]):
                     recovered=recovered,
                     commit=commit,
                 )
+            except GraphCommitError as error:
+                with suppress(BaseException):
+                    await finish_root(None)
+                raise error.cause from None
             except asyncio.CancelledError as error:
-                if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):
+                if root.consume_node_origin_cancellation(error):
                     with suppress(BaseException):
                         await finish_root(None)
                     raise

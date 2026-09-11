@@ -10,6 +10,7 @@ from typing import Generic, TypeAlias, TypeVar, cast, final
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
+    GraphCommitError,
     apply_commit_writes,
     commit_transition,
     confirm_transition,
@@ -141,16 +142,11 @@ class _ChildCall(Generic[GraphValueT]):
             raise ResultCollectionError("child call was already released")
         return self._owner
 
-    async def drive(self) -> ConfirmedChildBoundary[GraphValueT] | asyncio.CancelledError | None:
+    async def drive(self) -> ConfirmedChildBoundary[GraphValueT] | None:
         current = self._require_owner()
         if not isinstance(self.phase, ActiveChild):
             raise ResultCollectionError("only an active child call can be driven")
-        try:
-            disposition = await current.drive_quantum()
-        except asyncio.CancelledError as error:
-            if current.consume_commit_origin_cancellation(error):
-                return error
-            raise
+        disposition = await current.drive_quantum()
         if isinstance(disposition, AwaitingResume):
             current.handoff_evidence()
             self.phase = disposition
@@ -207,6 +203,79 @@ _ChildConstructor: TypeAlias = Callable[
 ]
 
 
+async def _start_fresh_owner(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    input_frame: GraphInputFrame[GraphValueT],
+    limits: ExecutionLimits,
+    commit: GraphCommit[GraphValueT] | None,
+    *,
+    parent: GraphActivationIdentity | None,
+    position: tuple[int, ...],
+    evidence_publisher: _EvidencePublisher[GraphValueT],
+) -> _GraphRun[GraphValueT]:
+    """Admit and construct one new owner through the sole fresh-run transaction.
+
+    Both a top-level run and a nested run must stage the input frame before
+    confirming ``StartGraphRun``.  The durable start is the boundary after
+    which owner construction failures are recoverable by an abort transition;
+    failures before confirmation leave no live run to clean up.
+    """
+
+    owner_commit = scoped_commit(scope_run, commit)
+    command = project_start_graph_command(
+        graph,
+        scope_run.graph_run_id,
+        parent,
+        config_cursor=(
+            input_frame.activation_config.config_cursor if input_frame.activation_config is not None else None
+        ),
+    )
+    transition = prepare_transition(
+        scope_run,
+        None,
+        command,
+        None,
+        graph=graph,
+        graph_input=input_frame,
+    )
+    staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
+    state = await confirm_transition(transition, owner_commit)
+    try:
+        return _GraphRun(
+            graph,
+            scope_run,
+            state,
+            staged_frames,
+            limits,
+            owner_commit,
+            _make_child_constructor(graph, scope_run, limits, commit, evidence_publisher),
+            position,
+            evidence_publisher,
+        )
+    except BaseException:
+        reason = GraphAbortReason(
+            "root graph owner construction failed" if parent is None else "nested graph owner construction failed"
+        )
+        cleanup_task = asyncio.create_task(
+            commit_transition(
+                scope_run,
+                state,
+                AbortGraphRun(state.revision, reason),
+                None,
+                owner_commit,
+                graph=graph,
+            )
+        )
+        try:
+            await wait_for_owner_task(cleanup_task)
+        except GraphCommitError:
+            raise
+        except BaseException:
+            pass
+        raise
+
+
 def _child_failure_reason(state: GraphRunState) -> str:
     failures = tuple(
         (node.node_id, str(node.settlement.failure))
@@ -227,15 +296,20 @@ async def _cleanup_unhanded_child(
     abort: bool,
 ) -> None:
     async def cleanup() -> None:
-        if abort:
-            with suppress(BaseException):
+        try:
+            if abort:
                 await call.abort(reason)
-        with suppress(BaseException):
-            await call.release()
+        finally:
+            with suppress(BaseException):
+                await call.release()
 
     cleanup_task = asyncio.create_task(cleanup())
-    with suppress(BaseException):
+    try:
         await wait_for_owner_task(cleanup_task)
+    except GraphCommitError:
+        raise
+    except BaseException:
+        pass
 
 
 def _merge_frames(
@@ -318,7 +392,6 @@ class _GraphRun(Generic[GraphValueT]):
         "_child_constructor",
         "_children",
         "_commit",
-        "_commit_origin_cancellation",
         "_executor",
         "_frames",
         "_graph",
@@ -357,7 +430,6 @@ class _GraphRun(Generic[GraphValueT]):
         self._limits = limits
         self._commit = commit
         self._child_constructor = child_constructor
-        self._commit_origin_cancellation: asyncio.CancelledError | None = None
         self._position = position
         self._publish_evidence = evidence_publisher
         self._children: list[_ChildCall[GraphValueT]] = []
@@ -433,10 +505,7 @@ class _GraphRun(Generic[GraphValueT]):
             apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
         )
         commit_task = asyncio.create_task(confirm_transition(transition, self._commit))
-        confirmed, cancellation = await wait_for_owner_task(
-            commit_task,
-            self._mark_commit_origin_cancellation,
-        )
+        confirmed, cancellation = await wait_for_owner_task(commit_task)
         self._state = confirmed
         self._frames = staged_frames
         if handoff_evidence and self._state.parent is not None:
@@ -458,15 +527,6 @@ class _GraphRun(Generic[GraphValueT]):
             confirmed_frames=confirmed_frames,
             handoff_evidence=True,
         )
-
-    def _mark_commit_origin_cancellation(self, error: asyncio.CancelledError) -> None:
-        self._commit_origin_cancellation = error
-
-    def consume_commit_origin_cancellation(self, error: asyncio.CancelledError) -> bool:
-        if self._commit_origin_cancellation is not error:
-            return False
-        self._commit_origin_cancellation = None
-        return True
 
     async def _fence(self, execution_token: GraphExecutionToken) -> None:
         await self._transition(FenceGraphExecution(self._state.revision, execution_token))
@@ -507,10 +567,7 @@ class _GraphRun(Generic[GraphValueT]):
                 position,
             )
         )
-        call, cancellation = await wait_for_owner_task(
-            construction,
-            self._mark_commit_origin_cancellation,
-        )
+        call, cancellation = await wait_for_owner_task(construction)
         try:
             self.accept_child_call(call)
         except BaseException:
@@ -527,9 +584,6 @@ class _GraphRun(Generic[GraphValueT]):
         if not isinstance(call.phase, ActiveChild):
             return
         child_result = await call.drive()
-        if isinstance(child_result, asyncio.CancelledError):
-            self._mark_commit_origin_cancellation(child_result)
-            raise child_result
         if isinstance(call.phase, CompletedChild | FailedChild | AbortedChild):
             self._install_terminal(call, child_result)
 
@@ -563,6 +617,8 @@ class _GraphRun(Generic[GraphValueT]):
                 continue
             try:
                 await call.fence()
+            except GraphCommitError:
+                raise
             except BaseException as error:
                 errors.append(error)
         session = self._session
@@ -574,10 +630,7 @@ class _GraphRun(Generic[GraphValueT]):
             finally:
                 self._session = None
         if self._state.status is GraphRunStatus.RUNNING and self._state.execution is not None:
-            try:
-                await self._fence(self._state.execution.token)
-            except BaseException as error:
-                errors.append(error)
+            await self._fence(self._state.execution.token)
         if errors:
             raise errors[0]
 
@@ -612,10 +665,6 @@ class _GraphRun(Generic[GraphValueT]):
                         AbortGraphRun(self._state.revision, GraphAbortReason("nested graph node was cancelled"))
                     )
                     return
-                except Exception:
-                    await session.aclose()
-                    await self._fence(execution_token)
-                    raise
                 result = completed.result
                 await self._transition(completed.command, result)
                 task = result.task
@@ -678,16 +727,12 @@ class _GraphRun(Generic[GraphValueT]):
                 if failures:
                     worker_failures = tuple(failures)
                     break
-        except BaseException:
-            cleanup_task = asyncio.create_task(cancel_workers())
-            with suppress(BaseException):
-                await wait_for_owner_task(cleanup_task)
-            raise
-
-        if not worker_failures:
-            return
-
-        primary = min(worker_failures, key=lambda item: item[0])[1]
+        except BaseException as error:
+            primary = error
+        else:
+            if not worker_failures:
+                return
+            primary = min(worker_failures, key=lambda item: item[0])[1]
         cleanup_error: BaseException | None = None
         cancellation_cleanup = asyncio.create_task(cancel_workers())
         try:
@@ -695,15 +740,23 @@ class _GraphRun(Generic[GraphValueT]):
         except BaseException as error:
             cleanup_error = error
 
-        # Commit- and node-origin cancellation deliberately keep their
-        # authoritative lease for caller handling or recovery.  Every other
-        # worker failure is a fan-in stop: fence the complete family after all
-        # Python tasks have settled.
-        family_failure = not (primary is self._commit_origin_cancellation or primary is self._node_origin_cancellation)
+        for worker in workers:
+            if worker.done() and not worker.cancelled():
+                failure = worker.exception()
+                if isinstance(failure, GraphCommitError):
+                    primary = failure
+                    break
+        family_failure = (
+            bool(worker_failures)
+            and not isinstance(primary, GraphCommitError)
+            and primary is not self._node_origin_cancellation
+        )
         if family_failure:
             fence_cleanup = asyncio.create_task(self.fence_after_worker_failure())
             try:
                 await wait_for_owner_task(fence_cleanup)
+            except GraphCommitError as error:
+                primary = error
             except BaseException as error:
                 if cleanup_error is None:
                     cleanup_error = error
@@ -847,6 +900,8 @@ class _GraphRun(Generic[GraphValueT]):
                 continue
             try:
                 await call.abort(reason)
+            except GraphCommitError:
+                raise
             except BaseException as error:
                 errors.append(error)
         if self._session is not None:
@@ -856,15 +911,8 @@ class _GraphRun(Generic[GraphValueT]):
                 errors.append(error)
         if self._state.status is GraphRunStatus.RUNNING:
             if self._state.execution is not None:
-                try:
-                    await self._fence(self._state.execution.token)
-                except BaseException as error:
-                    errors.append(error)
-            if self._state.execution is None:
-                try:
-                    await self._transition(AbortGraphRun(self._state.revision, reason))
-                except BaseException as error:
-                    errors.append(error)
+                await self._fence(self._state.execution.token)
+            await self._transition(AbortGraphRun(self._state.revision, reason))
         if errors:
             raise errors[0]
 
@@ -912,52 +960,16 @@ def _make_child_constructor(
         if child_graph is not expected_graph:
             raise SnapshotMismatchError("child construction does not match its parent topology")
         coordinate = child_scope_run_for_activation(owner_scope_run, parent)
-        child_commit = scoped_commit(coordinate, commit)
-        command = project_start_graph_command(
+        child = await _start_fresh_owner(
             child_graph,
-            coordinate.graph_run_id,
-            parent,
-            child_input.activation_config.config_cursor if child_input.activation_config is not None else None,
-        )
-        transition = prepare_transition(
             coordinate,
-            None,
-            command,
-            None,
-            graph=child_graph,
-            graph_input=child_input,
+            child_input,
+            limits,
+            commit,
+            parent=parent,
+            position=position,
+            evidence_publisher=evidence_publisher,
         )
-        staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
-        child_state = await confirm_transition(transition, child_commit)
-        try:
-            child = _GraphRun(
-                child_graph,
-                coordinate,
-                child_state,
-                staged_frames,
-                limits,
-                child_commit,
-                _make_child_constructor(child_graph, coordinate, limits, commit, evidence_publisher),
-                position,
-                evidence_publisher,
-            )
-        except BaseException:
-
-            async def cleanup_candidate() -> None:
-                reason = GraphAbortReason("nested graph owner construction failed")
-                await commit_transition(
-                    coordinate,
-                    child_state,
-                    AbortGraphRun(child_state.revision, reason),
-                    None,
-                    child_commit,
-                    graph=child_graph,
-                )
-
-            cleanup_task = asyncio.create_task(cleanup_candidate())
-            with suppress(BaseException):
-                await wait_for_owner_task(cleanup_task)
-            raise
         return _ChildCall(position, parent, ActiveChild(parent), child)
 
     return construct
@@ -1012,25 +1024,27 @@ async def admit_continued_root(
         owner_scope_run: ScopeRunCoordinate,
         owner_state: GraphRunState,
         owner_commit: GraphCommit[GraphValueT],
+        failure: BaseException,
     ) -> None:
         reason = GraphAbortReason("continued graph owner construction failed")
-        if owner is None:
-            if not transition_attempted and owner_state.status is GraphRunStatus.RUNNING:
+        try:
+            if not transition_attempted and not isinstance(failure, GraphCommitError):
+                if owner is None:
+                    if owner_state.status is GraphRunStatus.RUNNING:
+                        await commit_transition(
+                            owner_scope_run,
+                            owner_state,
+                            AbortGraphRun(owner_state.revision, reason),
+                            None,
+                            owner_commit,
+                            graph=owner_graph,
+                        )
+                else:
+                    await owner.abort(reason)
+        finally:
+            if owner is not None:
                 with suppress(BaseException):
-                    await commit_transition(
-                        owner_scope_run,
-                        owner_state,
-                        AbortGraphRun(owner_state.revision, reason),
-                        None,
-                        owner_commit,
-                        graph=owner_graph,
-                    )
-            return
-        if not transition_attempted:
-            with suppress(BaseException):
-                await owner.abort(reason)
-        with suppress(BaseException):
-            await owner.release()
+                    await owner.release()
 
     async def apply_admission(
         owner: _GraphRun[GraphValueT],
@@ -1074,15 +1088,19 @@ async def admit_continued_root(
             await apply_admission(child, fence, resume, tuple(binding.scope_run.scope))
             await admit_children(child, child_graph, binding.scope_run, binding.state)
             return _ChildCall(position, parent, ActiveChild(parent), child)
-        except BaseException:
+        except BaseException as primary:
             if failed_scope is None:
                 failed_scope = tuple(binding.scope_run.scope)
 
             cleanup_task = asyncio.create_task(
-                cleanup_owner(child, child_graph, binding.scope_run, binding.state, child_commit)
+                cleanup_owner(child, child_graph, binding.scope_run, binding.state, child_commit, primary)
             )
-            with suppress(BaseException):
+            try:
                 await wait_for_owner_task(cleanup_task)
+            except GraphCommitError:
+                raise
+            except BaseException:
+                pass
             raise
 
     async def admit_children(
@@ -1176,16 +1194,20 @@ async def admit_continued_root(
             partial = _partial_commit_error(
                 root.state,
                 continuation,
-                primary,
+                primary.cause if isinstance(primary, GraphCommitError) else primary,
                 failed_scope,
             )
             with suppress(BaseException):
                 await root.release()
-            raise partial from primary
+            raise partial from partial.cause
 
-        cleanup_task = asyncio.create_task(cleanup_owner(root, graph, scope_run, state, root_commit))
-        with suppress(BaseException):
+        cleanup_task = asyncio.create_task(cleanup_owner(root, graph, scope_run, state, root_commit, primary))
+        try:
             await wait_for_owner_task(cleanup_task)
+        except GraphCommitError:
+            raise
+        except BaseException:
+            pass
         raise
 
 
@@ -1197,58 +1219,17 @@ async def fresh_root(
     commit: GraphCommit[GraphValueT] | None,
 ) -> OwnerHandoff[GraphValueT]:
     evidence_publisher, evidence_reader = _evidence_adapter((), ScopedFrameIndex())
-    child_constructor = _make_child_constructor(graph, scope_run, limits, commit, evidence_publisher)
-    root_commit = scoped_commit(scope_run, commit)
-    command = project_start_graph_command(
+    root = await _start_fresh_owner(
         graph,
-        scope_run.graph_run_id,
-        config_cursor=(
-            input_frame.activation_config.config_cursor if input_frame.activation_config is not None else None
-        ),
-    )
-    transition = prepare_transition(
         scope_run,
-        None,
-        command,
-        None,
-        graph=graph,
-        graph_input=input_frame,
+        input_frame,
+        limits,
+        commit,
+        parent=None,
+        position=(),
+        evidence_publisher=evidence_publisher,
     )
-    staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
-    state = await confirm_transition(transition, root_commit)
-    try:
-        root = _GraphRun(
-            graph,
-            scope_run,
-            state,
-            staged_frames,
-            limits,
-            root_commit,
-            child_constructor,
-            (),
-            evidence_publisher,
-        )
-        return root, evidence_reader
-    except BaseException:
-
-        async def cleanup_root() -> None:
-            with suppress(BaseException):
-                await commit_transition(
-                    scope_run,
-                    state,
-                    AbortGraphRun(
-                        state.revision,
-                        GraphAbortReason("root graph owner construction failed"),
-                    ),
-                    None,
-                    root_commit,
-                    graph=graph,
-                )
-
-        cleanup_task = asyncio.create_task(cleanup_root())
-        with suppress(BaseException):
-            await wait_for_owner_task(cleanup_task)
-        raise
+    return root, evidence_reader
 
 
 def _project_result_views(

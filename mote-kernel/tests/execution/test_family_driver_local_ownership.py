@@ -4,6 +4,7 @@ from dataclasses import replace
 from typing import Protocol, TypeAlias, cast, runtime_checkable
 
 import pytest
+from tests.execution import persistence_fixtures
 from tests.execution.engine.factories import compiled_graph, direct, leased_state, running_state, task_success
 
 import mote_kernel.execution.commit as commit_module
@@ -12,6 +13,7 @@ from mote_kernel.execution import Graph
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
+    GraphCommitError,
     GraphTransition,
     commit_transition,
     scoped_commit,
@@ -83,9 +85,7 @@ from mote_kernel.state.graph_state import (
 
 _ChildTerminalView: TypeAlias = CompletedChild[str] | FailedChild | AbortedChild
 _ChildPhaseView: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminalView
-_ChildWaitResultView: TypeAlias = (
-    tuple[GraphBoundary, _ChildTerminalView | None, ConfirmedChildBoundary[str] | None] | asyncio.CancelledError
-)
+_ChildWaitResultView: TypeAlias = tuple[GraphBoundary, _ChildTerminalView | None, ConfirmedChildBoundary[str] | None]
 _EvidencePublisherView: TypeAlias = Callable[[ScopedStateBinding, ScopedFrameIndex[str]], None]
 _EvidenceReaderView: TypeAlias = Callable[[], tuple[tuple[ScopedStateBinding, ...], ScopedFrameIndex[str]]]
 _ChildConstructorView: TypeAlias = Callable[
@@ -103,7 +103,7 @@ class _ChildCallView(Protocol):
     @property
     def live(self) -> bool: ...
 
-    async def drive(self) -> ConfirmedChildBoundary[str] | asyncio.CancelledError | None: ...
+    async def drive(self) -> ConfirmedChildBoundary[str] | None: ...
 
     async def abort(self, reason: GraphAbortReason) -> None: ...
 
@@ -162,8 +162,6 @@ class _GraphRunView(Protocol):
     async def _retire_child(self, result: TaskResult[str]) -> None: ...
 
     async def fence_after_worker_failure(self) -> None: ...
-
-    def consume_commit_origin_cancellation(self, error: asyncio.CancelledError) -> bool: ...
 
     def handoff_evidence(self) -> None: ...
 
@@ -382,18 +380,11 @@ class _CallbackChildOwner:
         self._fence = fence
         self._release = release
         self._result: tuple[GraphBoundary, _ChildTerminalView | None, ConfirmedChildBoundary[str] | None] | None = None
-        self._cancellation: asyncio.CancelledError | None = None
 
     async def drive_quantum(self) -> GraphBoundary:
         result = await self._drive()
-        if isinstance(result, asyncio.CancelledError):
-            self._cancellation = result
-            raise result
         self._result = result
         return result[0]
-
-    def consume_commit_origin_cancellation(self, error: asyncio.CancelledError) -> bool:
-        return error is self._cancellation
 
     def terminal_projection(self, _parent: GraphActivationIdentity) -> _ChildTerminalView:
         if self._result is None or self._result[1] is None:
@@ -646,6 +637,134 @@ async def test_continued_root_rejects_a_root_binding_in_child_state() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("drive_failure", [False, True], ids=["family-fence", "nested-worker"])
+async def test_nested_cleanup_commit_failure_stops_parent_fencing(drive_failure: bool) -> None:
+    graph, state, _owner, parent, child_scope, _activation, child_state = nested_runtime()
+    failure = RuntimeError("worker failed before committing")
+    commit_failure = RuntimeError("fence confirmation was lost")
+    transitions: list[GraphTransition[str]] = []
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        raise commit_failure
+
+    root = root_owner(graph, leased_state(state), commit=commit)
+    child = graph_owner(graph.nested_graphs[parent.node_id], child_scope, leased_state(child_state), commit=commit)
+    call = _FamilyDriverPrivateView.child_call(family_driver, (0, 0), parent, ActiveChild(parent), child)
+    _GraphRunPrivateView.children(root).append(call)
+
+    async def fail() -> None:
+        raise failure
+
+    async def drive_child() -> None:
+        await _GraphRunPrivateView.drive_workers(child, (("fail", fail()),))
+
+    try:
+        with pytest.raises(GraphCommitError) as caught:
+            if drive_failure:
+                await _GraphRunPrivateView.drive_workers(root, (("child", drive_child()),))
+            else:
+                await root.fence_after_worker_failure()
+        assert caught.value.cause is commit_failure
+        assert [transition.scope for transition in transitions] == [tuple(child_scope.scope)]
+        assert root.state.execution is not None
+        assert child.state.execution is not None
+    finally:
+        await root.release()
+
+
+@pytest.mark.asyncio
+async def test_family_fencing_does_not_reopen_a_terminal_child() -> None:
+    graph, state, _owner, parent, _child_scope, _activation, _child_state = nested_runtime()
+    transitions: list[GraphTransition[str]] = []
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    root = root_owner(graph, leased_state(state), commit=commit)
+    phase = CompletedChild(parent, graph_output(graph.nested_graphs[parent.node_id], "done"))
+    root.accept_child_call(restored_child_call((0, 0), parent, phase))
+    await root.fence_after_worker_failure()
+    assert [transition.scope for transition in transitions] == [()]
+    assert root.state.execution is None
+    assert _GraphRunPrivateView.children(root)[0].phase is phase
+    await root.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["fresh-root", "fresh-child", "continued-root", "continued-child", "handoff"])
+async def test_construction_error_survives_a_cleanup_admission_error_without_a_write(
+    monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    original = RuntimeError("owner construction failed")
+    depth = 0 if boundary.endswith("root") else 1
+    transitions: list[GraphTransition[str]] = []
+    original_admission = commit_module.transition_admission_error
+    continued = nested_runtime() if boundary.startswith("continued") else None
+
+    def reject_abort(
+        graph: CompiledGraph[str],
+        previous_state: GraphRunState | None,
+        command: GraphRunCommand,
+        candidate_state: GraphRunState,
+    ) -> str | None:
+        if isinstance(command, AbortGraphRun):
+            return "abort admission rejected before commit"
+        return original_admission(graph, previous_state, command, candidate_state)
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        return transition.candidate_state
+
+    if boundary == "handoff":
+
+        def reject_handoff(_owner: _GraphRunView, _call: _ChildCallView) -> None:
+            raise original
+
+        monkeypatch.setattr(_FamilyDriverPrivateView.graph_run(family_driver), "accept_child_call", reject_handoff)
+    else:
+        fail_owner_construction(monkeypatch, original, scope_depth=depth)
+    monkeypatch.setattr(commit_module, "transition_admission_error", reject_abort)
+    with pytest.raises(RuntimeError) as caught:
+        if continued is not None:
+            graph, state, _owner, _parent, child_scope, _activation, child_state = continued
+            await admit_continuation_root(graph, state, (ScopedStateBinding(child_scope, child_state),), commit=commit)
+        else:
+            await persistence_fixtures.nested_graph([], depth=depth).run(
+                Graph.values(value="input"), run_id="run", commit=commit
+            )
+    assert caught.value is original
+    assert not any(isinstance(transition.command, AbortGraphRun) for transition in transitions)
+
+
+@pytest.mark.asyncio
+async def test_unhanded_child_commit_failure_is_not_hidden_by_the_handoff_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = RuntimeError("child handoff failed")
+    commit_failure = RuntimeError("abort confirmation was lost")
+    transitions: list[GraphTransition[str]] = []
+
+    def reject_handoff(_owner: _GraphRunView, _call: _ChildCallView) -> None:
+        raise original
+
+    async def commit(transition: GraphTransition[str], /) -> GraphRunState:
+        transitions.append(transition)
+        if isinstance(transition.command, AbortGraphRun):
+            raise commit_failure
+        return transition.candidate_state
+
+    monkeypatch.setattr(_FamilyDriverPrivateView.graph_run(family_driver), "accept_child_call", reject_handoff)
+    with pytest.raises(RuntimeError) as caught:
+        await persistence_fixtures.nested_graph([]).run(Graph.values(value="input"), run_id="run", commit=commit)
+    assert caught.value is commit_failure
+    assert isinstance(transitions[-1].command, AbortGraphRun)
+    assert transitions[-1].scope == ("child",)
+    assert sum(isinstance(transition.command, AbortGraphRun) for transition in transitions) == 1
+
+
+@pytest.mark.asyncio
 async def test_scoped_commit_rejects_a_transition_for_another_owner() -> None:
     graph = nested_graph()
     scope_run = root_scope_run(GraphRunId("run"))
@@ -821,7 +940,8 @@ async def test_worker_driver_closes_unstarted_workers_and_handles_an_empty_batch
 
 
 @pytest.mark.asyncio
-async def test_fence_after_worker_failure_attempts_every_owner_cleanup_and_keeps_first_error() -> None:
+@pytest.mark.parametrize("commit_fails", [False, True])
+async def test_fence_cleanup_keeps_ephemeral_errors_unless_confirmation_fails(commit_fails: bool) -> None:
     graph, state, _owner, parent, _child_scope, _activation, _child_state = nested_runtime()
 
     class CleanupError(RuntimeError):
@@ -853,7 +973,8 @@ async def test_fence_after_worker_failure_attempts_every_owner_cleanup_and_keeps
     async def reject_owner_fence(transition: GraphTransition[str], /) -> GraphRunState:
         if isinstance(transition.command, FenceGraphExecution):
             calls.append("owner")
-            raise owner_error
+            if commit_fails:
+                raise owner_error
         return transition.candidate_state
 
     leased = leased_state(state)
@@ -870,18 +991,24 @@ async def test_fence_after_worker_failure_attempts_every_owner_cleanup_and_keeps
     )
     _GraphRunPrivateView.set_session(owner, cast(GraphExecutionSession[str], FailingSession()))
 
-    with pytest.raises(CleanupError) as raised:
+    with pytest.raises(GraphCommitError if commit_fails else CleanupError) as raised:
         await owner.fence_after_worker_failure()
 
-    assert raised.value is child_error
+    if commit_fails:
+        assert isinstance(raised.value, GraphCommitError)
+        assert raised.value.cause is owner_error
+    else:
+        assert raised.value is child_error
     assert calls == ["child", "session", "owner"]
     assert _GraphRunPrivateView.session(owner) is None
-    assert owner.state.execution is not None
+    assert (owner.state.execution is not None) is commit_fails
 
 
 @pytest.mark.asyncio
-async def test_worker_failure_preserves_primary_when_cancellation_and_fence_cleanup_fail(
+@pytest.mark.parametrize("commit_fails", [False, True])
+async def test_worker_cleanup_preserves_primary_unless_confirmation_fails(
     monkeypatch: pytest.MonkeyPatch,
+    commit_fails: bool,
 ) -> None:
     primary = RuntimeError("worker failed")
     cancellation_cleanup_error = RuntimeError("worker cancellation cleanup failed")
@@ -893,16 +1020,21 @@ async def test_worker_failure_preserves_primary_when_cancellation_and_fence_clea
         return transition.candidate_state
 
     owner = root_owner(compiled_graph("a"), leased_state(running_state()), commit=reject_fence)
+    if not commit_fails:
+
+        async def fail_fence(_owner: _GraphRunView) -> None:
+            raise fence_cleanup_error
+
+        monkeypatch.setattr(_FamilyDriverPrivateView.graph_run(family_driver), "fence_after_worker_failure", fail_fence)
     original_wait = family_driver.wait_for_owner_task
     wait_calls = 0
 
     async def wait_with_failure(
         task: asyncio.Task[None],
-        on_task_cancellation: Callable[[asyncio.CancelledError], None] | None = None,
     ) -> tuple[None, asyncio.CancelledError | None]:
         nonlocal wait_calls
         wait_calls += 1
-        result = await original_wait(task, on_task_cancellation)
+        result = await original_wait(task)
         if wait_calls == 1:
             raise cancellation_cleanup_error
         return result
@@ -915,27 +1047,32 @@ async def test_worker_failure_preserves_primary_when_cancellation_and_fence_clea
     async def block() -> None:
         await asyncio.Event().wait()
 
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(GraphCommitError if commit_fails else RuntimeError) as raised:
         await _GraphRunPrivateView.drive_workers(owner, (("fail", fail()), ("block", block())))
 
-    assert raised.value is primary
+    if commit_fails:
+        assert isinstance(raised.value, GraphCommitError)
+        assert raised.value.cause is fence_cleanup_error
+    else:
+        assert raised.value is primary
     assert raised.value.__cause__ is cancellation_cleanup_error
-    assert wait_calls == 3
+    assert wait_calls == (3 if commit_fails else 2)
     assert owner.state.execution is not None
     await owner.release()
 
 
 @pytest.mark.asyncio
-async def test_worker_failure_preserves_primary_when_family_fence_fails() -> None:
+async def test_worker_failure_preserves_primary_when_family_cleanup_fails_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     primary = RuntimeError("worker failed")
     fence_cleanup_error = RuntimeError("family fence failed")
 
-    async def reject_fence(transition: GraphTransition[str], /) -> GraphRunState:
-        if isinstance(transition.command, FenceGraphExecution):
-            raise fence_cleanup_error
-        return transition.candidate_state
+    async def reject_fence(_owner: _GraphRunView) -> None:
+        raise fence_cleanup_error
 
-    owner = root_owner(compiled_graph("a"), leased_state(running_state()), commit=reject_fence)
+    owner = root_owner(compiled_graph("a"), leased_state(running_state()))
+    monkeypatch.setattr(_FamilyDriverPrivateView.graph_run(family_driver), "fence_after_worker_failure", reject_fence)
 
     async def fail() -> None:
         raise primary
@@ -1269,8 +1406,8 @@ async def test_child_call_rejects_impossible_initial_phases_and_inconsistent_ter
 
     commit_cancellation = asyncio.CancelledError("child commit cancelled")
 
-    async def cancelled_commit() -> asyncio.CancelledError:
-        return commit_cancellation
+    async def cancelled_commit() -> _ChildWaitResultView:
+        raise GraphCommitError(commit_cancellation)
 
     cancelled_owner = root_owner(graph, state)
     cancelled_call = callback_child_call(
@@ -1282,10 +1419,9 @@ async def test_child_call_rejects_impossible_initial_phases_and_inconsistent_ter
         no_release,
     )
     _GraphRunPrivateView.children(cancelled_owner).append(cancelled_call)
-    with pytest.raises(asyncio.CancelledError, match="child commit cancelled") as raised:
+    with pytest.raises(GraphCommitError) as raised:
         await _GraphRunPrivateView.drive_child(cancelled_owner, cancelled_call)
-    assert raised.value is commit_cancellation
-    assert cancelled_owner.consume_commit_origin_cancellation(commit_cancellation)
+    assert raised.value.cause is commit_cancellation
 
 
 @pytest.mark.asyncio
@@ -1407,7 +1543,6 @@ async def test_child_call_is_one_shot_and_inert_after_release() -> None:
     )
 
     child_result = await call.drive()
-    assert not isinstance(child_result, asyncio.CancelledError)
     assert isinstance(call.phase, AbortedChild)
     assert child_result is None
     with pytest.raises(ResultCollectionError, match="only an active child call"):
@@ -1459,10 +1594,10 @@ async def test_child_call_does_not_publish_a_child_whose_abort_was_not_committed
         child_owner,
     )
 
-    with pytest.raises(AbortCommitError) as raised:
+    with pytest.raises(GraphCommitError) as raised:
         await call.abort(GraphAbortReason("abort"))
 
-    assert raised.value is original
+    assert raised.value.cause is original
     assert child_owner.state.status is GraphRunStatus.RUNNING
     assert published == []
     await call.release()
@@ -1499,10 +1634,10 @@ async def test_child_call_does_not_handoff_evidence_while_fence_keeps_lease() ->
         child_owner,
     )
 
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(GraphCommitError) as raised:
         await call.fence()
 
-    assert raised.value is fence_error
+    assert raised.value.cause is fence_error
     assert child_owner.state.execution is not None
     assert published == []
     await call.release()
@@ -2040,9 +2175,9 @@ async def test_abort_preserves_first_child_session_fence_or_state_error() -> Non
         raise fence_error
 
     fenced_owner = root_owner(graph, leased_state(state), commit=reject_fence)
-    with pytest.raises(CleanupError) as raised_fence:
+    with pytest.raises(GraphCommitError) as raised_fence:
         await fenced_owner.abort(GraphAbortReason("abort"))
-    assert raised_fence.value is fence_error
+    assert raised_fence.value.cause is fence_error
 
     state_error = CleanupError("abort failed")
 
@@ -2050,9 +2185,9 @@ async def test_abort_preserves_first_child_session_fence_or_state_error() -> Non
         raise state_error
 
     state_owner = root_owner(graph, state, commit=reject_abort)
-    with pytest.raises(CleanupError) as raised_state:
+    with pytest.raises(GraphCommitError) as raised_state:
         await state_owner.abort(GraphAbortReason("abort"))
-    assert raised_state.value is state_error
+    assert raised_state.value.cause is state_error
 
 
 @pytest.mark.asyncio

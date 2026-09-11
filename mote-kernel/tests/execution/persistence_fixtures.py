@@ -5,6 +5,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Generic, TypeVar, cast
 
+import mote_kernel.execution.persistence as persistence_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.identity import ScopeRunCoordinate, root_scope_run
@@ -13,6 +14,8 @@ from mote_kernel.execution.run_context import ScopedStateBinding, UncreatedGraph
 from mote_kernel.state.graph_state import GraphNodeId, GraphRunId, GraphRunState
 
 GraphValueT = TypeVar("GraphValueT")
+capture_graph_input = persistence_module._capture_graph_input  # pyright: ignore[reportPrivateUsage]
+capture_publication = persistence_module._capture_publication  # pyright: ignore[reportPrivateUsage]
 
 
 def encode_strings(values: Graph.Values[str]) -> bytes:

@@ -65,13 +65,15 @@ from mote_kernel.state.graph_state.model import (
     GraphAbort,
     GraphAbortReason,
     GraphConfigCursor,
+    GraphEvidenceCommitment,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
+    GraphPublicationSettlement,
     GraphRunState,
     GraphRunStatus,
 )
-from mote_kernel.state.graph_state.reducer import reduce_graph_run
+from mote_kernel.state.graph_state.reducer import admit_graph_run_confirmation, reduce_graph_run
 from mote_kernel.state.graph_state.resource_command import AcquireResources, ReleaseResources, ResourceCommand
 from mote_kernel.state.graph_state.resource_model import ResourceAcquisition, ResourceId, ResourceLock, ResourceSnapshot
 from mote_kernel.state.graph_state.resource_reducer import (
@@ -100,6 +102,7 @@ __all__ = [
     "GraphConfigCursor",
     "GraphDefinitionId",
     "GraphDefinitionVersion",
+    "GraphEvidenceCommitment",
     "GraphExecutionAttemptId",
     "GraphExecutionLease",
     "GraphExecutionToken",
@@ -120,6 +123,7 @@ __all__ = [
     "GraphNodeOutcome",
     "GraphNodeResumeAction",
     "GraphNodeSettlement",
+    "GraphPublicationSettlement",
     "GraphResumeInputCodec",
     "GraphResumeInputCodecId",
     "GraphResumeInputPayload",
@@ -151,6 +155,7 @@ __all__ = [
     "SucceededGraphNode",
     "SucceededGraphNodeOutcome",
     "UseStepRequestInput",
+    "admit_graph_run_confirmation",
     "child_graph_run_id",
     "frontier_node",
     "frontier_status",

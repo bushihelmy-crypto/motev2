@@ -1,20 +1,23 @@
 # Graph examples / 图示例
 
-These runnable examples use only `mote_kernel.execution.Graph`, the public graph composition and execution facade.
+These examples compose and execute graphs only through `mote_kernel.execution.Graph`, the public graph facade.
+The durable Agent example adds the external authority/persistence wiring in `mote_kernel.Agent`, not another runner.
 The node callables keep graph state explicit: execution decisions and recoverable values travel through typed graph
 inputs, outcomes, state, and resume actions. The modules are grouped from basic topology through recovery and
 operational boundaries, so a reader can start with one small graph and then choose a production pattern.
 
-这些可运行示例只使用公开门面 `mote_kernel.execution.Graph`。图的执行决定与可恢复值都通过有类型的 graph input、
+这些示例统一使用公开门面 `mote_kernel.execution.Graph` 构建和执行图；持久 Agent 示例额外使用 `mote_kernel.Agent`
+完成外部权限/持久化接线，不建立另一套 runner。图的执行决定与可恢复值都通过有类型的 graph input、
 outcome、state 和 resume action 显式传递。示例从基础拓扑逐步覆盖恢复和运行边界，读者可以先运行一个小图，再按需求选择生产方案。
 
-These examples use in-memory commits and process-local state/continuations. Reassembling a Graph is not a process
+The standalone modules use in-memory commits and process-local state/continuations. Reassembling a Graph is not a process
 restart or durable recovery. Production recovery needs an atomic state/value commit and a complete checkpoint read;
 the backend-independent contracts and Agent integration stages are defined in the
 [persistence plan](../../docs/kernel-persistence-implementation-plan.zh-CN.md).
 
-这些示例使用内存提交与进程内 state/continuation；重建 Graph 对象不代表进程重启或持久恢复。生产持久化必须原子提交
-state 和完整值证据、读取完整 checkpoint；协议无关契约与 `agent.py` 接线阶段以实施计划为准。
+独立运行的模块使用内存提交与进程内 state/continuation；重建 Graph 对象不代表进程重启或持久恢复。生产持久化必须
+原子提交 state 和完整值证据、读取完整 checkpoint；`durable_agent_import` 通过必需 Ports 演示这种接线，不内置后端。
+协议无关契约与阶段状态以实施计划为准。
 
 | Module | Scenario |
 | --- | --- |
@@ -29,6 +32,7 @@ state 和完整值证据、读取完整 checkpoint；协议无关契约与 `agen
 | `human_in_the_loop` | Interrupt, graph reassembly, and state-only resume / 中断、重新装配与仅凭状态恢复 |
 | `resource_customer_report` | Parallel reads, an exclusive resource, and a join / 并行读取、独占资源与汇合 |
 | `checkpointed_import` | In-memory commit and explicit control-only resume / 内存提交与显式控制态恢复 |
+| `durable_agent_import` | Injected authority/store, cold Agent resume / 注入权限与存储，Agent 冷恢复 |
 | `bounded_execution` | Superstep budget and fail-closed retry / superstep 预算与安全停止后重试 |
 | `partial_commit_recovery` | Partial commit handoff and scoped retry / 部分提交交接与作用域重试 |
 | `cancellation_abort` | Caller cancellation and `AbortedResult` / 调用方取消与 `AbortedResult` |
@@ -49,6 +53,7 @@ state 和完整值证据、读取完整 checkpoint；协议无关契约与 `agen
 | 等待人工决定 / Wait for a human | `human_in_the_loop` | `Graph.interrupt`, `resume_interrupted` |
 | 并发访问共享能力 / Limit a shared capability | `resource_customer_report` | `resources=(...)`, `max_parallel_tasks` |
 | 观察每次提交确认 / Observe transition confirmation | `checkpointed_import` | `commit=...`, state-only `run(state=...)` |
+| 接入持久 Agent / Wire a durable Agent | `durable_agent_import` | `AgentStart`, `AgentResume`, injected Ports |
 | 保护长流程预算 / Bound a long run | `bounded_execution` | `max_supersteps`, `Graph.ExecutionLimitError` |
 | 提交只确认了前缀 / Commit confirms a prefix | `partial_commit_recovery` | `Graph.PartialCommitError` |
 | 主动停止运行 / Stop from the caller | `cancellation_abort` | task cancellation, `Graph.AbortedResult` |
@@ -241,6 +246,28 @@ state assignment with SQL would still omit durable value evidence and the comple
 
 `partial_commit_recovery` and `cancellation_abort` cover the two operational handoffs that are easiest to miss in a
 first integration. `versioned_deployment` shows the explicit version boundary for a topology change.
+
+## 持久 Agent 接线 / Durable Agent wiring
+
+`durable_agent_import.build_agent(persistence, authority)` reuses the business DTO, Graph topology and versioned codec
+from `checkpointed_import`. Its `demonstrate(...)` function starts an explicitly identified run, receives an interrupt,
+then answers through a fresh Agent instance. Only business results cross the caller boundary; no state or continuation
+is carried into the resume call. Supply real `PersistencePort[ImportJob]` and `AuthorityPort` capabilities at the
+composition root. This module intentionally has no standalone fake-backend entry point.
+
+`durable_agent_import.build_agent(persistence, authority)` 复用 `checkpointed_import` 的业务 DTO、Graph 拓扑与版本化
+codec。`demonstrate(...)` 显式创建 run、收到 interrupt 后，以新 Agent 实例读取存储并回答。外部只传业务结果和精确
+问题，不向 resume 传 state 或 continuation。装配方必须提供 `PersistencePort[ImportJob]` 和 `AuthorityPort`；
+示例不添加一个伪后端让模块看起来可以独立运行，也不选择数据库、传输或 Container。
+
+`tests/agent/test_example.py` verifies both snapshot and receipt-journal adapters against this exact example.
+`tests/agent/test_process_recovery.py` separately proves a real process exit after persisting a publication but before
+its acknowledgement: the next process recovers with new Agent/Graph/codec objects and never reruns that producer.
+The file adapter in that test is a sequential-process fixture, not a production database or an authority implementation.
+
+同一示例由 `tests/agent/test_example.py` 在 snapshot 和 receipt-journal 两种测试适配器上验证。
+`tests/agent/test_process_recovery.py` 独立验证 publication 落盘、ack 前退出后，由新进程/新 Agent/新 Graph/新 codec
+恢复且不重跑 producer。测试文件适配器只证明顺序进程交接，不冒充生产数据库或真实权限仲裁实现。
 
 ## 覆盖边界 / Coverage boundary
 

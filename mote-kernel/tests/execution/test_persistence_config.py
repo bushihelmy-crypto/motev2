@@ -3,13 +3,24 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
-from tests.execution.persistence_fixtures import STRING_CODEC, MemoryPersistence, encode_strings
+from tests.execution.persistence_fixtures import (
+    STRING_CODEC,
+    MemoryPersistence,
+    capture_graph_input,
+    capture_publication,
+    encode_strings,
+)
 
 from mote_kernel.config import Config, ConfigSnapshot, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.values import _make_single_graph_value
-from mote_kernel.execution.persistence import DurableGraphCommit, EncodedFrame, GraphPersistenceCommit, GraphRecovery
+from mote_kernel.execution.persistence import (
+    DurableGraphCommit,
+    EncodedFrame,
+    GraphPersistenceCommit,
+    GraphRecovery,
+)
 from mote_kernel.loop.config import ReActRuntimeConfig
 from mote_kernel.state.graph_state import GraphConfigCursor, GraphDefinitionId, GraphDefinitionVersion
 
@@ -114,7 +125,7 @@ async def test_business_decoder_cannot_supply_config_capabilities() -> None:
     [cast(GraphConfigCursor, object()), GraphConfigCursor(GraphDefinitionId("config"), GraphDefinitionVersion(1), 1)],
 )
 def test_persisted_config_reference_requires_a_valid_digest(cursor: GraphConfigCursor) -> None:
-    frame = EncodedFrame.capture(STRING_CODEC.codec_id, 1, b"{}")
+    frame = EncodedFrame(STRING_CODEC.codec_id, 1, b"{}")
     with pytest.raises(Graph.SnapshotMismatchError, match="Config"):
         replace(frame, config_cursor=cursor)
 
@@ -144,36 +155,49 @@ async def test_frame_config_must_belong_to_its_owning_state(segment: str, foreig
     checkpoint = store.checkpoint()
     if segment == "input":
         graph_input = checkpoint.graph_inputs[0]
+        changed = capture_graph_input(
+            graph_input.coordinate,
+            EncodedFrame(
+                graph_input.frame.codec_id,
+                graph_input.frame.codec_version,
+                graph_input.frame.payload,
+                foreign.config_cursor,
+            ),
+            graph_input.birth,
+        )
         checkpoint = replace(
             checkpoint,
-            graph_inputs=(
-                replace(
-                    graph_input,
-                    frame=EncodedFrame.capture(
-                        graph_input.frame.codec_id,
-                        graph_input.frame.codec_version,
-                        graph_input.frame.payload,
-                        foreign.config_cursor,
-                    ),
-                ),
-            ),
+            root_state=replace(checkpoint.root_state, graph_input_evidence=changed.evidence),
+            graph_inputs=(changed,),
         )
     else:
         publication = checkpoint.publications[0]
+        changed = capture_publication(
+            publication.coordinate,
+            EncodedFrame(
+                publication.frame.codec_id,
+                publication.frame.codec_version,
+                publication.frame.payload,
+                foreign.config_cursor,
+            ),
+            publication.birth,
+            publication.provenance,
+        )
+        activation = publication.coordinate.activation
+        settlements = tuple(
+            replace(settlement, evidence=changed.evidence)
+            if (
+                settlement.reference.activation.run_id == activation.scope_run.graph_run_id
+                and settlement.reference.activation.superstep == activation.superstep
+                and settlement.reference.activation.node_id == activation.node_id
+            )
+            else settlement
+            for settlement in checkpoint.root_state.settled_publications
+        )
         checkpoint = replace(
             checkpoint,
-            publications=(
-                replace(
-                    publication,
-                    frame=EncodedFrame.capture(
-                        publication.frame.codec_id,
-                        publication.frame.codec_version,
-                        publication.frame.payload,
-                        foreign.config_cursor,
-                    ),
-                ),
-                *checkpoint.publications[1:],
-            ),
+            root_state=replace(checkpoint.root_state, settled_publications=settlements),
+            publications=(changed, *checkpoint.publications[1:]),
         )
     committed = len(store.requests)
     with pytest.raises(Graph.SnapshotMismatchError, match="Config"):
@@ -297,7 +321,7 @@ async def test_deleted_config_cursor_fails_at_read_before_nodes_or_writes(
     before = tuple(seen)
     committed = len(store.requests)
     store.reopen()
-    with pytest.raises(Graph.SnapshotMismatchError, match="integrity"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="commitment"):
         await graph().run(recovery=recovery)
     assert decoded == []
     assert tuple(seen) == before
@@ -319,7 +343,7 @@ async def test_deleted_config_cursor_in_receipt_is_not_installed_or_silently_acc
             object.__setattr__(receipt.writes.publications[0].frame, "config_cursor", None)
         return receipt
 
-    with pytest.raises(Graph.SnapshotMismatchError, match="integrity"):
+    with pytest.raises(Graph.SnapshotMismatchError, match="commitment"):
         await config_graph(successor, seen).run(
             Graph.values(value="business"),
             run_id="run",

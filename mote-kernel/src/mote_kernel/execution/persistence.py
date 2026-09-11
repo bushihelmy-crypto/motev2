@@ -1,12 +1,13 @@
 """Backend-independent commit evidence and cold-recovery materialization."""
 
 import json
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Generic, Protocol, TypeVar
 
 from mote_kernel.config import Config, ConfigContractError, ConfigSnapshotKey, require_config
-from mote_kernel.execution.commit import GraphCommitKey, GraphTransition
+from mote_kernel.execution.commit import GraphCommitKey, GraphTransition, bind_transition_evidence
 from mote_kernel.execution.engine.admission import project_graph_outputs
 from mote_kernel.execution.engine.routing import graph_outputs_available
 from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
@@ -45,8 +46,11 @@ from mote_kernel.execution.run_context import (
     require_publication_confirmation,
 )
 from mote_kernel.state.graph_state import (
+    GraphActivationIdentity,
     GraphConfigCursor,
+    GraphEvidenceCommitment,
     GraphNodeId,
+    GraphRunId,
     GraphRunState,
     GraphRunStatus,
     GraphStateTransitionError,
@@ -56,39 +60,32 @@ from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
 
-
-def _frame_digest(
-    codec_id: str,
-    codec_version: int,
-    payload: bytes,
-    config_cursor: GraphConfigCursor | None,
-) -> str:
-    if not is_canonical_identity(codec_id) or type(codec_version) is not int or codec_version < 1:
-        raise SnapshotMismatchError("persistent frame codec identity and version must be canonical")
-    if type(payload) is not bytes:
-        raise SnapshotMismatchError("persistent frame integrity check failed")
-    cursor = None
-    if config_cursor is not None:
-        try:
-            cursor = GraphConfigCursor.admit(config_cursor)
-        except (TypeError, ValueError) as error:
-            raise SnapshotMismatchError("persistent frame Config cursor is malformed") from error
-        if cursor.digest is None:
-            raise SnapshotMismatchError("persistent frame Config requires an exact snapshot digest")
-    metadata = json.dumps(
-        (
-            codec_id,
-            codec_version,
-            (cursor.definition_id, cursor.definition_version, cursor.revision, cursor.digest)
-            if cursor is not None
-            else None,
-        ),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("ascii")
-    digest = sha256(b"mote.graph-frame\x00" + metadata + b"\x00")
-    digest.update(payload)
-    return digest.hexdigest()
+_DescriptorCommitmentParts = tuple[str, int, int, int]
+_ConfigCommitmentParts = tuple[str, int, int, str] | None
+_GraphInputCommitmentMetadata = tuple[
+    GraphRunId,
+    int,
+    tuple[GraphNodeId, ...],
+    GraphRunId,
+    _DescriptorCommitmentParts,
+    str,
+    int,
+    _ConfigCommitmentParts,
+]
+_PublicationCommitmentMetadata = tuple[
+    GraphRunId,
+    int,
+    tuple[GraphNodeId, ...],
+    GraphRunId,
+    int,
+    GraphNodeId,
+    _DescriptorCommitmentParts,
+    int,
+    str,
+    str,
+    int,
+    _ConfigCommitmentParts,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,77 +93,234 @@ class EncodedFrame:
     codec_id: str
     codec_version: int
     payload: bytes
-    frame_digest: str
     config_cursor: GraphConfigCursor | None = None
 
     def __post_init__(self) -> None:
-        expected = _frame_digest(self.codec_id, self.codec_version, self.payload, self.config_cursor)
-        if type(self.frame_digest) is not str or self.frame_digest != expected:
-            raise SnapshotMismatchError("persistent frame integrity check failed")
+        if not is_canonical_identity(self.codec_id) or type(self.codec_version) is not int or self.codec_version < 1:
+            raise SnapshotMismatchError("persistent frame codec identity and version must be canonical")
+        if type(self.payload) is not bytes:
+            raise SnapshotMismatchError("persistent frame payload must be exact immutable bytes")
+        if self.config_cursor is not None:
+            try:
+                cursor = GraphConfigCursor.admit(self.config_cursor)
+            except (TypeError, ValueError) as error:
+                raise SnapshotMismatchError("persistent frame Config cursor is malformed") from error
+            if cursor.digest is None:
+                raise SnapshotMismatchError("persistent frame Config requires an exact snapshot digest")
 
     @classmethod
-    def capture(
-        cls,
-        codec_id: str,
-        codec_version: int,
-        payload: bytes,
-        config_cursor: GraphConfigCursor | None = None,
-    ) -> "EncodedFrame":
-        return cls(
-            codec_id,
-            codec_version,
-            payload,
-            _frame_digest(codec_id, codec_version, payload, config_cursor),
-            config_cursor,
+    def admit(cls, frame: "EncodedFrame", /) -> "EncodedFrame":
+        if type(frame) is not cls:
+            raise SnapshotMismatchError("persistent frame must be an exact encoded envelope")
+        try:
+            return cls(frame.codec_id, frame.codec_version, frame.payload, frame.config_cursor)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("persistent frame is malformed") from error
+
+
+def _descriptor_parts(descriptor: FrameDescriptorIdentity) -> _DescriptorCommitmentParts:
+    return (
+        descriptor.definition_id,
+        descriptor.definition_version,
+        descriptor.frame_kind.value,
+        descriptor.owner_ordinal,
+    )
+
+
+def _config_parts(cursor: GraphConfigCursor | None) -> _ConfigCommitmentParts:
+    if cursor is None:
+        return None
+    return (cursor.definition_id, cursor.definition_version, cursor.revision, cursor.digest or "")
+
+
+def _commitment(
+    domain: bytes,
+    metadata: _GraphInputCommitmentMetadata | _PublicationCommitmentMetadata,
+    payload: bytes,
+) -> GraphEvidenceCommitment:
+    encoded = json.dumps(metadata, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    digest = sha256(domain + b"\x00" + encoded + b"\x00")
+    digest.update(payload)
+    return GraphEvidenceCommitment(digest.digest())
+
+
+def _graph_input_commitment(
+    coordinate: GraphInputAvailabilityCoordinate[GraphValueT],
+    frame: EncodedFrame,
+    birth: GraphCommitKey,
+) -> GraphEvidenceCommitment:
+    return _commitment(
+        b"mote.graph-input-evidence.v1",
+        (
+            birth.run_id,
+            birth.revision,
+            coordinate.scope_run.scope,
+            coordinate.scope_run.graph_run_id,
+            _descriptor_parts(coordinate.descriptor),
+            frame.codec_id,
+            frame.codec_version,
+            _config_parts(frame.config_cursor),
+        ),
+        frame.payload,
+    )
+
+
+def _publication_commitment(
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT],
+    frame: EncodedFrame,
+    birth: GraphCommitKey,
+    provenance: ExecutionPublicationProvenance,
+) -> GraphEvidenceCommitment:
+    token = require_publication_confirmation(birth.revision, provenance)
+    activation = coordinate.activation
+    return _commitment(
+        b"mote.graph-publication-evidence.v1",
+        (
+            birth.run_id,
+            birth.revision,
+            activation.scope_run.scope,
+            activation.scope_run.graph_run_id,
+            activation.superstep,
+            activation.node_id,
+            _descriptor_parts(coordinate.descriptor),
+            token.generation,
+            token.attempt_id,
+            frame.codec_id,
+            frame.codec_version,
+            _config_parts(frame.config_cursor),
+        ),
+        frame.payload,
+    )
+
+
+def _admit_graph_input_coordinate(
+    coordinate: GraphInputAvailabilityCoordinate[GraphValueT],
+) -> GraphInputAvailabilityCoordinate[GraphValueT]:
+    if type(coordinate) is not GraphInputAvailabilityCoordinate:
+        raise SnapshotMismatchError("persistent graph input coordinate is malformed")
+    try:
+        scope_run = ScopeRunCoordinate(tuple(coordinate.scope_run.scope), coordinate.scope_run.graph_run_id)
+        descriptor = FrameDescriptorIdentity(
+            coordinate.descriptor.definition_id,
+            coordinate.descriptor.definition_version,
+            coordinate.descriptor.frame_kind,
+            coordinate.descriptor.owner_ordinal,
         )
+        return GraphInputAvailabilityCoordinate(scope_run, descriptor)
+    except (AttributeError, GraphValidationError, SnapshotMismatchError, TypeError, ValueError) as error:
+        raise SnapshotMismatchError("persistent graph input coordinate is malformed") from error
+
+
+def _admit_publication_coordinate(
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT],
+) -> PublicationAvailabilityCoordinate[GraphValueT]:
+    if type(coordinate) is not PublicationAvailabilityCoordinate:
+        raise SnapshotMismatchError("persistent publication coordinate is malformed")
+    try:
+        activation = coordinate.activation
+        scope_run = ScopeRunCoordinate(tuple(activation.scope_run.scope), activation.scope_run.graph_run_id)
+        stable = StableActivation(scope_run, activation.superstep, activation.node_id)
+        descriptor = FrameDescriptorIdentity(
+            coordinate.descriptor.definition_id,
+            coordinate.descriptor.definition_version,
+            coordinate.descriptor.frame_kind,
+            coordinate.descriptor.owner_ordinal,
+        )
+        return PublicationAvailabilityCoordinate(stable, descriptor)
+    except (AttributeError, GraphValidationError, SnapshotMismatchError, TypeError, ValueError) as error:
+        raise SnapshotMismatchError("persistent publication coordinate is malformed") from error
+
+
+def _admit_commit_key(key: GraphCommitKey) -> GraphCommitKey:
+    if type(key) is not GraphCommitKey:
+        raise SnapshotMismatchError("persistent evidence requires an exact commit key")
+    try:
+        return GraphCommitKey(key.run_id, key.revision)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise SnapshotMismatchError("persistent evidence commit key is malformed") from error
 
 
 @dataclass(frozen=True, slots=True)
 class PersistedGraphInput(Generic[GraphValueT]):
     coordinate: GraphInputAvailabilityCoordinate[GraphValueT]
     frame: EncodedFrame
+    birth: GraphCommitKey
+    evidence: GraphEvidenceCommitment
 
     def __post_init__(self) -> None:
-        coordinate = self.coordinate
-        if (
-            type(coordinate) is not GraphInputAvailabilityCoordinate
-            or type(coordinate.scope_run) is not ScopeRunCoordinate
-            or type(coordinate.descriptor) is not FrameDescriptorIdentity
-            or type(self.frame) is not EncodedFrame
-        ):
-            raise SnapshotMismatchError("persistent graph input has malformed typed evidence")
-        replace(coordinate.scope_run)
+        coordinate = _admit_graph_input_coordinate(self.coordinate)
+        frame = EncodedFrame.admit(self.frame)
+        birth = _admit_commit_key(self.birth)
         try:
-            replace(coordinate.descriptor)
-        except GraphValidationError as error:
-            raise SnapshotMismatchError("persistent graph input descriptor is malformed") from error
-        replace(self.frame)
+            evidence = GraphEvidenceCommitment.admit(self.evidence)
+        except ValueError as error:
+            raise SnapshotMismatchError("persistent graph input commitment is malformed") from error
+        if birth.run_id != coordinate.scope_run.graph_run_id or birth.revision != 0:
+            raise SnapshotMismatchError("persistent graph input birth commit is inconsistent")
+        if evidence != _graph_input_commitment(coordinate, frame, birth):
+            raise SnapshotMismatchError("persistent graph input commitment does not match its complete evidence")
+
+    def admit(self) -> "PersistedGraphInput[GraphValueT]":
+        if type(self) is not PersistedGraphInput:
+            raise SnapshotMismatchError("persistent graph input must be an exact typed record")
+        try:
+            return PersistedGraphInput(self.coordinate, self.frame, self.birth, self.evidence)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("persistent graph input is malformed") from error
+
+
+def _capture_graph_input(
+    coordinate: GraphInputAvailabilityCoordinate[GraphValueT],
+    frame: EncodedFrame,
+    birth: GraphCommitKey,
+) -> PersistedGraphInput[GraphValueT]:
+    return PersistedGraphInput(coordinate, frame, birth, _graph_input_commitment(coordinate, frame, birth))
 
 
 @dataclass(frozen=True, slots=True)
 class PersistedPublication(Generic[GraphValueT]):
     coordinate: PublicationAvailabilityCoordinate[GraphValueT]
     frame: EncodedFrame
-    acknowledged_revision: int
+    birth: GraphCommitKey
     provenance: ExecutionPublicationProvenance
+    evidence: GraphEvidenceCommitment
 
     def __post_init__(self) -> None:
-        coordinate = self.coordinate
-        if (
-            type(coordinate) is not PublicationAvailabilityCoordinate
-            or type(coordinate.activation) is not StableActivation
-            or type(coordinate.descriptor) is not FrameDescriptorIdentity
-            or type(self.frame) is not EncodedFrame
-        ):
-            raise SnapshotMismatchError("persistent publication has malformed typed evidence")
-        replace(coordinate.activation)
-        replace(coordinate.activation.scope_run)
+        coordinate = _admit_publication_coordinate(self.coordinate)
+        frame = EncodedFrame.admit(self.frame)
+        birth = _admit_commit_key(self.birth)
         try:
-            replace(coordinate.descriptor)
-        except GraphValidationError as error:
-            raise SnapshotMismatchError("persistent publication descriptor is malformed") from error
-        replace(self.frame)
-        require_publication_confirmation(self.acknowledged_revision, self.provenance)
+            provenance = ExecutionPublicationProvenance.admit(self.provenance)
+            evidence = GraphEvidenceCommitment.admit(self.evidence)
+        except ValueError as error:
+            raise SnapshotMismatchError("persistent publication confirmation is malformed") from error
+        if birth.run_id != coordinate.activation.scope_run.graph_run_id or birth.revision < 1:
+            raise SnapshotMismatchError("persistent publication birth commit is inconsistent")
+        if evidence != _publication_commitment(coordinate, frame, birth, provenance):
+            raise SnapshotMismatchError("persistent publication commitment does not match its complete evidence")
+
+    def admit(self) -> "PersistedPublication[GraphValueT]":
+        if type(self) is not PersistedPublication:
+            raise SnapshotMismatchError("persistent publication must be an exact typed record")
+        try:
+            return PersistedPublication(self.coordinate, self.frame, self.birth, self.provenance, self.evidence)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("persistent publication is malformed") from error
+
+
+def _capture_publication(
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT],
+    frame: EncodedFrame,
+    birth: GraphCommitKey,
+    provenance: ExecutionPublicationProvenance,
+) -> PersistedPublication[GraphValueT]:
+    return PersistedPublication(
+        coordinate,
+        frame,
+        birth,
+        provenance,
+        _publication_commitment(coordinate, frame, birth, provenance),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,21 +330,31 @@ class GraphPersistenceWriteSet(Generic[GraphValueT]):
     publications: tuple[PersistedPublication[GraphValueT], ...]
 
     def __post_init__(self) -> None:
-        if type(self.commit_key) is not GraphCommitKey:
-            raise SnapshotMismatchError("persistent write set requires a typed commit key")
-        replace(self.commit_key)
-        if type(self.graph_inputs) is not tuple or any(
-            type(item) is not PersistedGraphInput for item in self.graph_inputs
+        commit_key = _admit_commit_key(self.commit_key)
+        if (
+            type(self.graph_inputs) is not tuple
+            or len(self.graph_inputs) > 1
+            or any(type(item) is not PersistedGraphInput for item in self.graph_inputs)
         ):
             raise SnapshotMismatchError("persistent graph input writes must be typed immutable records")
-        if type(self.publications) is not tuple or any(
-            type(item) is not PersistedPublication for item in self.publications
+        if (
+            type(self.publications) is not tuple
+            or len(self.publications) > 1
+            or any(type(item) is not PersistedPublication for item in self.publications)
         ):
             raise SnapshotMismatchError("persistent publication writes must be typed immutable records")
-        for graph_input in self.graph_inputs:
-            replace(graph_input)
-        for publication in self.publications:
-            replace(publication)
+        graph_inputs = tuple(item.admit() for item in self.graph_inputs)
+        publications = tuple(item.admit() for item in self.publications)
+        if any(item.birth != commit_key for item in (*graph_inputs, *publications)):
+            raise SnapshotMismatchError("persistent writes must be born in their enclosing commit")
+
+    def admit(self) -> "GraphPersistenceWriteSet[GraphValueT]":
+        if type(self) is not GraphPersistenceWriteSet:
+            raise SnapshotMismatchError("persistent commit requires an exact complete write set")
+        try:
+            return GraphPersistenceWriteSet(self.commit_key, self.graph_inputs, self.publications)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("persistent write set is malformed") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,12 +373,61 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
             raise SnapshotMismatchError("persistent commit expected revision must be absent or a non-negative integer")
         try:
             validate_graph_run_state(self.candidate_state)
-        except GraphStateTransitionError as error:
+        except (AttributeError, GraphStateTransitionError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("persistent commit candidate is malformed") from error
-        ScopeRunCoordinate(self.scope, self.candidate_state.run_id)
+        scope_run = ScopeRunCoordinate(self.scope, self.candidate_state.run_id)
         if type(self.writes) is not GraphPersistenceWriteSet:
-            raise SnapshotMismatchError("persistent commit requires a typed complete write set")
-        replace(self.writes)
+            raise SnapshotMismatchError("persistent commit requires an exact complete write set")
+        writes = self.writes.admit()
+        key = writes.commit_key
+        if key != GraphCommitKey(self.candidate_state.run_id, self.candidate_state.revision):
+            raise SnapshotMismatchError("persistent write set is not bound to its candidate state")
+        expected = None if self.candidate_state.revision == 0 else self.candidate_state.revision - 1
+        if self.expected_revision != expected:
+            raise SnapshotMismatchError("persistent commit CAS revision does not name its predecessor")
+        if self.candidate_state.graph_input_evidence is None or any(
+            item.evidence is None for item in self.candidate_state.settled_publications
+        ):
+            raise SnapshotMismatchError("durable candidate state is missing value evidence commitments")
+        if self.candidate_state.revision == 0:
+            if len(writes.graph_inputs) != 1:
+                raise SnapshotMismatchError("durable StartGraphRun requires exactly one graph input")
+            graph_input = writes.graph_inputs[0]
+            if (
+                graph_input.coordinate.scope_run != scope_run
+                or graph_input.evidence != self.candidate_state.graph_input_evidence
+            ):
+                raise SnapshotMismatchError("durable graph input is not bound to its authoritative state")
+        for publication in writes.publications:
+            activation = publication.coordinate.activation
+            if activation.scope_run != scope_run:
+                raise SnapshotMismatchError("durable publication belongs to a different scoped run")
+            identity = GraphActivationIdentity(
+                activation.scope_run.graph_run_id,
+                activation.superstep,
+                activation.node_id,
+            )
+            matches = tuple(
+                item for item in self.candidate_state.settled_publications if item.reference.activation == identity
+            )
+            if len(matches) != 1:
+                raise SnapshotMismatchError("durable publication lacks its authoritative settlement")
+            settlement = matches[0]
+            token = require_publication_confirmation(publication.birth.revision, publication.provenance)
+            if (
+                settlement.commit_revision != publication.birth.revision
+                or settlement.execution != token
+                or settlement.evidence != publication.evidence
+            ):
+                raise SnapshotMismatchError("durable publication does not match its authoritative settlement")
+
+    def admit(self) -> "GraphPersistenceCommit[GraphValueT]":
+        if type(self) is not GraphPersistenceCommit:
+            raise SnapshotMismatchError("persistence must return an exact commit request")
+        try:
+            return GraphPersistenceCommit(self.scope, self.expected_revision, self.candidate_state, self.writes)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("persistent commit request is malformed") from error
 
 
 class GraphPersistenceWriter(Protocol[GraphValueT]):
@@ -239,7 +452,7 @@ def _encode_frame(
     if codec.encode(decoded) != payload or codec.encode(values) != payload:
         raise GraphValueAdmissionError("persistent codec must have a deterministic canonical round trip")
     config = frame.activation_config
-    return EncodedFrame.capture(
+    return EncodedFrame(
         codec.codec_id,
         codec.version,
         payload,
@@ -259,36 +472,58 @@ class DurableGraphCommit(Generic[GraphValueT]):
             raise GraphValidationError("durable graph commit requires a typed codec and writer")
         self.codec.validate()
 
+    def admit(self) -> "DurableGraphCommit[GraphValueT]":
+        if type(self) is not DurableGraphCommit:
+            raise GraphValidationError("durable recovery requires its durable commit capability")
+        try:
+            if type(self.codec) is not FrameCodec or not callable(self.writer):
+                raise GraphValidationError("durable graph commit requires a typed codec and writer")
+            self.codec.validate()
+        except (AttributeError, TypeError, ValueError) as error:
+            raise GraphValidationError("durable graph commit capability is malformed") from error
+        return self
+
     async def __call__(self, transition: GraphTransition[GraphValueT], /) -> GraphRunState:
         writes = transition.writes
+        graph_inputs = tuple(
+            _capture_graph_input(
+                evidence.coordinate,
+                _encode_frame(evidence.frame, self.codec),
+                writes.commit_key,
+            )
+            for evidence in writes.graph_inputs
+        )
+        publications = tuple(
+            _capture_publication(
+                evidence.coordinate,
+                _encode_frame(evidence.frame, self.codec),
+                writes.commit_key,
+                evidence.provenance,
+            )
+            for evidence in writes.publications
+        )
+        bound = bind_transition_evidence(
+            transition,
+            graph_input=graph_inputs[0].evidence if graph_inputs else None,
+            publication=publications[0].evidence if publications else None,
+        )
         request = GraphPersistenceCommit(
             tuple(GraphNodeId(segment) for segment in transition.scope),
             transition.previous_state.revision if transition.previous_state is not None else None,
-            transition.candidate_state,
+            bound.candidate_state,
             GraphPersistenceWriteSet(
                 writes.commit_key,
-                tuple(
-                    PersistedGraphInput(evidence.coordinate, _encode_frame(evidence.frame, self.codec))
-                    for evidence in writes.graph_inputs
-                ),
-                tuple(
-                    PersistedPublication(
-                        evidence.coordinate,
-                        _encode_frame(evidence.frame, self.codec),
-                        writes.commit_key.revision,
-                        evidence.provenance,
-                    )
-                    for evidence in writes.publications
-                ),
+                graph_inputs,
+                publications,
             ),
         )
+        baseline = deepcopy(request.admit())
         confirmed = await self.writer(request)
-        if type(confirmed) is not GraphPersistenceCommit:
+        if request.admit() != baseline:
             raise SnapshotMismatchError("persistence must confirm the exact state and complete value write set")
-        confirmed = replace(confirmed)
-        if confirmed != request:
+        if type(confirmed) is not GraphPersistenceCommit or confirmed.admit() != baseline:
             raise SnapshotMismatchError("persistence must confirm the exact state and complete value write set")
-        return transition.candidate_state
+        return bound.candidate_state
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,15 +536,33 @@ class GraphCheckpoint(Generic[GraphValueT]):
     publications: tuple[PersistedPublication[GraphValueT], ...]
 
     def __post_init__(self) -> None:
-        if type(self.root_state) is not GraphRunState:
-            raise SnapshotMismatchError("checkpoint requires an authoritative root state")
-        if type(self.child_runs) is not tuple or any(
-            type(item) not in (ScopedStateBinding, UncreatedGraphRun)
-            or type(item.scope_run) is not ScopeRunCoordinate
-            or (isinstance(item, ScopedStateBinding) and type(item.state) is not GraphRunState)
-            for item in self.child_runs
-        ):
+        try:
+            validate_graph_run_state(self.root_state)
+        except (AttributeError, GraphStateTransitionError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("checkpoint requires an authoritative root state") from error
+        if type(self.child_runs) is not tuple:
             raise SnapshotMismatchError("checkpoint child states must be typed immutable bindings")
+        admitted_children: list[ScopedRunEvidence] = []
+        for child in self.child_runs:
+            try:
+                if type(child) is ScopedStateBinding:
+                    scope_run = ScopeRunCoordinate(tuple(child.scope_run.scope), child.scope_run.graph_run_id)
+                    validate_graph_run_state(child.state)
+                    admitted = ScopedStateBinding(scope_run, child.state)
+                    _ = admitted.parent_activation
+                elif type(child) is UncreatedGraphRun:
+                    admitted = UncreatedGraphRun(
+                        ScopeRunCoordinate(tuple(child.scope_run.scope), child.scope_run.graph_run_id)
+                    )
+                else:
+                    raise SnapshotMismatchError("checkpoint child state has an unsupported variant")
+            except (AttributeError, GraphStateTransitionError, SnapshotMismatchError, TypeError, ValueError) as error:
+                raise SnapshotMismatchError("checkpoint child states must be typed immutable bindings") from error
+            admitted_children.append(admitted)
+        if tuple(admitted_children) != tuple(sorted(admitted_children, key=lambda item: item.scope_run)):
+            raise SnapshotMismatchError("checkpoint child evidence must be canonical and distinct")
+        if len({item.scope_run for item in admitted_children}) != len(admitted_children):
+            raise SnapshotMismatchError("checkpoint child evidence repeats one scoped run")
         if type(self.graph_inputs) is not tuple or any(
             type(item) is not PersistedGraphInput for item in self.graph_inputs
         ):
@@ -318,14 +571,76 @@ class GraphCheckpoint(Generic[GraphValueT]):
             type(item) is not PersistedPublication for item in self.publications
         ):
             raise SnapshotMismatchError("checkpoint publications must be typed immutable records")
-        for child in self.child_runs:
-            replace(child.scope_run)
-            if isinstance(child, UncreatedGraphRun):
-                replace(child)
-        for graph_input in self.graph_inputs:
-            replace(graph_input)
-        for publication in self.publications:
-            replace(publication)
+        graph_inputs = tuple(item.admit() for item in self.graph_inputs)
+        publications = tuple(item.admit() for item in self.publications)
+        if graph_inputs != tuple(sorted(graph_inputs, key=lambda item: item.coordinate)):
+            raise SnapshotMismatchError("checkpoint graph inputs must be canonical and distinct")
+        if publications != tuple(sorted(publications, key=lambda item: item.coordinate)):
+            raise SnapshotMismatchError("checkpoint publications must be canonical and distinct")
+        if len({item.coordinate for item in graph_inputs}) != len(graph_inputs):
+            raise SnapshotMismatchError("checkpoint repeats one graph input coordinate")
+        if len({item.coordinate for item in publications}) != len(publications):
+            raise SnapshotMismatchError("checkpoint repeats one publication coordinate")
+
+    def admit(self) -> "GraphCheckpoint[GraphValueT]":
+        if type(self) is not GraphCheckpoint:
+            raise SnapshotMismatchError("checkpoint must be an exact typed record")
+        try:
+            return GraphCheckpoint(
+                self.root_state,
+                self.child_runs,
+                self.graph_inputs,
+                self.publications,
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("checkpoint is malformed") from error
+
+    @property
+    def config_cursors(self) -> tuple[GraphConfigCursor, ...]:
+        states = (self.root_state, *(item.state for item in self.child_runs if isinstance(item, ScopedStateBinding)))
+        try:
+            for state in states:
+                validate_graph_run_state(state)
+        except GraphStateTransitionError as error:
+            raise SnapshotMismatchError("checkpoint contains a malformed authoritative state") from error
+        cursors = {state.config_cursor for state in states if state.config_digest is not None}
+        cursors.update(
+            item.frame.config_cursor
+            for item in (*self.graph_inputs, *self.publications)
+            if item.frame.config_cursor is not None
+        )
+        return tuple(sorted(cursors))
+
+    def admit_child_reads(
+        self,
+        loaded: "GraphCheckpoint[GraphValueT]",
+        children: tuple[ScopeRunCoordinate, ...],
+    ) -> "GraphCheckpoint[GraphValueT]":
+        current = self.admit()
+        loaded = loaded.admit()
+        previous_states = tuple(item for item in current.child_runs if isinstance(item, ScopedStateBinding))
+        loaded_states = tuple(item for item in loaded.child_runs if isinstance(item, ScopedStateBinding))
+        previous_family = GraphCheckpoint(
+            current.root_state,
+            previous_states,
+            current.graph_inputs,
+            current.publications,
+        )
+        loaded_family = GraphCheckpoint(
+            loaded.root_state,
+            loaded_states,
+            loaded.graph_inputs,
+            loaded.publications,
+        )
+        if previous_family != loaded_family:
+            raise SnapshotMismatchError("family facts changed during an authority-constrained child reread")
+        expected = {item.scope_run for item in current.child_runs if isinstance(item, UncreatedGraphRun)} | set(
+            children
+        )
+        actual = tuple(item.scope_run for item in loaded.child_runs if isinstance(item, UncreatedGraphRun))
+        if len(actual) != len(expected) or set(actual) != expected:
+            raise SnapshotMismatchError("child reread must prove exactly the requested negative reads")
+        return loaded
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,13 +653,21 @@ class GraphRecovery(Generic[GraphValueT]):
 
     def __post_init__(self) -> None:
         if type(self.checkpoint) is not GraphCheckpoint:
-            raise SnapshotMismatchError("graph recovery requires a typed checkpoint")
-        replace(self.checkpoint)
+            raise SnapshotMismatchError("durable recovery requires an exact typed checkpoint")
         if type(self.commit) is not DurableGraphCommit:
             raise GraphValidationError("durable recovery requires its durable commit capability")
-        replace(self.commit)
+        self.checkpoint.admit()
+        self.commit.admit()
         if type(self.configs) is not tuple:
             raise SnapshotMismatchError("recovery Config capabilities must be an immutable tuple")
+
+    def admit(self) -> "GraphRecovery[GraphValueT]":
+        if type(self) is not GraphRecovery:
+            raise SnapshotMismatchError("durable recovery requires an exact typed capability")
+        try:
+            return GraphRecovery(self.checkpoint, self.commit, self.configs)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("durable recovery capability is malformed") from error
 
 
 def _resolved_config(cursor: GraphConfigCursor, configs: dict[ConfigSnapshotKey, Config]) -> Config:
@@ -360,6 +683,7 @@ def _decode_frame(
     codec: FrameCodec[GraphValueT],
     configs: dict[ConfigSnapshotKey, Config],
 ) -> tuple[_GraphValues[GraphValueT], Config | None]:
+    frame = EncodedFrame.admit(frame)
     if frame.codec_id != codec.codec_id or frame.codec_version != codec.version:
         raise SnapshotMismatchError("persistent frame codec identity or version does not match")
     values = codec.decode(frame.payload)
@@ -375,6 +699,7 @@ def restore_checkpoint(
 ) -> ScopedFrameIndex[GraphValueT]:
     """Materialize durable evidence before the existing fence/resume admission."""
 
+    recovery = recovery.admit()
     checkpoint = recovery.checkpoint
     lineage = lineage_states(checkpoint.root_state, checkpoint.child_runs)
     configs: dict[ConfigSnapshotKey, Config] = {}
@@ -391,6 +716,36 @@ def restore_checkpoint(
         require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
         if binding.state.config_digest is not None:
             _resolved_config(binding.state.config_cursor, configs)
+        if binding.state.graph_input_evidence is None or any(
+            settlement.evidence is None for settlement in binding.state.settled_publications
+        ):
+            raise SnapshotMismatchError("durable state is missing its value evidence commitments")
+    bindings = {binding.scope_run: binding.state for binding in lineage.bindings}
+    for graph_input in checkpoint.graph_inputs:
+        state = bindings.get(graph_input.coordinate.scope_run)
+        if state is None or state.graph_input_evidence != graph_input.evidence:
+            raise SnapshotMismatchError("persistent graph input is not bound to its authoritative state")
+    for publication in checkpoint.publications:
+        activation = publication.coordinate.activation
+        state = bindings.get(activation.scope_run)
+        identity = GraphActivationIdentity(
+            activation.scope_run.graph_run_id,
+            activation.superstep,
+            activation.node_id,
+        )
+        matches = (
+            ()
+            if state is None
+            else tuple(item for item in state.settled_publications if item.reference.activation == identity)
+        )
+        token = require_publication_confirmation(publication.birth.revision, publication.provenance)
+        if (
+            len(matches) != 1
+            or matches[0].commit_revision != publication.birth.revision
+            or matches[0].execution != token
+            or matches[0].evidence != publication.evidence
+        ):
+            raise SnapshotMismatchError("persistent publication is not bound to its authoritative settlement")
     frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
     try:
         for graph_input in checkpoint.graph_inputs:
@@ -402,16 +757,14 @@ def restore_checkpoint(
         for publication in checkpoint.publications:
             publication_coordinate = publication.coordinate
             scoped_graph = _compiled_graph_at_scope(graph, publication_coordinate.activation.scope_run.scope)
-            descriptor = scoped_graph.transition.publications.get(publication_coordinate.activation.node_id)
-            if descriptor is None:
-                raise SnapshotMismatchError("persistent publication references an unknown node")
+            descriptor = scoped_graph.transition.publications[publication_coordinate.activation.node_id]
             values, config = _decode_frame(publication.frame, recovery.commit.codec, configs)
             output = _make_node_output_frame(values, descriptor.declarations, config)
             frames = frames.add_publication(
                 ConfirmedPublication(
                     publication_coordinate,
                     output,
-                    publication.acknowledged_revision,
+                    publication.birth.revision,
                     publication.provenance,
                 )
             )

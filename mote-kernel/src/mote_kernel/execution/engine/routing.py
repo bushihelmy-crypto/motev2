@@ -281,7 +281,8 @@ def settled_activation_admission_error(
     reference to a node or route that this graph never declared.
     """
 
-    for reference in state.settled_activations:
+    for settlement in state.settled_publications:
+        reference = settlement.reference
         activation = reference.activation
         node_id = activation.node_id
         if node_id not in graph.nodes:
@@ -380,7 +381,8 @@ def causal_input_source_for_cause(
 
     reference = cause.references[0]
     expected = GraphActivationIdentity(state.run_id, target_superstep - 1, reference.activation.node_id)
-    if reference.activation != expected or reference not in state.settled_activations:
+    settled = frozenset(item.reference for item in state.settled_publications)
+    if reference.activation != expected or reference not in settled:
         raise InvalidRoutingCommandError("predecessor activation lacks immediate committed settlement evidence")
     sources = tuple(port for port in source.sources if port.node_id == reference.activation.node_id)
     if len(sources) != 1:
@@ -411,7 +413,7 @@ def _pending_join_arrivals(
     state: GraphRunState,
     declared_joins: Mapping[GraphJoinIdentity, CompiledJoin],
 ) -> Mapping[GraphJoinOccurrenceIdentity, tuple[ActivationReference, ...]]:
-    settled = frozenset(state.settled_activations)
+    settled = frozenset(item.reference for item in state.settled_publications)
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
     for progress in state.join_progress:
         occurrence = progress.occurrence
@@ -484,7 +486,8 @@ def _frontier_gate_error(
                 return f"frontier activation {node.node_id!r} has an unknown Join occurrence"
             if any(plan.occurrence_for(reference.activation) != occurrence for reference in cause.references):
                 return f"frontier activation {node.node_id!r} has misprojected Join evidence"
-        if any(reference not in state.settled_activations for reference in cause.references):
+        settled = frozenset(item.reference for item in state.settled_publications)
+        if any(reference not in settled for reference in cause.references):
             return f"frontier activation {node.node_id!r} lacks committed predecessor settlement evidence"
     return None
 
@@ -497,7 +500,8 @@ def _historical_join_arrivals(
 
     arrivals: dict[GraphJoinOccurrenceIdentity, list[ActivationReference]] = {}
     seen_sources: dict[tuple[GraphJoinOccurrenceIdentity, GraphNodeId], ActivationReference] = {}
-    for reference in state.settled_activations:
+    for settlement in state.settled_publications:
+        reference = settlement.reference
         activation = reference.activation
         if activation.superstep >= state.superstep:
             continue
@@ -536,7 +540,9 @@ def _post_advance_error(
     """
 
     previous = tuple(
-        reference for reference in state.settled_activations if reference.activation.superstep == state.superstep - 1
+        settlement.reference
+        for settlement in state.settled_publications
+        if settlement.reference.activation.superstep == state.superstep - 1
     )
     if not previous:
         return "non-initial frontier has no committed predecessor settlements"

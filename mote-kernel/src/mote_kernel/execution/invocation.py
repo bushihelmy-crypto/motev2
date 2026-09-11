@@ -373,10 +373,17 @@ def _validate_publication_records(
         ):
             raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
         token = require_publication_confirmation(record.acknowledged_revision, record.provenance)
-        if record.acknowledged_revision > binding.state.revision:
-            raise SnapshotMismatchError("continuation publication has inconsistent coordinates")
-        if token.generation > binding.state.execution_sequence:
-            raise SnapshotMismatchError("continuation publication has inconsistent execution provenance")
+        matches = tuple(
+            item
+            for item in binding.state.settled_publications
+            if item.reference.activation.run_id == coordinate.activation.scope_run.graph_run_id
+            and item.reference.activation.superstep == coordinate.activation.superstep
+            and item.reference.activation.node_id == coordinate.activation.node_id
+        )
+        if len(matches) != 1 or matches[0].commit_revision != record.acknowledged_revision:
+            raise SnapshotMismatchError("continuation publication does not match its settlement commit")
+        if matches[0].execution != token:
+            raise SnapshotMismatchError("continuation publication does not match its settlement execution")
         try:
             _admit_node_output_frame(record.frame, publication.declarations)
         except GraphValueAdmissionError as error:
@@ -465,18 +472,19 @@ def _validate_frame_index(
     _validate_child_boundary_records(graph, lineage, frames.child_boundaries)
 
 
-def _validate_child_run_evidence(
+def child_run_reads(
     graph: CompiledGraph[GraphValueT],
     lineage: _PlannedLineage,
     *,
     complete: bool,
-) -> None:
+) -> tuple[ScopeRunCoordinate, ...]:
     required: set[ScopeRunCoordinate] = set()
     uncreated_allowed: set[ScopeRunCoordinate] = set()
     for binding in lineage.bindings:
         scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
         state = binding.state
-        for reference in state.settled_activations:
+        for settlement in state.settled_publications:
+            reference = settlement.reference
             if reference.activation.node_id in scoped_graph.nested_graphs:
                 required.add(child_scope_run_for_activation(binding.scope_run, reference.activation))
         for node in state.frontier.nodes:
@@ -491,8 +499,12 @@ def _validate_child_run_evidence(
     uncreated = {record.scope_run for record in lineage.uncreated}
     if not uncreated <= uncreated_allowed or existing & uncreated or not existing <= required:
         raise SnapshotMismatchError("child run evidence does not match an authoritative parent activation")
-    if complete and existing | uncreated != required:
+    missing = required - existing - uncreated
+    if not missing <= uncreated_allowed:
+        raise SnapshotMismatchError("settled child activations require their durable snapshots")
+    if complete and missing:
         raise SnapshotMismatchError("complete evidence requires each child snapshot or explicit uncreated proof")
+    return tuple(sorted(missing))
 
 
 def _validate_complete_context(
@@ -504,9 +516,9 @@ def _validate_complete_context(
     if admitted_inputs != frozenset(binding.scope_run for binding in lineage.bindings):
         raise SnapshotMismatchError("complete continuation must retain every scoped graph input")
     expected_publications = {
-        stable_activation(binding.scope_run, reference.activation)
+        stable_activation(binding.scope_run, settlement.reference.activation)
         for binding in lineage.bindings
-        for reference in binding.state.settled_activations
+        for settlement in binding.state.settled_publications
     }
     if expected_publications != {record.coordinate.activation for record in frames.publications}:
         raise SnapshotMismatchError("complete publications must exactly match the committed settlement ledger")
@@ -549,7 +561,7 @@ def validate_context(
     *,
     recovered: bool,
 ) -> None:
-    _validate_child_run_evidence(graph, lineage, complete=not recovered)
+    child_run_reads(graph, lineage, complete=not recovered)
     _validate_frame_index(graph, lineage, frames)
     if not recovered:
         _validate_complete_context(graph, lineage, frames)

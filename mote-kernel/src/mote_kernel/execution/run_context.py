@@ -108,20 +108,31 @@ class AdmittedGraphInput(Generic[GraphValueT]):
 class ExecutionPublicationProvenance:
     execution_token: GraphExecutionToken
 
+    def __post_init__(self) -> None:
+        try:
+            GraphExecutionToken.admit(self.execution_token)
+        except ValueError as error:
+            raise SnapshotMismatchError("publication has inconsistent execution provenance") from error
+
+    @classmethod
+    def admit(cls, provenance: ExecutionPublicationProvenance, /) -> ExecutionPublicationProvenance:
+        if type(provenance) is not cls:
+            raise ValueError("publication execution provenance is malformed")
+        try:
+            return cls(GraphExecutionToken.admit(provenance.execution_token))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("publication execution provenance is malformed") from error
+
 
 def require_publication_confirmation(
     acknowledged_revision: int,
     provenance: ExecutionPublicationProvenance,
 ) -> GraphExecutionToken:
-    if (
-        type(acknowledged_revision) is not int
-        or acknowledged_revision < 1
-        or type(provenance) is not ExecutionPublicationProvenance
-    ):
+    if type(acknowledged_revision) is not int or acknowledged_revision < 1:
         raise SnapshotMismatchError("publication has inconsistent coordinates")
     try:
-        return GraphExecutionToken.admit(provenance.execution_token)
-    except ValueError as error:
+        return ExecutionPublicationProvenance.admit(provenance).execution_token
+    except (AttributeError, TypeError, ValueError) as error:
         raise SnapshotMismatchError("publication has inconsistent execution provenance") from error
 
 

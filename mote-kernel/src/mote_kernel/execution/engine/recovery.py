@@ -307,7 +307,7 @@ class _RecoveryCycleSignature:
     config_cursor: GraphConfigCursor
     frontier: tuple[RecoveryFrontierNode, ...]
     join_progress: tuple[GraphJoinProgress, ...]
-    settled_activations: tuple[_CycleSettlementKey, ...]
+    settled_publications: tuple[_CycleSettlementKey, ...]
     absolute_publications: tuple[_CyclePublicationKey, ...]
     relative_publications: tuple[_CyclePublicationKey, ...]
     current_resume_inputs: tuple[_CycleFrameKey, ...]
@@ -465,13 +465,18 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
                     _atom(reference.route or ""),
                 )
             )
-    for reference in graph_state.settled_activations:
+    for settlement in graph_state.settled_publications:
+        reference = settlement.reference
         parts.extend(
             (
                 _atom(reference.activation.run_id),
                 str(reference.activation.superstep),
                 _atom(reference.activation.node_id),
                 _atom(reference.route or ""),
+                str(settlement.commit_revision),
+                str(settlement.execution.generation),
+                _atom(settlement.execution.attempt_id),
+                settlement.evidence.digest.hex() if settlement.evidence is not None else "",
             )
         )
     pending = tuple(
@@ -601,7 +606,7 @@ def _recovery_cycle_signature(
         for reference in node.cause.references
     }
     referenced_settlements.update(reference for progress in state.join_progress for reference in progress.arrived)
-    settled_activations: tuple[_CycleSettlementKey, ...] = tuple(
+    settled_publications: tuple[_CycleSettlementKey, ...] = tuple(
         sorted(
             (
                 (
@@ -618,7 +623,8 @@ def _recovery_cycle_signature(
                     reference.route,
                 )
             )
-            for reference in state.settled_activations
+            for settlement in state.settled_publications
+            for reference in (settlement.reference,)
             if reference in referenced_settlements
             or reference.activation.superstep in absolute_steps
             or 0 <= state.superstep - reference.activation.superstep <= window.relative_horizon
@@ -628,7 +634,7 @@ def _recovery_cycle_signature(
         config_cursor=state.config_cursor,
         frontier=tuple(_settlement_coordinate(state, node) for node in state.frontier.nodes),
         join_progress=state.join_progress,
-        settled_activations=settled_activations,
+        settled_publications=settled_publications,
         absolute_publications=absolute_publications,
         relative_publications=relative_publications,
         current_resume_inputs=current_resume_inputs,

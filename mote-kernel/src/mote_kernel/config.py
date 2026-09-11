@@ -368,7 +368,7 @@ def require_config(value: Config, /) -> Config:
     return value
 
 
-def _require_snapshot_store(store: ConfigSnapshotStore | None, /) -> ConfigSnapshotStore:
+def require_config_store(store: ConfigSnapshotStore | None, /) -> ConfigSnapshotStore:
     """Check the two async operations before crossing a persistence Port."""
 
     if store is None:
@@ -383,7 +383,7 @@ def _require_snapshot_store(store: ConfigSnapshotStore | None, /) -> ConfigSnaps
     return store
 
 
-def _require_config_resolver(resolver: ConfigResolver | None, /) -> ConfigResolver:
+def require_config_resolver(resolver: ConfigResolver | None, /) -> ConfigResolver:
     """Check the resolver capability before invoking an external provider."""
 
     if resolver is None:
@@ -426,7 +426,7 @@ async def save_config_snapshot(
 ) -> ConfigSnapshot:
     """Persist one revision and require an exact durable confirmation."""
 
-    store = _require_snapshot_store(store)
+    store = require_config_store(store)
     if type(snapshot) is not ConfigSnapshot:
         raise ConfigContractError("config persistence requires a ConfigSnapshot")
     snapshot = _revalidate_snapshot(snapshot, "config snapshot")
@@ -446,7 +446,7 @@ async def load_config_snapshot(
 ) -> ConfigSnapshot:
     """Load and admit one exact revision without a latest-version fallback."""
 
-    store = _require_snapshot_store(store)
+    store = require_config_store(store)
     if type(key) is not ConfigSnapshotKey:
         raise ConfigContractError("config loading requires a ConfigSnapshotKey")
     key = _revalidate_snapshot_key(key, "config loading key")
@@ -466,7 +466,7 @@ async def resolve_config(
 ) -> Config:
     """Resolve one snapshot and reject resolver-side revision substitution."""
 
-    resolver = _require_config_resolver(resolver)
+    resolver = require_config_resolver(resolver)
     if type(snapshot) is not ConfigSnapshot:
         raise ConfigContractError("config resolution requires a ConfigSnapshot")
     snapshot = _revalidate_snapshot(snapshot, "config snapshot")
@@ -493,8 +493,8 @@ async def recover_config(
     immutable snapshot that its state references.
     """
 
-    store = _require_snapshot_store(store)
-    resolver = _require_config_resolver(resolver)
+    store = require_config_store(store)
+    resolver = require_config_resolver(resolver)
     key = ConfigSnapshotKey.from_state(state)
     snapshot = await load_config_snapshot(store, key)
     config = await resolve_config(resolver, snapshot)

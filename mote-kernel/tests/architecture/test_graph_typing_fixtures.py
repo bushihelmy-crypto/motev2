@@ -17,6 +17,22 @@ class NegativeTypingCase:
 
 CASES = (
     NegativeTypingCase(
+        "agent_cross_request.py",
+        ("AgentStart[int]", 'parameter "request"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_cross_store.py",
+        ("PersistencePort[int]", 'parameter "persistence"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_no_state.py",
+        ("GraphRunState", 'parameter "request"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_no_commit_override.py",
+        ('No parameter named "commit"', "reportCallIssue"),
+    ),
+    NegativeTypingCase(
         "logging_node_none_sink.py",
         ('Argument of type "None"', 'parameter "sink"', "reportArgumentType"),
     ),

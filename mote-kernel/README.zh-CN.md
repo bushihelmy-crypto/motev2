@@ -44,13 +44,31 @@ authoritative state 和 non-optional opaque continuation；选择性恢复动作
 逐条收到 scoped reducer candidate 与完整写集，只有精确确认后才安装 state/value。仅传 state 不会读取缺失值，
 continuation 也不可序列化。所有 continuation（包括 partial handoff）保留原 commit capability：省略或传 `None`
 都继承原对象，改绑在执行前拒绝。持久恢复的读写共用绑定 commit 的同一个 codec；换能力必须重新读取权威 checkpoint，
-不能降级为内存提交。持久 frame 的唯一摘要覆盖 codec、payload 和 Config cursor，包括 cursor 缺席。
-当前持久化阶段交付类型化提交/恢复契约；Agent load 与后端接入的后续范围以
-[实施计划](docs/kernel-persistence-implementation-plan.zh-CN.md)为准。
+不能降级为内存提交。每个持久值只使用一份 State-owned evidence commitment，统一绑定 availability coordinate、
+descriptor、birth commit、codec、payload、Config cursor（含缺席）以及 publication settlement provenance。
+`Agent` 将权威读取、精确 Config 解析、执行权限和提交对账接入同一 seam；具体后端实现不进入 Kernel。
+阶段状态与验证记录以[实施计划](docs/kernel-persistence-implementation-plan.zh-CN.md)为准。
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。
 
 公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类；`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 以及 value admission/unavailability/publication errors 用于精确捕获。
+
+## 持久 Agent 入口
+
+`mote_kernel.Agent` 只保存不可变接线，不驻留 runtime state，也不是第二个 runner。构造时提供 `agent_id`、Graph
+装配函数、typed frame codec、`PersistencePort` 和 `AuthorityPort`。每次 `Agent.run(request)` 都按排他权限获取、
+权威读取、Graph 装配/准入、执行、业务结果投影、权限释放的顺序完成；执行任务全部收敛后才释放权限。
+
+- `AgentStart(run_id, values)` 只创建从未存在的 run；已有 run 必须报冲突。
+- `AgentResume(run_id, answers=())` 读取并继续已有 run，也用于终态回放。`AgentAnswer` 将返回的精确 interrupt
+  问题与 typed 业务回答配对；调用者不接触 state、continuation 或逐次替换 commit 的入口。
+- 可选 `AgentConfig` 提供 Config store/resolver 及精确初始 key；恢复只解析 state/frame 引用的历史快照。
+  Config 更新仍只由 Observe 消费并持久化；这里的 Config snapshot cursor 与已删除的 Observe 调用方 cursor 无关。
+- 未知 Graph 提交仅对账同一不可变请求；只有已证明 `NotApplied` 才在显式 `max_commit_attempts` 上限内重发。
+  权限失效、冲突、错误 receipt 或结果仍未知直接停止，不基于旧内存写 cleanup。工具执行对账属于 Runtime。
+
+[持久 Agent 导入示例](example/graph/durable_agent_import.py)复用原有业务拓扑和 codec，只注入 Ports，不选择数据库、
+传输协议或 Container。ReAct END 后的新任务仍由上层驱动。
 
 ## 文档导航
 

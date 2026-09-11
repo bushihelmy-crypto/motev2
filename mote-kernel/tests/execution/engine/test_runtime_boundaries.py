@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 from tests.execution.driver import step_request
-from tests.execution.engine.factories import compiled_graph, join_progress, running_state
+from tests.execution.engine.factories import compiled_graph, join_progress, publication_settlements, running_state
 
 import mote_kernel.execution.family_driver as family_driver_module
 from mote_kernel.execution import Graph
@@ -148,6 +148,19 @@ from mote_kernel.state.graph_state import (
 
 async def echo(values: Graph.Values[str]) -> Graph.Values[str]:
     return values
+
+
+def with_settled_references(
+    state: GraphRunState,
+    references: tuple[ActivationReference, ...],
+) -> GraphRunState:
+    settlements = publication_settlements(references)
+    return replace(
+        state,
+        settled_publications=settlements,
+        revision=max((state.revision, *(item.commit_revision for item in settlements))),
+        execution_sequence=max((state.execution_sequence, *(item.execution.generation for item in settlements))),
+    )
 
 
 DEFAULT_LIMITS = ExecutionLimits()
@@ -1069,77 +1082,60 @@ def test_snapshot_guard_admits_only_compiled_activation_gates() -> None:
         edges=(DirectEdge(GraphNodeId("a"), GraphNodeId("b")),),
     )
     base = running_state(superstep=1, frontier=("b",))
+    predecessor = ActivationReference(
+        GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
+    )
 
-    valid = replace(
-        base,
-        settled_activations=(
-            ActivationReference(
-                GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
+    valid = with_settled_references(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (
+                    replace(
+                        base.frontier.nodes[0],
+                        cause=RoutedActivationCause((predecessor,)),
+                    ),
+                )
             ),
         ),
-        frontier=GraphFrontierState(
-            (
-                replace(
-                    base.frontier.nodes[0],
-                    cause=RoutedActivationCause(
-                        (
-                            ActivationReference(
-                                GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
-                            ),
-                        )
-                    ),
-                ),
-            )
-        ),
+        (predecessor,),
     )
     require_snapshot_matches_graph(graph, valid)
 
-    forged_source = replace(
-        valid,
-        settled_activations=(
-            *valid.settled_activations,
-            ActivationReference(
-                GraphActivationIdentity(valid.run_id, 0, GraphNodeId("ghost")),
-            ),
-        ),
-        frontier=GraphFrontierState(
-            (
-                replace(
-                    valid.frontier.nodes[0],
-                    cause=RoutedActivationCause(
-                        (
-                            ActivationReference(
-                                GraphActivationIdentity(valid.run_id, 0, GraphNodeId("ghost")),
-                            ),
-                        )
-                    ),
-                ),
-            )
-        ),
+    ghost = ActivationReference(
+        GraphActivationIdentity(valid.run_id, 0, GraphNodeId("ghost")),
     )
-    forged_route = replace(
-        valid,
-        settled_activations=(
-            ActivationReference(
-                GraphActivationIdentity(valid.run_id, 0, GraphNodeId("a")),
-                GraphRouteId("bogus"),
+    forged_source = with_settled_references(
+        replace(
+            valid,
+            frontier=GraphFrontierState(
+                (
+                    replace(
+                        valid.frontier.nodes[0],
+                        cause=RoutedActivationCause((ghost,)),
+                    ),
+                )
             ),
         ),
-        frontier=GraphFrontierState(
-            (
-                replace(
-                    valid.frontier.nodes[0],
-                    cause=RoutedActivationCause(
-                        (
-                            ActivationReference(
-                                GraphActivationIdentity(valid.run_id, 0, GraphNodeId("a")),
-                                GraphRouteId("bogus"),
-                            ),
-                        )
+        (ghost, predecessor),
+    )
+    invalid_route = ActivationReference(
+        GraphActivationIdentity(valid.run_id, 0, GraphNodeId("a")),
+        GraphRouteId("bogus"),
+    )
+    forged_route = with_settled_references(
+        replace(
+            valid,
+            frontier=GraphFrontierState(
+                (
+                    replace(
+                        valid.frontier.nodes[0],
+                        cause=RoutedActivationCause((invalid_route,)),
                     ),
-                ),
-            )
+                )
+            ),
         ),
+        (invalid_route,),
     )
 
     for forged in (forged_source, forged_route):
@@ -1164,18 +1160,20 @@ def test_snapshot_guard_rejects_a_ghost_settled_activation_even_when_the_frontie
     ghost = ActivationReference(
         GraphActivationIdentity(base.run_id, 0, GraphNodeId("ghost")),
     )
-    state = replace(
-        base,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("b"),
-                    PendingGraphNode(UseStepRequestInput()),
-                    RoutedActivationCause((predecessor,)),
-                ),
-            )
+    state = with_settled_references(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        PendingGraphNode(UseStepRequestInput()),
+                        RoutedActivationCause((predecessor,)),
+                    ),
+                )
+            ),
         ),
-        settled_activations=tuple(sorted((predecessor, ghost), key=ActivationReference.canonical_key)),
+        tuple(sorted((predecessor, ghost), key=ActivationReference.canonical_key)),
     )
 
     with pytest.raises(InvalidExecutionSnapshotError, match="settled activation references unknown node 'ghost'"):
@@ -1194,18 +1192,23 @@ def test_snapshot_guard_rejects_a_settled_route_not_declared_by_the_compiled_nod
         GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
         GraphRouteId("bogus"),
     )
-    state = replace(
-        base,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("b"),
-                    SucceededGraphNode(ContinueGraphRouting()),
-                    RoutedActivationCause((bogus,)),
-                ),
-            )
+    state = with_settled_references(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        SucceededGraphNode(ContinueGraphRouting()),
+                        RoutedActivationCause((bogus,)),
+                    ),
+                )
+            ),
         ),
-        settled_activations=(bogus,),
+        (
+            bogus,
+            ActivationReference(GraphActivationIdentity(base.run_id, 1, GraphNodeId("b"))),
+        ),
     )
 
     with pytest.raises(InvalidExecutionSnapshotError, match="selected route"):
@@ -1231,18 +1234,20 @@ def test_snapshot_guard_rejects_invalid_conditional_settled_routes(
         GraphActivationIdentity(base.run_id, 0, GraphNodeId("a")),
         GraphRouteId(route) if route is not None else None,
     )
-    state = replace(
-        base,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("b"),
-                    PendingGraphNode(UseStepRequestInput()),
-                    RoutedActivationCause((reference,)),
-                ),
-            )
+    state = with_settled_references(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        PendingGraphNode(UseStepRequestInput()),
+                        RoutedActivationCause((reference,)),
+                    ),
+                )
+            ),
         ),
-        settled_activations=(reference,),
+        (reference,),
     )
 
     with pytest.raises(InvalidExecutionSnapshotError, match=message):
@@ -1260,19 +1265,21 @@ def test_snapshot_guard_rejects_a_ghost_ledger_on_a_terminal_state() -> None:
     ghost = ActivationReference(
         GraphActivationIdentity(state.run_id, 0, GraphNodeId("ghost")),
     )
-    terminal = replace(
-        state,
-        status=GraphRunStatus.FAILED,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("b"),
-                    FailedGraphNode(GraphFailure("failed")),
-                    RoutedActivationCause((ghost,)),
-                ),
-            )
+    terminal = with_settled_references(
+        replace(
+            state,
+            status=GraphRunStatus.FAILED,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        FailedGraphNode(GraphFailure("failed")),
+                        RoutedActivationCause((ghost,)),
+                    ),
+                )
+            ),
         ),
-        settled_activations=(ghost,),
+        (ghost,),
     )
 
     with pytest.raises(InvalidExecutionSnapshotError, match="unknown node 'ghost'"):
@@ -1305,18 +1312,20 @@ async def test_public_state_recovery_rejects_a_ghost_ledger_before_any_callable(
     ghost = ActivationReference(
         GraphActivationIdentity(state.run_id, 0, GraphNodeId("ghost")),
     )
-    state = replace(
-        state,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("target"),
-                    PendingGraphNode(UseStepRequestInput()),
-                    RoutedActivationCause((ghost,)),
-                ),
-            )
+    state = with_settled_references(
+        replace(
+            state,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("target"),
+                        PendingGraphNode(UseStepRequestInput()),
+                        RoutedActivationCause((ghost,)),
+                    ),
+                )
+            ),
         ),
-        settled_activations=(ghost,),
+        (ghost,),
     )
 
     with pytest.raises(InvalidExecutionSnapshotError, match="unknown node 'ghost'"):
@@ -1531,15 +1540,26 @@ def test_mixed_completed_and_aborted_children_keep_canonical_parent_order() -> N
 def test_planner_claims_only_pending_nodes_from_a_mixed_frontier() -> None:
     graph = compiled_graph("a", "b", "c", entries=("a", "b", "c"))
     state = running_state(frontier=("a", "b", "c"))
-    state = replace(
-        state,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(GraphNodeId("a"), SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),
-                GraphFrontierNode(GraphNodeId("b"), FailedGraphNode(GraphFailure("failed")), StartActivationCause()),
-                state.frontier.nodes[2],
-            )
+    state = with_settled_references(
+        replace(
+            state,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("a"),
+                        SucceededGraphNode(ContinueGraphRouting()),
+                        StartActivationCause(),
+                    ),
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        FailedGraphNode(GraphFailure("failed")),
+                        StartActivationCause(),
+                    ),
+                    state.frontier.nodes[2],
+                )
+            ),
         ),
+        (ActivationReference(GraphActivationIdentity(state.run_id, 0, GraphNodeId("a"))),),
     )
 
     tasks = plan_tasks(graph, state, ExecutionLimits())

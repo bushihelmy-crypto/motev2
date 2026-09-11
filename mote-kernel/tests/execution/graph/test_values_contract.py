@@ -65,6 +65,11 @@ def test_values_and_frame_admission_rejects_each_malformed_internal_shape() -> N
     with pytest.raises(GraphValueAdmissionError, match="malformed canonical names"):
         _make_node_input_frame((malformed_name,), declarations)
 
+    malformed_values = Graph.values(value=1)
+    object.__setattr__(malformed_values, "_entries", (cast(NamedValue[int], None),))
+    with pytest.raises(GraphValueAdmissionError, match="malformed canonical entries"):
+        malformed_values.admit()
+
 
 def test_frame_factories_reject_malformed_and_conflicting_activation_configs() -> None:
     declarations = normalize_output_declarations({"value": int})

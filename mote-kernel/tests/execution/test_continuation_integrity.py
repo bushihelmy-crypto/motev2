@@ -699,13 +699,32 @@ async def test_complete_continuation_rejects_invalid_execution_publication_prove
     layout = _layout(completed.continuation)
     snapshot = layout.reveal()
     publication = snapshot.frames.publications[0]
-    malformed = replace(
-        publication,
-        provenance=ExecutionPublicationProvenance(GraphExecutionToken(0, GraphExecutionAttemptId("invalid"))),
-    )
+    provenance = object.__new__(ExecutionPublicationProvenance)
+    object.__setattr__(provenance, "execution_token", GraphExecutionToken(0, GraphExecutionAttemptId("invalid")))
+    malformed = replace(publication, provenance=provenance)
     layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=(malformed,))))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="execution provenance"):
+        await graph.run(state=completed.state, continuation=completed.continuation)
+
+
+@pytest.mark.asyncio
+async def test_complete_continuation_requires_the_real_settlement_execution() -> None:
+    graph, completed, publication = await _completed_output_publication("continuation.publication-settlement-execution")
+    layout = _layout(completed.continuation)
+    snapshot = layout.reveal()
+    forged = replace(
+        publication,
+        provenance=ExecutionPublicationProvenance(
+            replace(
+                publication.provenance.execution_token,
+                attempt_id=GraphExecutionAttemptId("valid-but-foreign-attempt"),
+            )
+        ),
+    )
+    layout.install(replace(snapshot, frames=replace(snapshot.frames, publications=(forged,))))
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="settlement execution"):
         await graph.run(state=completed.state, continuation=completed.continuation)
 
 
@@ -1002,7 +1021,7 @@ async def test_complete_continuation_requires_a_pending_node_input_source(erase_
     pending = replace(
         paused.state,
         frontier=GraphFrontierState((replace(node, settlement=PendingGraphNode(UseStepRequestInput())),)),
-        settled_activations=() if erase_ledger else paused.state.settled_activations,
+        settled_publications=() if erase_ledger else paused.state.settled_publications,
     )
     layout = _layout(paused.continuation)
     snapshot = layout.reveal()
@@ -1086,10 +1105,10 @@ async def test_complete_continuation_requires_historical_graph_output_publicatio
     state = (
         replace(
             completed.state,
-            settled_activations=tuple(
-                reference
-                for reference in completed.state.settled_activations
-                if reference.activation.node_id != GraphNodeId("producer")
+            settled_publications=tuple(
+                settlement
+                for settlement in completed.state.settled_publications
+                if settlement.reference.activation.node_id != GraphNodeId("producer")
             ),
         )
         if erase_ledger

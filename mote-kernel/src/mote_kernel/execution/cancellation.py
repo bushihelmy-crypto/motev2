@@ -1,7 +1,6 @@
 """Cancellation-safe joins for acknowledged execution work."""
 
 import asyncio
-from collections.abc import Callable
 from typing import TypeVar, cast
 
 AwaitedT = TypeVar("AwaitedT")
@@ -9,7 +8,6 @@ AwaitedT = TypeVar("AwaitedT")
 
 async def wait_for_owner_task(
     task: asyncio.Task[AwaitedT],
-    on_task_cancellation: Callable[[asyncio.CancelledError], None] | None = None,
 ) -> tuple[AwaitedT, asyncio.CancelledError | None]:
     """Wait through caller cancellation until one owner task is settled."""
 
@@ -23,13 +21,7 @@ async def wait_for_owner_task(
                 break
             if cancellation is None:
                 cancellation = error
-    try:
-        result = task.result()
-    except asyncio.CancelledError as error:
-        if on_task_cancellation is not None:
-            on_task_cancellation(error)
-        raise
-    return result, cancellation
+    return task.result(), cancellation
 
 
 __all__: list[str] = []

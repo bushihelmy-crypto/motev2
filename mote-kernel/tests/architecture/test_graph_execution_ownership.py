@@ -136,6 +136,7 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphCommitWriteSet",
                 "GraphTransition",
                 "GraphCommit",
+                "GraphCommitError",
                 "prepare_transition",
                 "confirm_transition",
                 "commit_transition",
@@ -482,8 +483,8 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
         "execution/claim.py",
         "execution/commit.py",
         "execution/engine/recovery.py",
-        "execution/engine/session.py",
         "execution/invocation.py",
+        "state/graph_state/reducer.py",
     )
 
     public_tree = _module("execution/__init__.py")
@@ -623,3 +624,59 @@ def test_recovery_consumes_shared_claim_and_settlement_lowering() -> None:
 
     assert not forbidden & names
     assert {"claim_resource_snapshot", "project_claim_command", "project_success_settlement"} <= names
+
+
+def test_agent_is_immutable_wiring_not_another_runtime_state_or_runner() -> None:
+    assert set(_class_fields("agent.py", "Agent")) == {
+        "agent_id",
+        "assemble",
+        "codec",
+        "persistence",
+        "authority",
+        "config",
+        "max_commit_attempts",
+        "limits",
+    }
+    tree = _module("agent.py")
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
+    assert not imported & {
+        "sqlite3",
+        "pickle",
+        "json",
+        "mote_kernel.execution.family_driver",
+        "mote_kernel.execution.executor",
+    }
+    assert not any(module.startswith("mote_kernel.execution.engine") for module in imported)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert not names & {"GraphRunState", "GraphTransition", "reduce_graph_run", "FenceGraphExecution", "AbortGraphRun"}
+    assert "GraphRecovery" in names
+    tasks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "create_task"
+    ]
+    assert len(tasks) == 2
+    assert {ast.unparse(node.args[0].func) for node in tasks if isinstance(node.args[0], ast.Call)} == {
+        "self.authority.acquire",
+        "self.authority.release",
+    }
+
+
+def test_commit_source_and_child_read_rules_have_one_owner() -> None:
+    assert _symbol_owners(frozenset({"GraphCommitError", "child_run_reads", "Agent", "AgentRunKey"})) == {
+        "GraphCommitError": ("execution/commit.py",),
+        "child_run_reads": ("execution/invocation.py",),
+        "Agent": ("agent.py",),
+        "AgentRunKey": ("persistence.py",),
+    }
+    retired = {"_commit_origin_cancellation", "consume_commit_origin_cancellation", "_validate_child_run_evidence"}
+    for _relative, tree in _production_modules():
+        assert not retired & {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        assert not retired & _defined_names(tree)
+    writer = _top_level_definition("agent.py", "_AuthorizedGraphWriter")
+    calls = {
+        node.func.attr
+        for node in ast.walk(writer)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert calls == {"admit", "commit", "reconcile"}

@@ -9,6 +9,7 @@ from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractEr
 from mote_kernel.execution.graph.values import _GraphValues
 from mote_kernel.execution.run_context import ScopedFrameIndex, ScopedRunEvidence
 from mote_kernel.state.graph_state import GraphInterruptId, GraphRunState
+from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
 _PartialCommitCause: TypeAlias = Exception | asyncio.CancelledError
@@ -154,6 +155,30 @@ class GraphInterruptView:
     node_id: str
     interrupt_id: GraphInterruptId
     request_payload: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.scope) is not tuple
+            or any(not is_canonical_identity(segment) for segment in self.scope)
+            or not is_canonical_identity(self.node_id)
+            or not is_canonical_identity(self.interrupt_id)
+            or type(self.request_payload) is not bytes
+        ):
+            raise SnapshotMismatchError("graph interrupt view has malformed typed coordinates")
+
+    @classmethod
+    def admit(cls, interrupt: "GraphInterruptView", /) -> "GraphInterruptView":
+        if type(interrupt) is not cls:
+            raise SnapshotMismatchError("graph interrupt view must have its exact type")
+        try:
+            return cls(
+                tuple(interrupt.scope),
+                interrupt.node_id,
+                interrupt.interrupt_id,
+                interrupt.request_payload,
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise SnapshotMismatchError("graph interrupt view is malformed") from error
 
 
 @dataclass(frozen=True, slots=True)

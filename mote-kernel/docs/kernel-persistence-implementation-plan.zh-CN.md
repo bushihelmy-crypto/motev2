@@ -2,9 +2,9 @@
 
 ## 0. 状态与评审约定
 
-- 日期：2026-09-10。
+- 日期：2026-09-11。
 - 调研提交基线：`e4ef968`；工作树另有用户正在进行的 routing/recovery 治理改动。
-- 当前阶段：**P1 已验收；停在 P2 前等待用户明确授权，状态与验收记录见第 11 节。**
+- 当前阶段：**P1 已验收；P2 复审意见已闭环，等待再次 code review；P3 未开始。详见第 11 节。**
 - 范围：只修改 `mote-kernel/`。不实现或修改 Rust、Cloudflare、数据库、网络传输和部署代码。
 - 恢复装配唯一入口：`src/mote_kernel/agent.py`。
 - 执行唯一入口：`mote_kernel.execution.Graph`；Agent 不实现 runner、scheduler 或 reducer。
@@ -145,6 +145,7 @@ Kernel 复用现有 `FenceGraphExecution` 转换收回快照中的旧 attempt；
 存储级 fencing 实现不进入 Kernel。旧 authority 不能提交，即使旧进程仍持有 Python state。
 
 释放发生在本地任务全部收敛之后。释放失败不能覆盖原始执行/提交错误，取消不能遗留无人负责的获取或释放任务。
+获取操作无法返回 grant 时，获取结果的不确定性由 Authority Port 自行收敛；Kernel 没有可以代为释放的能力。
 
 ### 4.4 不冻结具体 wire
 
@@ -391,7 +392,7 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 | --- | --- | --- |
 | P0 设计与计划 | 已验收 | 用户明确上层调度边界，并以“继续吧”授权进入 P1 |
 | P1 值证据与恢复准入 | 已验收 | 两轮复审意见均已闭环；独立复审与完整门禁通过，按用户“通过则提交”的授权验收 |
-| P2 Agent 统一装配 | 未开始 | P1 review 通过后开始 |
+| P2 Agent 统一装配 | 待评审 | 实现、边界测试、示例文档与全部规定门禁完成；停下等待用户 review |
 | P3 组合故障验收 | 未开始 | P2 review 通过后开始 |
 | P4 最终复核交接 | 未开始 | P3 review 通过后开始 |
 
@@ -425,7 +426,8 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 - continuation 的唯一 owner 保存原 commit capability；省略 commit 或传 `None` 都继承该 capability，显式替换必须拒绝。
   transient continuation 不得中途改为 durable；需要换提交能力时重新读取 checkpoint，使用新的 `GraphRecovery`。
   所有正常结果和 partial handoff 都遵循同一契约，不以仅在当前调用绑定 recovery commit 代替跨调用约束。
-- frame 只保留一个完整性摘要，覆盖 codec identity/version、payload 和 Config cursor（包括明确的无 Config）。
+- 每个持久值只保留一个 State-owned evidence commitment，覆盖 availability coordinate、descriptor、birth commit、
+  codec identity/version、payload 和 Config cursor（包括明确的无 Config）；publication 还覆盖 settlement provenance。
   在构造、读取和 receipt 准入时统一重验；历史上合法的无 Config frame 不根据当前 state 被补写 Config。
   Config 更新仍只由 Observe 消费并随其提交持久化；不新增更新入口、持久化路径或后端认证机制。
 - 先补初次/恢复/partial continuation 与 graph input/publication cursor 删除的确定性边界回归，再完成 owner 迁移；
@@ -441,8 +443,9 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 #### 实际调用链与唯一 owner
 
 1. `FrameCodec` 统一 resume 与持久 frame 的版本化编解码基础。持久值验证字段、精确类型、确定性往返；
-   `EncodedFrame.frame_digest` 统一覆盖 codec identity/version、payload 和 Config cursor（含缺席）。Config 只保存
-   cursor，能力对象不进入 codec。resume 保留其既有 Config 继承和异常边界。
+   `GraphEvidenceCommitment` 由 commit owner 统一覆盖完整 availability coordinate、descriptor、birth commit、codec、
+   payload、Config cursor（含缺席）及 publication provenance。Config 只保存 cursor，能力对象不进入 codec。
+   resume 保留其既有 Config 继承和异常边界。
 2. `prepare_transition` 仍由 reducer 产生唯一 candidate 与 typed write-set。`DurableGraphCommit` 投影出
    `GraphPersistenceCommit(scope, expected_revision, candidate_state, writes)`；**没有 reducer command**，后端不执行图规则。
 3. root、child、普通 transition 都先准备不可变 frame 安装结果，再 await commit。只有 receipt 重新准入且与整个请求
@@ -463,9 +466,9 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 | 缺口 | 最终契约与 owner | 主要回归 |
 | --- | --- | --- |
 | 恢复无 commit / codec A 读、B 写 | `GraphRecovery` 绑定必需的 `DurableGraphCommit`，不能覆写；连续恢复后的持久 state 与结果一致 | `test_persistence_admission.py`、`test_persistence_recovery.py` |
-| payload 篡改沿用旧 digest | 实际读取与 receipt 确认边界重新执行 envelope/record/frame owner 准入；解码前重新计算 digest | `test_persistence_integrity.py` |
+| payload 篡改沿用旧 commitment | 实际读取与 receipt 确认边界重新执行 envelope/record/frame owner 准入；解码前重新计算完整 evidence commitment | `test_persistence_integrity.py` |
 | frame Config 超前或串 definition/version | `GraphConfigCursor.admit_history` 统一历史关系；同 revision 必须同 digest；resolved Config 按唯一 `ConfigSnapshotKey` 索引并精确验 digest | `test_persistence_config.py` |
-| completed publication 宽松超集 | completion 保留既有 `settled_activations`；全部生命周期的 publications 与完整成功账本精确相等 | `test_persistence_integrity.py`、`test_continuation_integrity.py` |
+| completed publication 宽松超集 | completion 保留 `settled_publications`；全部生命周期的 publications 与完整成功账本精确相等 | `test_persistence_integrity.py`、`test_continuation_integrity.py` |
 | child 从未创建与记录丢失混淆 | `child_runs` 为 `ScopedStateBinding | UncreatedGraphRun`；省略不证明不存在；state 的历史/current nested activation 决定必需集合 | `test_persistence_children.py` |
 
 不新增终态 manifest、压缩模式、child lifecycle 或状态镜像。`UncreatedGraphRun` 仅是外部一致读取提供的负证据，
@@ -512,7 +515,7 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 - 二轮把 result/continuation 从 frame 与 task disposition owner 中迁出，是为了让 continuation 直接保存窄的
   `GraphCommit`，而非用 `object` token、反射或循环导入规避类型约束；没有增加 dataclass、runner、task 或可变状态写。
   Config frame 的校验规则仍只在 envelope owner；decoder 只判断与绑定 codec 是否匹配，不重复格式类型准入。
-  single digest 的 canonical metadata 明确编码 Config 缺席，不从当前 state 镜像历史 Config。
+  single evidence commitment 的 canonical metadata 明确编码 Config 缺席，不从当前 state 镜像历史 Config。
 - 二轮实测 type definitions 688→687（删除 snapshot alias）、fields 1104→1105（原 commit）、decision points
   3475→3477、semantic nodes 71401→71552；max CC 48、max cognitive 58、call-chain depth 17、clone 数均不变。
   import edges 682→689、runtime module pairs 419→422 是 owner 分离后的依赖重排；import cycle 仍为 0，health 仍全为 0。
@@ -559,4 +562,205 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
   均有唯一 owner，恢复仍汇入既有 `Graph.run()`、compiler/planner/routing/reducer/family-driver 调用链。按用户
   “审核通过则提交”的明确授权，将 P1 标记为已验收；该授权不启动 P2。
 
-**P1 已验收并停在 P2 前；未经用户明确授权，不进入 P2。**
+**P1 验收时停在 P2 前；后续用户已明确授权 P2，以下记录承接该授权。**
+
+### P2 / 统一 Agent 接线 / 待评审
+
+#### 开工基线与授权
+
+- 用户明确表示“review通过，继续p2开发”；本次授权仅覆盖 P2，不跨过 P2 的评审停点。
+- Kernel 开工基线为 `e05d3cd`，Kernel 工作树干净；其它项目的用户改动保留不动。
+- 开工重新执行 Kernel `make check`：2562 tests 全通过，100% 行与分支覆盖，类型、架构、复杂度、构建和
+  Twine 均通过。日志：`/tmp/mote-kernel-p2-baseline-check.log`。本阶段的失败不得归咎于原有基线。
+
+#### 开工设计与不变量
+
+- `Agent` 只持有不可变装配参数。每次调用都 acquire → load → 精确 Config 解析 → Graph 装配/准入 →
+  `Graph.run` → 业务结果投影 → release；不缓存运行 state、continuation、Config latest 或执行权限。
+- 请求明确区分创建和继续：创建已有 run 是冲突，继续不存在的 run 是不存在错误；不静默丢弃新输入、自动
+  rebase 或创建替代 run。run identity 由上层明确给出；已有终态通过继续请求回放，不负责业务续轮。
+- 同一 `(agent_id, run_id)` 的并发准入由外部 authority Port 排他仲裁；每次读、提交和对账都携带同一权限。
+  不在 Agent 内另建锁、busy 状态、租约时钟或 fencing 存储。取得新权限后才允许 Graph 使用既有 fence 转换。
+- 后端无关 Port 与权限值放在一个根级 `persistence.py` 中；已有 `execution/persistence.py` 继续独占
+  Graph checkpoint、完整 frame 编码和精确 receipt 准入。新增模块不是第二个 State、runner 或后端包树。
+- 初始 Config 只读取装配指定的 immutable key；恢复读取 state/frame 引用的全部精确历史 Config。
+  Config store/resolver 作为一个明确的可选装配组，启用时二者都必须存在。Agent 不写 Config、不消费更新，
+  不为历史无 Config 的 frame 填值；更新仍只由 Observe 消费并持久化。
+- family 第一次 load 返回一致的全部已有记录。若 current pending nested activation 尚无记录，由 Graph
+  的同一 child-lineage 规则推导精确查询坐标，再在同一有效权限下重读并取得 `UncreatedGraphRun` 负证据。
+  两次读的已有 state/value 必须完全相同；不能由 Agent 猜不存在，也不能要求后端复制 compiler/topology。
+  已结算 child 的缺失直接拒绝，不能变成创建。
+- `Applied` 仍交给 P1 的唯一 exact-ack owner 校验；`Unknown` 只对账同一不可变提交一次。
+  `NotApplied` 才允许在显式有限次数内重发原对象；每次发送仍由 Port 原子检查权限。最终 Unknown、CAS
+  冲突、错误 receipt 或权限失效直接停止，不重跑节点、不重新编码、不基于旧 state 写 cleanup transition。
+- acquire/release 使用已有 cancellation-safe owner-task join；Graph 任务由 Graph 自己收敛后才 release。
+  释放失败不能覆盖原始错误。Agent 不向调用者交付 state/continuation，也不把部分提交变成第二恢复入口。
+
+#### 一次性实现与验证范围
+
+1. 增加必要的 typed Port/权限/结果契约，补齐 checkpoint 的 Config 引用和 child 查询投影；复用原有准入规则。
+2. 在 `agent.py` 完成请求/业务投影、装配、创建/继续、提交对账与权限退出，保持同一 Graph 执行链。
+3. 增加两种测试适配器及确定性失败注入，覆盖 CAS、失效权限、三态对账、历史 Config、父子负证据、
+   interrupt、终态、并发和各 await 边界的取消；新增行为当阶段达到全部覆盖门禁。
+4. 同步迁移示例和中英文入口说明，完成 `make check` 与根 pre-commit，记录实际调用链、实测及限制。
+   P3 的独立进程组合故障验收不冒充已完成；P2 完成后停止等待 code review。
+
+#### 已落实的 owner 与调用链
+
+- `agent.py` 的 frozen `Agent` 只保存装配能力；`AgentStart` 明确 create-only，`AgentResume` 明确 existing-only。
+  `AgentAnswer` 保留精确 interrupt 问题与 typed 回答；completed/failed/interrupted/aborted 只投影业务结果。
+  completed output 不携带 activation Config，任何结果或异常都不提供 Agent state/continuation 接口。
+- 根级 `persistence.py` 定义 `AgentRunKey`、opaque `ExecutionAuthority`、`AuthorityPort`、泛型
+  `PersistencePort`、明确不存在证据和提交三态；不定义 wire、数据库、Container、调度或第二份 State。
+  每次读取、写入和对账都携带本次 grant；同 key 的并发准入完全由外部 Port 排他仲裁。
+- `AgentConfig` 只组合既有 snapshot store/resolver 与可选的精确初始 key。创建只读取该 key；恢复按 checkpoint
+  引用逐个读取精确 revision/digest 并解析能力。Agent 不消费更新、不保存 Config，不对合法的无 Config 历史补值。
+- `GraphCheckpoint.config_cursors` 只投影原有 state/frame 中的引用；`Graph.recovery_child_reads` 通过同一个
+  compiler/lineage owner 推导负读取坐标。二次 load 后由 `GraphCheckpoint.admit_child_reads` 检查已有事实完全一致、
+  负证据精确覆盖查询；没有后端 topology 副本、latest 查询或“没读到就是没创建”的回退。
+- `_AuthorizedGraphWriter` 将同一请求交给 Port；Unknown 只对账原对象一次，NotApplied 才能在显式有限次数内重发。
+  `DurableGraphCommit` 继续独占编码及 exact receipt 准入，Agent 不重复 reduce、编码或校验 candidate 的另一套规则。
+- `confirm_transition` 用 typed `GraphCommitError` 区分提交来源失败。family owner 收敛全部 worker 后按该来源决定
+  是否允许 durable cleanup；构造、child handoff、fence、abort 中的提交失败同样不能被普通错误吞掉。已有发出提交
+  先完成确认/对账，发现失败后不再合成祖先或 sibling 的 cleanup write；Graph 边界再还原原始提交异常。
+- acquire/release 复用 `wait_for_owner_task`。caller 反复取消时仍等待权限任务完成；取得 grant 后必定进入释放边界。
+  Graph 自己收敛 session/child/task，Agent 不另建 runner 或任务回收器，release 错误不覆盖原执行错误。
+
+```text
+Start
+  → admit business request → acquire exact run authority → load NeverCreated
+  → optional exact initial Config → assemble Graph → codec-bound durable Graph.run
+  → project business result → release authority after Graph cleanup
+
+Resume / terminal replay
+  → admit exact answers → acquire new authority → load complete family
+  → resolve all referenced Config snapshots → assemble Graph → Graph-owned child read projection
+  → if needed: consistent reread + exact negative-evidence admission
+  → GraphRecovery + same Graph.run → project business result → release
+
+One transition
+  → pure reducer + complete immutable frame write set → encode once
+  → authority-constrained atomic commit → optional same-request reconciliation / bounded NotApplied retry
+  → exact receipt admission → install authoritative state/frame
+```
+
+#### 实测发现与一次性迁移
+
+1. 开工基线没有失败。新增失败注入暴露了一个真实提交分类缺口：普通 commit 异常进入 worker 普通失败分支后，
+   会从未确认的内存 state 再写 fence。修正位于 commit owner 和 family fan-in，不在 Agent 中识别异常字符串。
+2. 收尾复审继续发现嵌套清理缺口：child 的 fence/abort 提交失败可能被旧的“保留第一个普通错误”分支吞掉，
+   使祖先再次发 cleanup。先建立复现，再令提交来源在 worker、构造和 handoff 清理中保持 typed 传播。
+   普通 cleanup/admission 错误仍保留原始异常优先级；只有不能确认的提交阻断后续 durable 操作。
+3. 删除 `_commit_origin_cancellation` mutable marker、mark/consume 方法、owner-task join 的取消回调参数，
+   以及 child drive 把取消异常作为返回值的旁路。所有提交异常和取消统一经过同一个 typed 来源边界。
+4. 删除 session consumer 中重复的普通失败 fence；由收敛后的 family fan-in 管理清理。保留并复用并行 G5 的
+   `_start_fresh_owner` 收敛，不重建 root/child 启动事务；本阶段在同一 owner 上闭环提交失败传播。
+5. Config capability validator 原地更名供 Agent 复用，child evidence validator 原地扩展成查询投影；旧名不留 alias。
+   既有 compiler、planner、routing、reducer、typed frame 和 continuation provenance 不增加第二执行路径。
+6. 测试同步迁移错误来源契约，不为旧断言添加生产 wrapper。补测中误用 frontier 字段以及把“child 已 abort”
+   误认为“root 已 abort”的断言均按既有 State/frontier owner 修正；child abort 仍由父节点投影为 failure，
+   不为了测试改写领域语义。
+
+#### P2 复审意见与契约闭环
+
+复审指出的五类证据问题均成立，且都属于既有 owner 应闭合的 Kernel 契约；没有以首轮门禁全绿替代设计判断。
+最终迁移没有增加 manifest、镜像 State、第二恢复路径、通用 validator 或后端协议字段：
+
+1. graph input/publication 的唯一 `GraphEvidenceCommitment` 改由 execution commit owner 从完整 canonical evidence
+   生成，统一绑定 scope/run、activation、descriptor、birth `GraphCommitKey`、codec identity/version、Config cursor
+   （含缺席）和 payload；publication 额外绑定真实 execution provenance。payload 交换后即使重建合法 frame，
+   也不能改变 value fact 的归属。
+2. `GraphRunState.settled_publications` 成为 publication birth/settlement 的唯一权威账本；每项保存 activation
+   reference、真实 commit revision、`GraphExecutionToken` 和 evidence commitment。运行 continuation、持久写入与
+   cold recovery 都必须与该项精确关联，不接受形式合法但来自其它 revision/attempt 的 provenance。
+3. `DurableGraphCommit` 在调用 writer 前保存独立的完整 admitted baseline。writer 返回后，原请求与 receipt 都和
+   baseline 比较；即使外部实现通过 `object.__setattr__` 同步修改 frozen 请求及其嵌套对象，也不能重定义 exact ack。
+4. Agent request/result、authority、Graph commit/receipt、checkpoint、frame、coordinate、provenance、Config cursor、
+   `GraphRunState` 与 `_GraphValues` 均在各自外部 typed boundary 完整重新准入。exact class 但缺字段、字段类型错误、
+   subclass 或嵌套伪造统一进入既有 typed contract error，不泄漏原始 `AttributeError`。
+5. Config revision/digest 不变量由 `GraphConfigCursor`/State owner 一次性闭合：successor revision 必须有 digest，
+   frame cursor 必须属于同一 definition/version 且不超前。Agent 不复制 Config 检查。这里的 Config snapshot cursor
+   与已删除的 Observe 调用方 cursor 是不同概念；本次没有恢复 Observe request/node cursor。
+
+复审建议中的“unknown publication node”由既有 compiled snapshot admission 更早且唯一地拒绝；因此删除了
+`restore_checkpoint` 中永远晚于该 owner 的重复分支，而不是再增加一份 topology 检查。相同地，删除 successor
+Config digest、非 Start graph-input write 及 settlement 二次排序等已被前置 canonical admission 证明不可达的检查。
+其余缺口均保留在各自领域 owner，没有用覆盖率驱动薄转发或状态机碎片化。
+
+#### 边界验证范围
+
+| 边界 | 本阶段证明 |
+| --- | --- |
+| 创建/继续身份 | 新建冲突、继续不存在、tombstone、不可用、不同 Agent/run 命名空间、终态只读回放 |
+| 权限 | 同 key 并发拒绝、同实例/新实例、异 key 独立、错 key/损坏 grant、逐次提交失权、释放不覆盖主错误 |
+| 完整提交 | linear graph 的 revision 0–6 全部覆盖：NotApplied、Unknown→Applied、Unknown→NotApplied、最终 Unknown 的已写/未写、失权 |
+| 幂等与失败 | 同 key 同完整内容重放、不同内容冲突、错误 receipt、非法 outcome、有限重试耗尽、原请求对象不变、节点不因重试重跑 |
+| Config | 初始精确 key、恢复全部历史 cursor、digest/definition/revision 错误、缺能力/缺快照、无 latest 回退、Agent 从不 save |
+| Child | Start 未提交的负证据、深层 child、已结算记录丢失、两次读取 state/value 分裂、错误/重复/缺失负证据、非法 checkpoint variant |
+| Interrupt | 精确问题身份、答案重放/错误 scope、部分 child resume 已提交后从新权威读取继续，不使用旧 continuation |
+| 取消与清理 | acquire/load/Config/reconcile/release、caller/node/commit 来源、反复取消、join 后释放、构造/handoff/fence/abort 的失败传播 |
+| 未知 cleanup 后恢复 | fence/abort 已写与未写都停止后续清理；新 Agent 重读后区分仍可执行 child 与已 abort child，不抹掉 durable 事实 |
+| 预算 | 执行预算耗尽保留已确认 publication；新 Agent 用足够预算恢复，不重跑已提交 producer |
+| 类型与架构 | 泛型 request/store 不可交叉、Agent 无 state/commit override、冻结接线、唯一 child lookup/commit 来源、无第二 runner |
+| canonical evidence | sibling payload 交换、coordinate/descriptor/birth/codec/Config/provenance 任一篡改、State 与 record commitment 分裂均在执行前拒绝 |
+| typed re-admission | exact-but-incomplete、subclass、嵌套缺字段、bool/int 混淆、非 canonical 集合顺序及重复坐标统一映射到 owner 契约错误 |
+| writer mutation | scope/state/key/frame 的无效原地 mutation 与保持请求内部一致的原地 mutation均不能越过独立 baseline |
+
+snapshot 与 receipt-journal 两种测试存储表示执行同一套 Agent 行为；前者保留快照，后者从完整 receipt 序列重建。
+`durable_agent_import` 直接复用 import 的 DTO、拓扑与 codec，通过注入 Ports 演示新 Agent 的 interrupt 恢复，
+并在两种适配器上验证；中英文 README、architecture 与示例入口同时迁移，不把伪后端写进生产示例。
+
+独立进程基本证明已在 P2 完成：capture 子进程写入完整 publication 后、返回 acknowledgement 前 `os._exit(23)`，
+另一个进程以新 Agent/Graph/codec 恢复，再由第三个进程回放终态。测试核对不同 PID、producer 只执行一次、恢复输出
+精确相同和权限 generation 前进。此证明使用 test-only 顺序进程文件适配器，不证明真实数据库、断电/fsync、并发租约
+服务或工具副作用 exactly-once；更广的 P3 组合故障验收仍未开始。
+
+#### 复杂度复核结论
+
+- `Agent._run_authorized` 保留完整权威读取到 Graph 准入的线性链路；创建/继续的分支是不同前置条件，不拆成
+  薄转发或宽 context。`_recover_configs` 只管理本次调用的精确快照集合，不是 Config cache 或新的 Config owner。
+- `_AuthorizedGraphWriter` 是绑定 Port、权限和尝试上限的窄不可变 callable；它处理三态与原请求身份，
+  不重新实现编码、receipt 校验、reducer 或通用重试框架。
+- `AgentResume` 的 tuple/type 准入命中 statement-clone 雷达，但它与 State 写集、Config、Failover 有不同输入和
+  异常边界，保留显式本地检查，不为降低指标增加 generic validator。外部 Adapter 抛出的 typed Port 异常被
+  “生产内无引用”雷达命中，不通过虚假内部调用消除这些合法外部契约。
+- family fan-in 保留集中 join、提交来源判别、清理顺序；不机械拆分状态机。复审整改后按整合工作树精确锁定 ratchet：
+  `top_level_definitions=1156`、`type_definitions=721`、`semantic_nodes=75445`、`attribute_writes=105`、
+  `exception_handlers=223`、`internal_call_edges=1559`。最大圈/认知复杂度仍为 `48/58`，最大 nesting 为 `6`，
+  最大调用链深度为 `19`；stateful async hotspot 仍为 `10`。
+- 全部 zero-debt health 指标仍为零：无 import cycle、仅测试使用的私有生产定义、未使用私有定义、未读取私有字段、
+  未消费 async call、无 owner 的 coroutine handle 或孤儿 task handle。没有 health 豁免或 ratchet 浮动余量。
+- 精确指标包含已存在的并行 G5 fresh-owner 收敛；其文档、已暂存变更及其它项目改动均保留，不声称这些是 P2 独立改动。
+
+#### 首轮门禁（P2 复审前历史）
+
+以下结果是收到 evidence 复审意见前的历史记录，不能作为本轮整改验收证据；再次评审只采用后续最新门禁记录。
+
+- Kernel `make check` 全通过：Ruff/format、strict Pyright（0 errors）、complexity ratchet/semantic index
+  （22 tests）、zero-debt health、全部架构和正负类型 fixture、完整行为测试、sdist/wheel 构建与 Twine 检查。
+  完整测试 **2910 passed**；生产代码 **100% 行与分支覆盖**（13374 statements、4254 branches，无遗漏）。
+  日志：`/tmp/mote-kernel-p2-final-check.log`。
+- 最终提交/清理补测 **124 passed**，覆盖全部七个 revision 的三态结果与失权，以及未知 child fence/abort
+  已写/未写后的权威恢复。日志：`/tmp/mote-kernel-p2-final-boundaries.log`。
+- monorepo 根目录 `pre-commit run --all-files` 全通过，包含 Kernel complexity、仓库基础检查、secret 检查与既有
+  Rust/Cloudflare 静态 hooks；只执行门禁，不修改这些项目的实现。
+  日志：`/tmp/mote-kernel-p2-root-precommit.log`。
+- `--all-files` 不覆盖 untracked 文件，因此额外从根目录执行 `pre-commit run --files ...`，显式包含全部新增
+  Agent、Port、示例、测试和负类型 fixture；所有适用 hook 通过。
+  日志：`/tmp/mote-kernel-p2-new-files-precommit.log`。
+- `git diff --check` 通过。没有为通过门禁增加生产兼容 API、放宽 health、添加 coverage 排除或第二条执行路径。
+- P2 仅完成 Kernel 范围实现与本地验证，尚未获得用户验收。未暂存或提交 P2 变更；既有并行暂存项保持不动。
+  未实现任何 Rust、CF 或其它具体持久化后端，不承担 Runtime 工具执行对账，也不处理 END 后的新任务调度。
+
+#### 复审整改后门禁（再次评审依据）
+
+- Kernel `make check` 全通过：Ruff/format、strict Pyright（0 errors / 0 warnings）、complexity、zero-debt health、
+  架构和正负类型 fixture、完整行为测试、sdist/wheel 构建与 Twine 检查均通过。
+- 完整测试 **2994 passed**；生产代码 **100% 行与分支覆盖**（13772 statements、4370 branches，无遗漏）。
+- complexity **22 passed**；最大圈复杂度 `48`、最大认知复杂度 `58`、最大调用链深度 `19`，zero-debt health PASS。
+- monorepo 根目录 `pre-commit run --all-files` 全通过；由于该命令不覆盖 untracked 文件，另对 Kernel 全部
+  **21 个 untracked 文件**执行定向 pre-commit，所有适用 hook 全通过。
+- 最终计划文档的仓库级定向 pre-commit 与 `git diff --check` 均通过。
+- 本记录只证明 P2 复审整改后的实现与门禁状态。P2 仍为**待再次评审**，未获得用户验收，不得进入 P3。
+
+**P2 在此停止等待 code review；只有用户 review 通过并明确授权，才进入 P3。**

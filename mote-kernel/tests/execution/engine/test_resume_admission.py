@@ -2,7 +2,7 @@ from dataclasses import replace
 from typing import cast
 
 import pytest
-from tests.execution.engine.factories import activation_config
+from tests.execution.engine.factories import activation_config, publication_settlements
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import admit_graph_input
@@ -187,6 +187,7 @@ def interrupted_predecessor_state(graph: CompiledGraph[str]) -> GraphRunState:
         state,
         superstep=1,
         execution_sequence=1,
+        revision=1,
         frontier=GraphFrontierState(
             (
                 GraphFrontierNode(
@@ -201,7 +202,7 @@ def interrupted_predecessor_state(graph: CompiledGraph[str]) -> GraphRunState:
                 ),
             )
         ),
-        settled_activations=(predecessor,),
+        settled_publications=publication_settlements((predecessor,)),
     )
 
 

@@ -46,7 +46,8 @@ Graph.run
   -> GraphCompiler.compile / _compile_definition
   -> admit_graph_input
   -> fresh_root
-  -> StartGraphRun
+  -> _start_fresh_owner
+       -> StartGraphRun
   -> prepare_transition / reduce_graph_run
   -> confirm_transition
   -> _GraphRun
@@ -114,8 +115,8 @@ drive_quantum
 | G2 | `K` | Fresh / continued root admission 的窄 handoff | 让两类 admission 后只保留一条 drive/project/cleanup 生命周期 | 隐藏 fresh commit、recovery preflight 和 partial-commit 差异 |
 | G3 | `K` | Compiler phase facts 与 topology traversal 复用 | 删除确实重复的静态关系构建或节点遍历 | 巨型 `CompilationContext`、改变 proof 顺序或错误优先级 |
 | G4 | `K` | Recovery 复用 routing/materialization 事实 | 删除 recovery 对相同坐标、binding、Join 规则的第二实现 | 把 live/recovery 错误边界混为一体，或缓存跨 work item 的过期事实 |
-| G5 | `C` | `Graph` facade 内部编排减负 | 让公共 facade 只显式表达装配和 invocation 阶段 | 新增第二公共 facade、薄转发层或 owner 不明的 service |
-| G6 | `C` | Typed record 审查 | 删除真正无不变量、单用途且只搬运参数的 record | 为降低类型数量退回 dict、tuple、`Any` 或宽 context |
+| G5 | `DONE` | `family_driver` fresh owner admission 收敛 | root 与 nested child 共用唯一 fresh start/construct/abort owner，保留各自 handoff 与错误边界 | 新增第二 runner、宽 context、模糊化 continued/recovery admission |
+| G6 | `K` | Typed record 审查 | 仅保留拥有不变量、坐标、证据或领域边界的 record | 为降低类型数量退回 dict、tuple、`Any` 或宽 context |
 
 G2 已确认当前 root lifecycle 没有重复 owner，判定为 `K`。若未来在 G5 范围发现同一 lifecycle
 出现新的重复，只能统一重新审查，不能分别引入两层抽象。
@@ -261,11 +262,13 @@ G1 最终复核结果：
 
 ## G2 / G5：Root admission 与 facade 内部编排
 
-当前状态：G2 为 `K`，G5 为 `C`。fresh、continued 和 durable-recovery admission 只在各自的
-准入语义中分支，随后统一交给一次 root owner wait、drive、result projection 和 cleanup；当前没有
-第二 owner construction、第二 driver 或重复 cleanup。G5 仅保留 family-driver 新增重复时的重开条件。
+当前状态：G2 为 `K`，G5 为 `DONE`。fresh、continued 和 durable-recovery admission 仍只在各自的
+准入语义中分支，随后统一交给一次 root owner wait、drive、result projection 和 cleanup。G5 收敛了
+fresh root 与 fresh nested child 原先重复的 `StartGraphRun -> prepare -> frame staging -> confirm ->
+_GraphRun -> construction-failure abort` 事务；continued/recovery 的 admission、partial-commit 和
+cancellation policy 未被模糊化。
 
-当前 fresh 与 continued admission 已经在 `Graph.run()` 后半段汇合到同一 owner drive、result projection 和 cleanup。进一步改动只有在发现以下真实重复时才成立：
+当前 fresh 与 continued admission 已经在 `Graph.run()` 后半段汇合到同一 owner drive、result projection 和 cleanup。迁移后的唯一 fresh owner 是 `_start_fresh_owner`；root 仍由 `fresh_root` 保留 evidence adapter，child 仍由 `_make_child_constructor` 保留 parent topology、coordinate、`_ChildCall` 和 handoff。进一步改动只有在发现以下新的真实重复时才成立：
 
 - 两条 admission 分别实现同一 owner construction；
 - 相同 partial-commit cleanup 在不同路径重复；
@@ -320,6 +323,10 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 
 ## G6：Typed record 审查
 
+当前状态：`K`。逐项复核单用途 private record 后，没有 record 同时满足“无独立不变量、无领域边界、
+删除后调用链更短且不引入裸参数/镜像状态”的全部条件；因此不做按数量驱动的删除。当前类型数量中
+包含 Config、持久化和并发工作树的新增契约，不能用指标反推删除。
+
 类型或 dataclass 数量本身不构成债务。只有同时满足以下条件才删除或内联：
 
 - record 不拥有独立不变量；
@@ -369,7 +376,7 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 ## 全量改进点登记（防遗忘清单）
 
 下面是本轮和此前 Graph/Execution/State 代码审查汇总出的全部后续工作。`G1–G6`
-是最初登记的主线设计候选；其中 G1 已完成，G2–G4 已复核为保留，G5–G6 仍是条件候选。
+是最初登记的主线设计候选；其中 G1、G5 已完成，G2–G4、G6 已复核为保留。
 其余项目是已经完成、明确保留或门禁收口事项。每一项都必须在
 本文件留下状态变更和证据，不能只在聊天记录里口头约定。
 
@@ -379,8 +386,8 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 | G2 | `Graph.run` fresh/continued admission | mode dispatch、root admission、drive、result、cleanup 的编排容易再次膨胀 | 两种 admission 只在各自语义边界分支，随后共用唯一 `_GraphRun` 生命周期；不引入 `RunContext`、第二 facade 或第二 runner | `K`：#20 已收敛；当前各 admission 后只存在一个 root lifecycle，进一步拆分只会增加转发层 |
 | G3 | `execution/graph/compiler.py` | topology/proof/descriptor phase 可能重复建立 successor、gate、node index | 先证明完全相同的静态事实，再一次构建并投影；route-independent proof 与 route-sensitive proof 不合并；不造巨型 `CompilationFacts` | `K`：#32 局部净化已完成；其余 traversal 分属不同 proof 和异常边界，没有相同事实的第二 owner |
 | G4 | `execution/engine/recovery.py` | recovery 可能重新实现 live routing、binding/availability 或 Join 规则 | 只复用纯坐标/纯 projection；每个 work item 独立评价；recovery 仍拥有 proof、budget、诊断和 boundary，不复制 runtime runner | `K`：#4–#10 的状态空间证明已复核；G1 后直接复用唯一 routing facts，未发现第二 runner 或规则实现 |
-| G5 | `execution/family_driver.py` | root/child owner wiring、handoff、partial-commit cleanup 可能重复；大方法命中复杂度热点 | 复用同一 owner construction/handoff 基础路径，保留 fresh/continued/child 的 partial-commit 和 cancellation 政策；不做宽 context 或通用 cleanup | `C`：#27/#28 已收敛；剩余分支按真实生命周期保留 |
-| G6 | 全部 typed record / dataclass | 类型数量高，部分单用途 record 可能只是参数搬运 | 逐个证明无独立不变量且删除后调用链更短才内联；不退回 dict、tuple、`Any`、字符串 tag 或镜像状态 | `C`：待逐项审计，不能按计数批量删除 |
+| G5 | `execution/family_driver.py` | root/child fresh owner wiring 曾重复；大方法命中复杂度热点 | `_start_fresh_owner` 统一 fresh start、frame staging、confirm、owner construction 和 construction-failure abort；root/child 保留各自 topology、evidence 与 handoff 边界 | `DONE`：删除两套重复 fresh transaction；continued/partial-commit/cancellation 路径未合并 |
+| G6 | 全部 typed record / dataclass | 类型数量高，部分单用途 record 可能只是参数搬运 | 逐个证明无独立不变量且删除后调用链更短才内联；不退回 dict、tuple、`Any`、字符串 tag 或镜像状态 | `K`：专项审计未找到满足全部删除条件的 record |
 | G7 | resume / frame / frontier / resource admission | 手工 frontier 模拟、重复坐标解析、重复 canonical order/resource order | 复用 compiled binding、canonical lineage 和 tuple 资源顺序；删除旧 failed/skip/substitution、`ResourceDefinition.order` 等无 owner 字段 | `DONE`：对应历史 #3、#11–#14、#18、#27–#28、#32–#33、#38–#40 |
 | G8 | `state/graph_state/*` reducer/validation | reducer、frontier、resource snapshot 分支命中复杂度门禁 | `GraphRunState`/`reduce_graph_run`/resource FIFO 保持唯一 owner；只做能净删除重复校验的改动，不拆原子 transition | `K`：历史 #43–#49 已复核，当前无可证明重构 |
 | G9 | Config → execution/state/frame | config cursor/pointer 在 admission、frame、state、recovery 间传播，存在形成第二 config truth 的风险 | `ConfigSnapshotKey`/`GraphConfigCursor` 只由 Config/State owner 持有；execution 只携带同一 immutable pointer，节点通过窄 `Config.bind` 投影；不把 Config 放进业务 DTO 或另建 runtime state | `DONE`：START、routed/direct/Join、resume 和空输出 nested graph 统一从既有 frame/cause 窄投影并检查 Config；未新增 state、DTO 或第二路径 |
@@ -390,21 +397,21 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 | G13 | 删除范围与历史误触 | `loop/react`、`role` 的删除曾被提出并出现误触风险 | 当前 HEAD 的目录/架构状态作为事实；没有新的明确指令不重复删除、不恢复、不新增兼容壳；架构门禁只反映实际目录 | `CLOSED`：本轮不改动 |
 | G14 | 文档与审查证据 | 多份历史 review 容易产生互相矛盾的基线和状态 | 本文件维护当前状态；49 项逐项解释以历史 review 为唯一详细 owner；每次实施同步记录删除清单、指标、测试和门禁 | `ACTIVE`：本次新增总账，后续持续更新 |
 
-### 数量摘要（2026-09-10）
+### 数量摘要（2026-09-11）
 
-按 G1–G14 的当前状态，数量如下；为避免“保留”和“再计划”混淆，`C` 明确表示
-“只有发现可证明重复才重新立项”，不是已经批准的重构：
+按 G1–G14 的当前状态，数量如下；“保留”表示已完成设计复核并不再机械重构，
+“条件再计划”才表示只有发现可证明重复才重新立项：
 
 | 类别 | 数量 | 编号 | 说明 |
 | --- | ---: | --- | --- |
-| 最后需要收口的代码/门禁事项 | **0** | — | G1、G9、G11、G12 已闭环；G10 复核后判定保留 |
-| 明确保留、不再机械重构 | **5 个主线组** | G2、G3、G4、G8、G10 | Root lifecycle、compiler proof、recovery proof、State 状态机和 Failover 泛型边界均已复核；历史 49 项中对应 `K` 裁决共 **37 项** |
-| 条件再计划候选 | **2** | G5、G6 | 只有找到完整调用链的净删除证据才重新开工；目前不产生实施承诺 |
-| 已完成或关闭 | **6** | G1、G7、G9、G11、G12、G13 | 已实施项和全部门禁均闭环；目录删除事项不重复操作 |
+| 最后需要收口的代码/门禁事项 | **0** | — | G1、G5、G9、G11、G12 已闭环；G6、G10 复核后判定保留 |
+| 明确保留、不再机械重构 | **6 个主线组** | G2、G3、G4、G6、G8、G10 | Root lifecycle、compiler proof、recovery proof、typed record、State 状态机和 Failover 泛型边界均已复核；历史 49 项中对应 `K` 裁决共 **37 项** |
+| 条件再计划候选 | **0** | — | 当前没有待批准的条件性重构 |
+| 已完成或关闭 | **7** | G1、G5、G7、G9、G11、G12、G13 | 已实施项和全部门禁均闭环；目录删除事项不重复操作 |
 | 文档持续维护 | **1** | G14 | 每次治理后更新状态和证据，不是生产代码重构项 |
 
-因此，本轮必须完成的代码治理和门禁事项已归零。条件性“再计划”仍有 **2 项**，但只有出现
-完整调用链净删除的新证据才重新立项；明确保留的历史热点是 **37 项**。G14 只是持续维护总账，
+因此，本轮必须完成的代码治理和门禁事项已归零。当前没有条件性“再计划”候选；明确保留的历史热点是
+**37 项**。G14 只是持续维护总账，
 不构成生产代码待办。
 
 ### 历史 49 个热点的完整状态索引
@@ -486,6 +493,25 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 - G12 完成精确 ratchet 和完整交付门禁：最大圈复杂度 45、最大认知复杂度 52、最大调用链深度 17，
   zero-debt health、`make check`、build/package-check 与 monorepo 全量 pre-commit 全部通过；
 - `docs/img_v3_02159_a3272a89-3c99-4916-9856-1777e602c7fg.jpg` 的删除由用户确认是预期清理，保留该删除。
+
+### 2026-09-11：完成 G5 fresh owner 收敛并将 G6 判定为 K
+
+- 复核确认 root 与 nested child 原先各自实现同一 fresh 启动事务：`StartGraphRun` 投影、
+  `prepare_transition`、`apply_commit_writes`、确认提交、`_GraphRun` 构造，以及构造失败后的 durable
+  `AbortGraphRun`；两处的 frame-first 顺序和原始异常优先级存在真实漂移风险；
+- 新增唯一内部 owner `_start_fresh_owner`，root 的 `fresh_root` 和 child 的 `_make_child_constructor`
+  均通过它完成 fresh admission。净删除两套重复事务和两个局部 cleanup coroutine；没有新增 alias、
+  wrapper、第二 runner 或宽 context。root evidence adapter、child topology/coordinate、`_ChildCall`
+  handoff，以及 continued/recovery/partial-commit/cancellation 边界保持原样；
+- 受影响执行测试 `176 passed`，Ruff、format 和 `family_driver.py` Strict Pyright 通过；隔离 HEAD + G5
+  的复杂度报告通过 zero-debt health。相对同一并行改动基线，`top_level_definitions +1`（新增真实 owner）、
+  `function_definitions -1`、`nested_function_definitions -2`、`semantic_nodes -47`、`await_points -2`、
+  `task_creations -1`、内部调用边 `-8`、跨模块调用边 `-9`、`linear_private_call_chain_links -2`；最大
+  圈/认知复杂度和调用链深度不变，已将精确值写入 complexity ratchet；
+- G6 对单用途 typed record 逐项审计后未找到可在不增加裸参数、镜像状态或调用链长度的前提下删除者，
+  因此判定为 `K`；
+- 当前共享工作树含同事未完成的 persistence/Agent/gateway 改动，工作树全量 complexity ratchet 不能
+  代表 G5；本项不暂存、不回滚、不改写这些并行改动，待整合后再执行仓库级全量门禁。
 
 ### Kernel 持久化分阶段工作
 

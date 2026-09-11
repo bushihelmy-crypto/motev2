@@ -50,13 +50,35 @@ complete write set; only confirmed state and values become visible. State-only c
 continuations are not serializable. Every continuation, including a partial-commit handoff, retains its original commit
 capability: omission or `None` inherits it, and a different object is rejected before execution. Durable recovery uses
 its bound commit's single codec for reading and writes; changing capabilities requires an authoritative reread, not an
-in-memory downgrade. A persistent frame's single digest covers its codec, payload, and Config cursor, including absence.
-The current persistence phase supplies typed commit/recovery contracts;
-Agent loading and backend integration remain separate work in the [implementation plan](docs/kernel-persistence-implementation-plan.zh-CN.md).
+in-memory downgrade. One state-owned evidence commitment binds every persisted value to its availability coordinate,
+descriptor, birth commit, codec, payload, Config cursor (including absence), and publication settlement provenance.
+`Agent` wires authoritative loading, exact Config resolution, authority and commit reconciliation into this same seam.
+Concrete backend implementations remain outside Kernel; phase status and evidence are recorded in the
+[implementation plan](docs/kernel-persistence-implementation-plan.zh-CN.md).
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 
 Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, `Graph.ExecutionLimitError`, and the value admission/unavailability/publication errors for precise handling.
+
+## Durable Agent boundary
+
+`mote_kernel.Agent` is immutable wiring, not a resident state cache or another runner. Supply an `agent_id`, a Graph
+assembly callable, one typed frame codec, `PersistencePort` and `AuthorityPort`. Every `Agent.run(request)` acquires
+exclusive authority, reads the store, assembles and admits the Graph, runs it, projects a business result, then releases
+authority after all execution tasks have joined.
+
+- `AgentStart(run_id, values)` creates only a never-created run; an existing run is a conflict.
+- `AgentResume(run_id, answers=())` reads an existing run, including terminal replay. `AgentAnswer` pairs the exact
+  returned interrupt question with typed business values. No state, continuation or per-call commit override is exposed.
+- `AgentConfig` optionally supplies the Config store/resolver and an exact initial key. Recovery resolves only the
+  historical snapshots referenced by state and frames; only Observe consumes and persists Config updates. This Config
+  snapshot cursor is unrelated to the removed caller-supplied Observe cursor.
+- Unknown Graph commits reconcile the same immutable request. Only proven `NotApplied` outcomes retry, within the
+  explicit `max_commit_attempts` budget. Authority loss, conflict, mismatched receipts and unresolved outcomes stop
+  execution without stale cleanup writes. Runtime, not Kernel, reconciles tool executions.
+
+[Durable Agent import](example/graph/durable_agent_import.py) reuses the import topology and codec with injected Ports;
+it does not choose a database, transport or Container. The next task after ReAct END remains an upper-driver decision.
 
 ## Documentation
 

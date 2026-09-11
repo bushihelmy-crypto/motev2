@@ -30,6 +30,7 @@ from mote_kernel.state.graph_state.model import (
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
+    GraphPublicationSettlement,
     GraphRunState,
     GraphRunStatus,
 )
@@ -77,11 +78,8 @@ def _canonical_references(
 def _reference_activation(reference: ActivationReference, field: str) -> GraphActivationIdentity:
     """Validate identity fields after collection admission has fixed the shape."""
 
-    try:
-        activation = reference.activation
-        route = reference.route
-    except (AttributeError, TypeError) as error:
-        raise GraphStateTransitionError(f"{field} contains an invalid reference") from error
+    activation = reference.activation
+    route = reference.route
     _require_identity(activation.run_id, f"{field} run identity")
     if type(activation.superstep) is not int or activation.superstep < 0:
         raise GraphStateTransitionError(f"{field} superstep must be a non-negative integer")
@@ -91,38 +89,63 @@ def _reference_activation(reference: ActivationReference, field: str) -> GraphAc
     return activation
 
 
-def _validate_settled_activations(state: GraphRunState) -> None:
-    """Validate the committed success ledger used by historical causes.
+def _validate_settled_publications(state: GraphRunState) -> None:
+    """Validate the committed publication ledger used by historical causes.
 
     A coordinate in a cause is not proof that its producer actually ran.  The
-    reducer records one route-bearing reference when a node success is
-    committed; later causes and Join arrivals must point at that exact entry.
-    The ledger is intentionally part of ``GraphRunState`` so the reducer can
-    enforce that local invariant.  Authenticity of historical entries is a
-    persistence/evidence concern and is checked at the compiled-graph
-    admission boundary when that evidence is available.
+    reducer records one route-bearing settlement when a node success is
+    committed; later causes and Join arrivals point at that exact reference.
+    The same state-owned record carries the real commit revision, execution
+    provenance, and optional durable value commitment.
     """
 
-    evidence = state.settled_activations
+    evidence = state.settled_publications
     if type(evidence) is not tuple:
-        raise GraphStateTransitionError("settled activation evidence must be a tuple")
-    _canonical_references(evidence, "settled activation evidence")
-    activation_ids = tuple(reference.activation for reference in evidence)
+        raise GraphStateTransitionError("settled publication evidence must be a tuple")
+    try:
+        admitted = tuple(GraphPublicationSettlement.admit(item) for item in evidence)
+    except ValueError as error:
+        raise GraphStateTransitionError("settled publication evidence contains a malformed record") from error
+    references = tuple(item.reference for item in admitted)
+    _canonical_references(references, "settled publication evidence")
+    activation_ids = tuple(reference.activation for reference in references)
     if len(activation_ids) != len(set(activation_ids)):
-        raise GraphStateTransitionError("settled activation evidence repeats one activation")
-    for reference in evidence:
-        activation = _reference_activation(reference, "settled activation evidence")
+        raise GraphStateTransitionError("settled publication evidence repeats one activation")
+    revisions = tuple(item.commit_revision for item in admitted)
+    if len(revisions) != len(set(revisions)):
+        raise GraphStateTransitionError("settled publication evidence repeats one commit revision")
+    for item in admitted:
+        reference = item.reference
+        activation = _reference_activation(reference, "settled publication evidence")
         if activation.run_id != state.run_id or activation.superstep > state.superstep:
-            raise GraphStateTransitionError("settled activation evidence has an invalid coordinate")
+            raise GraphStateTransitionError("settled publication evidence has an invalid coordinate")
+        if item.commit_revision > state.revision:
+            raise GraphStateTransitionError("settled publication revision exceeds its authoritative state")
+        if item.execution.generation > state.execution_sequence:
+            raise GraphStateTransitionError("settled publication execution exceeds its authoritative state")
         if activation.superstep == state.superstep and state.status is not GraphRunStatus.COMPLETED:
             current = frontier_node(state.frontier, activation.node_id)
             if current is None or not isinstance(current.settlement, SucceededGraphNode):
-                raise GraphStateTransitionError("current settled activation evidence has no successful frontier node")
+                raise GraphStateTransitionError("current settled publication has no successful frontier node")
             selected = (
                 current.settlement.routing.route if isinstance(current.settlement.routing, SelectGraphRoute) else None
             )
             if reference.route != selected:
-                raise GraphStateTransitionError("settled activation evidence route does not match its settlement")
+                raise GraphStateTransitionError("settled publication route does not match its frontier settlement")
+    if state.status is not GraphRunStatus.COMPLETED:
+        current_publications = {
+            item.reference for item in admitted if item.reference.activation.superstep == state.superstep
+        }
+        frontier_publications = {
+            ActivationReference(
+                GraphActivationIdentity(state.run_id, state.superstep, node.node_id),
+                node.settlement.routing.route if isinstance(node.settlement.routing, SelectGraphRoute) else None,
+            )
+            for node in state.frontier.nodes
+            if isinstance(node.settlement, SucceededGraphNode)
+        }
+        if current_publications != frontier_publications:
+            raise GraphStateTransitionError("current successful frontier and publication ledger disagree")
 
 
 def _validate_join_occurrence(
@@ -184,7 +207,7 @@ def _validate_join_progress(state: GraphRunState) -> None:
                 or activation.node_id not in sources
             ):
                 raise GraphStateTransitionError("join progress contains an invalid predecessor arrival")
-            if reference not in state.settled_activations:
+            if reference not in {item.reference for item in state.settled_publications}:
                 raise GraphStateTransitionError("join progress arrival lacks committed settlement evidence")
         if occurrence in seen:
             raise GraphStateTransitionError("graph state repeats join progress")
@@ -232,7 +255,7 @@ def _validate_activation_cause(
         activation = _reference_activation(reference, "routed activation cause")
         if activation.run_id != state.run_id or activation.superstep >= state.superstep:
             raise GraphStateTransitionError("routed activation cause references a non-predecessor activation")
-        if reference not in state.settled_activations:
+        if reference not in {item.reference for item in state.settled_publications}:
             raise GraphStateTransitionError("routed activation cause lacks committed settlement evidence")
     occurrence = cause.join_occurrence
     if occurrence is None:
@@ -298,7 +321,7 @@ def validate_graph_frontier(state: GraphRunState, frontier: GraphFrontierState) 
             raise GraphStateTransitionError("resume input codec version must be positive")
 
 
-def validate_graph_run_state(state: GraphRunState) -> None:
+def _validate_graph_run_state(state: GraphRunState) -> None:
     """Reject a recovered graph-run state that violates durable invariants."""
 
     if type(state) is not GraphRunState:
@@ -316,7 +339,7 @@ def validate_graph_run_state(state: GraphRunState) -> None:
         _ = state.config_cursor
     except (AttributeError, TypeError, ValueError) as error:
         raise GraphStateTransitionError("graph Config cursor is malformed") from error
-    _validate_settled_activations(state)
+    _validate_settled_publications(state)
     if state.completion_route is not None:
         _require_identity(state.completion_route, "graph completion route identity")
     if state.parent is not None:
@@ -401,6 +424,17 @@ def validate_graph_run_state(state: GraphRunState) -> None:
             _require_identity(state.abort.reason, "graph abort reason")
         case _:
             raise GraphStateTransitionError("graph run has an unsupported lifecycle status")
+
+
+def validate_graph_run_state(state: GraphRunState) -> None:
+    """Re-admit every field of an exact state object at external boundaries."""
+
+    try:
+        _validate_graph_run_state(state)
+    except GraphStateTransitionError:
+        raise
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphStateTransitionError("graph snapshot is malformed") from error
 
 
 def validated_graph_run_state(state: GraphRunState) -> GraphRunState:

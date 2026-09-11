@@ -9,6 +9,7 @@ from tests.execution.engine.factories import (
     join,
     join_occurrence,
     join_progress,
+    publication_settlements,
     running_state,
     topology,
 )
@@ -271,8 +272,10 @@ def test_selected_control_target_with_missing_input_aborts_before_advance() -> N
 def expected_advance(
     activations: tuple[GraphFrontierActivation, ...],
     join_progress: tuple[GraphJoinProgress, ...] = (),
+    *,
+    revision: int,
 ) -> AdvanceGraphFrontier:
-    return AdvanceGraphFrontier(0, activations, join_progress)
+    return AdvanceGraphFrontier(revision, activations, join_progress)
 
 
 def reference(
@@ -285,6 +288,19 @@ def reference(
     return ActivationReference(
         GraphActivationIdentity(GraphRunId(run_id), superstep, GraphNodeId(node_id)),
         GraphRouteId(route) if route is not None else None,
+    )
+
+
+def with_settled_references(
+    state: GraphRunState,
+    references: tuple[ActivationReference, ...],
+) -> GraphRunState:
+    settlements = publication_settlements(references)
+    return replace(
+        state,
+        settled_publications=settlements,
+        revision=max((state.revision, *(item.commit_revision for item in settlements))),
+        execution_sequence=max((state.execution_sequence, *(item.execution.generation for item in settlements))),
     )
 
 
@@ -315,9 +331,9 @@ def routed(
     return GraphFrontierActivation(GraphNodeId(node_id), RoutedActivationCause(references, occurrence))
 
 
-def expected_complete(completion_route: str | None = None) -> CompleteGraphFrontier:
+def expected_complete(*, revision: int, completion_route: str | None = None) -> CompleteGraphFrontier:
     return CompleteGraphFrontier(
-        0,
+        revision,
         completion_route=GraphRouteId(completion_route) if completion_route is not None else None,
     )
 
@@ -333,7 +349,7 @@ def resolve_contributions(
     *,
     superstep: int = 0,
     activations: tuple[GraphFrontierActivation, ...] | None = None,
-    settled_activations: tuple[ActivationReference, ...] | None = None,
+    settled_references: tuple[ActivationReference, ...] | None = None,
 ):
     if activations is None:
         activations = tuple(
@@ -363,7 +379,7 @@ def resolve_contributions(
             set(current_references)
             | set(cause_references)
             | {reference for progress in join_progress for reference in progress.arrived}
-            | set(settled_activations or ()),
+            | set(settled_references or ()),
             key=ActivationReference.canonical_key,
         )
     )
@@ -373,15 +389,17 @@ def resolve_contributions(
         frontier=tuple(node_id for node_id, _contribution in contributions),
         join_progress=join_progress,
     )
-    state = replace(
-        state,
-        frontier=GraphFrontierState(
-            tuple(
-                GraphFrontierNode(node_id, SucceededGraphNode(contribution), activation.cause)
-                for (node_id, contribution), activation in zip(contributions, activations, strict=True)
-            )
+    state = with_settled_references(
+        replace(
+            state,
+            frontier=GraphFrontierState(
+                tuple(
+                    GraphFrontierNode(node_id, SucceededGraphNode(contribution), activation.cause)
+                    for (node_id, contribution), activation in zip(contributions, activations, strict=True)
+                )
+            ),
         ),
-        settled_activations=evidence,
+        evidence,
     )
     scope_run = root_scope_run(GraphRunId("run"))
     frame = admit_graph_input(graph, Graph.values(value="input"))
@@ -527,9 +545,10 @@ def test_direct_conditional_and_terminal_routing_use_one_contribution_model() ->
         (
             routed("b", reference("a", route="optional")),
             routed("c", reference("a", route="optional")),
-        )
+        ),
+        revision=1,
     )
-    assert resolve_contributions(topology("a"), continue_for("a"), ()) == expected_complete()
+    assert resolve_contributions(topology("a"), continue_for("a"), ()) == expected_complete(revision=1)
 
 
 def test_compiled_join_source_index_corruption_fails_closed() -> None:
@@ -708,7 +727,8 @@ def test_routing_never_resolves_a_failed_causal_loop_frontier() -> None:
 def test_direct_fanout_activations_are_sorted_and_keep_the_source_cause() -> None:
     graph = topology("a", "b", "c", edges=(direct("a", "c"), direct("a", "b")))
     assert resolve_contributions(graph, continue_for("a"), ()) == expected_advance(
-        (routed("b", reference("a")), routed("c", reference("a")))
+        (routed("b", reference("a")), routed("c", reference("a"))),
+        revision=1,
     )
 
 
@@ -723,7 +743,7 @@ def test_conditional_route_selects_exact_target() -> None:
         graph,
         ((GraphNodeId("a"), SelectGraphRoute(GraphRouteId("right"))),),
         (),
-    ) == expected_advance((routed("c", reference("a", route="right")),))
+    ) == expected_advance((routed("c", reference("a", route="right")),), revision=1)
 
 
 def test_routing_validator_rejects_topology_incompatible_contribution() -> None:
@@ -772,6 +792,7 @@ def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
                 target_superstep=2,
             ),
         ),
+        revision=1,
     )
     second = resolve_contributions(
         graph,
@@ -779,13 +800,16 @@ def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
         first.join_progress,
         superstep=1,
         activations=(routed("b", reference("a")), routed("work", reference("a"))),
-        settled_activations=(
+        settled_references=(
             reference("a"),
             reference("b", superstep=1),
             reference("work", superstep=1),
         ),
     )
-    assert second == expected_advance((routed("c", reference("a"), reference("b", superstep=1)),))
+    assert second == expected_advance(
+        (routed("c", reference("a"), reference("b", superstep=1)),),
+        revision=3,
+    )
 
 
 def test_one_source_can_complete_multiple_joins_in_same_step() -> None:
@@ -802,7 +826,8 @@ def test_one_source_can_complete_multiple_joins_in_same_step() -> None:
         (
             routed("d", reference("a"), reference("b")),
             routed("e", reference("a"), reference("c")),
-        )
+        ),
+        revision=3,
     )
 
 
@@ -847,7 +872,8 @@ def test_conditional_branch_can_supply_join_source() -> None:
         (
             routed("a", reference("start", route="right")),
             routed("b", reference("start", route="right")),
-        )
+        ),
+        revision=1,
     )
     assert resolve_contributions(
         graph,
@@ -858,12 +884,15 @@ def test_conditional_branch_can_supply_join_source() -> None:
             routed("a", reference("start", route="right")),
             routed("b", reference("start", route="right")),
         ),
-        settled_activations=(
+        settled_references=(
             reference("start", route="right"),
             reference("a", superstep=1),
             reference("b", superstep=1),
         ),
-    ) == expected_advance((routed("end", reference("a", superstep=1), reference("b", superstep=1)),))
+    ) == expected_advance(
+        (routed("end", reference("a", superstep=1), reference("b", superstep=1)),),
+        revision=3,
+    )
 
 
 def test_chained_joins_advance_across_supersteps() -> None:
@@ -877,14 +906,14 @@ def test_chained_joins_advance_across_supersteps() -> None:
         entries=("a", "b"),
     )
     first = resolve_contributions(graph, continue_for("a", "b"), ())
-    assert first == expected_advance((routed("c", reference("a"), reference("b")),))
+    assert first == expected_advance((routed("c", reference("a"), reference("b")),), revision=2)
     second = resolve_contributions(
         graph,
         continue_for("c"),
         (),
         superstep=1,
         activations=(routed("c", reference("a"), reference("b")),),
-        settled_activations=(reference("a"), reference("b"), reference("c", superstep=1)),
+        settled_references=(reference("a"), reference("b"), reference("c", superstep=1)),
     )
     assert isinstance(second, AdvanceGraphFrontier)
     assert second == expected_advance(
@@ -897,6 +926,7 @@ def test_chained_joins_advance_across_supersteps() -> None:
                 target_superstep=3,
             ),
         ),
+        revision=3,
     )
     assert resolve_contributions(
         graph,
@@ -904,19 +934,23 @@ def test_chained_joins_advance_across_supersteps() -> None:
         second.join_progress,
         superstep=2,
         activations=(routed("d", reference("c", superstep=1)),),
-        settled_activations=(
+        settled_references=(
             reference("a"),
             reference("b"),
             reference("c", superstep=1),
             reference("d", superstep=2),
         ),
-    ) == expected_advance((routed("e", reference("c", superstep=1), reference("d", superstep=2)),))
+    ) == expected_advance(
+        (routed("e", reference("c", superstep=1), reference("d", superstep=2)),),
+        revision=4,
+    )
 
 
 def test_completed_join_emits_one_activation_with_all_arrival_references() -> None:
     graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
     assert resolve_contributions(graph, continue_for("a", "b"), ()) == expected_advance(
-        (routed("c", reference("a"), reference("b")),)
+        (routed("c", reference("a"), reference("b")),),
+        revision=2,
     )
 
 
@@ -936,7 +970,7 @@ def test_join_progress_survives_unrelated_supersteps() -> None:
         first.join_progress,
         superstep=1,
         activations=(routed("b", reference("a")),),
-        settled_activations=(reference("a"), reference("b", superstep=1)),
+        settled_references=(reference("a"), reference("b", superstep=1)),
     )
     assert isinstance(second, AdvanceGraphFrontier)
     third = resolve_contributions(
@@ -945,10 +979,13 @@ def test_join_progress_survives_unrelated_supersteps() -> None:
         second.join_progress,
         superstep=2,
         activations=(routed("c", reference("b", superstep=1)),),
-        settled_activations=(reference("a"), reference("b", superstep=1), reference("c", superstep=2)),
+        settled_references=(reference("a"), reference("b", superstep=1), reference("c", superstep=2)),
     )
     assert second.join_progress == first.join_progress
-    assert third == expected_advance((routed("d", reference("a"), reference("c", superstep=2)),))
+    assert third == expected_advance(
+        (routed("d", reference("a"), reference("c", superstep=2)),),
+        revision=3,
+    )
 
 
 def test_persisted_join_progress_order_does_not_change_decision() -> None:
@@ -971,25 +1008,28 @@ def test_persisted_join_progress_order_does_not_change_decision() -> None:
         (first, second),
         superstep=1,
         activations=activations,
-        settled_activations=evidence,
+        settled_references=evidence,
     ) == resolve_contributions(
         graph,
         continue_for("b", "c"),
         (second, first),
         superstep=1,
         activations=activations,
-        settled_activations=evidence,
+        settled_references=evidence,
     )
 
 
 def test_same_step_join_to_end_completes_and_self_loop_reactivates_node() -> None:
     joined = topology("a", "b", edges=(join(("a", "b"), END),), entries=("a", "b"))
-    assert resolve_contributions(joined, continue_for("a", "b"), ()) == expected_complete()
+    assert resolve_contributions(joined, continue_for("a", "b"), ()) == expected_complete(revision=2)
     # A control loop is only valid when the compiled topology also exposes a
     # normal exit; the direct END edge keeps this regression about reactivation
     # rather than relying on the execution limit as completion.
     loop = topology("a", edges=(direct("a", "a"), direct("a", END)))
-    assert resolve_contributions(loop, continue_for("a"), ()) == expected_advance((routed("a", reference("a")),))
+    assert resolve_contributions(loop, continue_for("a"), ()) == expected_advance(
+        (routed("a", reference("a")),),
+        revision=1,
+    )
 
 
 def test_terminal_join_completed_after_a_later_superstep_carries_consumption_proof() -> None:
@@ -1016,7 +1056,7 @@ def test_terminal_join_completed_after_a_later_superstep_carries_consumption_pro
         first.join_progress,
         superstep=1,
         activations=(routed("x", reference("a")), routed("middle", reference("b"))),
-        settled_activations=(
+        settled_references=(
             reference("a"),
             reference("b"),
             reference("x", superstep=1),
@@ -1030,7 +1070,7 @@ def test_terminal_join_completed_after_a_later_superstep_carries_consumption_pro
         second.join_progress,
         superstep=2,
         activations=(routed("y", reference("middle", superstep=1)),),
-        settled_activations=(
+        settled_references=(
             reference("a"),
             reference("b"),
             reference("x", superstep=1),
@@ -1040,7 +1080,7 @@ def test_terminal_join_completed_after_a_later_superstep_carries_consumption_pro
     )
 
     assert terminal == CompleteGraphFrontier(
-        0,
+        5,
         (join_occurrence(("x", "y"), END, target_superstep=3),),
     )
 
@@ -1143,7 +1183,7 @@ def test_invalid_recovered_join_progress_fails_closed(progress: GraphJoinProgres
             (progress,),
             superstep=1,
             activations=(routed("b", reference("a")),),
-            settled_activations=(reference("a"), reference("b", superstep=1)),
+            settled_references=(reference("a"), reference("b", superstep=1)),
         )
 
 
@@ -1169,7 +1209,7 @@ def test_duplicate_recovered_join_progress_fails_closed() -> None:
             (progress, progress),
             superstep=1,
             activations=(routed("b", reference("a")),),
-            settled_activations=(reference("a"), reference("b", superstep=1)),
+            settled_references=(reference("a"), reference("b", superstep=1)),
         )
 
 
@@ -1224,18 +1264,20 @@ def _settled_routing_state(
     evidence: tuple[ActivationReference, ...] = (),
 ) -> GraphRunState:
     base = running_state(superstep=superstep, frontier=(node_id,))
-    return replace(
-        base,
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId(node_id),
-                    SucceededGraphNode(ContinueGraphRouting()),
-                    cast(StartActivationCause | RoutedActivationCause, cause),
-                ),
-            )
+    return with_settled_references(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId(node_id),
+                        SucceededGraphNode(ContinueGraphRouting()),
+                        cast(StartActivationCause | RoutedActivationCause, cause),
+                    ),
+                )
+            ),
         ),
-        settled_activations=evidence,
+        evidence,
     )
 
 
@@ -1373,7 +1415,7 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         StartActivationCause(),
         evidence=(reference("a"),),
     )
-    invalid_previous = replace(previous, settled_activations=(reference("ghost"),))
+    invalid_previous = with_settled_references(previous, (reference("ghost"),))
     assert (
         transition_admission_error(
             topology("a"),
@@ -1412,7 +1454,7 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         == "graph completion consumed the wrong Join occurrences"
     )
 
-    empty_previous = replace(previous, frontier=GraphFrontierState(()), settled_activations=())
+    empty_previous = replace(previous, frontier=GraphFrontierState(()), settled_publications=())
     assert (
         transition_admission_error(
             topology("a"),
@@ -1429,23 +1471,25 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         edges=(conditional("a", "left", END), conditional("b", "right", END)),
         entries=("a", "b"),
     )
-    conflicting_previous = replace(
-        running_state(frontier=("a", "b")),
-        frontier=GraphFrontierState(
-            (
-                GraphFrontierNode(
-                    GraphNodeId("a"),
-                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("left"))),
-                    StartActivationCause(),
-                ),
-                GraphFrontierNode(
-                    GraphNodeId("b"),
-                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("right"))),
-                    StartActivationCause(),
-                ),
-            )
+    conflicting_previous = with_settled_references(
+        replace(
+            running_state(frontier=("a", "b")),
+            frontier=GraphFrontierState(
+                (
+                    GraphFrontierNode(
+                        GraphNodeId("a"),
+                        SucceededGraphNode(SelectGraphRoute(GraphRouteId("left"))),
+                        StartActivationCause(),
+                    ),
+                    GraphFrontierNode(
+                        GraphNodeId("b"),
+                        SucceededGraphNode(SelectGraphRoute(GraphRouteId("right"))),
+                        StartActivationCause(),
+                    ),
+                )
+            ),
         ),
-        settled_activations=(reference("a", route="left"), reference("b", route="right")),
+        (reference("a", route="left"), reference("b", route="right")),
     )
     assert (
         transition_admission_error(
@@ -1477,7 +1521,7 @@ def predecessor_binding(graph: CompiledGraph[int]) -> ResolvedInputBinding[int]:
 def test_predecessor_admission_requires_committed_predecessor_evidence() -> None:
     graph = predecessor_loop_graph()
     state, _frames = settled_predecessor_loop(graph, "continue")
-    candidate = replace(state, settled_activations=())
+    candidate = replace(state, settled_publications=())
 
     assert _RoutingPrivateView.frontier_gate_error(routing_module, graph, candidate) == (
         "predecessor activation lacks immediate committed settlement evidence"
@@ -1553,7 +1597,7 @@ def test_predecessor_source_rejects_a_non_immediate_or_uncommitted_reference() -
     with pytest.raises(InvalidRoutingCommandError, match="immediate committed settlement"):
         causal_input_source_for_cause(
             graph,
-            replace(state, settled_activations=()),
+            replace(state, settled_publications=()),
             1,
             cause,
             binding,
@@ -1833,11 +1877,13 @@ def test_post_advance_rejects_duplicate_join_occurrences_and_accepts_terminal_jo
     )
 
     terminal_graph = topology("a", "b", edges=(join(("a", "b"), END),), entries=("a", "b"))
-    terminal = replace(
-        duplicate,
-        frontier=GraphFrontierState(()),
-        join_progress=(),
-        settled_activations=(reference("a"), reference("b")),
+    terminal = with_settled_references(
+        replace(
+            duplicate,
+            frontier=GraphFrontierState(()),
+            join_progress=(),
+        ),
+        (reference("a"), reference("b")),
     )
     assert _RoutingPrivateView.post_advance_error(routing_module, terminal_graph, terminal) is None
 
@@ -1868,26 +1914,23 @@ def test_post_advance_rejects_unmatched_and_unexpected_successors() -> None:
 
 def test_join_arrival_rejects_two_routes_for_one_activation() -> None:
     graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
-    state = replace(
+    state = with_settled_references(
         running_state(superstep=1, frontier=("c",)),
-        settled_activations=(reference("a", route="left"), reference("a", route="right")),
+        (reference("a", route="left"), reference("a", route="right")),
     )
     with pytest.raises(JoinProgressError, match="selected two routes"):
         _RoutingPrivateView.historical_join_arrivals(routing_module, graph, state)
 
-    repeated = replace(
-        state,
-        settled_activations=(reference("a"), reference("a")),
-    )
+    repeated = with_settled_references(state, (reference("a"), reference("a")))
     with pytest.raises(JoinProgressError, match="occurrence repeated"):
         _RoutingPrivateView.historical_join_arrivals(routing_module, graph, repeated)
 
 
 def test_historical_join_arrival_rejects_an_unknown_older_ledger_node() -> None:
     graph = topology("a", "b", "c", edges=(join(("a", "b"), "c"),), entries=("a", "b"))
-    state = replace(
+    state = with_settled_references(
         running_state(superstep=2, frontier=("c",)),
-        settled_activations=(reference("ghost"), reference("a", superstep=1)),
+        (reference("ghost"), reference("a", superstep=1)),
     )
 
     with pytest.raises(JoinProgressError, match="unknown node 'ghost'"):
@@ -1934,9 +1977,9 @@ def test_post_advance_rejects_a_partial_join_at_or_after_its_target_coordinate(
         edges=(direct("a", "b"), direct("b", "work"), join(("a", "b"), "c")),
         entries=("a",),
     )
-    state = replace(
+    state = with_settled_references(
         running_state(superstep=superstep, frontier=("work",)),
-        settled_activations=(reference("a"), reference("work", superstep=work_superstep)),
+        (reference("a"), reference("work", superstep=work_superstep)),
     )
 
     assert _RoutingPrivateView.post_advance_error(routing_module, graph, state) == message
@@ -1958,9 +2001,9 @@ def test_post_advance_rejects_a_complete_join_before_its_compiled_target_coordin
         base,
         transition=replace(base.transition, joins_by_source=frozen_map(join_index)),
     )
-    state = replace(
+    state = with_settled_references(
         running_state(superstep=1, frontier=("c",)),
-        settled_activations=(reference("a"), reference("b")),
+        (reference("a"), reference("b")),
     )
 
     assert _RoutingPrivateView.post_advance_error(routing_module, graph, state) == (
@@ -1976,10 +2019,7 @@ def test_post_advance_requires_the_exact_reconstructed_partial_join_progress() -
         edges=(direct("a", "b"), join(("a", "b"), "c")),
         entries=("a",),
     )
-    missing = replace(
-        running_state(superstep=1, frontier=("b",)),
-        settled_activations=(reference("a"),),
-    )
+    missing = with_settled_references(running_state(superstep=1, frontier=("b",)), (reference("a"),))
     assert _RoutingPrivateView.post_advance_error(routing_module, graph, missing) == (
         "frontier transition lost or invented Join progress"
     )
@@ -2007,10 +2047,12 @@ def test_post_advance_requires_the_exact_reconstructed_partial_join_progress() -
         (reference("a"),),
         target_superstep=2,
     )
-    changed = replace(
-        running_state(superstep=1, frontier=("target",)),
-        settled_activations=(reference("a"), reference("b")),
-        join_progress=(incomplete_record,),
+    changed = with_settled_references(
+        replace(
+            running_state(superstep=1, frontier=("target",)),
+            join_progress=(incomplete_record,),
+        ),
+        (reference("a"), reference("b")),
     )
     assert incomplete_record.occurrence == occurrence
     assert _RoutingPrivateView.post_advance_error(routing_module, delayed_graph, changed) == (

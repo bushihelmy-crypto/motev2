@@ -37,9 +37,11 @@ from mote_kernel.state.graph_state.identity import (
 )
 from mote_kernel.state.graph_state.model import (
     GraphConfigCursor,
+    GraphEvidenceCommitment,
     GraphExecutionLease,
     GraphExecutionToken,
     GraphJoinProgress,
+    GraphPublicationSettlement,
     GraphRunState,
     GraphRunStatus,
 )
@@ -76,6 +78,14 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             config_cursor = GraphConfigCursor.admit(command.config_cursor)
     except (AttributeError, TypeError, ValueError) as error:
         raise GraphStateTransitionError("graph start Config cursor is malformed") from error
+    try:
+        graph_input_evidence = (
+            GraphEvidenceCommitment.admit(command.graph_input_evidence)
+            if command.graph_input_evidence is not None
+            else None
+        )
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphStateTransitionError("graph start input evidence is malformed") from error
     return validated_graph_run_state(
         GraphRunState(
             run_id=command.run_id,
@@ -90,6 +100,7 @@ def start_graph_run(command: StartGraphRun) -> GraphRunState:
             config_definition_id=config_cursor.definition_id,
             config_definition_version=config_cursor.definition_version,
             config_digest=config_cursor.digest,
+            graph_input_evidence=graph_input_evidence,
         )
     )
 
@@ -329,13 +340,11 @@ def claim_graph_execution(state: GraphRunState, command: ClaimGraphExecution) ->
         raise GraphStateTransitionError("an execution claim requires pending nodes")
     _validate_claim_resources(state, command.resources)
     token = GraphExecutionToken(state.execution_sequence + 1, command.attempt_id)
-    return validated_graph_run_state(
-        replace(
-            state,
-            execution_sequence=token.generation,
-            execution=GraphExecutionLease(token),
-            resources=command.resources,
-        )
+    return replace(
+        state,
+        execution_sequence=token.generation,
+        execution=GraphExecutionLease(token),
+        resources=command.resources,
     )
 
 
@@ -343,7 +352,7 @@ def fence_graph_execution(state: GraphRunState, command: FenceGraphExecution) ->
     if state.status is not GraphRunStatus.RUNNING:
         raise GraphStateTransitionError("only a running graph can fence execution")
     _require_execution_lease(state, command.execution)
-    return validated_graph_run_state(replace(state, execution=None, resources=None))
+    return replace(state, execution=None, resources=None)
 
 
 def _resolution_base(state: GraphRunState) -> None:
@@ -359,23 +368,21 @@ def advance_graph_frontier(state: GraphRunState, command: AdvanceGraphFrontier) 
     _resolution_base(state)
     consumed = _validate_next_activations(state, command.activations)
     _validate_join_progress_delta(state, command.join_progress, consumed, command.consumed_join_progress)
-    return validated_graph_run_state(
-        replace(
-            state,
-            superstep=state.superstep + 1,
-            frontier=GraphFrontierState(
-                tuple(
-                    GraphFrontierNode(
-                        activation.node_id,
-                        PendingGraphNode(UseStepRequestInput()),
-                        activation.cause,
-                    )
-                    for activation in command.activations
+    return replace(
+        state,
+        superstep=state.superstep + 1,
+        frontier=GraphFrontierState(
+            tuple(
+                GraphFrontierNode(
+                    activation.node_id,
+                    PendingGraphNode(UseStepRequestInput()),
+                    activation.cause,
                 )
-            ),
-            join_progress=command.join_progress,
-            completion_route=None,
-        )
+                for activation in command.activations
+            )
+        ),
+        join_progress=command.join_progress,
+        completion_route=None,
     )
 
 
@@ -388,14 +395,12 @@ def complete_graph_frontier(state: GraphRunState, command: CompleteGraphFrontier
     )
     if len(consumed) != len(state.join_progress):
         raise GraphStateTransitionError("a completed graph cannot discard unresolved join progress")
-    return validated_graph_run_state(
-        replace(
-            state,
-            status=GraphRunStatus.COMPLETED,
-            frontier=GraphFrontierState(()),
-            join_progress=(),
-            completion_route=command.completion_route,
-        )
+    return replace(
+        state,
+        status=GraphRunStatus.COMPLETED,
+        frontier=GraphFrontierState(()),
+        join_progress=(),
+        completion_route=command.completion_route,
     )
 
 
@@ -411,7 +416,7 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
     if current is None or not isinstance(current.settlement, PendingGraphNode):
         raise GraphStateTransitionError("node settlement requires a current pending node")
 
-    settled_activations = state.settled_activations
+    settled_publications = state.settled_publications
     if isinstance(outcome, SucceededGraphNodeOutcome):
         settlement = SucceededGraphNode(outcome.routing)
         route = outcome.routing.route if isinstance(outcome.routing, SelectGraphRoute) else None
@@ -419,12 +424,29 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
             GraphActivationIdentity(state.run_id, state.superstep, node_id),
             route,
         )
-        if evidence in settled_activations:
+        if any(item.reference == evidence for item in settled_publications):
             raise GraphStateTransitionError("node activation has already been committed as settled")
-        settled_activations = tuple(sorted((*settled_activations, evidence), key=ActivationReference.canonical_key))
+        settled_publications = tuple(
+            sorted(
+                (
+                    *settled_publications,
+                    GraphPublicationSettlement(
+                        evidence,
+                        command.expected_revision + 1,
+                        command.execution,
+                        command.publication_evidence,
+                    ),
+                ),
+                key=GraphPublicationSettlement.canonical_key,
+            )
+        )
     elif isinstance(outcome, FailedGraphNodeOutcome):
+        if command.publication_evidence is not None:
+            raise GraphStateTransitionError("failed node settlement cannot carry publication evidence")
         settlement = FailedGraphNode(outcome.failure)
     else:
+        if command.publication_evidence is not None:
+            raise GraphStateTransitionError("interrupted node settlement cannot carry publication evidence")
         expected = (state.run_id, state.superstep, node_id, command.execution.generation)
         identity = outcome.identity
         if (identity.run_id, identity.superstep, identity.node_id, identity.execution_generation) != expected:
@@ -471,19 +493,17 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
         execution = None
         resources = None
         status = GraphRunStatus.FAILED if derived is GraphFrontierStatus.FAILED else GraphRunStatus.RUNNING
-    return validated_graph_run_state(
-        replace(
-            state,
-            status=status,
-            frontier=frontier,
-            execution=execution,
-            resources=resources,
-            settled_activations=settled_activations,
-            config_revision=next_config_cursor.revision,
-            config_definition_id=next_config_cursor.definition_id,
-            config_definition_version=next_config_cursor.definition_version,
-            config_digest=next_config_cursor.digest,
-        )
+    return replace(
+        state,
+        status=status,
+        frontier=frontier,
+        execution=execution,
+        resources=resources,
+        settled_publications=settled_publications,
+        config_revision=next_config_cursor.revision,
+        config_definition_id=next_config_cursor.definition_id,
+        config_definition_version=next_config_cursor.definition_version,
+        config_digest=next_config_cursor.digest,
     )
 
 

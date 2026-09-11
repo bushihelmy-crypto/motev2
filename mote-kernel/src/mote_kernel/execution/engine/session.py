@@ -21,9 +21,10 @@ from mote_kernel.execution.result import ExecutedGraphNode, TaskResult
 from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphRunState,
+    GraphStateTransitionError,
     SettleGraphNode,
+    admit_graph_run_confirmation,
     pending_node_ids,
-    reduce_graph_run,
 )
 
 GraphValueT = TypeVar("GraphValueT")
@@ -123,8 +124,10 @@ class _GraphExecutionSession(Generic[GraphValueT]):
             if state != self._state:
                 raise ResultCollectionError("first session state must be the reducer-applied claim successor")
             return
-        if state != reduce_graph_run(self._state, command):
-            raise ResultCollectionError("session state acknowledgement is not the exact reducer successor")
+        try:
+            admit_graph_run_confirmation(self._state, command, state)
+        except GraphStateTransitionError as error:
+            raise ResultCollectionError("session state acknowledgement is not the exact reducer successor") from error
         self._state = state
         self._awaiting_ack = None
 

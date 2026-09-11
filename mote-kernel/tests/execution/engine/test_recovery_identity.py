@@ -1268,7 +1268,7 @@ def test_recovery_preflight_preserves_distinct_settlement_routes_after_completio
 
     assert len(boundaries) == 2
     assert all(boundary.binding.state.status is GraphRunStatus.COMPLETED for boundary in boundaries)
-    assert {boundary.binding.state.settled_activations[0].route for boundary in boundaries} == {
+    assert {boundary.binding.state.settled_publications[0].reference.route for boundary in boundaries} == {
         GraphRouteId("first"),
         GraphRouteId("second"),
     }
