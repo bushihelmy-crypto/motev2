@@ -1,7 +1,6 @@
 package model
 
 import (
-	"cmp"
 	"fmt"
 	"slices"
 
@@ -110,15 +109,10 @@ func (definition Definition) TokenLimits() TokenLimits {
 // Capability returns an immutable operation capability when the model declares
 // the operation.
 func (definition Definition) Capability(operation api.Operation) (Capability, bool) {
-	for index, config := range definition.config.Operations {
-		if config.Operation == operation {
-			return Capability{
-				definition:     definition,
-				operationIndex: index,
-			}, true
-		}
+	if len(definition.config.Operations) != 1 || definition.config.Operations[0].Operation != operation {
+		return Capability{}, false
 	}
-	return Capability{}, false
+	return Capability{definition: definition}, true
 }
 
 func normalizeConfig(config Config) (Config, error) {
@@ -132,27 +126,15 @@ func normalizeConfig(config Config) (Config, error) {
 	if reason := limits.validationError(); reason != "" {
 		return Config{}, configError(config.ID, "token_limits", reason)
 	}
-	if len(config.Operations) == 0 {
-		return Config{}, configError(config.ID, "operations", "must contain at least one operation")
+	if len(config.Operations) != 1 {
+		return Config{}, configError(config.ID, "operations", "must contain exactly one operation")
 	}
 
-	operations := make([]OperationConfig, 0, len(config.Operations))
-	seen := make(map[api.Operation]struct{}, len(config.Operations))
-	for _, candidate := range config.Operations {
-		operation, err := normalizeOperationConfig(config.ID, candidate)
-		if err != nil {
-			return Config{}, err
-		}
-		if _, exists := seen[operation.Operation]; exists {
-			return Config{}, configError(config.ID, "operations", fmt.Sprintf("duplicate operation %q", operation.Operation))
-		}
-		seen[operation.Operation] = struct{}{}
-		operations = append(operations, operation)
+	operation, err := normalizeOperationConfig(config.ID, config.Operations[0])
+	if err != nil {
+		return Config{}, err
 	}
-	slices.SortFunc(operations, func(left, right OperationConfig) int {
-		return cmp.Compare(left.Operation, right.Operation)
-	})
-	config.Operations = operations
+	config.Operations = []OperationConfig{operation}
 	return config, nil
 }
 

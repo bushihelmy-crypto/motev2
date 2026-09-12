@@ -304,7 +304,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	if len(catalog.definitions) != 9248 {
+	if len(catalog.definitions) != 8835 {
 		t.Fatalf("unexpected built-in model count for the pinned snapshot: %d", len(catalog.definitions))
 	}
 	canonicalIDs := make(map[string]string, len(catalog.definitions))
@@ -317,53 +317,40 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 			t.Fatalf("generated model IDs were not deduplicated: %q and %q", previous, definition.ID())
 		}
 		canonicalIDs[folded] = definition.ID()
-		if len(definition.config.Operations) == 0 {
-			t.Fatalf("generated model %q has no authoritative operation", definition.ID())
-		}
-		seenOperations := make(map[api.Operation]struct{}, len(definition.config.Operations))
-		for _, operation := range definition.config.Operations {
-			if _, duplicate := seenOperations[operation.Operation]; duplicate {
-				t.Fatalf("generated model %q repeats operation %q", definition.ID(), operation.Operation)
-			}
-			seenOperations[operation.Operation] = struct{}{}
+		if len(definition.config.Operations) != 1 {
+			t.Fatalf("generated model %q has %d operations, want exactly one", definition.ID(), len(definition.config.Operations))
 		}
 	}
 
-	assertOperation(t, catalog, "gpt-6-astra", api.OperationGenerate)
+	assertOperation(t, catalog, "gpt-6-astra-2026-09-03", api.OperationGenerate)
 	assertOperation(t, catalog, "gpt-image-2.5-flare", api.OperationImageGeneration)
-	assertOperation(t, catalog, "deepseek-v4-flash", api.OperationGenerate)
-	assertOperation(t, catalog, "kimi-k3", api.OperationGenerate)
-	assertOperation(t, catalog, "claude-opus-5", api.OperationGenerate)
+	assertOperation(t, catalog, "deepseek-v4-flash-latest", api.OperationGenerate)
+	assertOperation(t, catalog, "kimi-k3-us", api.OperationGenerate)
+	assertOperation(t, catalog, "claude-opus-5@default", api.OperationGenerate)
 	assertOperation(t, catalog, "dall-e-3", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gpt-image-1", api.OperationImageGeneration)
-	assertOperation(t, catalog, "gemini-2.5-flash-image", api.OperationImageGeneration)
-	assertOperation(t, catalog, "sora-2", api.OperationVideoGeneration)
-	assertOperation(t, catalog, "gpt-realtime-2.1", api.OperationRealtime)
-	assertOperation(t, catalog, "text-embedding-3-large", api.OperationEmbedding)
-	assertMode(t, catalog, "text-embedding-3-large", api.ModeAsync)
+	assertOperation(t, catalog, "gemini-2.0-flash-exp-image-generation", api.OperationImageGeneration)
+	assertOperation(t, catalog, "veo-3.0-generate-preview", api.OperationVideoGeneration)
+	assertOperation(t, catalog, "gpt-realtime-1.5", api.OperationRealtime)
+	assertOperation(t, catalog, "gemini-embedding-2", api.OperationEmbedding)
+	assertMode(t, catalog, "gemini-embedding-2", api.ModeAsync)
 	for _, generated := range []string{
-		"claude-3-5-sonnet-20241022", "gpt-4o",
-		"gemini-1.5-pro", "llama-3.2-11b-vision-instruct",
-		"nova-pro-v1",
+		"claude-opus-4.8", "gpt-4-turbo", "gemini-1.5-pro", "nova-pro-v1",
 	} {
 		assertOperation(t, catalog, generated, api.OperationGenerate)
 	}
 
-	if _, err := catalog.Lookup("gemini-2.5-pro"); err == nil {
-		t.Fatal("conflicting source limits were published instead of rejected")
+	gpt4Turbo, _ := catalog.Lookup("gpt-4-turbo")
+	limits := gpt4Turbo.TokenLimits()
+	if limits.MaxInputTokens != 128000 || limits.MaxOutputTokens != 4096 {
+		t.Fatalf("gpt-4-turbo limits do not match the merged source facts: %+v", limits)
 	}
-	gpt41Definition, _ := catalog.Lookup("gpt-4.1")
-	limits := gpt41Definition.TokenLimits()
-	if limits.MaxInputTokens != 1047576 || limits.MaxOutputTokens != 32768 {
-		t.Fatalf("gpt-4.1 limits were inflated by another service record: %+v", limits)
-	}
-	gpt41Capability, _ := gpt41Definition.Capability(api.OperationGenerate)
-	if resolved := gpt41Capability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
+	gpt4TurboCapability, _ := gpt4Turbo.Capability(api.OperationGenerate)
+	if resolved := gpt4TurboCapability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
 		t.Fatalf("central max_output_tokens policy is wrong: %+v", resolved)
 	}
-	gpt41, _ := catalog.Lookup("gpt-4.1")
-	if !assertModes(gpt41, api.OperationGenerate, api.ModeUnary, api.ModeAsync) {
-		t.Fatal("gpt-4.1 lost unary or async delivery capability")
+	if !assertModes(gpt4Turbo, api.OperationGenerate, api.ModeUnary, api.ModeAsync) {
+		t.Fatal("gpt-4-turbo lost unary or async delivery capability")
 	}
 	latest, _ := catalog.Lookup("gpt-5.1-chat-latest")
 	latestCapability, _ := latest.Capability(api.OperationGenerate)
@@ -376,17 +363,15 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 			t.Errorf("non-authoritative BaseModel alias was published: %q", alias)
 		}
 	}
-	for _, canonical := range []string{"kokoro-82m", "chirp-3"} {
-		if _, lookupErr := catalog.Lookup(canonical); lookupErr != nil {
-			t.Errorf("canonical mixed-operation model %q was lost: %v", canonical, lookupErr)
+	for _, conflicting := range []string{
+		"gpt-6-astra", "deepseek-v4-flash", "kimi-k3", "claude-opus-5",
+		"gemini-2.5-pro", "gemini-2.5-flash-image", "gpt-4.1", "sora-2",
+		"text-embedding-3-large", "embed-v4.0", "codestral-embed", "mistral-embed",
+		"kokoro-82m", "whisper-1",
+	} {
+		if _, lookupErr := catalog.Lookup(conflicting); lookupErr == nil {
+			t.Errorf("conflicting canonical identity %q was published", conflicting)
 		}
-	}
-	whisper, _ := catalog.Lookup("whisper-1")
-	if _, exists := whisper.Capability(api.OperationGenerate); !exists {
-		t.Fatal("whisper's independently sourced generate operation was lost")
-	}
-	if _, exists := whisper.Capability(api.OperationAudioTranscription); !exists {
-		t.Fatal("whisper transcription operation is missing")
 	}
 
 	for _, synthetic := range []string{
@@ -409,10 +394,8 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 		}
 	}
 	for _, validEmbedding := range []string{
-		"amazon.titan-embed-text-v2:0",
-		"embed-v4.0",
-		"codestral-embed",
-		"mistral-embed",
+		"amazon.titan-embed-text-v2:0", "gemini-embedding-2",
+		"amazon.nova-2-multimodal-embeddings-v1:0", "voyage-3-large",
 	} {
 		assertOperation(t, catalog, validEmbedding, api.OperationEmbedding)
 	}
@@ -472,11 +455,14 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	large, _ := catalog.Lookup("text-embedding-3-large")
+	large, err := catalog.Lookup("gemini-embedding-2")
+	if err != nil {
+		t.Fatalf("lookup fixed-width embedding: %v", err)
+	}
 	capability, ok := large.Capability(api.OperationEmbedding)
 	if !ok || !capability.SupportsInputModality(api.ModalityText) ||
 		!capability.SupportsOutputModality(api.ModalityEmbedding) {
-		t.Fatal("text-embedding-3-large has an invalid embedding shape")
+		t.Fatal("gemini-embedding-2 has an invalid embedding shape")
 	}
 	if resolved := capability.ResolveEmbeddingDimensions(pointer(int64(9000))); resolved != nil {
 		t.Fatalf("fixed-width model accepted a dimensions parameter: %v", resolved)
@@ -485,12 +471,15 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		t.Fatalf("embedding default dimension is wrong: %d %v", dimensions, known)
 	}
 
-	gemini, _ := catalog.Lookup("gemini-embedding-001")
-	geminiCapability, _ := gemini.Capability(api.OperationEmbedding)
-	if requested := geminiCapability.ResolveEmbeddingDimensions(pointer(int64(512))); requested != nil {
+	titan, err := catalog.Lookup("amazon.titan-embed-text-v2:0")
+	if err != nil {
+		t.Fatalf("lookup Titan embedding: %v", err)
+	}
+	titanCapability, _ := titan.Capability(api.OperationEmbedding)
+	if requested := titanCapability.ResolveEmbeddingDimensions(pointer(int64(512))); requested != nil {
 		t.Fatalf("fixed-width embedding accepted a dimensions override: %v", requested)
 	}
-	if dimensions, known := geminiCapability.DefaultEmbeddingDimensions(); !known || dimensions != 3072 {
+	if dimensions, known := titanCapability.DefaultEmbeddingDimensions(); !known || dimensions != 1024 {
 		t.Fatalf("fixed embedding width is wrong: %d %v", dimensions, known)
 	}
 
@@ -520,6 +509,7 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		{name: "reversed output-token bounds", defaults: []Config{withReversedOutputLimits(testModelConfig("model-a"))}, field: "token_limits"},
 		{name: "limit exceeds context", defaults: []Config{withLimitAboveContext(testModelConfig("model-a"))}, field: "token_limits"},
 		{name: "duplicate operation", defaults: []Config{withDuplicateOperation(testModelConfig("model-a"))}, field: "operations"},
+		{name: "multiple operations", defaults: []Config{withSecondOperation(testModelConfig("model-a"))}, field: "operations"},
 		{name: "invalid operation", defaults: []Config{withInvalidOperation(testModelConfig("model-a"))}, field: "operations.operation"},
 		{name: "invalid mode", defaults: []Config{withInvalidMode(testModelConfig("model-a"))}, field: "operations.modes"},
 		{name: "invalid input modality", defaults: []Config{withInvalidInputModality(testModelConfig("model-a"))}, field: "operations.input_modalities"},
@@ -677,7 +667,7 @@ func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	for _, modelID := range []string{"claude-opus-4-8", "claude-opus-5", "claude-sonnet-5"} {
+	for _, modelID := range []string{"claude-opus-4.8", "claude-opus-5@default", "claude-sonnet-5@default"} {
 		definition, lookupErr := catalog.Lookup(modelID)
 		if lookupErr != nil {
 			t.Fatalf("lookup %q: %v", modelID, lookupErr)
@@ -797,6 +787,16 @@ func withLimitAboveContext(config Config) Config {
 
 func withDuplicateOperation(config Config) Config {
 	config.Operations = append(config.Operations, config.Operations[0])
+	return config
+}
+
+func withSecondOperation(config Config) Config {
+	config.Operations = append(config.Operations, OperationConfig{
+		Operation:        api.OperationRerank,
+		Modes:            []api.DeliveryMode{api.ModeUnary},
+		InputModalities:  []api.Modality{api.ModalityText},
+		OutputModalities: []api.Modality{api.ModalityText},
+	})
 	return config
 }
 

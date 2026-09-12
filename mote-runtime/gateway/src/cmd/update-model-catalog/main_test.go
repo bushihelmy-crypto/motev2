@@ -13,9 +13,9 @@ import (
 	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
-// compileForTest exposes the first rejection for focused assertions while
-// production publication keeps the complete rejection slice from the single
-// compileModelGroup path.
+// compileForTest exposes the first diagnostic for focused assertions. The
+// production command prints diagnostics for the current generation only; it
+// does not persist a rejection artifact.
 func compileForTest(modelID string, matches []recordRef) (modelConfig, bool, error) {
 	compiled, present, rejections := compileModelGroup(modelID, matches)
 	if len(rejections) == 0 {
@@ -43,8 +43,9 @@ func TestExplicitSourceModeOwnsOperationClassification(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			ref := recordRef{record: sourceRecord{Mode: testCase.mode, SupportedOutputModalities: testCase.outputs}}
-			if got := operationForRecord(testCase.modelID, ref); string(got) != testCase.expected {
-				t.Fatalf("operationForRecord(%q, %q) = %q, want %q", testCase.modelID, testCase.mode, got, testCase.expected)
+			got, reason := authoritativeOperation(ref)
+			if reason != "" || string(got) != testCase.expected {
+				t.Fatalf("authoritativeOperation(%q) = %q, %q, want %q", testCase.mode, got, reason, testCase.expected)
 			}
 		})
 	}
@@ -79,40 +80,40 @@ func TestExplicitSourceModalitiesAreExactAndMultimodalFactsAreRetained(t *testin
 	}
 }
 
-func TestSupplementalModalitiesAreConsumedWithoutWideningPrimaryFacts(t *testing.T) {
+func TestEqualSourceFactsMergeAndConflictingFactsDeleteIdentity(t *testing.T) {
 	primary := recordRef{key: "model", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}}
 	matchingBatch := recordRef{key: "provider/model:batch", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}}
-	compiled, _, err := compileForTest(primary.key, []recordRef{primary, matchingBatch})
-	if err != nil {
-		t.Fatal(err)
+	compiled, present, err := compileForTest(primary.key, []recordRef{primary, matchingBatch})
+	if err != nil || !present {
+		t.Fatalf("equal source facts were not merged: present=%v err=%v", present, err)
 	}
 	if got := compiled.Operations[0].InputModalities; len(got) != 1 || got[0] != api.ModalityText {
-		t.Fatalf("matching supplemental facts changed primary input: %v", got)
+		t.Fatalf("equal source facts changed input: %v", got)
 	}
 
 	missingPrimary := recordRef{key: "model-with-batch-fact", record: sourceRecord{Mode: "chat"}}
 	supplemental := recordRef{key: "provider/model-with-batch-fact:batch", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"text"}}}
-	compiled, _, err = compileForTest(missingPrimary.key, []recordRef{missingPrimary, supplemental})
-	if err != nil {
-		t.Fatal(err)
+	compiled, present, err = compileForTest(missingPrimary.key, []recordRef{missingPrimary, supplemental})
+	if err != nil || !present {
+		t.Fatalf("complementary source fact was not merged: present=%v err=%v", present, err)
 	}
 	if got := compiled.Operations[0].InputModalities; len(got) != 2 || got[0] != api.ModalityImage || got[1] != api.ModalityText {
-		t.Fatalf("supplemental explicit input was discarded: %v", got)
+		t.Fatalf("explicit supplemental input was not retained: %v", got)
 	}
 
 	conflicting := recordRef{key: "provider/model:batch", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"text"}}}
-	_, _, err = compileForTest(primary.key, []recordRef{primary, conflicting})
+	_, present, err = compileForTest(primary.key, []recordRef{primary, conflicting})
 	var compileErr *compileError
-	if !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "conflicts with primary record") {
-		t.Fatalf("conflicting supplemental modality fact was not rejected: %T %v", err, err)
+	if present || !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "supported_modalities") {
+		t.Fatalf("conflicting model was not rejected as a whole: present=%v %T %v", present, err, err)
 	}
 
 	missingPrimary = recordRef{key: "model-with-two-batch-facts", record: sourceRecord{Mode: "chat"}}
 	firstSupplemental := recordRef{key: "provider/model-with-two-batch-facts:batch", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}}
 	secondSupplemental := recordRef{key: "other/model-with-two-batch-facts:batch", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"image"}, SupportedOutputModalities: []string{"text"}}}
-	_, _, err = compileForTest(missingPrimary.key, []recordRef{missingPrimary, firstSupplemental, secondSupplemental})
-	if !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "conflicts with") {
-		t.Fatalf("disagreeing supplemental modality facts were unioned: %T %v", err, err)
+	_, present, err = compileForTest(missingPrimary.key, []recordRef{missingPrimary, firstSupplemental, secondSupplemental})
+	if !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "supported_modalities") {
+		t.Fatalf("disagreeing source modality facts were not fatal: present=%v %T %v", present, err, err)
 	}
 }
 
@@ -125,8 +126,31 @@ func TestQualifiedOnlyIdentityRejectsConflictingModalityFacts(t *testing.T) {
 	if len(models) != 0 {
 		t.Fatalf("qualified observations with no authoritative owner were published: %+v", models)
 	}
-	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "conflicting supplemental modality facts") {
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "supported_modalities") {
 		t.Fatalf("qualified modality conflict was not rejected once: %v", rejected)
+	}
+}
+
+func TestPrefixCollisionDeletesTheWholeCanonicalModel(t *testing.T) {
+	records := []recordRef{
+		{key: "model", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text"}, SupportedOutputModalities: []string{"text"}}},
+		{key: "provider/model", record: sourceRecord{Mode: "chat", SupportedModalities: []string{"text", "image"}, SupportedOutputModalities: []string{"text"}}},
+	}
+	models, rejected := compileModels(records, nil)
+	if len(models) != 0 {
+		t.Fatalf("conflicting prefixed and bare records left a partial model: %+v", models)
+	}
+	if len(rejected) == 0 || !strings.Contains(rejected[0].Reason, "supported_modalities") {
+		t.Fatalf("prefix collision was not diagnosed: %v", rejected)
+	}
+}
+
+func TestPeerParameterConflictDeletesTheWholeCanonicalModel(t *testing.T) {
+	first := recordRef{key: "model", record: sourceRecord{Mode: "chat", ModelParameters: []sourceParameter{{ID: "temperature", Default: json.RawMessage("1"), Range: &sourceRange{Minimum: numberPtr("0"), Maximum: numberPtr("2")}}}}}
+	second := recordRef{key: "provider/model", record: sourceRecord{Mode: "chat", ModelParameters: []sourceParameter{{ID: "temperature", Default: json.RawMessage("0.7"), Range: &sourceRange{Minimum: numberPtr("0"), Maximum: numberPtr("1")}}}}}
+	models, rejected := compileModels([]recordRef{first, second}, nil)
+	if len(models) != 0 || len(rejected) == 0 {
+		t.Fatalf("conflicting peer parameter facts were published: models=%v rejected=%v", models, rejected)
 	}
 }
 
@@ -135,11 +159,11 @@ func TestSupplementalOperationConflictIsRejected(t *testing.T) {
 	batch := recordRef{key: "provider/model:batch", record: sourceRecord{Mode: "embedding"}}
 	compiled, present, err := compileForTest(primary.key, []recordRef{primary, batch})
 	var compileErr *compileError
-	if !present || len(compiled.Operations) != 1 || compiled.Operations[0].Operation != api.OperationGenerate {
-		t.Fatalf("valid primary operation was discarded with conflicting batch: present=%v model=%+v", present, compiled)
+	if present || len(compiled.Operations) != 0 {
+		t.Fatalf("conflicting operation left a partial model: present=%v model=%+v", present, compiled)
 	}
-	if !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "without a matching non-batch operation") {
-		t.Fatalf("supplemental operation conflict was not isolated: %T %v", err, err)
+	if !errors.As(err, &compileErr) || !strings.Contains(compileErr.Reason, "conflicting operations") {
+		t.Fatalf("canonical operation conflict was not rejected: %T %v", err, err)
 	}
 }
 
@@ -151,8 +175,8 @@ func TestCanonicalIdentityRemovesEveryPrefixAndDeduplicatesByLeaf(t *testing.T) 
 		{key: "vercel_ai_gateway/mistral/codestral-embed", record: sourceRecord{Mode: "chat"}},
 	}
 	models, rejected := compileModels(records, nil)
-	if len(rejected) != 0 {
-		t.Fatalf("metadata wrapper should not reject the authoritative model: %v", rejected)
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "conflicting operations") {
+		t.Fatalf("conflicting operation identity was not rejected: %v", rejected)
 	}
 	seen := make(map[string]modelConfig, len(models))
 	for _, model := range models {
@@ -166,8 +190,8 @@ func TestCanonicalIdentityRemovesEveryPrefixAndDeduplicatesByLeaf(t *testing.T) 
 	if _, ok := seen["gpt-4.1"]; !ok {
 		t.Fatal("bare canonical model was lost")
 	}
-	if model, ok := seen["codestral-embed"]; !ok || len(model.Operations) != 2 {
-		t.Fatalf("same leaf was not deduplicated with independent operations: %+v", model)
+	if _, ok := seen["codestral-embed"]; ok {
+		t.Fatalf("same leaf with conflicting operations was published: %+v", seen["codestral-embed"])
 	}
 }
 
@@ -226,7 +250,7 @@ func TestMalformedQualifiedAndBatchSourcesBlockInference(t *testing.T) {
 	}
 }
 
-func TestCanonicalModelKeepsIndependentOperationsAndBatchDelivery(t *testing.T) {
+func TestCanonicalModelDropsConflictingOperations(t *testing.T) {
 	records := []recordRef{
 		{key: "model", record: sourceRecord{Mode: "chat"}},
 		{key: "openrouter/model", record: sourceRecord{BaseModel: "model", Mode: "audio_speech"}},
@@ -234,30 +258,12 @@ func TestCanonicalModelKeepsIndependentOperationsAndBatchDelivery(t *testing.T) 
 		{key: "vercel_ai_gateway/model:batch", record: sourceRecord{BaseModel: "model:batch", Mode: "embedding"}},
 	}
 	models, rejected := compileModels(records, nil)
-	if len(models) != 1 {
-		t.Fatalf("canonical model count = %d, want one: %v", len(models), models)
+	if len(models) != 0 {
+		t.Fatalf("conflicting canonical operations were published: %v", models)
 	}
-	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "without a matching non-batch operation") {
-		t.Fatalf("conflicting batch was not isolated: %v", rejected)
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "conflicting operations") {
+		t.Fatalf("conflicting operation was not rejected: %v", rejected)
 	}
-	model := models[0]
-	if len(model.Operations) != 2 {
-		t.Fatalf("independent operations were flattened or lost: %+v", model.Operations)
-	}
-	for _, operation := range model.Operations {
-		if operation.Operation == api.OperationGenerate && !containsDeliveryMode(operation.Modes, api.ModeAsync) {
-			t.Fatalf("matching batch did not add async delivery: %+v", operation)
-		}
-	}
-}
-
-func containsDeliveryMode(values []api.DeliveryMode, wanted api.DeliveryMode) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 func TestUnknownSourceModalityIsRejected(t *testing.T) {
@@ -310,6 +316,13 @@ func TestSyntheticRequestPresetsAreNotModels(t *testing.T) {
 		if syntheticModelID(modelID) {
 			t.Errorf("syntheticModelID(%q) = true for a model", modelID)
 		}
+	}
+}
+
+func TestAmbiguousCanonicalLeafIsNotNameInferred(t *testing.T) {
+	model, present, rejected := compileInferredModel("flux")
+	if present || len(rejected) != 0 || model.ID != "" {
+		t.Fatalf("ambiguous leaf acquired an invented operation: present=%v model=%+v diagnostics=%v", present, model, rejected)
 	}
 }
 
@@ -546,30 +559,6 @@ func TestConflictingOutputMaximumFactsAreRejected(t *testing.T) {
 	}
 }
 
-func TestRejectionManifestIsDeterministicAndMachineReadable(t *testing.T) {
-	if got := defaultRejectionManifestPath("src/internal/model/catalog_data.json.gz"); got != "src/internal/model/catalog_rejections.json" {
-		t.Fatalf("default rejection path = %q", got)
-	}
-	manifest := rejectionManifest{
-		SchemaVersion: 1,
-		Rejections: []*compileError{
-			{ModelID: "z", Field: "operation", Reason: "bad"},
-			{ModelID: "a", Field: "mode", Reason: "missing"},
-		},
-	}
-	data, err := encodeRejectionManifest(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded rejectionManifest
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decoded.Rejections) != 2 || decoded.Rejections[0].ModelID != "a" || decoded.Rejections[1].ModelID != "z" {
-		t.Fatalf("manifest was not deterministically sorted: %+v", decoded.Rejections)
-	}
-}
-
 func TestCatalogEncodingRejectsQualifiedModelIDs(t *testing.T) {
 	_, err := encodeCatalog(catalogDocument{
 		SchemaVersion: 1,
@@ -580,61 +569,23 @@ func TestCatalogEncodingRejectsQualifiedModelIDs(t *testing.T) {
 	}
 }
 
-func TestArtifactPairPublishesTogether(t *testing.T) {
+func TestCatalogArtifactPublishesAtomically(t *testing.T) {
 	directory := t.TempDir()
 	catalogPath := filepath.Join(directory, "catalog.json.gz")
-	manifestPath := filepath.Join(directory, "rejections.json")
 	if err := os.WriteFile(catalogPath, []byte("old catalog"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(manifestPath, []byte("old manifest"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := publishArtifactPair(catalogPath, []byte("new catalog"), manifestPath, []byte("new manifest")); err != nil {
+	if err := publishArtifact(catalogPath, []byte("new catalog")); err != nil {
 		t.Fatal(err)
 	}
 	assertFileContent(t, catalogPath, "new catalog")
-	assertFileContent(t, manifestPath, "new manifest")
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("publication left staging or rollback files: %v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("publication left staging files: %v", entries)
 	}
-}
-
-func TestArtifactPairRollsBackWhenSecondReplacementFails(t *testing.T) {
-	directory := t.TempDir()
-	catalogPath := filepath.Join(directory, "catalog.json.gz")
-	manifestPath := filepath.Join(directory, "rejections.json")
-	if err := os.WriteFile(catalogPath, []byte("old catalog"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifestPath, []byte("old manifest"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pair := [2]pendingArtifact{{path: catalogPath}, {path: manifestPath}}
-	for index, data := range [2][]byte{[]byte("new catalog"), []byte("new manifest")} {
-		if err := prepareArtifact(&pair[index], data); err != nil {
-			cleanupPendingArtifacts(&pair)
-			t.Fatal(err)
-		}
-	}
-	renameCalls := 0
-	err := commitArtifactPair(&pair, func(source, target string) error {
-		renameCalls++
-		if renameCalls == 2 {
-			return errors.New("injected second replacement failure")
-		}
-		return os.Rename(source, target)
-	})
-	cleanupPendingArtifacts(&pair)
-	if err == nil || !strings.Contains(err.Error(), "injected second replacement failure") {
-		t.Fatalf("replacement failure was not returned: %v", err)
-	}
-	assertFileContent(t, catalogPath, "old catalog")
-	assertFileContent(t, manifestPath, "old manifest")
 }
 
 func assertFileContent(t *testing.T, path, expected string) {
@@ -666,10 +617,10 @@ func TestExplicitBatchVariantDoesNotBecomeBaseModelAlias(t *testing.T) {
 	}
 }
 
-func TestBareSourceOwnsDeduplicatedQualifiedRecords(t *testing.T) {
-	primary := recordRef{key: "model", record: sourceRecord{Mode: "chat", SupportsNativeStreaming: true}}
+func TestEqualRecordsCombineComplementaryDeliveryEvidence(t *testing.T) {
+	bare := recordRef{key: "model", record: sourceRecord{Mode: "chat", SupportsNativeStreaming: true}}
 	qualified := recordRef{key: "provider/model", record: sourceRecord{Mode: "chat", SupportsNativeStreaming: false}}
-	compiled, rejected := compileModels([]recordRef{primary, qualified}, nil)
+	compiled, rejected := compileModels([]recordRef{bare, qualified}, nil)
 	if len(rejected) != 0 {
 		t.Fatal(rejected)
 	}
@@ -679,11 +630,11 @@ func TestBareSourceOwnsDeduplicatedQualifiedRecords(t *testing.T) {
 		}
 		modes := model.Operations[0].Modes
 		if len(modes) != 2 || modes[0] != "server_stream" || modes[1] != "unary" {
-			t.Fatalf("qualified non-batch record changed the exact model modes: %v", modes)
+			t.Fatalf("complementary delivery evidence was not combined: %v", modes)
 		}
 		return
 	}
-	t.Fatal("exact model was not compiled")
+	t.Fatal("canonical model was not compiled")
 }
 
 func number(value string) json.Number { return json.Number(value) }

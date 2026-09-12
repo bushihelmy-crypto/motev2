@@ -16,7 +16,18 @@
 | [`src/api/operation.go`](../src/api/operation.go) | 中立的 operation/modality/mode/feature 词汇 |
 | [`src/cmd/update-model-catalog`](../src/cmd/update-model-catalog) | 从 new-api/Bifrost 快照生成纯模型目录，并复用 runtime 的 typed operation-shape owner |
 | `src/internal/model/catalog_data.json.gz` | 生成后的模型事实快照，不应被手工编辑 |
-| `src/internal/model/catalog_rejections.json` | 同一输入快照中被 fail-closed 拒绝的模型集合，不是第二份能力目录 |
+
+生成器仍是一个 Go package 和一条执行路径，但文件按实际 owner 分开：
+
+| 文件 | 唯一职责 |
+| --- | --- |
+| `main.go` | CLI 参数和顶层生成顺序 |
+| `source.go` | 来源 DTO、严格 JSON 解码、固定 Git revision 抽取 |
+| `identity.go` | 去除所有 `/` 前缀后的 canonical ID、synthetic ID 排除和无来源时的 operation 推断 |
+| `compiler.go` | canonical 分组、冲突判定和模型级编译 |
+| `operation_compiler.go` | 单个 operation 的 mode/modality/feature/shape 编译 |
+| `parameters.go` | token limit、generation/embedding 参数事实及数值合法性 |
+| `artifact.go` | catalog schema、确定性 gzip 编码和单文件 atomic rename |
 
 本目录采用“真实模型能力优先”的语义：目录记录来源能够证明的完整模型能力，
 不因为当前 `gateway_invocation` v1 的请求 DTO 或某个调用 profile 暂时较窄就删掉
@@ -50,7 +61,7 @@
 | structured-output 模型兼容性证据 | 选中 operation 的 `Features` | `supports_response_schema` / `supports_native_structured_output` 只投影为中立的 `structured_output` 证据；协议和服务准入仍必须再次通过 |
 | Embedding 维度 | `EmbeddingPolicy` | fixed 与 adjustable 互斥；默认值和边界不复制到别处 |
 | operation shape（mode/modality/policy 组合） | `src/internal/model/shape.go` 的 `ValidateOperationShape` | 生成器和 runtime 复用同一个 typed 校验，不各自维护规则表 |
-| 来源抽取和快照生成 | `src/cmd/update-model-catalog` | 输入 revision/hash 只记录在 catalog；输出不携带 service/protocol/pricing 字段；rejection 写入机器可读 sidecar，并与 catalog 先全部 staging 后成对替换 |
+| 来源抽取和快照生成 | `src/cmd/update-model-catalog` | 输入 revision/hash 只记录在 catalog；输出不携带 service/protocol/pricing 字段；冲突身份完全不发布，且不建立第二份持久状态 |
 | 服务、协议、凭据、价格 | 各自的 service/protocol/receipt owner | `internal/model` 和 catalog 中不存在这些执行事实 |
 
 ### 组合调用链
@@ -88,16 +99,18 @@ Protocol adapter encodes the resolved neutral request
 
 - `Definition` 建立后，调用方修改构造输入的 slice、pointer 或 stop 列表，不得改变
   已建立的定义。
-- 每个模型的同一 operation 唯一；一个真实模型可以同时发布多个独立 operation，集合
-  排序且不含重复项；所有枚举值都来自 `api` 的中立词汇。
+- 每个 canonical ID 恰好发布一个 operation；`chat`、`completion`、`responses` 都归一
+  为 `generate`，而来源若声明两个不同 semantic operation，则整个 ID 不发布。所有
+  集合排序且不含重复项，枚举值都来自 `api` 的中立词汇。
 - `Lookup("model ")` 不得命中 `Lookup("model")`；不允许 alias、大小写折叠、
   家族推断或隐式 fallback。
 - 已有模型的 `nil` override 字段继承默认值；非 nil 的 operation 集合整体替换，
   不能同时存在“逐项 patch”和“整体替换”两种语义。
 - 未知模型只有在 override 提供完整、可校验的 operation 集合时才可加入目录。
 - 生命周期、token limit、默认值和 numeric bounds 在构造时失败即返回 typed error，
-  不能为了“尽量可用”在运行时偷偷修正。生成阶段以模型为发布单元：非法记录不会
-  进入目录，并输出确定性的 rejection；一条坏的服务别名不会阻断其余独立模型。
+  不能为了“尽量可用”在运行时偷偷修正。生成阶段以模型为发布单元：同一 canonical
+  ID 的事实一旦冲突，整个模型都不进入目录；运行时查询它与查询随意编造的名字一样
+  返回 unknown model。
 
 ### Generation 参数
 
@@ -130,54 +143,50 @@ Protocol adapter encodes the resolved neutral request
 
 生成器必须保持可重现、可解释，而不是把上游资料原样搬进 Gateway。请重点检查：
 
-1. `compileModels` 是否先形成一个稳定的 canonical model identity，再按 semantic
-   operation 分桶；同一模型的不同 operation 必须并存，不能互相覆盖。canonical identity
-   永远是来源 ID 的最后一段（例如 `openrouter/cohere/command` → `command`），因此
-   目录中不得出现 `/`，相同裸 ID 只能有一份。明确的 `:batch` 变体只补充同 operation
-   的交付模式，冲突 batch 只拒绝该变体。模态 supplemental fact 不得扩大主记录；主
-   记录缺失时只能确定性采用一致的观察，冲突记录写入 rejection manifest，不能静默
-   丢弃或 union 出来源未声明的能力。
-2. `sortRecords` 的优先级是否稳定；同一输入重复生成时，输出顺序和字段应一致。
+1. `compileModels` 是否先形成一个稳定的 canonical model identity，再确定唯一 semantic
+   operation。canonical identity 永远是来源 ID 的最后一段（例如
+   `openrouter/cohere/command` → `command`），因此
+   目录中不得出现 `/`，相同裸 ID 只能有一份。去掉前缀后所有来源记录完全平权，不得
+   偏爱原本不带前缀的记录；事实一致时去重、事实缺失时由明确来源补齐，任何事实冲突
+   （包括不同 operation）都删除整个 canonical 模型，不允许发布部分能力。
+2. `sortRecords` 是否只负责稳定顺序而不决定事实优先级；同一输入重复生成时，输出顺序
+   和字段应一致。
 3. `inferOperation`、图像/视频/Embedding 名称判定只是完全没有来源记录时的保守
    补足；有精确来源记录时，显式 `mode` 直接拥有 operation，模型名称不能覆盖它；
-   `mode` 缺失或未知时必须 rejection，不能回退到名称推断。新增启发式必须有针对性
+   `mode` 缺失或未知时必须丢弃，不能回退到名称推断。新增启发式必须有针对性
    测试，不能用一个名称规则覆盖整个服务商。
 4. batch-only 记录是否只暴露 `async`；普通模型有 batch 能力时是否保留 `unary`
    并额外声明 `async`；`:batch` 行在 canonical 分组后只能补充同 operation，不能成为
-   另一个模型 ID，也不能把不同 operation 的主模型拒绝掉。
+   另一个模型 ID；如果它声明不同 operation，必须按身份冲突删除整个 canonical ID。
 5. `compileTokenLimits`、参数默认值和维度信息是否来自模型事实，而不是价格行、
    provider 字段或 protocol endpoint。`model_parameters` 中的 output-token UI 默认值
    不被消费；Gateway 的 4096 运行时策略是唯一默认 owner，只采纳来源声明的边界。
 6. 生成的 gzip 文件是否经过 `gzip -t`，来源 revision/hash 是否与输入一致，且目录
    不含 `provider`、`protocol`、`endpoint`、`credential`、`price`、`pricing`、
-   `family` 等越权字段；catalog 与 rejection sidecar 是否由同一个 staging/rollback
-   事务发布。
+   `family` 等越权字段；catalog 是否通过单文件 staging + atomic rename 发布，且不存在
+   rejection sidecar、alias 表或其他第二份目录状态。
 
-固定 revision/hash 的当前快照发布 9248 个 canonical 模型；其中 23 个模型有多个
-独立 semantic operation。下面的 operation 数量用于人工核对；它们不是可替代模型
-事实的第二份能力状态：
+固定 revision/hash 的当前快照发布 8835 个 canonical 模型，每个模型恰好一个 semantic
+operation。下面的 operation 数量用于人工核对；它们不是可替代模型事实的第二份能力状态：
 
 | operation | 数量 |
 | --- | ---: |
-| `generate` | 8685 |
-| `embedding` | 160 |
-| `rerank` | 32 |
-| `image_generation` | 190 |
-| `audio_generation` | 40 |
-| `audio_transcription` | 75 |
+| `generate` | 8293 |
+| `embedding` | 145 |
+| `rerank` | 31 |
+| `image_generation` | 184 |
+| `audio_generation` | 34 |
+| `audio_transcription` | 67 |
 | `music_generation` | 0 |
-| `video_generation` | 77 |
-| `realtime` | 12 |
+| `video_generation` | 73 |
+| `realtime` | 8 |
 
 原始快照中的 `:batch` 请求变体只补充基础模型的 `async` 能力，不发布为模型。当前
-rejection manifest 有 89 条：19 条是顶层 output maximum 与参数 range maximum 冲突，
-4 条是非法 output-token range（minimum 大于 maximum），8 条是来源声明了 Gateway
-未知的 `code` modality，53 条是 Gateway 不拥有的 `search`/`ocr`/`moderation`/`3d`
-等未知 operation，另有 5 条 supplemental modality 冲突；这些记录都不会静默消失，
-完整集合写入 `src/internal/model/catalog_rejections.json`。无 authoritative source
-的模型才允许按明确的名称规则推断 operation；有 source row 但 mode 缺失或未知时
-直接 rejection。`fallback_generalizations` 是 Bifrost 的规则元数据，不是模型记录，
-按 source adapter 规则排除，不计入模型或 rejection。
+冲突、非法或 Gateway 不认识的来源只在生成命令当次运行的 stderr 中报告，不写入任何
+持久 artifact。它们不会进入目录，之后查询这些名字只会得到 unknown model。无
+authoritative source 的模型才允许按明确的名称规则推断 operation；有 source row 但
+mode 缺失或未知时直接丢弃。`fallback_generalizations` 是 Bifrost 的规则元数据，不是
+模型记录，按 source adapter 规则排除。
 数量变化本身不一定是缺陷，但必须能由来源 revision、生成器规则或明确的模型事实
 解释；不能只改测试期望值。
 
@@ -259,8 +268,9 @@ git diff --check
 只有在设计本身清晰且唯一、关键不变量有测试、所有适用门禁通过，并且剩余限制已被
 明确记录时，才建议批准。
 
-本次复杂度基线记录为 703 个 decision points / 131 个函数（最大 cyclomatic 为 51，
+本次复杂度基线记录为 635 个 decision points / 118 个函数（最大 cyclomatic 为 51，
 最大嵌套深度为 4）：`cmd/update-model-catalog` 也纳入同一 radar，因为它是生产的
-source-to-artifact compiler；这不是把 compiler 拆成 wrapper 或兼容路径，而是让后续
-修改有真实的完整调用链基线。新增的 `ValidateOperationShape` 仍是 runtime 与
+source-to-artifact compiler。文件数和 import edges 的增加来自按真实 owner 拆分同一
+package，不是 wrapper 或兼容路径；决策点和函数数下降来自删除旧的双 artifact、冲突
+分支和多 operation 编译骨架。新增的 `ValidateOperationShape` 仍是 runtime 与
 build-time compiler 共用的唯一 typed shape owner。
