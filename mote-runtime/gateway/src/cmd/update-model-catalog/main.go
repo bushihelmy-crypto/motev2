@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
 type options struct {
@@ -59,22 +61,18 @@ func run(configured options) error {
 	if err != nil {
 		return err
 	}
-	newModels, err := extractNewAPIModels(configured.newAPIRepo, configured.newAPIRef)
-	if err != nil {
-		return err
-	}
-	models, rejected := compileModels(records, newModels)
+	models, rejected := compileModels(records)
 	if len(models) == 0 {
 		return errors.New("compile model catalog: sources produced no usable models")
 	}
 	digest := sha256.Sum256(parameterData)
-	sources := []catalogSource{
+	sources := []modelcatalog.CatalogSource{
 		{Name: "new-api", Revision: strings.TrimSpace(newRevision)},
 		{Name: "bifrost", Revision: strings.TrimSpace(bifrostRevision)},
 		{Name: "bifrost-model-parameters", SHA256: hex.EncodeToString(digest[:])},
 	}
-	document := catalogDocument{
-		SchemaVersion: catalogSchemaVersion,
+	document := modelcatalog.CatalogDocument{
+		SchemaVersion: modelcatalog.CatalogSchemaVersion,
 		Sources:       sources,
 		Models:        models,
 	}

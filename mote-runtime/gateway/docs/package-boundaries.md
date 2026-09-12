@@ -22,7 +22,7 @@ result or log protocol.
 `model.Config`; per-model differences are declared as operation capability
 data. Catalog defaults are combined once with model overrides carried from
 Kernel by the Gateway invocation adapter. The resulting `model.Definition` is
-immutable and uses exact model-ID lookup, never aliasing, routing, discovery,
+immutable and uses exact `BaseModel` lookup, never aliasing, routing, discovery,
 or fallback.
 
 For service- and protocol-neutral generation controls already known to `api`,

@@ -8,24 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
-const catalogSchemaVersion = 1
-
-type catalogDocument struct {
-	SchemaVersion int             `json:"schema_version"`
-	Sources       []catalogSource `json:"sources"`
-	Models        []modelConfig   `json:"models"`
-}
-
-type catalogSource struct {
-	Name     string `json:"name"`
-	Revision string `json:"revision,omitempty"`
-	SHA256   string `json:"sha256,omitempty"`
-}
-
-func encodeCatalog(document catalogDocument) ([]byte, error) {
+func encodeCatalog(document modelcatalog.CatalogDocument) ([]byte, error) {
 	var output bytes.Buffer
 	fmt.Fprintf(&output, "{\n  \"schema_version\": %d,\n  \"sources\": ", document.SchemaVersion)
 	sources, err := json.Marshal(document.Sources)
@@ -35,12 +22,15 @@ func encodeCatalog(document catalogDocument) ([]byte, error) {
 	output.Write(sources)
 	output.WriteString(",\n  \"models\": [\n")
 	for index, model := range document.Models {
-		if model.ID == "" || strings.Contains(model.ID, "/") {
-			return nil, fmt.Errorf("encode model %q: canonical ID must be a non-empty final path segment", model.ID)
+		if err := modelcatalog.ValidateBaseModel(model.BaseModel); err != nil {
+			return nil, fmt.Errorf("encode model %q: BaseModel %w", model.BaseModel, err)
+		}
+		if err := modelcatalog.ValidateConfig(model); err != nil {
+			return nil, fmt.Errorf("encode model %q: %w", model.BaseModel, err)
 		}
 		encoded, encodeErr := json.Marshal(model)
 		if encodeErr != nil {
-			return nil, fmt.Errorf("encode model %q: %w", model.ID, encodeErr)
+			return nil, fmt.Errorf("encode model %q: %w", model.BaseModel, encodeErr)
 		}
 		output.WriteString("    ")
 		output.Write(encoded)

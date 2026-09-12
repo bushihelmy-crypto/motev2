@@ -92,9 +92,9 @@ Gateway 不能把“组合不兼容”解释成“让我换个模型或服务商
 
 模型描述模型本身，例如：
 
-- 规范模型 ID；
+- 裸 `BaseModel` 名称；
 - 是否支持文本、图片、音频；
-- 是否支持 tool call、结构化输出、thinking；
+- 是否支持 tool call、结构化输出等已纳入中立词汇的模型能力；
 - 上下文窗口和最大输出；
 - 生命周期与废弃状态。
 
@@ -108,9 +108,10 @@ Gateway 不能把“组合不兼容”解释成“让我换个模型或服务商
 同一个 Claude 模型可以部署在 Anthropic、Azure、Vertex 或 Bedrock，所以模型不能等同于服务商。
 
 模型层不需要带 `Chat()`、`Embed()` 或网络行为的 `BaseLLM`。公共部分是
-`model.Config` 数据：精确模型 ID、生命周期、token 限制；不同部分是每个
-operation 声明的模态、delivery mode、feature，以及参数的支持状态、默认值和
-数值边界。执行行为仍然属于 Protocol Adapter 与 Service Connector。
+`model.Config` 数据：裸 `BaseModel`、生命周期和 token 限制；不同部分是每个
+operation 声明的输入/输出模态、模型兼容性 feature，以及参数的支持状态、默认值
+和数值边界。delivery mode 属于协议/服务调用生命周期，不进入模型定义。执行行为
+仍然属于 Protocol Adapter 与 Service Connector。
 
 模型配置按固定优先级只合并一次：
 
@@ -123,7 +124,7 @@ immutable model.Definition
 ```
 
 override 使用 presence 语义：未提供的公共标量和 token limit 继承默认值；非 nil
-的 operation 集合整体替换默认集合，不存在第二套 operation patch 规则。override
+的 capability 整体替换默认 capability，不存在第二套 capability patch 规则。override
 不能借此传入 service、protocol、endpoint、credential 或 price。Gateway 不读取
 另一份用户配置源，也不在调用中修改已经冻结的 `model.Definition`。
 

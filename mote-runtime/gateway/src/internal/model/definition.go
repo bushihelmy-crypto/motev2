@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
 )
@@ -16,8 +17,8 @@ const (
 	LifecycleRetired    Lifecycle = "retired"
 
 	// gatewayDefaultMaxOutputTokens is a Gateway policy, not a
-	// provider/model fact. A model's own minimum and maximum remain owned by
-	// TokenLimits.
+	// model fact. A model's own minimum and maximum remain owned by TokenLimits;
+	// Gateway policy must not be copied into this catalog field.
 	gatewayDefaultMaxOutputTokens int64 = 4096
 )
 
@@ -55,21 +56,21 @@ type TokenLimitsOverride struct {
 // Config is the common model configuration envelope. It deliberately contains
 // no family grouping: Router owns every grouping used to select a model.
 type Config struct {
-	ID          string            `json:"id"`
-	Lifecycle   Lifecycle         `json:"lifecycle"`
-	TokenLimits TokenLimits       `json:"token_limits"`
-	Operations  []OperationConfig `json:"operations"`
+	BaseModel   string           `json:"base_model"`
+	Lifecycle   Lifecycle        `json:"lifecycle"`
+	TokenLimits TokenLimits      `json:"token_limits"`
+	Capability  CapabilityConfig `json:"capability"`
 }
 
 // Override is the single model configuration patch delivered by Kernel.
-// Scalar pointers inherit when absent. A nil Operations slice inherits the
-// built-in operation set; a non-nil slice replaces it completely. For a custom
-// model absent from the built-in catalog, Operations must define the model.
+// Scalar pointers inherit when absent. A nil Capability inherits the built-in
+// capability; a non-nil value replaces it completely. For a custom model
+// absent from the built-in catalog, Capability must define the model.
 type Override struct {
-	ModelID     string
+	BaseModel   string
 	Lifecycle   *Lifecycle
 	TokenLimits TokenLimitsOverride
-	Operations  []OperationConfig
+	Capability  *CapabilityConfig
 }
 
 // Definition is the immutable model description consumed by admission and a
@@ -87,13 +88,29 @@ type ConfigError struct {
 	Reason  string
 }
 
+// ValidateBaseModel enforces the catalog identity vocabulary. A BaseModel is
+// an exact, bare model name; provider/service namespaces and surrounding
+// whitespace belong to source records or invocation routing, never here.
+func ValidateBaseModel(value string) error {
+	if value == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if strings.TrimSpace(value) != value {
+		return fmt.Errorf("must not contain surrounding whitespace")
+	}
+	if strings.Contains(value, "/") {
+		return fmt.Errorf("must be a bare model name without '/'")
+	}
+	return nil
+}
+
 func (err *ConfigError) Error() string {
 	return fmt.Sprintf("invalid model config %q %s: %s", err.ModelID, err.Field, err.Reason)
 }
 
-// ID returns the exact catalog model identifier selected by Router.
-func (definition Definition) ID() string {
-	return definition.config.ID
+// BaseModel returns the exact model identity selected by Router.
+func (definition Definition) BaseModel() string {
+	return definition.config.BaseModel
 }
 
 // Lifecycle returns the model catalog lifecycle state.
@@ -109,81 +126,89 @@ func (definition Definition) TokenLimits() TokenLimits {
 // Capability returns an immutable operation capability when the model declares
 // the operation.
 func (definition Definition) Capability(operation api.Operation) (Capability, bool) {
-	if len(definition.config.Operations) != 1 || definition.config.Operations[0].Operation != operation {
+	if definition.config.Capability.Operation != operation {
 		return Capability{}, false
 	}
 	return Capability{definition: definition}, true
 }
 
 func normalizeConfig(config Config) (Config, error) {
-	if config.ID == "" {
-		return Config{}, configError(config.ID, "id", "must not be empty")
+	if reason := ValidateBaseModel(config.BaseModel); reason != nil {
+		return Config{}, configError(config.BaseModel, "base_model", reason.Error())
 	}
 	if config.Lifecycle != LifecycleActive && config.Lifecycle != LifecycleDeprecated && config.Lifecycle != LifecycleRetired {
-		return Config{}, configError(config.ID, "lifecycle", fmt.Sprintf("unsupported value %q", config.Lifecycle))
+		return Config{}, configError(config.BaseModel, "lifecycle", fmt.Sprintf("unsupported value %q", config.Lifecycle))
 	}
 	limits := config.TokenLimits
 	if reason := limits.validationError(); reason != "" {
-		return Config{}, configError(config.ID, "token_limits", reason)
+		return Config{}, configError(config.BaseModel, "token_limits", reason)
 	}
-	if len(config.Operations) != 1 {
-		return Config{}, configError(config.ID, "operations", "must contain exactly one operation")
-	}
-
-	operation, err := normalizeOperationConfig(config.ID, config.Operations[0])
+	capability, err := normalizeCapabilityConfig(config.BaseModel, config.Capability)
 	if err != nil {
 		return Config{}, err
 	}
-	config.Operations = []OperationConfig{operation}
+	config.Capability = capability
 	return config, nil
 }
 
-func normalizeOperationConfig(modelID string, config OperationConfig) (OperationConfig, error) {
+// ValidateConfig applies the same immutable model validation used by runtime
+// catalog construction. The source compiler calls this owner before publishing
+// an artifact, so build-time and runtime cannot accept different shapes.
+func ValidateConfig(config Config) error {
+	_, err := normalizeConfig(config)
+	return err
+}
+
+func normalizeCapabilityConfig(modelID string, config CapabilityConfig) (CapabilityConfig, error) {
 	if !config.Operation.IsValid() {
-		return OperationConfig{}, configError(modelID, "operations.operation", fmt.Sprintf("unsupported value %q", config.Operation))
+		return CapabilityConfig{}, configError(modelID, "capability.operation", fmt.Sprintf("unsupported value %q", config.Operation))
 	}
-	if len(config.Modes) == 0 || len(config.InputModalities) == 0 || len(config.OutputModalities) == 0 {
-		return OperationConfig{}, configError(modelID, "operations", "modes and input/output modalities must not be empty")
+	if len(config.InputModalities) == 0 || len(config.OutputModalities) == 0 {
+		return CapabilityConfig{}, configError(modelID, "capability", "input/output modalities must not be empty")
 	}
 	var err error
-	config.Modes, err = normalizeSet(config.Modes, api.DeliveryMode.IsValid)
-	if err != nil {
-		return OperationConfig{}, configError(modelID, "operations.modes", err.Error())
-	}
 	config.InputModalities, err = normalizeSet(config.InputModalities, api.Modality.IsValid)
 	if err != nil {
-		return OperationConfig{}, configError(modelID, "operations.input_modalities", err.Error())
+		return CapabilityConfig{}, configError(modelID, "capability.input_modalities", err.Error())
 	}
 	config.OutputModalities, err = normalizeSet(config.OutputModalities, api.Modality.IsValid)
 	if err != nil {
-		return OperationConfig{}, configError(modelID, "operations.output_modalities", err.Error())
+		return CapabilityConfig{}, configError(modelID, "capability.output_modalities", err.Error())
 	}
-	config.Features, err = normalizeSet(config.Features, api.Feature.IsValid)
+	config.Features, err = normalizeSet(config.Features, isModelFeature)
 	if err != nil {
-		return OperationConfig{}, configError(modelID, "operations.features", err.Error())
+		return CapabilityConfig{}, configError(modelID, "capability.features", err.Error())
 	}
-	if err := ValidateOperationShape(OperationShape{
+	if err := validateCapabilityShape(capabilityShape{
 		Operation:        config.Operation,
-		Modes:            config.Modes,
 		InputModalities:  config.InputModalities,
 		OutputModalities: config.OutputModalities,
 		HasGeneration:    config.Generation != nil,
 		HasEmbedding:     config.Embedding != nil,
 	}); err != nil {
-		return OperationConfig{}, configError(modelID, "operations", err.Error())
+		return CapabilityConfig{}, configError(modelID, "capability", err.Error())
 	}
 
 	generation, field, reason := normalizeGenerationPolicy(config.Generation)
 	if reason != "" {
-		return OperationConfig{}, configError(modelID, "operations.generation."+field, reason)
+		return CapabilityConfig{}, configError(modelID, "capability.generation."+field, reason)
 	}
 	config.Generation = generation
 	embedding, field, reason := normalizeEmbeddingPolicy(config.Embedding)
 	if reason != "" {
-		return OperationConfig{}, configError(modelID, "operations.embedding."+field, reason)
+		return CapabilityConfig{}, configError(modelID, "capability.embedding."+field, reason)
 	}
 	config.Embedding = embedding
 	return config, nil
+}
+
+func isModelFeature(feature api.Feature) bool {
+	switch feature {
+	case api.FeatureToolCalls, api.FeatureStructured:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeSet[T ~string](values []T, valid func(T) bool) ([]T, error) {
@@ -217,8 +242,8 @@ func applyOverride(base Config, override Override) (Config, error) {
 	if override.TokenLimits.MaxOutputTokens != nil {
 		result.TokenLimits.MaxOutputTokens = *override.TokenLimits.MaxOutputTokens
 	}
-	if override.Operations != nil {
-		result.Operations = override.Operations
+	if override.Capability != nil {
+		result.Capability = *override.Capability
 	}
 	return normalizeConfig(result)
 }

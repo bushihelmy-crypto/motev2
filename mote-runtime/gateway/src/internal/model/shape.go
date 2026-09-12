@@ -7,12 +7,10 @@ import (
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
 )
 
-// OperationShape is the typed, service-neutral shape of one model operation.
-// It is shared by catalog generation and runtime validation so an operation
-// cannot be published in a shape that runtime would later accept differently.
-type OperationShape struct {
+// capabilityShape is the model-owned shape of one semantic operation.
+// Delivery modes are deliberately absent: protocols and services own them.
+type capabilityShape struct {
 	Operation        api.Operation
-	Modes            []api.DeliveryMode
 	InputModalities  []api.Modality
 	OutputModalities []api.Modality
 	HasGeneration    bool
@@ -20,25 +18,27 @@ type OperationShape struct {
 }
 
 type operationShapePolicy struct {
-	allowedModes     []api.DeliveryMode
+	defaultInputs    []api.Modality
+	defaultOutputs   []api.Modality
 	allowedInputs    []api.Modality
 	allowedOutputs   []api.Modality
 	requiredOutput   api.Modality
 	exactOutput      bool
 	embedding        bool
 	allowsGeneration bool
-	realtime         bool
 }
 
 var operationShapePolicies = map[api.Operation]operationShapePolicy{
 	api.OperationGenerate: {
-		allowedModes:     []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:    []api.Modality{api.ModalityText},
+		defaultOutputs:   []api.Modality{api.ModalityText},
 		allowedInputs:    []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs:   []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowsGeneration: true,
 	},
 	api.OperationEmbedding: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText},
+		defaultOutputs: []api.Modality{api.ModalityEmbedding},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs: []api.Modality{api.ModalityEmbedding},
 		requiredOutput: api.ModalityEmbedding,
@@ -46,64 +46,78 @@ var operationShapePolicies = map[api.Operation]operationShapePolicy{
 		embedding:      true,
 	},
 	api.OperationRerank: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText},
+		defaultOutputs: []api.Modality{api.ModalityText},
 		allowedInputs:  []api.Modality{api.ModalityText},
 		allowedOutputs: []api.Modality{api.ModalityText},
 		requiredOutput: api.ModalityText,
 	},
 	api.OperationImageGeneration: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText},
+		defaultOutputs: []api.Modality{api.ModalityImage},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs: []api.Modality{api.ModalityText, api.ModalityImage},
 		requiredOutput: api.ModalityImage,
 	},
 	api.OperationAudioGeneration: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText},
+		defaultOutputs: []api.Modality{api.ModalityAudio},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityAudio},
 		allowedOutputs: []api.Modality{api.ModalityText, api.ModalityAudio},
 		requiredOutput: api.ModalityAudio,
 	},
 	api.OperationAudioTranscription: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityAudio},
+		defaultOutputs: []api.Modality{api.ModalityText},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs: []api.Modality{api.ModalityText},
 		requiredOutput: api.ModalityText,
 	},
 	api.OperationMusicGeneration: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText},
+		defaultOutputs: []api.Modality{api.ModalityMusic},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityAudio},
 		allowedOutputs: []api.Modality{api.ModalityText, api.ModalityAudio, api.ModalityMusic},
 		requiredOutput: api.ModalityMusic,
 	},
 	api.OperationVideoGeneration: {
-		allowedModes:   []api.DeliveryMode{api.ModeUnary, api.ModeServerStream, api.ModeAsync},
+		defaultInputs:  []api.Modality{api.ModalityText, api.ModalityImage},
+		defaultOutputs: []api.Modality{api.ModalityVideo},
 		allowedInputs:  []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs: []api.Modality{api.ModalityText, api.ModalityVideo},
 		requiredOutput: api.ModalityVideo,
 	},
 	api.OperationRealtime: {
-		allowedModes:     []api.DeliveryMode{api.ModeDuplex},
+		defaultInputs:    []api.Modality{api.ModalityText, api.ModalityAudio},
+		defaultOutputs:   []api.Modality{api.ModalityText, api.ModalityAudio},
 		allowedInputs:    []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo},
 		allowedOutputs:   []api.Modality{api.ModalityText, api.ModalityAudio},
-		realtime:         true,
 		allowsGeneration: true,
 	},
 }
 
-// ValidateOperationShape validates the one canonical operation-shape rule.
+// DefaultCapabilityModalities returns the conservative semantic defaults used
+// only when a source omits an input or output modality list. The returned
+// slices are copies so callers cannot mutate the shape owner's policy.
+func DefaultCapabilityModalities(operation api.Operation) ([]api.Modality, []api.Modality, bool) {
+	policy, ok := operationShapePolicies[operation]
+	if !ok {
+		return nil, nil, false
+	}
+	return append([]api.Modality(nil), policy.defaultInputs...), append([]api.Modality(nil), policy.defaultOutputs...), true
+}
+
+// validateCapabilityShape validates the one operation-shape rule.
 // Explicit multimodal source facts remain valid when they are semantically
 // compatible with the operation; profile-specific invocation limits belong to
 // admission, not to this model-fact validator.
-func ValidateOperationShape(shape OperationShape) error {
+func validateCapabilityShape(shape capabilityShape) error {
 	policy, ok := operationShapePolicies[shape.Operation]
 	if !ok {
 		return fmt.Errorf("unsupported operation %q", shape.Operation)
 	}
-	if len(shape.Modes) == 0 || len(shape.InputModalities) == 0 || len(shape.OutputModalities) == 0 {
-		return fmt.Errorf("modes and input/output modalities must not be empty")
-	}
-	if err := validateShapeSet("mode", shape.Modes, policy.allowedModes); err != nil {
-		return err
+	if len(shape.InputModalities) == 0 || len(shape.OutputModalities) == 0 {
+		return fmt.Errorf("input/output modalities must not be empty")
 	}
 	if err := validateShapeSet("input modality", shape.InputModalities, policy.allowedInputs); err != nil {
 		return err
@@ -114,18 +128,13 @@ func ValidateOperationShape(shape OperationShape) error {
 	if slices.Contains(shape.InputModalities, api.ModalityEmbedding) {
 		return fmt.Errorf("embedding cannot be an operation input modality")
 	}
-	if policy.realtime {
-		if !slices.Equal(shape.Modes, []api.DeliveryMode{api.ModeDuplex}) {
-			return fmt.Errorf("realtime must use duplex mode only")
-		}
+	if shape.Operation == api.OperationRealtime {
 		if !containsAny(shape.InputModalities, api.ModalityText, api.ModalityAudio) {
 			return fmt.Errorf("realtime must accept text or audio input")
 		}
 		if !containsAny(shape.OutputModalities, api.ModalityText, api.ModalityAudio) {
 			return fmt.Errorf("realtime must produce text or audio output")
 		}
-	} else if slices.Contains(shape.Modes, api.ModeDuplex) {
-		return fmt.Errorf("only realtime may use duplex mode")
 	}
 	if policy.requiredOutput != "" && !slices.Contains(shape.OutputModalities, policy.requiredOutput) {
 		return fmt.Errorf("%s must produce %s", shape.Operation, policy.requiredOutput)

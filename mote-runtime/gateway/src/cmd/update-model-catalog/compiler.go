@@ -6,57 +6,8 @@ import (
 	"strings"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
-
-type modelConfig struct {
-	ID          string            `json:"id"`
-	Lifecycle   string            `json:"lifecycle"`
-	TokenLimits tokenLimits       `json:"token_limits"`
-	Operations  []operationConfig `json:"operations"`
-}
-
-type tokenLimits struct {
-	ContextWindowTokens int64 `json:"context_window_tokens,omitempty"`
-	MaxInputTokens      int64 `json:"max_input_tokens,omitempty"`
-	MinOutputTokens     int64 `json:"min_output_tokens,omitempty"`
-	MaxOutputTokens     int64 `json:"max_output_tokens,omitempty"`
-}
-
-type operationConfig struct {
-	Operation        api.Operation      `json:"operation"`
-	Modes            []api.DeliveryMode `json:"modes"`
-	InputModalities  []api.Modality     `json:"input_modalities"`
-	OutputModalities []api.Modality     `json:"output_modalities"`
-	Features         []api.Feature      `json:"features,omitempty"`
-	Generation       *generationPolicy  `json:"generation,omitempty"`
-	Embedding        *embeddingPolicy   `json:"embedding,omitempty"`
-}
-
-type generationPolicy struct {
-	Temperature     *numericParameter[float64] `json:"temperature,omitempty"`
-	TopP            *numericParameter[float64] `json:"top_p,omitempty"`
-	MaxOutputTokens *outputTokenParameter      `json:"max_output_tokens,omitempty"`
-	Stop            *stopParameter             `json:"stop,omitempty"`
-	Seed            *numericParameter[int64]   `json:"seed,omitempty"`
-}
-
-type numericParameter[T int64 | float64] struct {
-	Minimum *T `json:"minimum,omitempty"`
-	Maximum *T `json:"maximum,omitempty"`
-	Default *T `json:"default,omitempty"`
-}
-
-type outputTokenParameter struct {
-}
-
-type stopParameter struct {
-	Default []string `json:"default,omitempty"`
-}
-
-type embeddingPolicy struct {
-	FixedDimensions *int64                   `json:"fixed_dimensions,omitempty"`
-	Dimensions      *numericParameter[int64] `json:"dimensions,omitempty"`
-}
 
 type compileError struct {
 	ModelID string `json:"model_id"`
@@ -71,32 +22,25 @@ func (err *compileError) Error() string {
 	return fmt.Sprintf("invalid model source %q %s: %s", err.ModelID, err.Field, err.Reason)
 }
 
-// compileModels groups provider-qualified rows by one canonical model ID.
-// chat/completion/responses are normalized to generate; a canonical ID that is
-// claimed by more than one semantic operation is rejected as ambiguous.
-func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelConfig, []*compileError) {
-	index := buildIdentityIndex(records, newModels)
+// compileModels groups rows by their authoritative bare BaseModel. Source keys
+// (provider/service names) never create identities, and rows without a valid
+// BaseModel are discarded.
+func compileModels(records []recordRef) ([]modelcatalog.Config, []*compileError) {
 	groups := make(map[string][]recordRef)
+	rejected := make([]*compileError, 0)
 	for _, ref := range records {
-		if ref.key == "" || nonModelSourceRecord(ref.key) || (syntheticModelID(ref.key) && !isBatchRecord(ref)) {
+		if ref.key == "" || nonModelSourceRecord(ref.key) || isMetadataRecord(ref) || isBatchRecord(ref) {
 			continue
 		}
-		modelID := canonicalRecordID(ref, index)
-		if modelID != "" && !syntheticModelID(modelID) {
-			groups[modelID] = append(groups[modelID], ref)
+		modelID := ref.record.BaseModel
+		if err := modelcatalog.ValidateBaseModel(modelID); err != nil {
+			rejected = append(rejected, &compileError{ModelID: ref.key, Field: "base_model", Reason: err.Error()})
+			continue
 		}
-	}
-	for modelID := range newModels {
 		if syntheticModelID(modelID) {
 			continue
 		}
-		ref := recordRef{key: modelID}
-		canonical := canonicalRecordID(ref, index)
-		if canonical != "" && !syntheticModelID(canonical) {
-			if _, exists := groups[canonical]; !exists {
-				groups[canonical] = nil
-			}
-		}
+		groups[modelID] = append(groups[modelID], ref)
 	}
 	ids := make([]string, 0, len(groups))
 	for modelID := range groups {
@@ -109,8 +53,7 @@ func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelC
 		}
 		return ids[left] < ids[right]
 	})
-	models := make([]modelConfig, 0, len(ids))
-	rejected := make([]*compileError, 0)
+	models := make([]modelcatalog.Config, 0, len(ids))
 	for _, modelID := range ids {
 		model, present, errorsForModel := compileModelGroup(modelID, groups[modelID])
 		rejected = append(rejected, errorsForModel...)
@@ -122,14 +65,14 @@ func compileModels(records []recordRef, newModels map[string]struct{}) ([]modelC
 	return models, rejected
 }
 
-// compileModelGroup is the only path that turns one canonical model identity
-// into a catalog definition. Every source row in the group has equal weight:
-// prefixes have already been removed, so no row can become a hidden primary.
-// Facts that agree are deduplicated, facts that complement one another are
-// completed, and a contradictory fact invalidates the whole model identity.
-func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, []*compileError) {
+// compileModelGroup is the only path that turns one authoritative BaseModel
+// into a catalog definition. Every source row in the group has equal weight;
+// no provider or service row can become a hidden primary. Facts that agree are
+// deduplicated, facts that complement one another are completed, and a
+// contradictory fact invalidates the whole model identity.
+func compileModelGroup(modelID string, matches []recordRef) (modelcatalog.Config, bool, []*compileError) {
 	if len(matches) == 0 {
-		return compileInferredModel(modelID)
+		return modelcatalog.Config{}, false, nil
 	}
 
 	sortRecords(matches)
@@ -139,10 +82,20 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 	var operation api.Operation
 	operationOwner := ""
 	for _, ref := range matches {
-		// Rows produced by the pricing CSV merger carry a mode for display, not
-		// an authoritative model operation.  They may identify a candidate
-		// model, but must never override a real capability row.
+		// Metadata rows are not model evidence. They are filtered before grouping
+		// and remain ignored here as a defensive boundary.
 		if isMetadataRecord(ref) {
+			continue
+		}
+		baseModel := ref.record.BaseModel
+		if baseErr := modelcatalog.ValidateBaseModel(baseModel); baseErr != nil {
+			hasMalformedSource = true
+			rejected = append(rejected, &compileError{ModelID: modelID, Field: "base_model", Reason: fmt.Sprintf("source record %q: %s", ref.key, baseErr)})
+			continue
+		}
+		if baseModel != modelID {
+			hasMalformedSource = true
+			rejected = append(rejected, &compileError{ModelID: modelID, Field: "base_model", Reason: fmt.Sprintf("source record %q declares %q, expected %q", ref.key, baseModel, modelID)})
 			continue
 		}
 		candidate, reason := authoritativeOperation(ref)
@@ -156,16 +109,14 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 			continue
 		}
 		if operationOwner != "" && operation != candidate {
-			// Prefix removal intentionally makes one leaf one identity. If the
-			// normalized identity is claimed by different semantic operations,
-			// there is no safe way to know whether this is one model or two
-			// unrelated models with the same leaf. Drop the whole identity.
+			// A single BaseModel may only have one semantic operation. If source
+			// records disagree, the identity is ambiguous and is removed as a whole.
 			rejected = append(rejected, &compileError{
 				ModelID: modelID,
 				Field:   "operation",
 				Reason:  fmt.Sprintf("source records %q and %q declare conflicting operations (%s and %s)", operationOwner, ref.key, operation, candidate),
 			})
-			return modelConfig{}, false, rejected
+			return modelcatalog.Config{}, false, rejected
 		}
 		if operationOwner == "" {
 			operation, operationOwner = candidate, ref.key
@@ -176,59 +127,86 @@ func compileModelGroup(modelID string, matches []recordRef) (modelConfig, bool, 
 	if len(records) == 0 {
 		if hasMalformedSource {
 			// A malformed source row is evidence about this identity. Do not hide
-			// it by publishing a name-inferred operation.
-			return modelConfig{}, false, rejected
+			// it by publishing a partially inferred definition.
+			return modelcatalog.Config{}, false, rejected
 		}
-		// A model represented only by metadata rows still gets one operation,
-		// but the operation is inferred from its canonical ID because no source
-		// record claimed an authoritative fact.
-		inferred, present, inferredRejected := compileInferredModel(modelID)
-		return inferred, present, append(rejected, inferredRejected...)
+		return modelcatalog.Config{}, false, rejected
 	}
 
 	if hasMalformedSource {
-		// Once a canonical identity has an invalid authoritative row, keeping a
+		// Once a BaseModel has an invalid authoritative row, keeping a
 		// different row would make the same public name depend on which source
 		// happened to be selected. Treat it like any other identity conflict.
-		return modelConfig{}, false, rejected
+		return modelcatalog.Config{}, false, rejected
 	}
 
 	limits, outputTokensSupported, err := compileTokenLimits(operation, records)
 	if err != nil {
 		rejected = append(rejected, &compileError{ModelID: modelID, Field: "token_limits", Reason: fmt.Sprintf("operation %q: %s", operation, err)})
-		return modelConfig{}, false, rejected
+		return modelcatalog.Config{}, false, rejected
 	}
 	compiled, err := compileOperation(operation, records, outputTokensSupported)
 	if err != nil {
 		rejected = append(rejected, &compileError{ModelID: modelID, Field: "operation", Reason: fmt.Sprintf("operation %q: %s", operation, err)})
-		return modelConfig{}, false, rejected
+		return modelcatalog.Config{}, false, rejected
 	}
-	lifecycleDeprecated := false
-	for _, ref := range records {
-		lifecycleDeprecated = lifecycleDeprecated || ref.record.IsDeprecated
+	lifecycle, err := compileLifecycle(records)
+	if err != nil {
+		rejected = append(rejected, &compileError{ModelID: modelID, Field: "lifecycle", Reason: err.Error()})
+		return modelcatalog.Config{}, false, rejected
 	}
-	lifecycle := "active"
-	if lifecycleDeprecated {
-		lifecycle = "deprecated"
-	}
-	return modelConfig{
-		ID:          modelID,
+	model := modelcatalog.Config{
+		BaseModel:   modelID,
 		Lifecycle:   lifecycle,
 		TokenLimits: limits,
-		Operations:  []operationConfig{compiled},
-	}, true, rejected
+		Capability:  compiled,
+	}
+	if err := modelcatalog.ValidateConfig(model); err != nil {
+		rejected = append(rejected, &compileError{ModelID: modelID, Field: "capability", Reason: err.Error()})
+		return modelcatalog.Config{}, false, rejected
+	}
+	return model, true, rejected
 }
 
-func compileInferredModel(modelID string) (modelConfig, bool, []*compileError) {
-	operation := inferOperation(modelID)
-	if operation == "" {
-		return modelConfig{}, false, nil
-	}
-	compiled, err := compileOperation(operation, nil, false)
+func compileLifecycle(records []recordRef) (modelcatalog.Lifecycle, error) {
+	deprecated, err := compileBooleanField(booleanField{
+		name:  "is_deprecated",
+		value: func(record sourceRecord) *bool { return record.IsDeprecated },
+	}, records)
 	if err != nil {
-		return modelConfig{}, false, []*compileError{{ModelID: modelID, Field: "operation", Reason: err.Error()}}
+		return "", err
 	}
-	return modelConfig{ID: modelID, Lifecycle: "active", Operations: []operationConfig{compiled}}, true, nil
+	if deprecated != nil && *deprecated {
+		return modelcatalog.LifecycleDeprecated, nil
+	}
+	return modelcatalog.LifecycleActive, nil
+}
+
+type booleanField struct {
+	name  string
+	value func(sourceRecord) *bool
+}
+
+// compileBooleanField keeps missing distinct from false. Positive observations
+// may complete an unknown model fact, while explicit true/false disagreement
+// invalidates the BaseModel instead of being ORed across source rows.
+func compileBooleanField(field booleanField, records []recordRef) (*bool, error) {
+	var owner *bool
+	ownerKey := ""
+	for _, ref := range records {
+		candidate := field.value(ref.record)
+		if candidate == nil {
+			continue
+		}
+		if owner != nil && *owner != *candidate {
+			return nil, fmt.Errorf("%s from %q conflicts with %q", field.name, ref.key, ownerKey)
+		}
+		if owner == nil {
+			value := *candidate
+			owner, ownerKey = &value, ref.key
+		}
+	}
+	return owner, nil
 }
 
 func isMetadataRecord(ref recordRef) bool {
@@ -250,7 +228,7 @@ func authoritativeOperation(ref recordRef) (api.Operation, string) {
 // Bifrost stores its name-based fallback rules beside model parameter rows.
 // This metadata object is not a model and has no authoritative mode; unlike a
 // model-shaped record with a missing mode, it must not become a rejection or a
-// name-inferred catalog entry.
+// name-inferred catalog entry. The compiler has no fallback identity path.
 func nonModelSourceRecord(key string) bool {
 	return key == "fallback_generalizations"
 }

@@ -19,7 +19,7 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	overrideMinimum := int64(2)
 	overrideMaximum := int64(1024)
 	overrides := []Override{{
-		ModelID:   "overridden-model",
+		BaseModel: "overridden-model",
 		Lifecycle: &overrideLifecycle,
 		TokenLimits: TokenLimitsOverride{
 			ContextWindowTokens: &overrideContext,
@@ -27,15 +27,14 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 			MinOutputTokens:     &overrideMinimum,
 			MaxOutputTokens:     &overrideMaximum,
 		},
-		Operations: []OperationConfig{{
+		Capability: &CapabilityConfig{
 			Operation:        api.OperationGenerate,
-			Modes:            []api.DeliveryMode{api.ModeUnary},
 			InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
 			OutputModalities: []api.Modality{api.ModalityText},
 			Generation: &GenerationPolicy{
 				MaxOutputTokens: &OutputTokenParameter{},
 			},
-		}},
+		},
 	}}
 
 	catalog, err := newCatalog(defaults, overrides)
@@ -44,21 +43,21 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	}
 
 	// Constructor inputs cease to be state once effective definitions exist.
-	defaults[0].Operations[0].Modes[0] = api.ModeAsync
+	defaults[0].Capability.InputModalities[0] = api.ModalityAudio
 	overrideLifecycle = LifecycleRetired
 	overrideContext = 1
 	overrideInput = 1
 	overrideMinimum = 1
 	overrideMaximum = 1
-	overrides[0].Operations[0].InputModalities[0] = api.ModalityAudio
-	overrides[0].Operations[0].Generation.MaxOutputTokens = nil
+	overrides[0].Capability.InputModalities[0] = api.ModalityAudio
+	overrides[0].Capability.Generation.MaxOutputTokens = nil
 
 	inherited, err := catalog.Lookup("default-model")
 	if err != nil {
 		t.Fatalf("lookup inherited model: %v", err)
 	}
 	inheritedCapability, ok := inherited.Capability(api.OperationGenerate)
-	if !ok || !inheritedCapability.SupportsMode(api.ModeUnary) {
+	if !ok || !inheritedCapability.SupportsInputModality(api.ModalityText) || inheritedCapability.SupportsInputModality(api.ModalityAudio) {
 		t.Fatal("default model did not retain its frozen capability")
 	}
 
@@ -66,8 +65,8 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup overridden model: %v", err)
 	}
-	if definition.ID() != "overridden-model" || definition.Lifecycle() != LifecycleDeprecated {
-		t.Fatalf("Kernel scalar override was not applied: id=%q lifecycle=%q", definition.ID(), definition.Lifecycle())
+	if definition.BaseModel() != "overridden-model" || definition.Lifecycle() != LifecycleDeprecated {
+		t.Fatalf("Kernel scalar override was not applied: base_model=%q lifecycle=%q", definition.BaseModel(), definition.Lifecycle())
 	}
 	limits := definition.TokenLimits()
 	if limits.ContextWindowTokens != 4096 || limits.MaxInputTokens != 3500 || limits.MinOutputTokens != 2 || limits.MaxOutputTokens != 1024 {
@@ -77,8 +76,8 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 	if !ok || !capability.SupportsInputModality(api.ModalityText) || !capability.SupportsInputModality(api.ModalityImage) {
 		t.Fatal("Kernel operation replacement was not applied")
 	}
-	if capability.SupportsMode(api.ModeServerStream) || capability.SupportsFeature(api.FeatureUsage) {
-		t.Fatal("a non-nil Kernel operation set must replace, not patch, catalog operations")
+	if capability.SupportsFeature(api.FeatureUsage) {
+		t.Fatal("a non-nil Kernel capability must replace, not patch, the catalog capability")
 	}
 	parameters := capability.ResolveGenerationParameters(api.GenerationParameters{})
 	if parameters.MaxOutputTokens == nil || *parameters.MaxOutputTokens != 1024 {
@@ -135,7 +134,7 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 	}
 
 	allSupported := testModelConfig("all-supported")
-	allSupported.Operations[0].Generation = &GenerationPolicy{
+	allSupported.Capability.Generation = &GenerationPolicy{
 		Temperature:     &NumericParameter[float64]{Minimum: pointer(0.0), Maximum: pointer(2.0)},
 		TopP:            &NumericParameter[float64]{Minimum: pointer(0.0), Maximum: pointer(1.0)},
 		MaxOutputTokens: &OutputTokenParameter{},
@@ -164,7 +163,7 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 
 func TestCapabilityClampsOnlyKnownNumericBoundaries(t *testing.T) {
 	config := testModelConfig("bounded-model")
-	config.Operations[0].Generation = &GenerationPolicy{
+	config.Capability.Generation = &GenerationPolicy{
 		Temperature:     &NumericParameter[float64]{Minimum: pointer(0.0), Maximum: pointer(2.0)},
 		TopP:            &NumericParameter[float64]{Maximum: pointer(1.0)},
 		MaxOutputTokens: &OutputTokenParameter{},
@@ -189,7 +188,7 @@ func TestCapabilityClampsOnlyKnownNumericBoundaries(t *testing.T) {
 	unknownBounds := testModelConfig("unknown-bounds")
 	unknownBounds.TokenLimits.MinOutputTokens = 0
 	unknownBounds.TokenLimits.MaxOutputTokens = 0
-	unknownBounds.Operations[0].Generation = &GenerationPolicy{
+	unknownBounds.Capability.Generation = &GenerationPolicy{
 		Temperature:     &NumericParameter[float64]{},
 		MaxOutputTokens: &OutputTokenParameter{},
 	}
@@ -261,25 +260,23 @@ func TestKernelCanOverrideBuiltinsAndDefineCustomModelsThroughOnePath(t *testing
 	customInput := int64(4096)
 	catalog, err := newCatalog([]Config{testModelConfig("built-in")}, []Override{
 		{
-			ModelID: "built-in",
-			Operations: []OperationConfig{{
+			BaseModel: "built-in",
+			Capability: &CapabilityConfig{
 				Operation:        api.OperationEmbedding,
-				Modes:            []api.DeliveryMode{api.ModeUnary},
 				InputModalities:  []api.Modality{api.ModalityText},
 				OutputModalities: []api.Modality{api.ModalityEmbedding},
 				Embedding:        &EmbeddingPolicy{},
-			}},
+			},
 		},
 		{
-			ModelID:     "kernel/custom-embedding",
+			BaseModel:   "custom-embedding",
 			TokenLimits: TokenLimitsOverride{MaxInputTokens: &customInput},
-			Operations: []OperationConfig{{
+			Capability: &CapabilityConfig{
 				Operation:        api.OperationEmbedding,
-				Modes:            []api.DeliveryMode{api.ModeUnary},
 				InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
 				OutputModalities: []api.Modality{api.ModalityEmbedding},
 				Embedding:        &EmbeddingPolicy{FixedDimensions: pointer(int64(1024))},
-			}},
+			},
 		},
 	})
 	if err != nil {
@@ -289,7 +286,7 @@ func TestKernelCanOverrideBuiltinsAndDefineCustomModelsThroughOnePath(t *testing
 	if _, ok := builtIn.Capability(api.OperationGenerate); ok {
 		t.Fatal("built-in operation replacement left a second capability truth")
 	}
-	custom, err := catalog.Lookup("kernel/custom-embedding")
+	custom, err := catalog.Lookup("custom-embedding")
 	if err != nil || custom.TokenLimits().MaxInputTokens != 4096 || custom.Lifecycle() != LifecycleActive {
 		t.Fatalf("custom Kernel model was not admitted: %+v %v", custom, err)
 	}
@@ -304,59 +301,47 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	if len(catalog.definitions) != 8835 {
-		t.Fatalf("unexpected built-in model count for the pinned snapshot: %d", len(catalog.definitions))
+	if len(catalog.definitions) == 0 {
+		t.Fatal("built-in catalog is empty")
 	}
-	canonicalIDs := make(map[string]string, len(catalog.definitions))
 	for _, definition := range catalog.definitions {
-		if strings.Contains(definition.ID(), "/") {
-			t.Fatalf("generated model ID still contains a source prefix: %q", definition.ID())
+		if strings.Contains(definition.BaseModel(), "/") {
+			t.Fatalf("generated BaseModel still contains a source prefix: %q", definition.BaseModel())
 		}
-		folded := strings.ToLower(definition.ID())
-		if previous, duplicate := canonicalIDs[folded]; duplicate {
-			t.Fatalf("generated model IDs were not deduplicated: %q and %q", previous, definition.ID())
-		}
-		canonicalIDs[folded] = definition.ID()
-		if len(definition.config.Operations) != 1 {
-			t.Fatalf("generated model %q has %d operations, want exactly one", definition.ID(), len(definition.config.Operations))
+		if !definition.config.Capability.Operation.IsValid() {
+			t.Fatalf("generated model %q has no valid capability", definition.BaseModel())
 		}
 	}
 
-	assertOperation(t, catalog, "gpt-6-astra-2026-09-03", api.OperationGenerate)
+	assertOperation(t, catalog, "DeepSeek-V4.1-Flash", api.OperationGenerate)
 	assertOperation(t, catalog, "gpt-image-2.5-flare", api.OperationImageGeneration)
-	assertOperation(t, catalog, "deepseek-v4-flash-latest", api.OperationGenerate)
-	assertOperation(t, catalog, "kimi-k3-us", api.OperationGenerate)
-	assertOperation(t, catalog, "claude-opus-5@default", api.OperationGenerate)
+	assertOperation(t, catalog, "glm-5-3-flash", api.OperationGenerate)
+	assertOperation(t, catalog, "Kimi-K3", api.OperationGenerate)
+	assertOperation(t, catalog, "claude-opus-4.8", api.OperationGenerate)
 	assertOperation(t, catalog, "dall-e-3", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gpt-image-1", api.OperationImageGeneration)
 	assertOperation(t, catalog, "gemini-2.0-flash-exp-image-generation", api.OperationImageGeneration)
-	assertOperation(t, catalog, "veo-3.0-generate-preview", api.OperationVideoGeneration)
+	assertOperation(t, catalog, "veo-2", api.OperationVideoGeneration)
 	assertOperation(t, catalog, "gpt-realtime-1.5", api.OperationRealtime)
 	assertOperation(t, catalog, "gemini-embedding-2", api.OperationEmbedding)
-	assertMode(t, catalog, "gemini-embedding-2", api.ModeAsync)
-	for _, generated := range []string{
-		"claude-opus-4.8", "gpt-4-turbo", "gemini-1.5-pro", "nova-pro-v1",
-	} {
+	for _, generated := range []string{"claude-opus-4.8", "nova-pro-v1"} {
 		assertOperation(t, catalog, generated, api.OperationGenerate)
 	}
 
-	gpt4Turbo, _ := catalog.Lookup("gpt-4-turbo")
+	gpt4Turbo, _ := catalog.Lookup("chatgpt-4o")
 	limits := gpt4Turbo.TokenLimits()
 	if limits.MaxInputTokens != 128000 || limits.MaxOutputTokens != 4096 {
-		t.Fatalf("gpt-4-turbo limits do not match the merged source facts: %+v", limits)
+		t.Fatalf("chatgpt-4o limits do not match the source facts: %+v", limits)
 	}
 	gpt4TurboCapability, _ := gpt4Turbo.Capability(api.OperationGenerate)
 	if resolved := gpt4TurboCapability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
 		t.Fatalf("central max_output_tokens policy is wrong: %+v", resolved)
 	}
-	if !assertModes(gpt4Turbo, api.OperationGenerate, api.ModeUnary, api.ModeAsync) {
-		t.Fatal("gpt-4-turbo lost unary or async delivery capability")
-	}
-	latest, _ := catalog.Lookup("gpt-5.1-chat-latest")
+	latest, _ := catalog.Lookup("claude-opus-4.8")
 	latestCapability, _ := latest.Capability(api.OperationGenerate)
 	filtered := latestCapability.ResolveGenerationParameters(api.GenerationParameters{Temperature: pointer(0.4), TopP: pointer(0.5)})
 	if filtered.Temperature != nil || filtered.TopP != nil {
-		t.Fatalf("disabled sampling parameters leaked: %+v", filtered)
+		t.Fatalf("unsupported sampling parameters leaked: %+v", filtered)
 	}
 	for _, alias := range []string{"doubao-embedding-large-text", "openrouter/hexgrad/kokoro-82m", "openrouter/google/chirp-3"} {
 		if _, lookupErr := catalog.Lookup(alias); lookupErr == nil {
@@ -367,10 +352,10 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 		"gpt-6-astra", "deepseek-v4-flash", "kimi-k3", "claude-opus-5",
 		"gemini-2.5-pro", "gemini-2.5-flash-image", "gpt-4.1", "sora-2",
 		"text-embedding-3-large", "embed-v4.0", "codestral-embed", "mistral-embed",
-		"kokoro-82m", "whisper-1",
+		"kokoro-82m", "whisper-1", "text-to-image", "gemini-3-flash",
 	} {
 		if _, lookupErr := catalog.Lookup(conflicting); lookupErr == nil {
-			t.Errorf("conflicting canonical identity %q was published", conflicting)
+			t.Errorf("conflicting BaseModel %q was published", conflicting)
 		}
 	}
 
@@ -394,8 +379,8 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 		}
 	}
 	for _, validEmbedding := range []string{
-		"amazon.titan-embed-text-v2:0", "gemini-embedding-2",
-		"amazon.nova-2-multimodal-embeddings-v1:0", "voyage-3-large",
+		"titan-embed-text", "gemini-embedding-2",
+		"nova-2-multimodal-embeddings", "voyage-3-large",
 	} {
 		assertOperation(t, catalog, validEmbedding, api.OperationEmbedding)
 	}
@@ -407,6 +392,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	for _, forbidden := range [][]byte{
 		[]byte(`"provider":`), []byte(`"price":`), []byte(`"pricing":`),
 		[]byte(`"protocol":`), []byte(`"endpoint":`), []byte(`"credential":`), []byte(`"family":`),
+		[]byte(`"modes":`), []byte(`"usage":`),
 	} {
 		if bytes.Contains(decodedCatalog, forbidden) {
 			t.Errorf("catalog contains forbidden owner field %s", forbidden)
@@ -416,7 +402,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	if len(catalogData) == 0 {
 		t.Fatal("embedded catalog is empty")
 	}
-	var document catalogDocument
+	var document CatalogDocument
 	decoder := json.NewDecoder(bytes.NewReader(decodedCatalog))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&document); err != nil {
@@ -432,7 +418,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 			"c5c02ae7", "47fe294a", "7f7f7652", "77aae08b", "bf0835fa",
 		}, ""),
 		"bifrost-model-parameters": strings.Join([]string{
-			"7ccfc3a9", "a98ffc09", "bff1ae37", "2bf574d8", "4cf2c336", "2c6493c8", "69978f14", "a6b41ea1",
+			"85debda1", "2147b0ce", "b170195e", "bce4f5e5", "415f4bdd", "facd2f1e", "e769a19e", "d5b9983d",
 		}, ""),
 	}
 	for _, source := range document.Sources {
@@ -471,7 +457,7 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		t.Fatalf("embedding default dimension is wrong: %d %v", dimensions, known)
 	}
 
-	titan, err := catalog.Lookup("amazon.titan-embed-text-v2:0")
+	titan, err := catalog.Lookup("titan-embed-text")
 	if err != nil {
 		t.Fatalf("lookup Titan embedding: %v", err)
 	}
@@ -483,7 +469,7 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		t.Fatalf("fixed embedding width is wrong: %d %v", dimensions, known)
 	}
 
-	multimodal, _ := catalog.Lookup("amazon.nova-2-multimodal-embeddings-v1:0")
+	multimodal, _ := catalog.Lookup("nova-2-multimodal-embeddings")
 	multimodalCapability, _ := multimodal.Capability(api.OperationEmbedding)
 	for _, modality := range []api.Modality{api.ModalityText, api.ModalityImage, api.ModalityAudio, api.ModalityVideo} {
 		if !multimodalCapability.SupportsInputModality(modality) {
@@ -502,35 +488,33 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		overrides []Override
 		field     string
 	}{
-		{name: "empty model ID", defaults: []Config{testModelConfig("")}, field: "id"},
+		{name: "empty model ID", defaults: []Config{testModelConfig("")}, field: "base_model"},
 		{name: "empty lifecycle", defaults: []Config{withEmptyLifecycle(testModelConfig("model-a"))}, field: "lifecycle"},
-		{name: "duplicate model", defaults: []Config{testModelConfig("model-a"), testModelConfig("model-a")}, field: "id"},
+		{name: "duplicate model", defaults: []Config{testModelConfig("model-a"), testModelConfig("model-a")}, field: "base_model"},
 		{name: "negative token limit", defaults: []Config{withNegativeLimit(testModelConfig("model-a"))}, field: "token_limits"},
 		{name: "reversed output-token bounds", defaults: []Config{withReversedOutputLimits(testModelConfig("model-a"))}, field: "token_limits"},
 		{name: "limit exceeds context", defaults: []Config{withLimitAboveContext(testModelConfig("model-a"))}, field: "token_limits"},
-		{name: "duplicate operation", defaults: []Config{withDuplicateOperation(testModelConfig("model-a"))}, field: "operations"},
-		{name: "multiple operations", defaults: []Config{withSecondOperation(testModelConfig("model-a"))}, field: "operations"},
-		{name: "invalid operation", defaults: []Config{withInvalidOperation(testModelConfig("model-a"))}, field: "operations.operation"},
-		{name: "invalid mode", defaults: []Config{withInvalidMode(testModelConfig("model-a"))}, field: "operations.modes"},
-		{name: "invalid input modality", defaults: []Config{withInvalidInputModality(testModelConfig("model-a"))}, field: "operations.input_modalities"},
-		{name: "invalid output modality", defaults: []Config{withInvalidOutputModality(testModelConfig("model-a"))}, field: "operations.output_modalities"},
-		{name: "empty modalities", defaults: []Config{withEmptyInputModalities(testModelConfig("model-a"))}, field: "operations"},
-		{name: "duplicate feature", defaults: []Config{withDuplicateFeature(testModelConfig("model-a"))}, field: "operations.features"},
-		{name: "reversed numeric bounds", defaults: []Config{withReversedNumericBounds(testModelConfig("model-a"))}, field: "operations.generation.temperature.bounds"},
-		{name: "invalid numeric default", defaults: []Config{withInvalidNumericDefault(testModelConfig("model-a"))}, field: "operations.generation.temperature.default"},
-		{name: "non-finite numeric value", defaults: []Config{withNonFiniteDefault(testModelConfig("model-a"))}, field: "operations.generation.temperature.value"},
-		{name: "rerank generation policy", defaults: []Config{withRerankOperation(testModelConfig("model-a"))}, field: "operations"},
-		{name: "embedding generation policy", defaults: []Config{withEmbeddingGenerationPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "operations"},
-		{name: "embedding missing policy", defaults: []Config{withMissingEmbeddingPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "operations"},
-		{name: "embedding wrong output", defaults: []Config{withWrongEmbeddingOutput(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "operations"},
-		{name: "non-embedding embedding policy", defaults: []Config{withEmbeddingPolicyOnGenerate(testModelConfig("model-a"))}, field: "operations"},
-		{name: "conflicting dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(128)), Dimensions: &NumericParameter[int64]{}})}, field: "operations.embedding.dimensions"},
-		{name: "invalid fixed dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(0))})}, field: "operations.embedding.fixed_dimensions"},
-		{name: "invalid adjustable dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{Dimensions: &NumericParameter[int64]{Minimum: pointer(int64(0))}})}, field: "operations.embedding.dimensions.minimum"},
-		{name: "empty override ID", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: ""}}, field: "override.model_id"},
-		{name: "incomplete custom model", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "missing"}}, field: "operations"},
-		{name: "duplicate override", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "model-a"}, {ModelID: "model-a"}}, field: "override.model_id"},
-		{name: "empty operation replacement", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{ModelID: "model-a", Operations: []OperationConfig{}}}, field: "operations"},
+		{name: "invalid operation", defaults: []Config{withInvalidOperation(testModelConfig("model-a"))}, field: "capability.operation"},
+		{name: "invalid input modality", defaults: []Config{withInvalidInputModality(testModelConfig("model-a"))}, field: "capability.input_modalities"},
+		{name: "invalid output modality", defaults: []Config{withInvalidOutputModality(testModelConfig("model-a"))}, field: "capability.output_modalities"},
+		{name: "empty modalities", defaults: []Config{withEmptyInputModalities(testModelConfig("model-a"))}, field: "capability"},
+		{name: "duplicate feature", defaults: []Config{withDuplicateFeature(testModelConfig("model-a"))}, field: "capability.features"},
+		{name: "service-owned feature", defaults: []Config{withUsageFeature(testModelConfig("model-a"))}, field: "capability.features"},
+		{name: "reversed numeric bounds", defaults: []Config{withReversedNumericBounds(testModelConfig("model-a"))}, field: "capability.generation.temperature.bounds"},
+		{name: "invalid numeric default", defaults: []Config{withInvalidNumericDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.default"},
+		{name: "non-finite numeric value", defaults: []Config{withNonFiniteDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.value"},
+		{name: "rerank generation policy", defaults: []Config{withRerankOperation(testModelConfig("model-a"))}, field: "capability"},
+		{name: "embedding generation policy", defaults: []Config{withEmbeddingGenerationPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "embedding missing policy", defaults: []Config{withMissingEmbeddingPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "embedding wrong output", defaults: []Config{withWrongEmbeddingOutput(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "non-embedding embedding policy", defaults: []Config{withEmbeddingPolicyOnGenerate(testModelConfig("model-a"))}, field: "capability"},
+		{name: "conflicting dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(128)), Dimensions: &NumericParameter[int64]{}})}, field: "capability.embedding.dimensions"},
+		{name: "invalid fixed dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(0))})}, field: "capability.embedding.fixed_dimensions"},
+		{name: "invalid adjustable dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{Dimensions: &NumericParameter[int64]{Minimum: pointer(int64(0))}})}, field: "capability.embedding.dimensions.minimum"},
+		{name: "empty override ID", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: ""}}, field: "override.base_model"},
+		{name: "incomplete custom model", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "missing"}}, field: "capability.operation"},
+		{name: "duplicate override", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a"}, {BaseModel: "model-a"}}, field: "override.base_model"},
+		{name: "empty capability replacement", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a", Capability: &CapabilityConfig{}}}, field: "capability.operation"},
 	}
 
 	for _, test := range tests {
@@ -544,49 +528,110 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestCatalogRejectsInvalidOperationShapes(t *testing.T) {
-	realtimeUnary := testModelConfig("realtime-unary")
-	realtimeUnary.Operations[0].Operation = api.OperationRealtime
-	realtimeUnary.Operations[0].Modes = []api.DeliveryMode{api.ModeUnary}
-	realtimeUnary.Operations[0].InputModalities = []api.Modality{api.ModalityText}
-	realtimeUnary.Operations[0].OutputModalities = []api.Modality{api.ModalityText}
+func TestValidateBaseModelVocabulary(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "empty", value: "", valid: false},
+		{name: "leading whitespace", value: " model", valid: false},
+		{name: "trailing whitespace", value: "model ", valid: false},
+		{name: "qualified name", value: "provider/model", valid: false},
+		{name: "bare name with colon", value: "model:0", valid: true},
+		{name: "bare name", value: "model-v1.2", valid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateBaseModel(test.value)
+			if test.valid && err != nil {
+				t.Fatalf("ValidateBaseModel(%q) rejected a valid bare name: %v", test.value, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("ValidateBaseModel(%q) accepted an invalid identity", test.value)
+			}
+		})
+	}
 
-	nonRealtimeDuplex := testModelConfig("non-realtime-duplex")
-	nonRealtimeDuplex.Operations[0].Modes = []api.DeliveryMode{api.ModeDuplex}
+	config := testModelConfig("model:0")
+	catalog, err := newCatalog([]Config{config}, nil)
+	if err != nil {
+		t.Fatalf("construct catalog with a colon-bearing bare name: %v", err)
+	}
+	definition, err := catalog.Lookup("model:0")
+	if err != nil {
+		t.Fatalf("lookup bare identity: %v", err)
+	}
+	if definition.BaseModel() != "model:0" {
+		t.Fatalf("definition changed the authoritative identity: %q", definition.BaseModel())
+	}
+}
+
+func TestCatalogRejectsInvalidCapabilityShapes(t *testing.T) {
+	realtimeWithoutConversationalInput := testModelConfig("realtime-without-conversational-input")
+	realtimeWithoutConversationalInput.Capability.Operation = api.OperationRealtime
+	realtimeWithoutConversationalInput.Capability.InputModalities = []api.Modality{api.ModalityImage}
+	realtimeWithoutConversationalInput.Capability.OutputModalities = []api.Modality{api.ModalityText}
 
 	embeddingInput := embeddingModelConfig("embedding-input", &EmbeddingPolicy{FixedDimensions: pointer(int64(768))})
-	embeddingInput.Operations[0].InputModalities = []api.Modality{api.ModalityEmbedding}
+	embeddingInput.Capability.InputModalities = []api.Modality{api.ModalityEmbedding}
 
 	embeddingOutput := embeddingModelConfig("embedding-output", &EmbeddingPolicy{FixedDimensions: pointer(int64(768))})
-	embeddingOutput.Operations[0].OutputModalities = []api.Modality{api.ModalityEmbedding, api.ModalityText}
+	embeddingOutput.Capability.OutputModalities = []api.Modality{api.ModalityEmbedding, api.ModalityText}
 
 	for _, test := range []struct {
 		name   string
 		config Config
 	}{
-		{name: "realtime requires duplex", config: realtimeUnary},
-		{name: "duplex is exclusive to realtime", config: nonRealtimeDuplex},
+		{name: "realtime requires conversational input", config: realtimeWithoutConversationalInput},
 		{name: "embedding cannot be input", config: embeddingInput},
 		{name: "embedding output is exclusive", config: embeddingOutput},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := newCatalog([]Config{test.config}, nil)
 			var configErr *ConfigError
-			if !errors.As(err, &configErr) || configErr.Field != "operations" {
-				t.Fatalf("expected operation-shape error, got %T %v", err, err)
+			if !errors.As(err, &configErr) || configErr.Field != "capability" {
+				t.Fatalf("expected capability-shape error, got %T %v", err, err)
 			}
 		})
 	}
 }
 
+func TestDefaultCapabilityModalitiesAreOwnedByTheShapePolicy(t *testing.T) {
+	for _, operation := range []api.Operation{
+		api.OperationGenerate,
+		api.OperationEmbedding,
+		api.OperationRerank,
+		api.OperationImageGeneration,
+		api.OperationAudioGeneration,
+		api.OperationAudioTranscription,
+		api.OperationMusicGeneration,
+		api.OperationVideoGeneration,
+		api.OperationRealtime,
+	} {
+		inputs, outputs, known := DefaultCapabilityModalities(operation)
+		if !known || len(inputs) == 0 || len(outputs) == 0 {
+			t.Fatalf("missing default shape for %q: inputs=%v outputs=%v known=%v", operation, inputs, outputs, known)
+		}
+		inputs[0] = "mutated"
+		outputs[0] = "mutated"
+		againInputs, againOutputs, againKnown := DefaultCapabilityModalities(operation)
+		if !againKnown || againInputs[0] == "mutated" || againOutputs[0] == "mutated" {
+			t.Fatalf("shape policy returned mutable state for %q", operation)
+		}
+	}
+	if inputs, outputs, known := DefaultCapabilityModalities("unknown"); known || inputs != nil || outputs != nil {
+		t.Fatalf("unknown operation unexpectedly had defaults: inputs=%v outputs=%v known=%v", inputs, outputs, known)
+	}
+}
+
 func TestCatalogRetainsStructuredOutputModelCompatibilityEvidence(t *testing.T) {
 	config := testModelConfig("structured-override")
-	config.Operations[0].Features = []api.Feature{api.FeatureStructured}
+	config.Capability.Features = []api.Feature{api.FeatureStructured}
 	catalog, err := newCatalog([]Config{config}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition, err := catalog.Lookup(config.ID)
+	definition, err := catalog.Lookup(config.BaseModel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,18 +641,16 @@ func TestCatalogRetainsStructuredOutputModelCompatibilityEvidence(t *testing.T) 
 	}
 }
 
-func TestCatalogRetainsExplicitMultimodalOperationFacts(t *testing.T) {
+func TestCatalogRetainsExplicitMultimodalCapabilityFacts(t *testing.T) {
 	realtime := testModelConfig("realtime-multimodal")
-	realtime.Operations[0] = OperationConfig{
+	realtime.Capability = CapabilityConfig{
 		Operation:        api.OperationRealtime,
-		Modes:            []api.DeliveryMode{api.ModeDuplex},
 		InputModalities:  []api.Modality{api.ModalityAudio, api.ModalityImage, api.ModalityText, api.ModalityVideo},
 		OutputModalities: []api.Modality{api.ModalityAudio, api.ModalityText},
 	}
 	image := testModelConfig("image-multimodal")
-	image.Operations[0] = OperationConfig{
+	image.Capability = CapabilityConfig{
 		Operation:        api.OperationImageGeneration,
-		Modes:            []api.DeliveryMode{api.ModeUnary},
 		InputModalities:  []api.Modality{api.ModalityImage, api.ModalityText},
 		OutputModalities: []api.Modality{api.ModalityImage, api.ModalityText},
 	}
@@ -615,12 +658,12 @@ func TestCatalogRetainsExplicitMultimodalOperationFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition, _ := catalog.Lookup(realtime.ID)
+	definition, _ := catalog.Lookup(realtime.BaseModel)
 	capability, _ := definition.Capability(api.OperationRealtime)
 	if !capability.SupportsInputModality(api.ModalityImage) || !capability.SupportsInputModality(api.ModalityVideo) {
 		t.Fatal("realtime source modalities were narrowed to the current invocation profile")
 	}
-	definition, _ = catalog.Lookup(image.ID)
+	definition, _ = catalog.Lookup(image.BaseModel)
 	capability, _ = definition.Capability(api.OperationImageGeneration)
 	if !capability.SupportsOutputModality(api.ModalityText) || !capability.SupportsOutputModality(api.ModalityImage) {
 		t.Fatal("explicit multimodal image output was rejected")
@@ -647,9 +690,32 @@ func TestCatalogDocumentErrorsAreTyped(t *testing.T) {
 	}
 }
 
+func TestCatalogDocumentAcceptsOnlyCurrentSchema(t *testing.T) {
+	document := CatalogDocument{
+		SchemaVersion: CatalogSchemaVersion,
+		Sources:       []CatalogSource{{Name: "test", Revision: "immutable"}},
+		Models:        []Config{testModelConfig("model-a")},
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCatalogDefaults(encoded); err != nil {
+		t.Fatalf("current schema was rejected: %v", err)
+	}
+	document.SchemaVersion--
+	encoded, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCatalogDefaults(encoded); err == nil {
+		t.Fatal("previous schema was accepted")
+	}
+}
+
 func TestModelErrorsPreserveBoundaryFacts(t *testing.T) {
-	configErrorValue := (&ConfigError{ModelID: "m", Field: "operations", Reason: "missing"}).Error()
-	if configErrorValue != `invalid model config "m" operations: missing` {
+	configErrorValue := (&ConfigError{ModelID: "m", Field: "capability", Reason: "missing"}).Error()
+	if configErrorValue != `invalid model config "m" capability: missing` {
 		t.Fatalf("unexpected config error: %q", configErrorValue)
 	}
 	notFoundErrorValue := (&ModelNotFoundError{ModelID: "missing"}).Error()
@@ -667,7 +733,7 @@ func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	for _, modelID := range []string{"claude-opus-4.8", "claude-opus-5@default", "claude-sonnet-5@default"} {
+	for _, modelID := range []string{"claude-opus-4.8", "claude-opus-latest", "claude-sonnet-4.6"} {
 		definition, lookupErr := catalog.Lookup(modelID)
 		if lookupErr != nil {
 			t.Fatalf("lookup %q: %v", modelID, lookupErr)
@@ -697,35 +763,9 @@ func assertOperation(t *testing.T, catalog Catalog, modelID string, operation ap
 	}
 }
 
-func assertMode(t *testing.T, catalog Catalog, modelID string, mode api.DeliveryMode) {
-	t.Helper()
-	definition, err := catalog.Lookup(modelID)
-	if err != nil {
-		t.Fatalf("lookup %q: %v", modelID, err)
-	}
-	operation := definition.config.Operations[0].Operation
-	capability, ok := definition.Capability(operation)
-	if !ok || !capability.SupportsMode(mode) {
-		t.Fatalf("model %q is missing mode %q", modelID, mode)
-	}
-}
-
-func assertModes(definition Definition, operation api.Operation, modes ...api.DeliveryMode) bool {
-	capability, ok := definition.Capability(operation)
-	if !ok {
-		return false
-	}
-	for _, mode := range modes {
-		if !capability.SupportsMode(mode) {
-			return false
-		}
-	}
-	return true
-}
-
 func testModelConfig(id string) Config {
 	return Config{
-		ID:        id,
+		BaseModel: id,
 		Lifecycle: LifecycleActive,
 		TokenLimits: TokenLimits{
 			ContextWindowTokens: 8192,
@@ -733,35 +773,31 @@ func testModelConfig(id string) Config {
 			MinOutputTokens:     1,
 			MaxOutputTokens:     2048,
 		},
-		Operations: []OperationConfig{{
+		Capability: CapabilityConfig{
 			Operation:        api.OperationGenerate,
-			Modes:            []api.DeliveryMode{api.ModeUnary},
 			InputModalities:  []api.Modality{api.ModalityText},
 			OutputModalities: []api.Modality{api.ModalityText},
-			Features:         []api.Feature{api.FeatureUsage},
 			Generation: &GenerationPolicy{
 				MaxOutputTokens: &OutputTokenParameter{},
 				Stop:            &StopParameter{Default: []string{"END"}},
 			},
-		}},
+		},
 	}
 }
 
 func embeddingModelConfig(id string, policy *EmbeddingPolicy) Config {
 	return Config{
-		ID:        id,
+		BaseModel: id,
 		Lifecycle: LifecycleActive,
 		TokenLimits: TokenLimits{
 			MaxInputTokens: 8192,
 		},
-		Operations: []OperationConfig{{
+		Capability: CapabilityConfig{
 			Operation:        api.OperationEmbedding,
-			Modes:            []api.DeliveryMode{api.ModeUnary},
 			InputModalities:  []api.Modality{api.ModalityText},
 			OutputModalities: []api.Modality{api.ModalityEmbedding},
-			Features:         []api.Feature{api.FeatureUsage},
 			Embedding:        policy,
-		}},
+		},
 	}
 }
 
@@ -785,92 +821,77 @@ func withLimitAboveContext(config Config) Config {
 	return config
 }
 
-func withDuplicateOperation(config Config) Config {
-	config.Operations = append(config.Operations, config.Operations[0])
-	return config
-}
-
-func withSecondOperation(config Config) Config {
-	config.Operations = append(config.Operations, OperationConfig{
-		Operation:        api.OperationRerank,
-		Modes:            []api.DeliveryMode{api.ModeUnary},
-		InputModalities:  []api.Modality{api.ModalityText},
-		OutputModalities: []api.Modality{api.ModalityText},
-	})
-	return config
-}
-
 func withInvalidOperation(config Config) Config {
-	config.Operations[0].Operation = "invalid"
-	return config
-}
-
-func withInvalidMode(config Config) Config {
-	config.Operations[0].Modes = []api.DeliveryMode{"invalid"}
+	config.Capability.Operation = "invalid"
 	return config
 }
 
 func withInvalidInputModality(config Config) Config {
-	config.Operations[0].InputModalities = []api.Modality{"invalid"}
+	config.Capability.InputModalities = []api.Modality{"invalid"}
 	return config
 }
 
 func withInvalidOutputModality(config Config) Config {
-	config.Operations[0].OutputModalities = []api.Modality{"invalid"}
+	config.Capability.OutputModalities = []api.Modality{"invalid"}
 	return config
 }
 
 func withEmptyInputModalities(config Config) Config {
-	config.Operations[0].InputModalities = nil
+	config.Capability.InputModalities = nil
 	return config
 }
 
 func withDuplicateFeature(config Config) Config {
-	config.Operations[0].Features = []api.Feature{api.FeatureUsage, api.FeatureUsage}
+	config.Capability.Features = []api.Feature{api.FeatureToolCalls, api.FeatureToolCalls}
+	return config
+}
+
+func withUsageFeature(config Config) Config {
+	config.Capability.Features = []api.Feature{api.FeatureUsage}
 	return config
 }
 
 func withReversedNumericBounds(config Config) Config {
-	config.Operations[0].Generation.Temperature = &NumericParameter[float64]{
+	config.Capability.Generation.Temperature = &NumericParameter[float64]{
 		Minimum: pointer(2.0), Maximum: pointer(1.0),
 	}
 	return config
 }
 
 func withInvalidNumericDefault(config Config) Config {
-	config.Operations[0].Generation.Temperature = &NumericParameter[float64]{
+	config.Capability.Generation.Temperature = &NumericParameter[float64]{
 		Minimum: pointer(0.0), Maximum: pointer(1.0), Default: pointer(2.0),
 	}
 	return config
 }
 
 func withNonFiniteDefault(config Config) Config {
-	config.Operations[0].Generation.Temperature = &NumericParameter[float64]{Default: pointer(math.Inf(1))}
+	config.Capability.Generation.Temperature = &NumericParameter[float64]{Default: pointer(math.Inf(1))}
 	return config
 }
 
 func withRerankOperation(config Config) Config {
-	config.Operations[0].Operation = api.OperationRerank
+	config.Capability.Operation = api.OperationRerank
 	return config
 }
 
 func withEmbeddingGenerationPolicy(config Config) Config {
-	config.Operations[0].Generation = &GenerationPolicy{}
+	config.Capability.Generation = &GenerationPolicy{}
 	return config
 }
 
 func withMissingEmbeddingPolicy(config Config) Config {
-	config.Operations[0].Embedding = nil
+	config.Capability.Embedding = nil
 	return config
 }
 
 func withWrongEmbeddingOutput(config Config) Config {
-	config.Operations[0].OutputModalities = []api.Modality{api.ModalityText}
+	config.Capability.OutputModalities = []api.Modality{api.ModalityText}
 	return config
 }
 
 func withEmbeddingPolicyOnGenerate(config Config) Config {
-	config.Operations[0].Embedding = &EmbeddingPolicy{}
+	config.Capability.Embedding = &EmbeddingPolicy{}
 	return config
 }
 

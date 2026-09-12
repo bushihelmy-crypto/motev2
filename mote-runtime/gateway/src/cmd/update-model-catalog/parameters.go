@@ -10,23 +10,24 @@ import (
 	"strings"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
-func compileTokenLimits(operation api.Operation, records []recordRef) (tokenLimits, bool, error) {
-	var limits tokenLimits
+func compileTokenLimits(operation api.Operation, records []recordRef) (modelcatalog.TokenLimits, bool, error) {
+	var limits modelcatalog.TokenLimits
 	for _, ref := range records {
 		maxInput, err := nonNegativeInteger(ref.record.MaxInputTokens)
 		if err != nil {
-			return tokenLimits{}, false, fmt.Errorf("max_input_tokens: %w", err)
+			return modelcatalog.TokenLimits{}, false, fmt.Errorf("max_input_tokens: %w", err)
 		}
 		if operation == api.OperationEmbedding && maxInput == 0 {
 			maxInput, err = nonNegativeInteger(ref.record.MaxTokens)
 			if err != nil {
-				return tokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
+				return modelcatalog.TokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
 			}
 		}
 		if err := mergeLimitValue("max_input_tokens", &limits.MaxInputTokens, maxInput); err != nil {
-			return tokenLimits{}, false, err
+			return modelcatalog.TokenLimits{}, false, err
 		}
 	}
 	if operation != api.OperationGenerate && operation != api.OperationRealtime {
@@ -37,30 +38,30 @@ func compileTokenLimits(operation api.Operation, records []recordRef) (tokenLimi
 	for _, ref := range records {
 		explicit, err := nonNegativeInteger(ref.record.MaxOutputTokens)
 		if err != nil {
-			return tokenLimits{}, false, fmt.Errorf("max_output_tokens: %w", err)
+			return modelcatalog.TokenLimits{}, false, fmt.Errorf("max_output_tokens: %w", err)
 		}
 		generic, err := nonNegativeInteger(ref.record.MaxTokens)
 		if err != nil {
-			return tokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
+			return modelcatalog.TokenLimits{}, false, fmt.Errorf("max_tokens: %w", err)
 		}
 		if explicit > 0 && generic > 0 && explicit != generic {
-			return tokenLimits{}, false, errors.New("max_output_tokens conflicts with max_tokens")
+			return modelcatalog.TokenLimits{}, false, errors.New("max_output_tokens conflicts with max_tokens")
 		}
 		candidate := explicit
 		if candidate == 0 {
 			candidate = generic
 		}
 		if err := mergeLimitValue("max_output_tokens", &maxOutput, candidate); err != nil {
-			return tokenLimits{}, false, err
+			return modelcatalog.TokenLimits{}, false, err
 		}
 	}
 	parameterPolicy, parameterFound, policyErr := outputTokenBounds(records)
 	if policyErr != nil {
-		return tokenLimits{}, false, policyErr
+		return modelcatalog.TokenLimits{}, false, policyErr
 	}
 	if parameterFound {
 		if maxOutput > 0 && parameterPolicy.Maximum != nil && maxOutput != *parameterPolicy.Maximum {
-			return tokenLimits{}, false, errors.New("model output maximum conflicts with parameter range maximum")
+			return modelcatalog.TokenLimits{}, false, errors.New("model output maximum conflicts with parameter range maximum")
 		}
 		if maxOutput == 0 && parameterPolicy.Maximum != nil {
 			maxOutput = *parameterPolicy.Maximum
@@ -71,7 +72,7 @@ func compileTokenLimits(operation api.Operation, records []recordRef) (tokenLimi
 	}
 	limits.MaxOutputTokens = maxOutput
 	if limits.MinOutputTokens > 0 && limits.MaxOutputTokens > 0 && limits.MinOutputTokens > limits.MaxOutputTokens {
-		return tokenLimits{}, false, errors.New("output minimum must not exceed maximum")
+		return modelcatalog.TokenLimits{}, false, errors.New("output minimum must not exceed maximum")
 	}
 	return limits, parameterFound || maxOutput > 0, nil
 }
@@ -87,19 +88,14 @@ func mergeLimitValue(field string, target *int64, candidate int64) error {
 	return nil
 }
 
-func compileGenerationPolicy(records []recordRef, outputTokensSupported bool) (*generationPolicy, error) {
-	policy := &generationPolicy{}
-	var samplingAllowed *bool
-	for _, ref := range records {
-		if ref.record.SupportsSamplingParams == nil {
-			continue
-		}
-		value := *ref.record.SupportsSamplingParams
-		if samplingAllowed != nil && *samplingAllowed != value {
-			return nil, fmt.Errorf("supports_sampling_params conflicts between source records")
-		}
-		copy := value
-		samplingAllowed = &copy
+func compileGenerationPolicy(records []recordRef, outputTokensSupported bool) (*modelcatalog.GenerationPolicy, error) {
+	policy := &modelcatalog.GenerationPolicy{}
+	samplingAllowed, err := compileBooleanField(booleanField{
+		name:  "supports_sampling_params",
+		value: func(record sourceRecord) *bool { return record.SupportsSamplingParams },
+	}, records)
+	if err != nil {
+		return nil, err
 	}
 	allowsSampling := samplingAllowed == nil || *samplingAllowed
 	if allowsSampling {
@@ -131,7 +127,7 @@ func compileGenerationPolicy(records []recordRef, outputTokensSupported bool) (*
 	if outputTokensSupported {
 		// The default is a Gateway policy, not a model fact. Runtime resolves
 		// it centrally so the catalog never repeats a derived 4096 value.
-		policy.MaxOutputTokens = &outputTokenParameter{}
+		policy.MaxOutputTokens = &modelcatalog.OutputTokenParameter{}
 	}
 	if parameter, ok, err := findParameter(records, "stop", "stop_sequences", "stopsequences"); err != nil {
 		return nil, err
@@ -140,7 +136,7 @@ func compileGenerationPolicy(records []recordRef, outputTokensSupported bool) (*
 		if parseErr != nil {
 			return nil, fmt.Errorf("stop: %w", parseErr)
 		}
-		policy.Stop = &stopParameter{Default: stops}
+		policy.Stop = &modelcatalog.StopParameter{Default: stops}
 	}
 	if policy.Temperature == nil && policy.TopP == nil && policy.MaxOutputTokens == nil && policy.Stop == nil && policy.Seed == nil {
 		return nil, nil
@@ -148,8 +144,8 @@ func compileGenerationPolicy(records []recordRef, outputTokensSupported bool) (*
 	return policy, nil
 }
 
-func compileEmbeddingPolicy(records []recordRef) (*embeddingPolicy, error) {
-	policy := &embeddingPolicy{}
+func compileEmbeddingPolicy(records []recordRef) (*modelcatalog.EmbeddingPolicy, error) {
+	policy := &modelcatalog.EmbeddingPolicy{}
 	if parameter, ok, err := findParameter(records, "dimensions", "output_dimensionality"); err != nil {
 		return nil, err
 	} else if ok {
@@ -198,12 +194,12 @@ func consistentVectorSize(records []recordRef) (int64, bool, error) {
 	return value, found, nil
 }
 
-func floatPolicy(parameter sourceParameter) (*numericParameter[float64], error) {
+func floatPolicy(parameter sourceParameter) (*modelcatalog.NumericParameter[float64], error) {
 	defaultValue, err := rawFloat(parameter.Default)
 	if err != nil {
 		return nil, err
 	}
-	policy := &numericParameter[float64]{Default: defaultValue}
+	policy := &modelcatalog.NumericParameter[float64]{Default: defaultValue}
 	if parameter.Range != nil {
 		policy.Minimum, err = numberFloat(parameter.Range.Minimum)
 		if err != nil {
@@ -224,12 +220,12 @@ func floatPolicy(parameter sourceParameter) (*numericParameter[float64], error) 
 	return policy, nil
 }
 
-func integerPolicy(parameter sourceParameter) (*numericParameter[int64], error) {
+func integerPolicy(parameter sourceParameter) (*modelcatalog.NumericParameter[int64], error) {
 	defaultValue, err := rawInteger(parameter.Default)
 	if err != nil {
 		return nil, err
 	}
-	policy := &numericParameter[int64]{Default: defaultValue}
+	policy := &modelcatalog.NumericParameter[int64]{Default: defaultValue}
 	if parameter.Range != nil {
 		policy.Minimum, err = numberInteger(parameter.Range.Minimum)
 		if err != nil {
@@ -250,7 +246,7 @@ func integerPolicy(parameter sourceParameter) (*numericParameter[int64], error) 
 	return policy, nil
 }
 
-func positiveIntegerPolicy(parameter sourceParameter) (*numericParameter[int64], error) {
+func positiveIntegerPolicy(parameter sourceParameter) (*modelcatalog.NumericParameter[int64], error) {
 	policy, err := integerPolicy(parameter)
 	if err != nil {
 		return nil, err
@@ -263,13 +259,24 @@ func positiveIntegerPolicy(parameter sourceParameter) (*numericParameter[int64],
 	return policy, nil
 }
 
-func outputTokenBounds(records []recordRef) (*numericParameter[int64], bool, error) {
-	policy := &numericParameter[int64]{}
+func outputTokenBounds(records []recordRef) (*modelcatalog.NumericParameter[int64], bool, error) {
+	policy := &modelcatalog.NumericParameter[int64]{}
 	found := false
+	disabledIn := ""
 	for _, ref := range records {
 		for _, parameter := range ref.record.ModelParameters {
-			if parameter.Disabled || !parameterNameMatch(parameter.ID, []string{"max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens"}) {
+			if !parameterNameMatch(parameter.ID, []string{"max_tokens", "max_output_tokens", "max_completion_tokens", "max_response_output_tokens"}) {
 				continue
+			}
+			if parameter.Disabled {
+				if found {
+					return nil, false, fmt.Errorf("disabled output-token parameter from %s conflicts with an enabled declaration", ref.key)
+				}
+				disabledIn = ref.key
+				continue
+			}
+			if disabledIn != "" {
+				return nil, false, fmt.Errorf("enabled output-token parameter from %s conflicts with disabled declaration in %s", ref.key, disabledIn)
 			}
 			found = true
 			if parameter.Range == nil {
@@ -309,10 +316,21 @@ func outputTokenBounds(records []recordRef) (*numericParameter[int64], bool, err
 func findParameter(records []recordRef, names ...string) (sourceParameter, bool, error) {
 	var found sourceParameter
 	foundIn := ""
+	disabledIn := ""
 	for _, ref := range records {
 		for _, parameter := range ref.record.ModelParameters {
-			if parameter.Disabled || !parameterNameMatch(parameter.ID, names) {
+			if !parameterNameMatch(parameter.ID, names) {
 				continue
+			}
+			if parameter.Disabled {
+				if foundIn != "" {
+					return sourceParameter{}, false, fmt.Errorf("disabled parameter %q from %s conflicts with enabled declaration in %s", parameter.ID, ref.key, foundIn)
+				}
+				disabledIn = ref.key
+				continue
+			}
+			if disabledIn != "" {
+				return sourceParameter{}, false, fmt.Errorf("enabled parameter %q from %s conflicts with disabled declaration in %s", parameter.ID, ref.key, disabledIn)
 			}
 			if foundIn == "" {
 				found = parameter
@@ -354,15 +372,6 @@ func equivalentNumber(left, right *json.Number) bool {
 		return left == nil && right == nil
 	}
 	return left.String() == right.String()
-}
-
-func hasParameter(record sourceRecord, name string) bool {
-	for _, parameter := range record.ModelParameters {
-		if !parameter.Disabled && strings.EqualFold(parameter.ID, name) {
-			return true
-		}
-	}
-	return false
 }
 
 func rawFloat(raw json.RawMessage) (*float64, error) {

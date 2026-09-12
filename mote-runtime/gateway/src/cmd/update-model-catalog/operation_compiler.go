@@ -8,41 +8,34 @@ import (
 	modelcatalog "github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
 )
 
-func compileOperation(operation api.Operation, records []recordRef, outputTokensSupported bool) (operationConfig, error) {
+func compileOperation(operation api.Operation, records []recordRef, outputTokensSupported bool) (modelcatalog.CapabilityConfig, error) {
 	inputs, outputs, modalityErr := compileModalities(operation, sourceModeForRecords(records), records)
 	if modalityErr != nil {
-		return operationConfig{}, modalityErr
+		return modelcatalog.CapabilityConfig{}, modalityErr
 	}
-	result := operationConfig{
+	features, featureErr := compileFeatures(operation, records)
+	if featureErr != nil {
+		return modelcatalog.CapabilityConfig{}, featureErr
+	}
+	result := modelcatalog.CapabilityConfig{
 		Operation:        operation,
-		Modes:            compileModes(operation, records),
 		InputModalities:  inputs,
 		OutputModalities: outputs,
-		Features:         compileFeatures(operation, records),
+		Features:         features,
 	}
 	if operation == api.OperationGenerate || operation == api.OperationRealtime {
 		policy, err := compileGenerationPolicy(records, outputTokensSupported)
 		if err != nil {
-			return operationConfig{}, err
+			return modelcatalog.CapabilityConfig{}, err
 		}
 		result.Generation = policy
 	}
 	if operation == api.OperationEmbedding {
 		policy, err := compileEmbeddingPolicy(records)
 		if err != nil {
-			return operationConfig{}, err
+			return modelcatalog.CapabilityConfig{}, err
 		}
 		result.Embedding = policy
-	}
-	if err := modelcatalog.ValidateOperationShape(modelcatalog.OperationShape{
-		Operation:        result.Operation,
-		Modes:            result.Modes,
-		InputModalities:  result.InputModalities,
-		OutputModalities: result.OutputModalities,
-		HasGeneration:    result.Generation != nil,
-		HasEmbedding:     result.Embedding != nil,
-	}); err != nil {
-		return operationConfig{}, err
 	}
 	return result, nil
 }
@@ -56,89 +49,10 @@ func sourceModeForRecords(records []recordRef) string {
 	return ""
 }
 
-func compileModes(operation api.Operation, records []recordRef) []api.DeliveryMode {
-	modes := make(map[api.DeliveryMode]struct{}, 3)
-	switch operation {
-	case api.OperationRealtime:
-		modes[api.ModeDuplex] = struct{}{}
-	case api.OperationVideoGeneration:
-		modes[api.ModeAsync] = struct{}{}
-	default:
-		modes[api.ModeUnary] = struct{}{}
-	}
-	if operation == api.OperationGenerate {
-		for _, ref := range records {
-			if ref.record.SupportsNativeStreaming || hasParameter(ref.record, "stream") {
-				modes[api.ModeServerStream] = struct{}{}
-				break
-			}
-		}
-	}
-	if operation == api.OperationAudioTranscription {
-		for _, ref := range records {
-			if ref.record.SupportsNativeStreaming || strings.Contains(strings.ToLower(ref.key), "realtime") {
-				modes[api.ModeServerStream] = struct{}{}
-				break
-			}
-		}
-	}
-	if operation != api.OperationRealtime {
-		batchOnly := len(records) > 0
-		for _, ref := range records {
-			if batchEvidence(ref) {
-				modes[api.ModeAsync] = struct{}{}
-			}
-			if !batchOnlyEvidence(ref) {
-				batchOnly = false
-			}
-		}
-		if batchOnly {
-			delete(modes, api.ModeUnary)
-		}
-	}
-	return sortedSet(modes)
-}
-
-func batchEvidence(ref recordRef) bool {
-	key := strings.ToLower(ref.key)
-	if strings.Contains(key, ":batch") || strings.Contains(key, "/batch/") {
-		return true
-	}
-	for _, endpoint := range ref.record.SupportedEndpoints {
-		if strings.Contains(strings.ToLower(endpoint), "batch") {
-			return true
-		}
-	}
-	return false
-}
-
-func batchOnlyEvidence(ref recordRef) bool {
-	key := strings.ToLower(ref.key)
-	if strings.HasSuffix(key, ":batch") || strings.Contains(key, "/batch/") {
-		return true
-	}
-	hasBatch, hasNonBatch := false, false
-	for _, endpoint := range ref.record.SupportedEndpoints {
-		if strings.Contains(strings.ToLower(endpoint), "batch") {
-			hasBatch = true
-		} else {
-			hasNonBatch = true
-		}
-	}
-	return hasBatch && !hasNonBatch
-}
-
 func compileModalities(operation api.Operation, sourceMode string, records []recordRef) ([]api.Modality, []api.Modality, error) {
-	defaults := map[api.Operation][2][]api.Modality{
-		api.OperationGenerate:           {{api.ModalityText}, {api.ModalityText}},
-		api.OperationEmbedding:          {{api.ModalityText}, {api.ModalityEmbedding}},
-		api.OperationRerank:             {{api.ModalityText}, {api.ModalityText}},
-		api.OperationImageGeneration:    {{api.ModalityText}, {api.ModalityImage}},
-		api.OperationAudioGeneration:    {{api.ModalityText}, {api.ModalityAudio}},
-		api.OperationAudioTranscription: {{api.ModalityAudio}, {api.ModalityText}},
-		api.OperationMusicGeneration:    {{api.ModalityText}, {api.ModalityMusic}},
-		api.OperationVideoGeneration:    {{api.ModalityText, api.ModalityImage}, {api.ModalityVideo}},
-		api.OperationRealtime:           {{api.ModalityText, api.ModalityAudio}, {api.ModalityText, api.ModalityAudio}},
+	defaultInputs, defaultOutputs, knownOperation := modelcatalog.DefaultCapabilityModalities(operation)
+	if !knownOperation {
+		return nil, nil, fmt.Errorf("unsupported operation %q", operation)
 	}
 	inputs, inputKnown, err := compileSourceModalities("supported_modalities", records, func(ref recordRef) []string {
 		return ref.record.SupportedModalities
@@ -153,36 +67,55 @@ func compileModalities(operation api.Operation, sourceMode string, records []rec
 		return nil, nil, err
 	}
 	if !inputKnown {
-		inputs = modalityMap(defaults[operation][0])
-		for _, ref := range records {
-			switch operation {
-			case api.OperationEmbedding:
-				if ref.record.SupportsEmbeddingImageInput {
-					inputs[api.ModalityImage] = struct{}{}
-				}
-				if ref.record.SupportsAudioInput {
-					inputs[api.ModalityAudio] = struct{}{}
-				}
-				if ref.record.SupportsVideoInput {
-					inputs[api.ModalityVideo] = struct{}{}
-				}
-			case api.OperationGenerate, api.OperationRealtime:
-				if ref.record.SupportsVision || ref.record.SupportsImageInput {
-					inputs[api.ModalityImage] = struct{}{}
-				}
-				if ref.record.SupportsAudioInput {
-					inputs[api.ModalityAudio] = struct{}{}
-				}
-				if ref.record.SupportsVideoInput {
-					inputs[api.ModalityVideo] = struct{}{}
-				}
+		inputs = modalityMap(defaultInputs)
+		var inputFacts []modalityFact
+		switch operation {
+		case api.OperationEmbedding:
+			inputFacts = []modalityFact{
+				{modality: api.ModalityImage, name: "embedding image input", fields: []booleanField{
+					{name: "supports_embedding_image_input", value: func(record sourceRecord) *bool { return record.SupportsEmbeddingImageInput }},
+				}},
+				{modality: api.ModalityAudio, name: "audio input", fields: []booleanField{
+					{name: "supports_audio_input", value: func(record sourceRecord) *bool { return record.SupportsAudioInput }},
+				}},
+				{modality: api.ModalityVideo, name: "video input", fields: []booleanField{
+					{name: "supports_video_input", value: func(record sourceRecord) *bool { return record.SupportsVideoInput }},
+				}},
+			}
+		case api.OperationGenerate, api.OperationRealtime:
+			inputFacts = []modalityFact{
+				{modality: api.ModalityImage, name: "image input", fields: []booleanField{
+					{name: "supports_vision", value: func(record sourceRecord) *bool { return record.SupportsVision }},
+					{name: "supports_image_input", value: func(record sourceRecord) *bool { return record.SupportsImageInput }},
+				}},
+				{modality: api.ModalityAudio, name: "audio input", fields: []booleanField{
+					{name: "supports_audio_input", value: func(record sourceRecord) *bool { return record.SupportsAudioInput }},
+				}},
+				{modality: api.ModalityVideo, name: "video input", fields: []booleanField{
+					{name: "supports_video_input", value: func(record sourceRecord) *bool { return record.SupportsVideoInput }},
+				}},
+			}
+		}
+		for _, fact := range inputFacts {
+			enabled, factErr := compileAnyBooleanFact(fact.name, records, fact.fields)
+			if factErr != nil {
+				return nil, nil, factErr
+			}
+			if enabled {
+				inputs[fact.modality] = struct{}{}
 			}
 		}
 	}
 	if !outputKnown {
-		outputs = modalityMap(defaults[operation][1])
-		for _, ref := range records {
-			if (operation == api.OperationGenerate || operation == api.OperationRealtime) && ref.record.SupportsAudioOutput {
+		outputs = modalityMap(defaultOutputs)
+		if operation == api.OperationGenerate || operation == api.OperationRealtime {
+			audio, factErr := compileAnyBooleanFact("audio output", records, []booleanField{
+				{name: "supports_audio_output", value: func(record sourceRecord) *bool { return record.SupportsAudioOutput }},
+			})
+			if factErr != nil {
+				return nil, nil, factErr
+			}
+			if audio {
 				outputs[api.ModalityAudio] = struct{}{}
 			}
 		}
@@ -195,7 +128,7 @@ func compileModalities(operation api.Operation, sourceMode string, records []rec
 
 // compileSourceModalities merges equal-weight source observations. An explicit
 // list is a model fact, not a provider preference: all non-empty declarations
-// must be identical. A disagreement invalidates the canonical model rather
+// must be identical. A disagreement invalidates the BaseModel rather
 // than allowing one source row to widen or narrow it.
 func compileSourceModalities(
 	field string,
@@ -258,22 +191,52 @@ func addModality(target map[api.Modality]struct{}, value string) error {
 	return nil
 }
 
-func compileFeatures(operation api.Operation, records []recordRef) []api.Feature {
-	features := map[api.Feature]struct{}{api.FeatureUsage: {}}
+type modalityFact struct {
+	modality api.Modality
+	name     string
+	fields   []booleanField
+}
+
+// compileAnyBooleanFact unions distinct positive evidence fields only after
+// each individual source field has proven internally consistent.
+func compileAnyBooleanFact(name string, records []recordRef, fields []booleanField) (bool, error) {
+	enabled := false
+	for _, field := range fields {
+		value, err := compileBooleanField(field, records)
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", name, err)
+		}
+		enabled = enabled || value != nil && *value
+	}
+	return enabled, nil
+}
+
+func compileFeatures(operation api.Operation, records []recordRef) ([]api.Feature, error) {
+	features := make(map[api.Feature]struct{}, 3)
 	if operation != api.OperationGenerate && operation != api.OperationRealtime {
-		return sortedSet(features)
+		return nil, nil
 	}
-	for _, ref := range records {
-		record := ref.record
-		if record.SupportsFunctionCalling {
-			features[api.FeatureToolCalls] = struct{}{}
+	facts := []struct {
+		feature api.Feature
+		name    string
+		fields  []booleanField
+	}{
+		{feature: api.FeatureToolCalls, name: "tool calling", fields: []booleanField{
+			{name: "supports_function_calling", value: func(record sourceRecord) *bool { return record.SupportsFunctionCalling }},
+		}},
+		{feature: api.FeatureStructured, name: "structured output compatibility", fields: []booleanField{
+			{name: "supports_response_schema", value: func(record sourceRecord) *bool { return record.SupportsResponseSchema }},
+			{name: "supports_native_structured_output", value: func(record sourceRecord) *bool { return record.SupportsNativeStructured }},
+		}},
+	}
+	for _, fact := range facts {
+		enabled, err := compileAnyBooleanFact(fact.name, records, fact.fields)
+		if err != nil {
+			return nil, err
 		}
-		if record.SupportsResponseSchema || record.SupportsNativeStructured {
-			features[api.FeatureStructured] = struct{}{}
-		}
-		if record.SupportsPromptCaching || record.SupportsCachePoint {
-			features[api.FeaturePromptCache] = struct{}{}
+		if enabled {
+			features[fact.feature] = struct{}{}
 		}
 	}
-	return sortedSet(features)
+	return sortedSet(features), nil
 }

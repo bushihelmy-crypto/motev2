@@ -5,14 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	"os/exec"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -22,10 +17,9 @@ const (
 )
 
 type sourceRecord struct {
-	// BaseModel is source metadata only; source keys, never this hint, define
-	// catalog identity.
+	// BaseModel is the authoritative pure-model identity. Source keys may carry
+	// provider/service prefixes and are never published as model identities.
 	BaseModel                   string            `json:"base_model"`
-	Provider                    string            `json:"provider"`
 	Source                      string            `json:"source"`
 	Mode                        string            `json:"mode"`
 	MaxInputTokens              *json.Number      `json:"max_input_tokens"`
@@ -33,26 +27,21 @@ type sourceRecord struct {
 	MaxTokens                   *json.Number      `json:"max_tokens"`
 	OutputVectorSize            *json.Number      `json:"output_vector_size"`
 	ModelParameters             []sourceParameter `json:"model_parameters"`
-	SupportedEndpoints          []string          `json:"supported_endpoints"`
 	SupportedModalities         []string          `json:"supported_modalities"`
 	SupportedOutputModalities   []string          `json:"supported_output_modalities"`
-	SupportsAudioInput          bool              `json:"supports_audio_input"`
-	SupportsAudioOutput         bool              `json:"supports_audio_output"`
-	SupportsEmbeddingImageInput bool              `json:"supports_embedding_image_input"`
-	SupportsFunctionCalling     bool              `json:"supports_function_calling"`
-	SupportsImageInput          bool              `json:"supports_image_input"`
-	SupportsNativeStreaming     bool              `json:"supports_native_streaming"`
-	// These source flags are compatibility evidence for the model/service
-	// combination. The catalog keeps the model-side hint, while admission still
-	// requires protocol and service support before promising strict output.
-	SupportsNativeStructured bool  `json:"supports_native_structured_output"`
-	SupportsPromptCaching    bool  `json:"supports_prompt_caching"`
-	SupportsCachePoint       bool  `json:"supports_cache_point"`
-	SupportsResponseSchema   bool  `json:"supports_response_schema"`
+	SupportsAudioInput          *bool             `json:"supports_audio_input"`
+	SupportsAudioOutput         *bool             `json:"supports_audio_output"`
+	SupportsEmbeddingImageInput *bool             `json:"supports_embedding_image_input"`
+	SupportsFunctionCalling     *bool             `json:"supports_function_calling"`
+	SupportsImageInput          *bool             `json:"supports_image_input"`
+	// Structured-output flags are retained only as model compatibility evidence;
+	// the protocol/service path still owns strict schema enforcement.
+	SupportsNativeStructured *bool `json:"supports_native_structured_output"`
+	SupportsResponseSchema   *bool `json:"supports_response_schema"`
 	SupportsSamplingParams   *bool `json:"supports_sampling_params"`
-	SupportsVideoInput       bool  `json:"supports_video_input"`
-	SupportsVision           bool  `json:"supports_vision"`
-	IsDeprecated             bool  `json:"is_deprecated"`
+	SupportsVideoInput       *bool `json:"supports_video_input"`
+	SupportsVision           *bool `json:"supports_vision"`
+	IsDeprecated             *bool `json:"is_deprecated"`
 }
 
 type sourceParameter struct {
@@ -134,122 +123,6 @@ func decodeSourceRecords(data []byte) ([]recordRef, error) {
 	}
 	sort.Slice(records, func(left, right int) bool { return records[left].key < records[right].key })
 	return records, nil
-}
-
-func extractNewAPIModels(repo, ref string) (map[string]struct{}, error) {
-	listing, err := gitOutput(repo, "ls-tree", "-r", "--name-only", ref)
-	if err != nil {
-		return nil, fmt.Errorf("list new-api source tree: %w", err)
-	}
-	models := make(map[string]struct{})
-	for _, name := range strings.Fields(listing) {
-		if !strings.HasPrefix(name, "relay/channel/") || !strings.HasSuffix(name, ".go") {
-			continue
-		}
-		content, showErr := gitOutput(repo, "show", ref+":"+name)
-		if showErr != nil {
-			return nil, fmt.Errorf("read new-api %s: %w", name, showErr)
-		}
-		file, parseErr := parser.ParseFile(token.NewFileSet(), name, content, 0)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse new-api %s: %w", name, parseErr)
-		}
-		parts := strings.Split(filepath.ToSlash(name), "/")
-		if len(parts) < 3 {
-			continue
-		}
-		channel := parts[2]
-		stringConstants := collectStringConstants(file)
-		ast.Inspect(file, func(node ast.Node) bool {
-			spec, ok := node.(*ast.ValueSpec)
-			if !ok || len(spec.Names) != 1 || spec.Names[0].Name != "ModelList" || len(spec.Values) != 1 {
-				return true
-			}
-			literal, ok := spec.Values[0].(*ast.CompositeLit)
-			if !ok {
-				return false
-			}
-			for _, element := range literal.Elts {
-				modelID, ok := resolveStringLiteral(element, stringConstants)
-				if !ok || modelID == "" || syntheticNewAPIModel(channel, modelID) {
-					continue
-				}
-				models[modelID] = struct{}{}
-			}
-			return false
-		})
-	}
-	return models, nil
-}
-
-func collectStringConstants(file *ast.File) map[string]string {
-	constants := make(map[string]string)
-	for _, declaration := range file.Decls {
-		group, ok := declaration.(*ast.GenDecl)
-		if !ok || group.Tok != token.CONST {
-			continue
-		}
-		for _, specification := range group.Specs {
-			values, ok := specification.(*ast.ValueSpec)
-			if !ok || len(values.Names) != len(values.Values) {
-				continue
-			}
-			for index, name := range values.Names {
-				value, ok := resolveStringLiteral(values.Values[index], constants)
-				if ok {
-					constants[name.Name] = value
-				}
-			}
-		}
-	}
-	return constants
-}
-
-func resolveStringLiteral(expression ast.Expr, constants map[string]string) (string, bool) {
-	switch value := expression.(type) {
-	case *ast.BasicLit:
-		if value.Kind != token.STRING {
-			return "", false
-		}
-		literal, err := strconv.Unquote(value.Value)
-		return literal, err == nil
-	case *ast.Ident:
-		literal, ok := constants[value.Name]
-		return literal, ok
-	default:
-		return "", false
-	}
-}
-
-func syntheticNewAPIModel(channel, modelID string) bool {
-	if syntheticModelID(modelID) {
-		return true
-	}
-	suffix := func(values ...string) bool {
-		for _, value := range values {
-			if strings.HasSuffix(modelID, "-"+value) {
-				return true
-			}
-		}
-		return false
-	}
-	switch channel {
-	case "codex":
-		return modelID == "codex-auto-review"
-	case "claude":
-		return suffix("thinking", "max", "xhigh", "high", "medium", "low")
-	case "deepseek":
-		return suffix("none", "max")
-	case "openai":
-		base := strings.TrimSuffix(modelID, "-high")
-		base = strings.TrimSuffix(base, "-medium")
-		base = strings.TrimSuffix(base, "-low")
-		return base != modelID && (base == "o3-mini" || base == "o3-mini-2025-01-31")
-	case "xai":
-		return strings.HasSuffix(modelID, "-search") || modelID == "grok-3-mini-high" || modelID == "grok-3-mini-low"
-	default:
-		return false
-	}
 }
 
 func gitOutput(repo string, arguments ...string) (string, error) {

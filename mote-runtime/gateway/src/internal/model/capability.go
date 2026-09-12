@@ -52,39 +52,33 @@ type EmbeddingPolicy struct {
 	Dimensions      *NumericParameter[int64] `json:"dimensions,omitempty"`
 }
 
-// OperationConfig describes one operation a model can perform. Differences
-// between model configurations are expressed as data here, not behavioral
-// subclasses. Generation and Embedding are operation-specific typed policies.
-type OperationConfig struct {
-	Operation        api.Operation      `json:"operation"`
-	Modes            []api.DeliveryMode `json:"modes"`
-	InputModalities  []api.Modality     `json:"input_modalities"`
-	OutputModalities []api.Modality     `json:"output_modalities"`
-	Features         []api.Feature      `json:"features,omitempty"`
-	Generation       *GenerationPolicy  `json:"generation,omitempty"`
-	Embedding        *EmbeddingPolicy   `json:"embedding,omitempty"`
+// CapabilityConfig describes the one semantic operation identified by a
+// BaseModel. Delivery modes belong to protocol and service capabilities; this
+// model dimension contains model-native facts and the explicitly retained
+// structured-output compatibility evidence.
+type CapabilityConfig struct {
+	Operation        api.Operation     `json:"operation"`
+	InputModalities  []api.Modality    `json:"input_modalities"`
+	OutputModalities []api.Modality    `json:"output_modalities"`
+	Features         []api.Feature     `json:"features,omitempty"`
+	Generation       *GenerationPolicy `json:"generation,omitempty"`
+	Embedding        *EmbeddingPolicy  `json:"embedding,omitempty"`
 }
 
-// Capability is an immutable view of one normalized OperationConfig.
+// Capability is an immutable view of one normalized CapabilityConfig.
 type Capability struct {
 	definition Definition
 }
 
-// SupportsMode reports whether this operation supports the delivery mode.
-func (capability Capability) SupportsMode(mode api.DeliveryMode) bool {
-	operation := capability.definition.config.Operations[0]
-	return slices.Contains(operation.Modes, mode)
-}
-
 // SupportsInputModality reports whether this operation accepts the modality.
 func (capability Capability) SupportsInputModality(modality api.Modality) bool {
-	operation := capability.definition.config.Operations[0]
+	operation := capability.definition.config.Capability
 	return slices.Contains(operation.InputModalities, modality)
 }
 
 // SupportsOutputModality reports whether this operation produces the modality.
 func (capability Capability) SupportsOutputModality(modality api.Modality) bool {
-	operation := capability.definition.config.Operations[0]
+	operation := capability.definition.config.Capability
 	return slices.Contains(operation.OutputModalities, modality)
 }
 
@@ -92,7 +86,7 @@ func (capability Capability) SupportsOutputModality(modality api.Modality) bool 
 // compatibility evidence for a required feature. For structured output,
 // admission must additionally verify protocol and service support.
 func (capability Capability) SupportsFeature(feature api.Feature) bool {
-	operation := capability.definition.config.Operations[0]
+	operation := capability.definition.config.Capability
 	return slices.Contains(operation.Features, feature)
 }
 
@@ -104,7 +98,7 @@ func (capability Capability) ResolveGenerationParameters(
 ) api.GenerationParameters {
 	definition := capability.definition.config
 	return resolveGenerationPolicy(
-		definition.Operations[0].Generation,
+		definition.Capability.Generation,
 		requested,
 		definition.TokenLimits,
 	)
@@ -114,7 +108,7 @@ func (capability Capability) ResolveGenerationParameters(
 // and explicit request, clamping it to known bounds. It returns nil for a fixed
 // width or a model that does not support the dimensions request parameter.
 func (capability Capability) ResolveEmbeddingDimensions(requested *int64) *int64 {
-	operation := capability.definition.config.Operations[0]
+	operation := capability.definition.config.Capability
 	if operation.Embedding == nil {
 		return nil
 	}
@@ -124,7 +118,7 @@ func (capability Capability) ResolveEmbeddingDimensions(requested *int64) *int64
 // DefaultEmbeddingDimensions returns a known fixed or adjustable default
 // output width. False means the catalog has no authoritative width.
 func (capability Capability) DefaultEmbeddingDimensions() (int64, bool) {
-	operation := capability.definition.config.Operations[0]
+	operation := capability.definition.config.Capability
 	if operation.Embedding == nil {
 		return 0, false
 	}
