@@ -28,7 +28,7 @@ const (
 	ProfileExecutionMedia Profile = "execution_media"
 )
 
-// RequestKind is the wire discriminator for the two v1 request DTOs.
+// RequestKind is the wire discriminator for the two current request DTOs.
 type RequestKind string
 
 const (

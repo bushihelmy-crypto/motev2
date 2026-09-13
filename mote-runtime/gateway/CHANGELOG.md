@@ -25,12 +25,13 @@ No model wire protocol or durable DTO is released by this scaffold.
   model defaults, validated Kernel overrides, and deterministic filtering of
   known optional generation parameters unsupported by the selected model.
   Supported numeric request parameters are clamped to model-owned bounds.
-- Unified the generated `max_output_tokens` target default at 4096; models with
+- Unified the effective `max_output_tokens` target default at 4096; models with
   a known smaller output ceiling use that ceiling as the effective default.
 - Added built-in Embedding model capabilities with text/image/audio/video
   input declarations, fixed and adjustable vector dimensions, and the same
   deterministic filtering and clamping rules. This does not publish an
   Embedding invocation DTO.
-- Generated the model-only catalog from pinned new-api and Bifrost revisions
-  and a content-addressed Bifrost parameter snapshot; service, protocol,
-  credential, endpoint, family, and pricing data are excluded.
+- Reworked the model catalog into a checked-in static seed containing only
+  model-owned facts. External source importers and their provenance/state are
+  no longer part of Gateway; a future CRUD owner will be the single write
+  path.

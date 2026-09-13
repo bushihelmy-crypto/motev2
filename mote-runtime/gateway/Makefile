@@ -34,7 +34,7 @@ export GOCACHE GOMODCACHE GOTOOLCHAIN GOLANGCI_LINT_CACHE
 GO_ENV = PATH="$$(dirname "$$(readlink -f "$$(command -v $(GO))")"):$${PATH}"
 
 .PHONY: all help check quality check-structure toolchain-check format fmt fmt-check
-.PHONY: vet lint tools test test-unit test-catalog test-integration architecture complexity coverage
+.PHONY: vet lint tools test test-unit test-integration architecture complexity coverage
 .PHONY: module-hygiene tidy-check security vulncheck secret-scan license-check build run
 .PHONY: docker-build clean
 
@@ -97,13 +97,10 @@ tools:
 lint: tools
 	@cd $(GO_DIR) && $(GO_ENV) '$(GOLANGCI_LINT)' run --config ../.golangci.yaml ./...
 
-test test-unit: test-catalog
+test test-unit:
 	@packages="$$(cd $(GO_DIR) && $(GO) list ./... | grep -Ev '/internal/(architecture|complexity)$$|/integration$$')"; \
 		test -n "$$packages"; \
 		$(GO) -C $(GO_DIR) test -race -count=1 -covermode=atomic -coverprofile=../$(COVERAGE_FILE) $$packages
-
-test-catalog:
-	@$(GO) -C $(GO_DIR) test ./cmd/update-model-catalog
 
 test-integration:
 	@$(GO) -C $(GO_DIR) test -race -count=1 -tags=integration ./integration/...

@@ -12,22 +12,15 @@ import (
 //go:embed catalog_data.json.gz
 var catalogData []byte
 
-// CatalogSchemaVersion is the single schema owner shared by the source
-// compiler and embedded-catalog reader.
-const CatalogSchemaVersion = 2
+// CatalogSchemaVersion identifies the embedded model-definition document.
+// The document is a static seed owned by Gateway; it has no upstream-source
+// provenance or importer-specific fields.
+const CatalogSchemaVersion = 3
 
 // CatalogDocument is the typed durable model-catalog artifact.
 type CatalogDocument struct {
-	SchemaVersion int             `json:"schema_version"`
-	Sources       []CatalogSource `json:"sources"`
-	Models        []Config        `json:"models"`
-}
-
-// CatalogSource identifies one immutable catalog input.
-type CatalogSource struct {
-	Name     string `json:"name"`
-	Revision string `json:"revision,omitempty"`
-	SHA256   string `json:"sha256,omitempty"`
+	SchemaVersion int      `json:"schema_version"`
+	Models        []Config `json:"models"`
 }
 
 // Catalog is an immutable exact-BaseModel registry. Construction resolves each
@@ -40,11 +33,11 @@ type Catalog struct {
 // ModelNotFoundError reports that Router selected an exact BaseModel absent
 // from the configured catalog. Lookup never tries another spelling or model.
 type ModelNotFoundError struct {
-	ModelID string
+	BaseModel string
 }
 
 func (err *ModelNotFoundError) Error() string {
-	return fmt.Sprintf("model %q is not present in the catalog", err.ModelID)
+	return fmt.Sprintf("model %q is not present in the catalog", err.BaseModel)
 }
 
 // CatalogDataError reports an invalid embedded catalog document rather than
@@ -57,9 +50,10 @@ func (err *CatalogDataError) Error() string {
 	return "invalid embedded model catalog: " + err.Reason
 }
 
-// NewCatalog loads Gateway's built-in model defaults and applies each Kernel
-// override exactly once. An override for an unknown BaseModel defines a custom model
-// through the same validation path and must provide its complete capability.
+// NewCatalog loads Gateway's embedded model seed and applies each Kernel
+// override exactly once. An override for an unknown BaseModel defines a custom
+// model through the same validation path and must provide its complete
+// capability.
 func NewCatalog(overrides []Override) (Catalog, error) {
 	defaults, err := loadCatalogDefaults(catalogData)
 	if err != nil {
@@ -123,22 +117,6 @@ func loadCatalogDefaults(data []byte) ([]Config, error) {
 	if document.SchemaVersion != CatalogSchemaVersion {
 		return nil, &CatalogDataError{Reason: fmt.Sprintf("unsupported schema version %d", document.SchemaVersion)}
 	}
-	if len(document.Sources) == 0 {
-		return nil, &CatalogDataError{Reason: "sources must not be empty"}
-	}
-	seenSources := make(map[string]struct{}, len(document.Sources))
-	for _, source := range document.Sources {
-		if source.Name == "" {
-			return nil, &CatalogDataError{Reason: "source name must not be empty"}
-		}
-		if _, exists := seenSources[source.Name]; exists {
-			return nil, &CatalogDataError{Reason: fmt.Sprintf("duplicate source %q", source.Name)}
-		}
-		seenSources[source.Name] = struct{}{}
-		if (source.Revision == "") == (source.SHA256 == "") {
-			return nil, &CatalogDataError{Reason: fmt.Sprintf("source %q must declare exactly one revision or SHA-256", source.Name)}
-		}
-	}
 	if len(document.Models) == 0 {
 		return nil, &CatalogDataError{Reason: "models must not be empty"}
 	}
@@ -166,10 +144,10 @@ func decodeCatalogData(data []byte) ([]byte, error) {
 
 // Lookup returns the exact BaseModel definition or a typed error. It never tries a
 // family, prefix, alias, service, or fallback candidate.
-func (catalog Catalog) Lookup(modelID string) (Definition, error) {
-	definition, ok := catalog.definitions[modelID]
+func (catalog Catalog) Lookup(baseModel string) (Definition, error) {
+	definition, ok := catalog.definitions[baseModel]
 	if !ok {
-		return Definition{}, &ModelNotFoundError{ModelID: modelID}
+		return Definition{}, &ModelNotFoundError{BaseModel: baseModel}
 	}
 	return definition, nil
 }

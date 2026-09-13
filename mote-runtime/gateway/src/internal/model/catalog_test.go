@@ -86,8 +86,8 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 
 	_, err = catalog.Lookup("overridden-model ")
 	var notFound *ModelNotFoundError
-	if !errors.As(err, &notFound) || notFound.ModelID != "overridden-model " {
-		t.Fatalf("lookup must use the exact model ID without aliases: %T %v", err, err)
+	if !errors.As(err, &notFound) || notFound.BaseModel != "overridden-model " {
+		t.Fatalf("lookup must use the exact BaseModel without aliases: %T %v", err, err)
 	}
 }
 
@@ -306,10 +306,10 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	}
 	for _, definition := range catalog.definitions {
 		if strings.Contains(definition.BaseModel(), "/") {
-			t.Fatalf("generated BaseModel still contains a source prefix: %q", definition.BaseModel())
+			t.Fatalf("static seed BaseModel contains a namespace: %q", definition.BaseModel())
 		}
 		if !definition.config.Capability.Operation.IsValid() {
-			t.Fatalf("generated model %q has no valid capability", definition.BaseModel())
+			t.Fatalf("static seed model %q has no valid capability", definition.BaseModel())
 		}
 	}
 
@@ -324,14 +324,14 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	assertOperation(t, catalog, "veo-2", api.OperationVideoGeneration)
 	assertOperation(t, catalog, "gpt-realtime-1.5", api.OperationRealtime)
 	assertOperation(t, catalog, "gemini-embedding-2", api.OperationEmbedding)
-	for _, generated := range []string{"claude-opus-4.8", "nova-pro-v1"} {
-		assertOperation(t, catalog, generated, api.OperationGenerate)
+	for _, baseModel := range []string{"claude-opus-4.8", "nova-pro-v1"} {
+		assertOperation(t, catalog, baseModel, api.OperationGenerate)
 	}
 
 	gpt4Turbo, _ := catalog.Lookup("chatgpt-4o")
 	limits := gpt4Turbo.TokenLimits()
 	if limits.MaxInputTokens != 128000 || limits.MaxOutputTokens != 4096 {
-		t.Fatalf("chatgpt-4o limits do not match the source facts: %+v", limits)
+		t.Fatalf("chatgpt-4o limits do not match the seed facts: %+v", limits)
 	}
 	gpt4TurboCapability, _ := gpt4Turbo.Capability(api.OperationGenerate)
 	if resolved := gpt4TurboCapability.ResolveGenerationParameters(api.GenerationParameters{}); resolved.MaxOutputTokens == nil || *resolved.MaxOutputTokens != 4096 {
@@ -342,41 +342,6 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	filtered := latestCapability.ResolveGenerationParameters(api.GenerationParameters{Temperature: pointer(0.4), TopP: pointer(0.5)})
 	if filtered.Temperature != nil || filtered.TopP != nil {
 		t.Fatalf("unsupported sampling parameters leaked: %+v", filtered)
-	}
-	for _, alias := range []string{"doubao-embedding-large-text", "openrouter/hexgrad/kokoro-82m", "openrouter/google/chirp-3"} {
-		if _, lookupErr := catalog.Lookup(alias); lookupErr == nil {
-			t.Errorf("non-authoritative BaseModel alias was published: %q", alias)
-		}
-	}
-	for _, conflicting := range []string{
-		"gpt-6-astra", "deepseek-v4-flash", "kimi-k3", "claude-opus-5",
-		"gemini-2.5-pro", "gemini-2.5-flash-image", "gpt-4.1", "sora-2",
-		"text-embedding-3-large", "embed-v4.0", "codestral-embed", "mistral-embed",
-		"kokoro-82m", "whisper-1", "text-to-image", "gemini-3-flash",
-	} {
-		if _, lookupErr := catalog.Lookup(conflicting); lookupErr == nil {
-			t.Errorf("conflicting BaseModel %q was published", conflicting)
-		}
-	}
-
-	for _, synthetic := range []string{
-		"codex-auto-review", "claude-opus-4-8-high", "deepseek-v4-flash-max",
-		"o3-mini-high", "grok-3-search", "grok-3-mini-low", "preset/advanced",
-		"conservative", "edit", "openrouter/openai/text-embedding-3-large:batch",
-	} {
-		if _, lookupErr := catalog.Lookup(synthetic); lookupErr == nil {
-			t.Errorf("synthetic request preset %q was stored as a model", synthetic)
-		}
-	}
-	for _, rejected := range []string{
-		"vercel_ai_gateway/amazon/titan-embed-text-v2",
-		"vercel_ai_gateway/cohere/embed-v4.0",
-		"vercel_ai_gateway/mistral/codestral-embed",
-		"vercel_ai_gateway/mistral/mistral-embed",
-	} {
-		if _, lookupErr := catalog.Lookup(rejected); lookupErr == nil {
-			t.Errorf("invalid upstream model %q was published", rejected)
-		}
 	}
 	for _, validEmbedding := range []string{
 		"titan-embed-text", "gemini-embedding-2",
@@ -406,33 +371,13 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 	decoder := json.NewDecoder(bytes.NewReader(decodedCatalog))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&document); err != nil {
-		t.Fatalf("decode catalog provenance: %v", err)
+		t.Fatalf("decode embedded catalog: %v", err)
 	}
-	wantSources := map[string]string{
-		// These are public source revisions/content digest. Keep the chunks
-		// separate so the secret scanner does not mistake provenance for a key.
-		"new-api": strings.Join([]string{
-			"bdef1175", "05247769", "268b2096", "65fb3ad7", "554c3da7",
-		}, ""),
-		"bifrost": strings.Join([]string{
-			"c5c02ae7", "47fe294a", "7f7f7652", "77aae08b", "bf0835fa",
-		}, ""),
-		"bifrost-model-parameters": strings.Join([]string{
-			"85debda1", "2147b0ce", "b170195e", "bce4f5e5", "415f4bdd", "facd2f1e", "e769a19e", "d5b9983d",
-		}, ""),
+	if document.SchemaVersion != CatalogSchemaVersion || len(document.Models) == 0 {
+		t.Fatalf("embedded catalog has an invalid static shape: schema=%d models=%d", document.SchemaVersion, len(document.Models))
 	}
-	for _, source := range document.Sources {
-		value := source.Revision
-		if value == "" {
-			value = source.SHA256
-		}
-		if wantSources[source.Name] != value {
-			t.Errorf("unexpected source provenance for %q: %q", source.Name, value)
-		}
-		delete(wantSources, source.Name)
-	}
-	if len(wantSources) != 0 {
-		t.Fatalf("catalog provenance is incomplete: %v", wantSources)
+	if bytes.Contains(decodedCatalog, []byte(`"sources"`)) {
+		t.Fatal("embedded catalog must not retain upstream source metadata")
 	}
 }
 
@@ -477,7 +422,7 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 		}
 	}
 	if generation := multimodalCapability.ResolveGenerationParameters(api.GenerationParameters{Temperature: pointer(1.0)}); generation.Temperature != nil {
-		t.Fatal("embedding inherited generation parameters from source metadata")
+		t.Fatal("embedding inherited generation parameters")
 	}
 }
 
@@ -488,7 +433,7 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		overrides []Override
 		field     string
 	}{
-		{name: "empty model ID", defaults: []Config{testModelConfig("")}, field: "base_model"},
+		{name: "empty BaseModel", defaults: []Config{testModelConfig("")}, field: "base_model"},
 		{name: "empty lifecycle", defaults: []Config{withEmptyLifecycle(testModelConfig("model-a"))}, field: "lifecycle"},
 		{name: "duplicate model", defaults: []Config{testModelConfig("model-a"), testModelConfig("model-a")}, field: "base_model"},
 		{name: "negative token limit", defaults: []Config{withNegativeLimit(testModelConfig("model-a"))}, field: "token_limits"},
@@ -511,7 +456,7 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 		{name: "conflicting dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(128)), Dimensions: &NumericParameter[int64]{}})}, field: "capability.embedding.dimensions"},
 		{name: "invalid fixed dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(0))})}, field: "capability.embedding.fixed_dimensions"},
 		{name: "invalid adjustable dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{Dimensions: &NumericParameter[int64]{Minimum: pointer(int64(0))}})}, field: "capability.embedding.dimensions.minimum"},
-		{name: "empty override ID", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: ""}}, field: "override.base_model"},
+		{name: "empty override BaseModel", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: ""}}, field: "override.base_model"},
 		{name: "incomplete custom model", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "missing"}}, field: "capability.operation"},
 		{name: "duplicate override", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a"}, {BaseModel: "model-a"}}, field: "override.base_model"},
 		{name: "empty capability replacement", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a", Capability: &CapabilityConfig{}}}, field: "capability.operation"},
@@ -596,34 +541,6 @@ func TestCatalogRejectsInvalidCapabilityShapes(t *testing.T) {
 	}
 }
 
-func TestDefaultCapabilityModalitiesAreOwnedByTheShapePolicy(t *testing.T) {
-	for _, operation := range []api.Operation{
-		api.OperationGenerate,
-		api.OperationEmbedding,
-		api.OperationRerank,
-		api.OperationImageGeneration,
-		api.OperationAudioGeneration,
-		api.OperationAudioTranscription,
-		api.OperationMusicGeneration,
-		api.OperationVideoGeneration,
-		api.OperationRealtime,
-	} {
-		inputs, outputs, known := DefaultCapabilityModalities(operation)
-		if !known || len(inputs) == 0 || len(outputs) == 0 {
-			t.Fatalf("missing default shape for %q: inputs=%v outputs=%v known=%v", operation, inputs, outputs, known)
-		}
-		inputs[0] = "mutated"
-		outputs[0] = "mutated"
-		againInputs, againOutputs, againKnown := DefaultCapabilityModalities(operation)
-		if !againKnown || againInputs[0] == "mutated" || againOutputs[0] == "mutated" {
-			t.Fatalf("shape policy returned mutable state for %q", operation)
-		}
-	}
-	if inputs, outputs, known := DefaultCapabilityModalities("unknown"); known || inputs != nil || outputs != nil {
-		t.Fatalf("unknown operation unexpectedly had defaults: inputs=%v outputs=%v known=%v", inputs, outputs, known)
-	}
-}
-
 func TestCatalogRetainsStructuredOutputModelCompatibilityEvidence(t *testing.T) {
 	config := testModelConfig("structured-override")
 	config.Capability.Features = []api.Feature{api.FeatureStructured}
@@ -661,7 +578,7 @@ func TestCatalogRetainsExplicitMultimodalCapabilityFacts(t *testing.T) {
 	definition, _ := catalog.Lookup(realtime.BaseModel)
 	capability, _ := definition.Capability(api.OperationRealtime)
 	if !capability.SupportsInputModality(api.ModalityImage) || !capability.SupportsInputModality(api.ModalityVideo) {
-		t.Fatal("realtime source modalities were narrowed to the current invocation profile")
+		t.Fatal("realtime model modalities were narrowed to the current invocation profile")
 	}
 	definition, _ = catalog.Lookup(image.BaseModel)
 	capability, _ = definition.Capability(api.OperationImageGeneration)
@@ -672,14 +589,10 @@ func TestCatalogRetainsExplicitMultimodalCapabilityFacts(t *testing.T) {
 
 func TestCatalogDocumentErrorsAreTyped(t *testing.T) {
 	tests := []string{
-		`{"schema_version":2,"sources":[{"name":"x","revision":"r"}],"models":[]}`,
-		`{"schema_version":1,"sources":[],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"","revision":"r"}],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"x","revision":"r"},{"name":"x","sha256":"s"}],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"x"}],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"x","revision":"r","sha256":"s"}],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"x","revision":"r","provider":"bad"}],"models":[]}`,
-		`{"schema_version":1,"sources":[{"name":"x","revision":"r"}],"models":[]} {}`,
+		`{"schema_version":2,"models":[]}`,
+		`{"schema_version":3,"models":[]}`,
+		`{"schema_version":3,"models":[]} {}`,
+		`{"schema_version":3,"models":[],"sources":[]}`,
 	}
 	for _, data := range tests {
 		_, err := loadCatalogDefaults([]byte(data))
@@ -693,7 +606,6 @@ func TestCatalogDocumentErrorsAreTyped(t *testing.T) {
 func TestCatalogDocumentAcceptsOnlyCurrentSchema(t *testing.T) {
 	document := CatalogDocument{
 		SchemaVersion: CatalogSchemaVersion,
-		Sources:       []CatalogSource{{Name: "test", Revision: "immutable"}},
 		Models:        []Config{testModelConfig("model-a")},
 	}
 	encoded, err := json.Marshal(document)
@@ -714,11 +626,11 @@ func TestCatalogDocumentAcceptsOnlyCurrentSchema(t *testing.T) {
 }
 
 func TestModelErrorsPreserveBoundaryFacts(t *testing.T) {
-	configErrorValue := (&ConfigError{ModelID: "m", Field: "capability", Reason: "missing"}).Error()
+	configErrorValue := (&ConfigError{BaseModel: "m", Field: "capability", Reason: "missing"}).Error()
 	if configErrorValue != `invalid model config "m" capability: missing` {
 		t.Fatalf("unexpected config error: %q", configErrorValue)
 	}
-	notFoundErrorValue := (&ModelNotFoundError{ModelID: "missing"}).Error()
+	notFoundErrorValue := (&ModelNotFoundError{BaseModel: "missing"}).Error()
 	if notFoundErrorValue != `model "missing" is not present in the catalog` {
 		t.Fatalf("unexpected lookup error: %q", notFoundErrorValue)
 	}
@@ -733,39 +645,39 @@ func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
-	for _, modelID := range []string{"claude-opus-4.8", "claude-opus-latest", "claude-sonnet-4.6"} {
-		definition, lookupErr := catalog.Lookup(modelID)
+	for _, baseModel := range []string{"claude-opus-4.8", "claude-opus-latest", "claude-sonnet-4.6"} {
+		definition, lookupErr := catalog.Lookup(baseModel)
 		if lookupErr != nil {
-			t.Fatalf("lookup %q: %v", modelID, lookupErr)
+			t.Fatalf("lookup %q: %v", baseModel, lookupErr)
 		}
 		capability, ok := definition.Capability(api.OperationGenerate)
 		if !ok {
-			t.Fatalf("%q has no generate capability", modelID)
+			t.Fatalf("%q has no generate capability", baseModel)
 		}
 		resolved := capability.ResolveGenerationParameters(api.GenerationParameters{
 			Temperature: pointer(0.4),
 			TopP:        pointer(0.5),
 		})
 		if resolved.Temperature != nil || resolved.TopP != nil {
-			t.Fatalf("%q accepted unsupported sampling parameters: %+v", modelID, resolved)
+			t.Fatalf("%q accepted unsupported sampling parameters: %+v", baseModel, resolved)
 		}
 	}
 }
 
-func assertOperation(t *testing.T, catalog Catalog, modelID string, operation api.Operation) {
+func assertOperation(t *testing.T, catalog Catalog, baseModel string, operation api.Operation) {
 	t.Helper()
-	definition, err := catalog.Lookup(modelID)
+	definition, err := catalog.Lookup(baseModel)
 	if err != nil {
-		t.Fatalf("lookup %q: %v", modelID, err)
+		t.Fatalf("lookup %q: %v", baseModel, err)
 	}
 	if _, ok := definition.Capability(operation); !ok {
-		t.Fatalf("model %q is missing operation %q", modelID, operation)
+		t.Fatalf("model %q is missing operation %q", baseModel, operation)
 	}
 }
 
-func testModelConfig(id string) Config {
+func testModelConfig(baseModel string) Config {
 	return Config{
-		BaseModel: id,
+		BaseModel: baseModel,
 		Lifecycle: LifecycleActive,
 		TokenLimits: TokenLimits{
 			ContextWindowTokens: 8192,
@@ -785,9 +697,9 @@ func testModelConfig(id string) Config {
 	}
 }
 
-func embeddingModelConfig(id string, policy *EmbeddingPolicy) Config {
+func embeddingModelConfig(baseModel string, policy *EmbeddingPolicy) Config {
 	return Config{
-		BaseModel: id,
+		BaseModel: baseModel,
 		Lifecycle: LifecycleActive,
 		TokenLimits: TokenLimits{
 			MaxInputTokens: 8192,

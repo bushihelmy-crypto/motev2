@@ -11,6 +11,10 @@ type number interface {
 	~float64 | ~int64
 }
 
+// gatewayDefaultMaxOutputTokens is Gateway parameter-resolution policy, not a
+// model fact. Model-owned minimum and maximum values remain in TokenLimits.
+const gatewayDefaultMaxOutputTokens int64 = 4096
+
 // NumericParameter declares support for one numeric control. Bounds and a
 // default are independently optional: nil bounds mean known support with an
 // unknown boundary, so an explicit request is retained without invented

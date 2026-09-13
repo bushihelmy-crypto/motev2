@@ -494,7 +494,7 @@ Gateway 至少需要以下稳定错误码：
 | `gateway.upstream_unavailable` | 上游网络或服务暂不可用 | 是或结果未知 |
 | `gateway.outcome_unknown` | 无法确认上游是否已经完成调用 | 是，结果未知 |
 
-错误中应包含 `service_kind`、`protocol_id`、`model_id`、`operation_id` 和安全的诊断信息，但绝不能包含 API Key、token 或完整签名 Header。
+错误中应包含 `service_kind`、`protocol_id`、`base_model`、`operation_id` 和安全的诊断信息，但绝不能包含 API Key、token 或完整签名 Header。
 
 Gateway 可以对明确安全的网络失败做有界机械重试，但不能自行更换模型、服务商或协议。语义级 Failover 由 Kernel 决定。
 
@@ -521,7 +521,7 @@ Admission
 ```text
 ModelReceipt
 ├── operation_id
-├── selected_model_id
+├── selected_base_model
 ├── service_kind / safe service instance id
 ├── protocol_id
 ├── config revision or fingerprint

@@ -14,8 +14,8 @@ type TraceContext struct {
 // frozen into the call plan. Resource values are opaque fingerprints, never
 // addresses or secrets.
 type ModelObservation struct {
-	RequestedModelID    string `json:"requested_model_id"`
-	ResolvedModelID     string `json:"resolved_model_id,omitempty"`
+	RequestedBaseModel  string `json:"requested_base_model"`
+	ResolvedBaseModel   string `json:"resolved_base_model,omitempty"`
 	ServiceKind         string `json:"service_kind"`
 	ProtocolID          string `json:"protocol_id"`
 	UpstreamRequestID   string `json:"upstream_request_id,omitempty"`
@@ -48,7 +48,7 @@ type AttemptObservation struct {
 	Ordinal             int64                `json:"ordinal"`
 	ResumeGeneration    int64                `json:"resume_generation"`
 	State               string               `json:"state"`
-	ModelID             string               `json:"model_id"`
+	BaseModel           string               `json:"base_model"`
 	ServiceKind         string               `json:"service_kind"`
 	EndpointFingerprint string               `json:"endpoint_fingerprint,omitempty"`
 	CredentialSlotID    string               `json:"credential_slot_id,omitempty"`

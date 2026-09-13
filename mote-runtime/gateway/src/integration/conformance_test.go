@@ -23,7 +23,11 @@ import (
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
 )
 
-const gatewayInvocationProtocol = "gateway_invocation"
+const (
+	gatewayInvocationProtocol = "gateway_invocation"
+	gatewayInvocationVersion  = 2
+	gatewayInvocationSchema   = "gateway_invocation.v2.schema.json"
+)
 
 type conformanceManifest struct {
 	Schema           string            `json:"$schema"`
@@ -77,8 +81,8 @@ func TestGatewayConformanceVectors(t *testing.T) {
 	if manifest.ManifestVersion != 1 {
 		t.Fatalf("unsupported conformance manifest version: %d", manifest.ManifestVersion)
 	}
-	if manifest.ProtocolVersions[gatewayInvocationProtocol] != 1 {
-		t.Fatalf("manifest must enable %s v1", gatewayInvocationProtocol)
+	if manifest.ProtocolVersions[gatewayInvocationProtocol] != gatewayInvocationVersion {
+		t.Fatalf("manifest must enable %s v%d", gatewayInvocationProtocol, gatewayInvocationVersion)
 	}
 	if len(manifest.Suites.WireVectors) == 0 {
 		t.Fatal("gateway conformance suite must contain at least one wire vector")
@@ -100,7 +104,7 @@ func TestGatewayConformanceVectors(t *testing.T) {
 			t.Fatalf("duplicate conformance case id: %s", vector.CaseID)
 		}
 		caseIDs[vector.CaseID] = struct{}{}
-		if vector.Protocol.Name != gatewayInvocationProtocol || vector.Protocol.Version != 1 {
+		if vector.Protocol.Name != gatewayInvocationProtocol || vector.Protocol.Version != gatewayInvocationVersion {
 			t.Fatalf("%s: unexpected protocol %+v", relative, vector.Protocol)
 		}
 		if vector.Protocol.Profile != string(api.ProfileKernelLLM) && vector.Protocol.Profile != string(api.ProfileExecutionMedia) {
@@ -141,12 +145,12 @@ func TestGatewayConformanceVectors(t *testing.T) {
 
 func assertProtocolSchema(t *testing.T, root string) {
 	t.Helper()
-	document := readJSONFile[map[string]json.RawMessage](t, filepath.Join(root, "schemas", "protocol", "gateway_invocation.v1.schema.json"))
+	document := readJSONFile[map[string]json.RawMessage](t, filepath.Join(root, "schemas", "protocol", gatewayInvocationSchema))
 	var dialect, schemaID string
 	if err := json.Unmarshal(document["$schema"], &dialect); err != nil || dialect != "https://json-schema.org/draft/2020-12/schema" {
 		t.Fatalf("unexpected Gateway protocol schema dialect: %q (%v)", dialect, err)
 	}
-	if err := json.Unmarshal(document["$id"], &schemaID); err != nil || schemaID != "https://mote.dev/conformance/protocol/gateway_invocation.v1.schema.json" {
+	if err := json.Unmarshal(document["$id"], &schemaID); err != nil || schemaID != "https://mote.dev/conformance/protocol/gateway_invocation.v2.schema.json" {
 		t.Fatalf("unexpected Gateway protocol schema id: %q (%v)", schemaID, err)
 	}
 	var definitions map[string]json.RawMessage
@@ -178,13 +182,13 @@ func admitLLMRequest(data []byte) (api.LLMRequest, error) {
 	if err := decodeStrict(data, &request); err != nil {
 		return request, invalid("decode LLM request: %v", err)
 	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "model_id", "operation", "modality", "mode", "input", "features"); err != nil {
+	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "base_model", "operation", "modality", "mode", "input", "features"); err != nil {
 		return request, invalid("LLM request: %v", err)
 	}
 	if request.Kind != api.RequestKindLLM {
 		return request, invalid("LLM request kind must be %q", api.RequestKindLLM)
 	}
-	if request.SchemaVersion != 1 {
+	if request.SchemaVersion != gatewayInvocationVersion {
 		return request, invalid("unsupported schema_version %d", request.SchemaVersion)
 	}
 	if request.Operation == api.OperationGenerate {
@@ -201,7 +205,7 @@ func admitLLMRequest(data []byte) (api.LLMRequest, error) {
 	} else {
 		return request, invalid("operation %q is outside kernel_llm profile", request.Operation)
 	}
-	if err := validateRequestIdentity(request.OperationID, request.ModelID); err != nil {
+	if err := validateRequestIdentity(request.OperationID, request.BaseModel); err != nil {
 		return request, invalid("LLM request: %v", err)
 	}
 	if err := validateFeatures(request.Features, true); err != nil {
@@ -215,16 +219,16 @@ func admitMediaRequest(data []byte) (api.MediaRequest, error) {
 	if err := decodeStrict(data, &request); err != nil {
 		return request, invalid("decode media request: %v", err)
 	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "model_id", "operation", "modality", "mode", "input", "features"); err != nil {
+	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "base_model", "operation", "modality", "mode", "input", "features"); err != nil {
 		return request, invalid("media request: %v", err)
 	}
 	if request.Kind != api.RequestKindMedia {
 		return request, invalid("media request kind must be %q", api.RequestKindMedia)
 	}
-	if request.SchemaVersion != 1 {
+	if request.SchemaVersion != gatewayInvocationVersion {
 		return request, invalid("unsupported schema_version %d", request.SchemaVersion)
 	}
-	if err := validateRequestIdentity(request.OperationID, request.ModelID); err != nil {
+	if err := validateRequestIdentity(request.OperationID, request.BaseModel); err != nil {
 		return request, invalid("media request: %v", err)
 	}
 	if request.Mode != api.ModeUnary && request.Mode != api.ModeServerStream && request.Mode != api.ModeAsync {
@@ -307,7 +311,7 @@ func admitLLMResponse(request api.LLMRequest, data []byte) (api.LLMResponse, err
 	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "mode", "terminal", "observation", "receipt"); err != nil {
 		return response, invalid("LLM response: %v", err)
 	}
-	if response.Kind != api.ResponseKindLLM || response.SchemaVersion != 1 || response.OperationID != request.OperationID || response.Mode != request.Mode {
+	if response.Kind != api.ResponseKindLLM || response.SchemaVersion != gatewayInvocationVersion || response.OperationID != request.OperationID || response.Mode != request.Mode {
 		return response, invalid("LLM response envelope does not correlate with request")
 	}
 	if response.Terminal.Outcome == api.OutcomeSubmitted || response.Terminal.Outcome == "" {
@@ -337,7 +341,7 @@ func admitMediaResponse(request api.MediaRequest, data []byte) (api.MediaRespons
 	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "mode", "terminal", "observation", "receipt"); err != nil {
 		return response, invalid("media response: %v", err)
 	}
-	if response.Kind != api.ResponseKindMedia || response.SchemaVersion != 1 || response.OperationID != request.OperationID || response.Mode != request.Mode {
+	if response.Kind != api.ResponseKindMedia || response.SchemaVersion != gatewayInvocationVersion || response.OperationID != request.OperationID || response.Mode != request.Mode {
 		return response, invalid("media response envelope does not correlate with request")
 	}
 	switch response.Terminal.Outcome {
@@ -372,7 +376,7 @@ func admitMediaResponse(request api.MediaRequest, data []byte) (api.MediaRespons
 
 func validateLLMObservation(request api.LLMRequest, response api.LLMResponse) error {
 	o := response.Observation
-	if o.SchemaVersion != 1 || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
+	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
 		return invalid("LLM observation does not correlate with request")
 	}
 	if response.Receipt.OperationID != request.OperationID || response.Receipt.ReceiptID == "" || response.Receipt.Revision < 1 {
@@ -383,7 +387,7 @@ func validateLLMObservation(request api.LLMRequest, response api.LLMResponse) er
 
 func validateMediaObservation(request api.MediaRequest, response api.MediaResponse) error {
 	o := response.Observation
-	if o.SchemaVersion != 1 || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
+	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
 		return invalid("media observation does not correlate with request")
 	}
 	if response.Receipt.OperationID != request.OperationID || response.Receipt.ReceiptID == "" || response.Receipt.Revision < 1 {
@@ -409,9 +413,9 @@ func validateTiming(mode api.DeliveryMode, timing api.StreamSummary) error {
 	return nil
 }
 
-func validateRequestIdentity(operationID, modelID string) error {
-	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(modelID) == "" {
-		return errors.New("operation_id and model_id are required")
+func validateRequestIdentity(operationID, baseModel string) error {
+	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(baseModel) == "" {
+		return errors.New("operation_id and base_model are required")
 	}
 	return nil
 }

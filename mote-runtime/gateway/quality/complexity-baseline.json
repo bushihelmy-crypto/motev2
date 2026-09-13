@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
   "metrics": {
-    "production_files": 91,
-    "top_level_declarations": 231,
-    "function_definitions": 108,
-    "decision_points": 493,
-    "max_cyclomatic": 29,
-    "max_nesting_depth": 4,
-    "import_edges": 65,
-    "package_count": 36
+    "production_files": 83,
+    "top_level_declarations": 159,
+    "function_definitions": 53,
+    "decision_points": 146,
+    "max_cyclomatic": 11,
+    "max_nesting_depth": 2,
+    "import_edges": 21,
+    "package_count": 35
   }
 }

@@ -39,18 +39,18 @@ Embedding capability is model data, not a generation subclass. It declares
 accepted input modalities and embedding-only output. A fixed vector width
 filters a caller-supplied `dimensions`; an adjustable width owns one default
 and its known bounds, and clamps the Kernel value to those bounds. The built-in
-catalog is generated from pinned new-api and Bifrost inputs without importing
-service, protocol, endpoint, credential, pricing, or family metadata. Kernel
-uses the same validated override path to replace a built-in definition or add
-a complete custom model.
+catalog contains only model-owned facts. It has no importer, service, protocol,
+endpoint, credential, pricing, or family metadata. Kernel uses the same
+validated override path to replace a built-in definition or add a complete
+custom model.
 
 The cross-language invocation contract is authoritative in the repository root
-at `conformance/`. In particular, `gateway_invocation` v1 defines the stable
+at `conformance/`. In particular, `gateway_invocation` v2 defines the current
 operation/modality/mode vocabulary and stream/session terminal semantics. The
 Go interfaces in `src/invocation.go` only adapt that contract to typed Go
 capabilities; they must not grow a private wire schema or lifecycle variant.
 
-The caller split is fixed for v1:
+The caller split is fixed for v2:
 
 ```text
 Kernel Think  -> LLMInvocation   -> api.LLMRequest   -> api.LLMResponse

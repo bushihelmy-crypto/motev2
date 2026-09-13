@@ -15,11 +15,6 @@ const (
 	LifecycleActive     Lifecycle = "active"
 	LifecycleDeprecated Lifecycle = "deprecated"
 	LifecycleRetired    Lifecycle = "retired"
-
-	// gatewayDefaultMaxOutputTokens is a Gateway policy, not a
-	// model fact. A model's own minimum and maximum remain owned by TokenLimits;
-	// Gateway policy must not be copied into this catalog field.
-	gatewayDefaultMaxOutputTokens int64 = 4096
 )
 
 // TokenLimits contains independently known model-native limits. Zero means
@@ -83,9 +78,9 @@ type Definition struct {
 // ConfigError reports malformed catalog defaults or validated Kernel
 // overrides. Field identifies the rejected model-owned configuration path.
 type ConfigError struct {
-	ModelID string
-	Field   string
-	Reason  string
+	BaseModel string
+	Field     string
+	Reason    string
 }
 
 // ValidateBaseModel enforces the catalog identity vocabulary. A BaseModel is
@@ -105,7 +100,7 @@ func ValidateBaseModel(value string) error {
 }
 
 func (err *ConfigError) Error() string {
-	return fmt.Sprintf("invalid model config %q %s: %s", err.ModelID, err.Field, err.Reason)
+	return fmt.Sprintf("invalid model config %q %s: %s", err.BaseModel, err.Field, err.Reason)
 }
 
 // BaseModel returns the exact model identity selected by Router.
@@ -151,33 +146,26 @@ func normalizeConfig(config Config) (Config, error) {
 	return config, nil
 }
 
-// ValidateConfig applies the same immutable model validation used by runtime
-// catalog construction. The source compiler calls this owner before publishing
-// an artifact, so build-time and runtime cannot accept different shapes.
-func ValidateConfig(config Config) error {
-	_, err := normalizeConfig(config)
-	return err
-}
-
-func normalizeCapabilityConfig(modelID string, config CapabilityConfig) (CapabilityConfig, error) {
-	if !config.Operation.IsValid() {
-		return CapabilityConfig{}, configError(modelID, "capability.operation", fmt.Sprintf("unsupported value %q", config.Operation))
+func normalizeCapabilityConfig(baseModel string, config CapabilityConfig) (CapabilityConfig, error) {
+	shapePolicy, ok := operationShapePolicies[config.Operation]
+	if !ok {
+		return CapabilityConfig{}, configError(baseModel, "capability.operation", fmt.Sprintf("unsupported value %q", config.Operation))
 	}
 	if len(config.InputModalities) == 0 || len(config.OutputModalities) == 0 {
-		return CapabilityConfig{}, configError(modelID, "capability", "input/output modalities must not be empty")
+		return CapabilityConfig{}, configError(baseModel, "capability", "input/output modalities must not be empty")
 	}
 	var err error
 	config.InputModalities, err = normalizeSet(config.InputModalities, api.Modality.IsValid)
 	if err != nil {
-		return CapabilityConfig{}, configError(modelID, "capability.input_modalities", err.Error())
+		return CapabilityConfig{}, configError(baseModel, "capability.input_modalities", err.Error())
 	}
 	config.OutputModalities, err = normalizeSet(config.OutputModalities, api.Modality.IsValid)
 	if err != nil {
-		return CapabilityConfig{}, configError(modelID, "capability.output_modalities", err.Error())
+		return CapabilityConfig{}, configError(baseModel, "capability.output_modalities", err.Error())
 	}
 	config.Features, err = normalizeSet(config.Features, isModelFeature)
 	if err != nil {
-		return CapabilityConfig{}, configError(modelID, "capability.features", err.Error())
+		return CapabilityConfig{}, configError(baseModel, "capability.features", err.Error())
 	}
 	if err := validateCapabilityShape(capabilityShape{
 		Operation:        config.Operation,
@@ -185,18 +173,18 @@ func normalizeCapabilityConfig(modelID string, config CapabilityConfig) (Capabil
 		OutputModalities: config.OutputModalities,
 		HasGeneration:    config.Generation != nil,
 		HasEmbedding:     config.Embedding != nil,
-	}); err != nil {
-		return CapabilityConfig{}, configError(modelID, "capability", err.Error())
+	}, shapePolicy); err != nil {
+		return CapabilityConfig{}, configError(baseModel, "capability", err.Error())
 	}
 
 	generation, field, reason := normalizeGenerationPolicy(config.Generation)
 	if reason != "" {
-		return CapabilityConfig{}, configError(modelID, "capability.generation."+field, reason)
+		return CapabilityConfig{}, configError(baseModel, "capability.generation."+field, reason)
 	}
 	config.Generation = generation
 	embedding, field, reason := normalizeEmbeddingPolicy(config.Embedding)
 	if reason != "" {
-		return CapabilityConfig{}, configError(modelID, "capability.embedding."+field, reason)
+		return CapabilityConfig{}, configError(baseModel, "capability.embedding."+field, reason)
 	}
 	config.Embedding = embedding
 	return config, nil
@@ -248,6 +236,6 @@ func applyOverride(base Config, override Override) (Config, error) {
 	return normalizeConfig(result)
 }
 
-func configError(modelID, field, reason string) error {
-	return &ConfigError{ModelID: modelID, Field: field, Reason: reason}
+func configError(baseModel, field, reason string) error {
+	return &ConfigError{BaseModel: baseModel, Field: field, Reason: reason}
 }

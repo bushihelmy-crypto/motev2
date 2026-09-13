@@ -34,7 +34,7 @@ type MediaRequest struct {
 	Kind          RequestKind  `json:"kind"`
 	SchemaVersion int          `json:"schema_version"`
 	OperationID   string       `json:"operation_id"`
-	ModelID       string       `json:"model_id"`
+	BaseModel     string       `json:"base_model"`
 	Operation     Operation    `json:"operation"`
 	Modality      Modality     `json:"modality"`
 	Mode          DeliveryMode `json:"mode"`

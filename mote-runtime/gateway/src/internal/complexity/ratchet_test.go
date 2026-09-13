@@ -19,11 +19,8 @@ import (
 // The measured set is explicit. Test infrastructure and the process shell do
 // not inflate the production architecture budget.
 var measuredRoots = map[string]bool{
-	".": true,
-	// The build-time compiler is production code too. Keeping it in the same
-	// radar makes changes to its complete source-to-artifact call path visible.
-	"cmd/update-model-catalog": true,
-	"api":                      true, "internal/application": true, "internal/admission": true,
+	".":   true,
+	"api": true, "internal/application": true, "internal/admission": true,
 	"internal/plan": true, "internal/model": true, "internal/protocol": true,
 	"internal/service": true, "internal/cache": true, "internal/usage": true,
 	"internal/receipt": true, "internal/telemetry": true, "internal/upstream": true,
