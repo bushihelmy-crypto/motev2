@@ -202,6 +202,7 @@ async def test_partial_fence_preserves_uncreated_sibling_evidence() -> None:
                 state.revision,
                 claimed,
                 GraphPersistenceWriteSet(GraphCommitKey(claimed.run_id, claimed.revision), (), ()),
+                expected_config_cursor=state.config_cursor,
             )
         )
     checkpoint = store.checkpoint(child_reads=(right,))

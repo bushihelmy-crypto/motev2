@@ -8,7 +8,7 @@ import pytest
 from tests.agent.config_fixtures import ConfigCatalog
 from tests.agent.persistence_fixtures import SnapshotPersistence
 from tests.execution.persistence_fixtures import STRING_CODEC, MemoryPersistence
-from tests.execution.test_persistence_config import config_at
+from tests.execution.test_persistence_config import config_at, config_graph
 
 from mote_kernel.agent import (
     Agent,
@@ -23,6 +23,7 @@ from mote_kernel.agent import (
 from mote_kernel.config import Config, ConfigContractError
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import GraphValidationError, SnapshotMismatchError
+from mote_kernel.execution.graph.values import _make_single_graph_value
 from mote_kernel.execution.persistence import DurableGraphCommit, GraphPersistenceCommit, GraphRecovery
 from mote_kernel.execution.run_context import ScopedStateBinding
 from mote_kernel.persistence import AgentRunKey, CommitUnknown, ExecutionAuthority, PersistenceContractError
@@ -565,6 +566,95 @@ async def test_nested_child_session_config_successor_ignores_historical_output_c
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_rejects_a_graph_state_with_an_older_session_commit(
+    agent: Agent[str, str, str], store: SnapshotPersistence[str]
+) -> None:
+    codec = _session_codec()
+    configured = Agent(
+        agent.agent_id,
+        lambda _config: _successor_graph([]),
+        STRING_CODEC,
+        store,
+        agent.authority,
+        session_codec=codec,
+    )
+    initial = AgentSession("hook-1", "context-1")
+    await configured.run(AgentStart("run", Graph.values(value="input"), initial))
+    checkpoint = (await store.view(AgentRunKey("agent", GraphRunId("run")))).checkpoint()
+    old_receipt = next(request for _, request in store.commits if request.candidate_state.revision == 0)
+    assert old_receipt.agent_session is not None and old_receipt.session_receipt is not None
+
+    with pytest.raises(SnapshotMismatchError, match="included family commit"):
+        replace(
+            checkpoint,
+            agent_session=old_receipt.agent_session,
+            session_receipt=old_receipt.session_receipt,
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_transition_requires_a_session_successor_when_a_session_is_active(
+    agent: Agent[str, str, str], store: SnapshotPersistence[str]
+) -> None:
+    initial, successor = config_at(1), config_at(2)
+    catalog = ConfigCatalog((initial.snapshot, successor.snapshot))
+    configured = Agent(
+        agent.agent_id,
+        lambda _config: config_graph(successor, []),
+        STRING_CODEC,
+        store,
+        agent.authority,
+        config=AgentConfig(catalog, catalog),
+        session_codec=_session_codec(),
+    )
+
+    with pytest.raises(SnapshotMismatchError, match="explicit AgentSession successor"):
+        await configured.run(
+            AgentStart("run", Graph.values(value="input"), AgentSession("hook-1", "context-1", initial))
+        )
+
+
+@pytest.mark.asyncio
+async def test_config_transition_with_a_session_successor_commits_atomically(
+    agent: Agent[str, str, str], store: SnapshotPersistence[str]
+) -> None:
+    initial, successor = config_at(1), config_at(2)
+    child = Graph[str]("explicit-config-successor")
+
+    async def update(values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(
+            _make_single_graph_value("value", values["value"], successor),
+            session=AgentSession("hook-2", "context-2", successor),
+        )
+
+    child.add_node("update", update, inputs={"value": child.graph_input("value", str)}, outputs={"value": str})
+    child.add_edge(Graph.START, "update")
+    child.add_edge("update", Graph.END)
+    child.set_outputs({"value": child.output_ref("update", "value")})
+    catalog = ConfigCatalog((initial.snapshot, successor.snapshot))
+    configured = Agent(
+        agent.agent_id,
+        lambda _config: child,
+        STRING_CODEC,
+        store,
+        agent.authority,
+        config=AgentConfig(catalog, catalog),
+        session_codec=_session_codec(),
+    )
+
+    result = await configured.run(
+        AgentStart("run", Graph.values(value="input"), AgentSession("hook-1", "context-1", initial))
+    )
+
+    assert isinstance(result, AgentCompleted)
+    assert result.session == AgentSession("hook-2", "context-2", successor)
+    checkpoint = (await store.view(AgentRunKey("agent", GraphRunId("run")))).checkpoint()
+    assert checkpoint.root_state.config_cursor == successor.config_cursor
+    assert checkpoint.agent_session is not None
+    assert checkpoint.agent_session.config_cursor == successor.config_cursor
+
+
+@pytest.mark.asyncio
 async def test_nested_child_failure_preserves_its_last_session_successor(
     agent: Agent[str], store: SnapshotPersistence[str], calls: list[str]
 ) -> None:
@@ -772,7 +862,7 @@ async def test_recovery_rejects_a_checkpoint_and_commit_session_mismatch(
     checkpoint = (await store.view(AgentRunKey("agent", GraphRunId("run")))).checkpoint()
     encoded_b = codec.encode(session_b)
     if scenario == "none-b":
-        checkpoint = replace(checkpoint, agent_session=None)
+        checkpoint = replace(checkpoint, agent_session=None, session_receipt=None)
     commit_session = None if scenario == "a-none" else encoded_b
 
     async def writer(request: GraphPersistenceCommit[str]) -> GraphPersistenceCommit[str]:
@@ -807,7 +897,8 @@ async def test_recovery_rejects_a_decoded_session_with_the_same_cursor_but_diffe
     await configured.run(AgentStart("run", Graph.values(value="input"), session_a))
     checkpoint = (await store.view(AgentRunKey("agent", GraphRunId("run")))).checkpoint()
     encoded_b = codec.encode(session_b)
-    forged_checkpoint = replace(checkpoint, agent_session=encoded_b)
+    with pytest.raises(SnapshotMismatchError, match="receipt"):
+        replace(checkpoint, agent_session=encoded_b)
 
     async def writer(request: GraphPersistenceCommit[str]) -> GraphPersistenceCommit[str]:
         return request
@@ -819,8 +910,40 @@ async def test_recovery_rejects_a_decoded_session_with_the_same_cursor_but_diffe
         session_codec=codec,
     )
 
+    with pytest.raises(SnapshotMismatchError, match="same AgentSession"):
+        GraphRecovery(checkpoint, commit, session=session_a)
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_a_decoded_session_with_the_same_cursor_and_bound_commit(
+    agent: Agent[str, str, str], store: SnapshotPersistence[str]
+) -> None:
+    codec = _session_codec()
+    configured = Agent(
+        agent.agent_id,
+        agent.assemble,
+        STRING_CODEC,
+        store,
+        agent.authority,
+        session_codec=codec,
+    )
+    session_a = AgentSession("hook-a", "context-a")
+    session_b = AgentSession("hook-b", "context-b")
+    await configured.run(AgentStart("run", Graph.values(value="input"), session_a))
+    checkpoint = (await store.view(AgentRunKey("agent", GraphRunId("run")))).checkpoint()
+
+    async def writer(request: GraphPersistenceCommit[str]) -> GraphPersistenceCommit[str]:
+        return request
+
+    commit = DurableGraphCommit(
+        STRING_CODEC,
+        writer,
+        agent_session=checkpoint.agent_session,
+        session_codec=codec,
+    )
+
     with pytest.raises(SnapshotMismatchError, match="durable envelope"):
-        GraphRecovery(forged_checkpoint, commit, session=session_a)
+        GraphRecovery(checkpoint, commit, session=session_b)
 
 
 def test_agent_session_codec_constructor_rejects_invalid_capabilities() -> None:

@@ -270,37 +270,44 @@ quote-style = "double"
 # layer, a second execution path, or a commitment domain version.  The private
 # settlement lookup and completed-state proof are substantive provenance
 # checks, and their measured shape is ratcheted here after review.
+# The 2026-09-13 Session durable-boundary closure adds one scoped
+# GraphSessionReceipt owner for exact Graph state/Session commit identity and
+# one explicit Config-successor admission at the existing transition owner.
+# The receipt pairing, checkpoint source-state check, and nested-child
+# inheritance exception are substantive durable facts; no alias, merge path,
+# or metric-only helper was introduced.  The values below are the exact
+# post-review measurement for this call chain.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 1168
-type_definitions = 734
-dataclass_types = 457
-dataclass_fields = 1184
-decision_points = 3986
+top_level_definitions = 1172
+type_definitions = 735
+dataclass_types = 458
+dataclass_fields = 1190
+decision_points = 4035
 logical_clone_pairs = 66
 statement_clone_pairs = 124
-near_clone_pairs = 65
+near_clone_pairs = 63
 record_shape_clone_pairs = 42
 thin_single_use_helpers = 0
 single_use_private_dataclasses = 23
 test_only_private_definitions = 0
-function_definitions = 1161
-method_definitions = 712
+function_definitions = 1167
+method_definitions = 715
 nested_function_definitions = 17
-semantic_nodes = 80764
-cognitive_complexity = 5117
+semantic_nodes = 81427
+cognitive_complexity = 5169
 await_points = 167
-exception_handlers = 249
+exception_handlers = 255
 attribute_writes = 136
 task_creations = 16
 max_cyclomatic_complexity = 49
 max_cognitive_complexity = 60
 max_nesting_depth = 6
-internal_call_edges = 1658
+internal_call_edges = 1673
 recursive_call_components = 5
 max_call_fan_out = 24
 max_call_chain_depth = 17
 max_call_chain_cognitive = 324
-cross_module_call_edges = 1565
+cross_module_call_edges = 1575
 cross_module_call_pairs = 452
 max_runtime_module_fan_out = 30
 internal_import_edges = 733
@@ -308,16 +315,16 @@ import_cycle_components = 0
 max_module_fan_out = 31
 max_module_dependency_depth = 33
 ambiguous_internal_dispatches = 94
-transparent_private_definitions = 38
+transparent_private_definitions = 39
 thin_single_use_methods = 4
-low_usage_private_definitions = 239
-linear_private_call_chain_links = 40
+low_usage_private_definitions = 242
+linear_private_call_chain_links = 41
 production_unreferenced_definitions = 13
 low_cohesion_classes = 9
 max_methods_per_class = 33
 max_fields_per_class = 39
 max_class_components = 18
-complexity_hotspots = 147
+complexity_hotspots = 149
 stateful_async_hotspots = 11
 unused_private_definitions = 0
 unread_private_fields = 0

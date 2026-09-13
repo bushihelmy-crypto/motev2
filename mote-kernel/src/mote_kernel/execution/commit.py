@@ -200,6 +200,31 @@ class GraphCommit(Protocol[GraphValueT]):
     ) -> GraphRunState: ...
 
 
+def _validate_transition_session_config(
+    previous_state: GraphRunState | None,
+    candidate: GraphRunState,
+    command: GraphRunCommand,
+    result: TaskResult[GraphValueT] | None,
+    session: AgentSessionCarrier,
+) -> None:
+    admitted = admit_session_carrier(session)
+    candidate_cursor = candidate.config_cursor if candidate.config_digest is not None else None
+    if isinstance(command, StartGraphRun):
+        if admitted.config_cursor != candidate_cursor:
+            raise SnapshotMismatchError("Graph candidate Config does not match its AgentSession")
+        return
+    if previous_state is None:
+        raise SnapshotMismatchError("non-start Graph transition requires a previous state")
+    previous_cursor = previous_state.config_cursor if previous_state.config_digest is not None else None
+    if isinstance(result, TaskSuccess) and result.session is not None and admitted != result.session:
+        raise SnapshotMismatchError("scoped Config transition AgentSession does not match its candidate state")
+    if previous_cursor == candidate_cursor or admitted.config_cursor == candidate_cursor:
+        return
+    if not isinstance(result, TaskSuccess) or result.session is None:
+        raise SnapshotMismatchError("a scoped Config transition requires an explicit AgentSession successor")
+    raise SnapshotMismatchError("scoped Config transition AgentSession does not match its candidate state")
+
+
 def prepare_transition(
     scope_run: ScopeRunCoordinate,
     previous_state: GraphRunState | None,
@@ -218,11 +243,7 @@ def prepare_transition(
         raise SnapshotMismatchError(admission_error)
     if agent_session is not None:
         try:
-            admitted_session = admit_session_carrier(agent_session)
-            if isinstance(command, StartGraphRun):
-                candidate_cursor = candidate.config_cursor if candidate.config_digest is not None else None
-                if admitted_session.config_cursor != candidate_cursor:
-                    raise SnapshotMismatchError("Graph candidate Config does not match its AgentSession")
+            _validate_transition_session_config(previous_state, candidate, command, result, agent_session)
         except AgentSessionContractError as error:
             raise SnapshotMismatchError("Graph transition AgentSession is malformed") from error
     if admitted_successor is not None and candidate != admitted_successor:

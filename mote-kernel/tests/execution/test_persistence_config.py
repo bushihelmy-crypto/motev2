@@ -9,6 +9,7 @@ from tests.execution.persistence_fixtures import (
     capture_graph_input,
     capture_publication,
     encode_strings,
+    linear_graph,
 )
 
 from mote_kernel.config import Config, ConfigSnapshot, ConfigSnapshotKey
@@ -17,9 +18,11 @@ from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.values import _make_single_graph_value
 from mote_kernel.execution.persistence import (
     DurableGraphCommit,
+    EncodedAgentSession,
     EncodedFrame,
     GraphPersistenceCommit,
     GraphRecovery,
+    GraphSessionReceipt,
 )
 from mote_kernel.loop.config import ReActRuntimeConfig
 from mote_kernel.state.graph_state import GraphConfigCursor, GraphDefinitionId, GraphDefinitionVersion
@@ -85,6 +88,101 @@ async def test_historical_frames_resolve_their_own_config_without_serializing_ca
     assert seen[0] is initial
     assert seen[1] is restored_successor
     assert result.outputs.activation_config is restored_successor
+
+
+@pytest.mark.asyncio
+async def test_persistence_commit_rejects_a_candidate_config_ahead_of_its_session() -> None:
+    initial, successor = config_at(1), config_at(2)
+    store = MemoryPersistence[str]()
+    await config_graph(successor, []).run(
+        Graph.values(value="business"),
+        run_id="run",
+        activation_config=initial,
+        commit=DurableGraphCommit(STRING_CODEC, store),
+    )
+    request = next(
+        item for item in store.requests if item.candidate_state.config_digest == successor.config_cursor.digest
+    )
+    stale = EncodedAgentSession("test.session", 1, b"stale", initial.config_cursor)
+    with pytest.raises(Graph.SnapshotMismatchError, match="candidate Config successor"):
+        replace(
+            request,
+            agent_session=stale,
+            session_receipt=GraphSessionReceipt.for_commit(request.scope, request.writes.commit_key, stale),
+        )
+    missing_cursor = EncodedAgentSession("test.session", 1, b"stale", None)
+    with pytest.raises(Graph.SnapshotMismatchError, match="candidate Config successor"):
+        replace(
+            request,
+            agent_session=missing_cursor,
+            session_receipt=GraphSessionReceipt.for_commit(
+                request.scope,
+                request.writes.commit_key,
+                missing_cursor,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_persistence_commit_requires_an_exact_config_predecessor() -> None:
+    initial, successor = config_at(1), config_at(2)
+    store = MemoryPersistence[str]()
+    await config_graph(successor, []).run(
+        Graph.values(value="business"),
+        run_id="run",
+        activation_config=initial,
+        commit=DurableGraphCommit(STRING_CODEC, store),
+    )
+    start = store.requests[0]
+    successor_request = next(
+        item for item in store.requests if item.candidate_state.config_cursor == successor.config_cursor
+    )
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="predecessor Config cursor is malformed"):
+        replace(start, expected_config_cursor=cast(GraphConfigCursor, object()))
+    with pytest.raises(Graph.SnapshotMismatchError, match="cannot carry a predecessor"):
+        replace(start, expected_config_cursor=initial.config_cursor)
+    with pytest.raises(Graph.SnapshotMismatchError, match="requires its predecessor"):
+        replace(successor_request, expected_config_cursor=None)
+    with pytest.raises(Graph.SnapshotMismatchError, match="does not name its predecessor"):
+        replace(
+            successor_request,
+            expected_config_cursor=GraphConfigCursor(
+                GraphDefinitionId("other-config"),
+                GraphDefinitionVersion(1),
+                initial.config_cursor.revision,
+                initial.config_cursor.digest,
+            ),
+        )
+
+    plain_store = MemoryPersistence[str]()
+    await linear_graph([]).run(
+        Graph.values(value="input"), run_id="plain", commit=DurableGraphCommit(STRING_CODEC, plain_store)
+    )
+    plain_request = next(item for item in plain_store.requests if item.candidate_state.revision == 1)
+    plain_cursor = plain_request.candidate_state.config_cursor
+    with pytest.raises(Graph.SnapshotMismatchError, match="does not name its predecessor"):
+        replace(
+            plain_request,
+            expected_config_cursor=GraphConfigCursor(
+                plain_cursor.definition_id,
+                plain_cursor.definition_version,
+                plain_cursor.revision,
+                "historical-digest",
+            ),
+        )
+
+    newer_session = EncodedAgentSession("test.session", 1, b"newer", config_at(3).config_cursor)
+    accepted = replace(
+        successor_request,
+        agent_session=newer_session,
+        session_receipt=GraphSessionReceipt.for_commit(
+            successor_request.scope,
+            successor_request.writes.commit_key,
+            newer_session,
+        ),
+    )
+    assert accepted.admit() == accepted
 
 
 @pytest.mark.asyncio
