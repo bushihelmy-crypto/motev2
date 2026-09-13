@@ -1,6 +1,6 @@
 # Terminal completion route / frontier proof 验收与 Code Review 指引（2026-09-12）
 
-状态：**已修复独立 reviewer 的 P1/P2 findings，完整门禁已通过，等待独立复审**。
+状态：**P2 symbolic terminal-frontier proof 已落盘，等待完整门禁与独立复审**。
 
 这份文档是给 reviewer/agent 的审查入口，不替代代码审查，也不替代
 [`graph-mainline-simplification-governance.zh-CN.md`](./graph-mainline-simplification-governance.zh-CN.md) 中的治理总账。
@@ -8,7 +8,7 @@
 
 记录生成时的仓库事实：
 
-- Kernel 工作目录：`/home/longert/motev2/mote-kernel`；记录时 `HEAD=562755e`；
+- Kernel 工作目录：`/home/longert/motev2/mote-kernel`；具体提交以当前工作树为准；
 - 本次 route 改动尚未单独提交；审查应针对当前工作树中列出的 route 相关路径；
 - 工作树同时存在同事的 gateway、persistence、codec、`session.py` 等并发改动，这些不属于本文验收范围，不能因为它们的
   diff 变化而给本次 route 设计背书或定罪；
@@ -53,7 +53,8 @@
 3. 再检查异常类型、错误优先级和 nested/recovery 边界；
 4. 最后用类型、测试、覆盖率、复杂度、架构和 pre-commit 证明没有回归。
 
-复杂度热点只表示需要复审。不能为了降低 `_completion_routes()` 或 `_collect_control_topology()` 的局部指标，把 proof
+复杂度热点只表示需要复审。不能为了降低 `_FrontierRelation.completion_routes()` 或
+`_collect_control_topology()` 的局部指标，把 proof
 拆成转发 helper、宽 context、镜像状态或第二执行路径。
 
 ## 3. 完整调用链
@@ -68,9 +69,9 @@ Graph.add_node(..., exported_routes=...)
        -> conditional_targets
        -> transition.route_options
        -> nested child domain checks
-  -> GraphCompiler._completion_routes()
-       -> canonical reachable-frontier fixed point
-       -> relative compiled Join progress
+  -> prove_completion_routes()
+       -> compiler-owned symbolic transition relation
+       -> BDD reachable fixed point over frontier / Join bits
        -> exact successful-frontier route domain
        -> CompiledGraph.completion_routes
   -> immutable FrontierTransitionPlan / CompiledGraph
@@ -148,14 +149,14 @@ Recovery 对尚未执行节点的所有选择直接来自 compiler route domain�
 
 ### 5.3 Terminal-frontier proof
 
-`_completion_routes()` 必须同时满足以下性质：
+`prove_completion_routes()` 必须同时满足以下性质：
 
 1. successful frontier 的发现、route 冲突判断和 `completion_routes` 生成由同一次 fixed point 完成，不存在并行的 terminal-event 扫描；
-2. proof state 只有 canonical frontier node tuple 与相对当前 superstep 的 compiled Join progress；不复制业务值、runtime state 或 scheduler；
-3. 下一 frontier 只由 `direct_targets`、一次 conditional route 选择和 `CompiledJoin` occurrence offset 产生；同一 target 出现两个 activation cause 时立即拒绝；
+2. proof 使用 compiler-owned 的 Boolean 状态位表示当前/下一 frontier 节点与相对当前 superstep 的 compiled Join progress；route choice 是每次 transition 的一次性 existential 变量，不复制业务值、runtime state 或 scheduler；
+3. BDD transition relation 只由 `direct_targets`、一次 conditional route 选择和 `CompiledJoin` occurrence offset 产生；同一 target 出现两个 activation cause 时立即拒绝；
 4. 只有在没有 successor、也没有剩余 Join progress 时才检查 completion route；因此早期 terminal event 是否被清除由实际 frontier 推进决定，不由全局最大 level 猜测；
 5. 每次 frontier 推进都会形成新的 activation occurrence；循环回到相同 node 不会把前后两次 route 当作同一选择；
-6. canonical proof state 是有限集合，cycle 通过 fixed point 收敛，不依赖 `max_supersteps` 或隐式 loop counter；
+6. BDD fixed point 在有限 Boolean 状态空间上收敛，cycle 不依赖 `max_supersteps` 或隐式 loop counter；BDD 运算采用显式后序遍历，不把图深度转化为 Python 调用栈深度；
 7. 同一最终 frontier 只要存在两个不同 route 的合法组合就在 compiler 报错；同一 node 的互斥 route 或不同 frontier 的 route 不误杀；
 8. 没有任何可达 successful terminal frontier 时拒绝 definition；runtime deadlock guard 仍保留为外部 snapshot/command 防线。
 
@@ -180,7 +181,7 @@ Recovery 对尚未执行节点的所有选择直接来自 compiler route domain�
 - 原先按全局最大 absolute level 删除早期 event，会丢失“更晚节点只在部分 route 激活”的分支相关性；该算法已整体删除，
   conditional early exit 的公开 Graph 复现现在在 compile 阶段拒绝，unconditional tail 则只导出最终的 `None` route；
 - 原先按 node 合并 route requirement，会把 cycle 中不同 superstep 的 activation occurrence 错当成同一次互斥选择；该 pairwise
-  proof 已整体删除，fixed point 每推进一个 frontier 就自然形成新的 occurrence，reviewer 的 `{d:x, c:z}` 复现现在在 compile 阶段拒绝；
+  proof 已整体删除，symbolic fixed point 每推进一个 frontier 就自然形成新的 occurrence，reviewer 的 `{d:x, c:z}` 复现现在在 compile 阶段拒绝；
 - `completion_route_known=False` 没有生产入口；相关 transfer/boundary/work-item/cycle-signature/nested-outcome 字段、unknown 分支和
   synthetic 私有测试已整链删除，completed child 只读取 authoritative `GraphRunState.completion_route`；
 - Join source 去重、offset 对齐和 deadline 完整性由 `_compile_join_occurrence_plans()` 的 synchronized cohort / absolute coordinate
@@ -228,8 +229,8 @@ Recovery 对尚未执行节点的所有选择直接来自 compiler route domain�
 
 ### 7.2 Compiler proof
 
-- [ ] successful frontier、Join source、direct successor 和 conditional route 的推进只由同一次 fixed point 处理。
-- [ ] finality 来自 canonical frontier fixed point，没有全局 `final_level` 剪枝或 gate-pair 替代路径。
+- [ ] successful frontier、Join source、direct successor 和 conditional route 的推进只由同一次 symbolic fixed point 处理。
+- [ ] finality 来自 symbolic transition relation，没有全局 `final_level` 剪枝或 gate-pair 替代路径。
 - [ ] Join progress 使用 compiler 已生成的 occurrence offset，并以相对坐标进入 proof identity。
 - [ ] repeatable node 的不同 activation occurrence 不共享 route requirement。
 - [ ] 同一 terminal frontier 的 route 冲突在 compile 阶段拒绝；不同 frontier 的合法互斥 route 不被误杀。
@@ -276,15 +277,16 @@ cd /home/longert/motev2
 pre-commit run --all-files
 ```
 
-本轮已经得到的结果：
+本轮完整复核结果：
 
 | 证据 | 结果 |
 | --- | --- |
-| Graph/compiler/routing/recovery 定向测试 | `182 passed` |
-| 全量 Kernel pytest | `3031 passed` |
+| Graph/compiler/routing/recovery 定向测试 | `224 passed` |
+| execution/graph + engine + state 定向测试 | `791 passed` |
+| 全量 Kernel pytest | `3116 passed` |
 | 行覆盖率 / 分支覆盖率 | `100.00% / 100.00%` |
 | Strict Pyright | `0 errors, 0 warnings, 0 informations` |
-| complexity ratchet | `22 passed` |
+| complexity/semantic architecture gate | `22 passed` |
 | zero-debt complexity health | `PASS` |
 | build 与 package check | `PASSED` |
 | monorepo `pre-commit run --all-files` | 全部 `Passed` |

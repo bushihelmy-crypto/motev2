@@ -16,6 +16,7 @@ from mote_kernel.execution.graph.definition import (
     NestedGraphNodeDefinition,
 )
 from mote_kernel.execution.graph.edge import DirectEdge, Edge, JoinEdge
+from mote_kernel.execution.graph.frontier_proof import prove_completion_routes
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
@@ -54,8 +55,6 @@ from mote_kernel.state.graph_state import GraphJoinIdentity, GraphNodeId, GraphR
 GraphValueT = TypeVar("GraphValueT")
 RouteRequirements: TypeAlias = tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
 _RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
-_ControlCandidates: TypeAlias = tuple[tuple[GraphNodeId, tuple[GraphNodeId, ...]], ...]
-_ControlJoinProgress: TypeAlias = tuple[CompiledJoin, int, tuple[GraphNodeId, ...]]
 
 
 def _activation_gate_sort_key(
@@ -87,20 +86,12 @@ class _RouteRequirementProof:
 
     An exact proof has lost no branch-local or correlated condition and may
     prove that every one-shot Join source has the same activation domain.
-    Reachable-frontier coexistence is owned by ``_completion_routes``;
+    Reachable-frontier coexistence is owned by ``prove_completion_routes``;
     a node key here is never treated as identity for two repeatable occurrences.
     """
 
     requirements: RouteRequirements
     exact: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _ControlFrontier:
-    """Canonical static projection of one reachable runtime control frontier."""
-
-    nodes: tuple[GraphNodeId, ...]
-    join_progress: tuple[_ControlJoinProgress, ...] = ()
 
 
 def _all_single_source_gates(
@@ -362,168 +353,6 @@ def _guaranteed_sets(
         if replacements == guarantees:
             return guarantees
         guarantees = replacements
-
-
-def _with_control_candidate(
-    candidates: _ControlCandidates,
-    target: GraphNodeId,
-    sources: tuple[GraphNodeId, ...],
-) -> _ControlCandidates:
-    """Add one exact activation cause or reject a reachable duplicate target."""
-
-    indexed = dict(candidates)
-    existing = indexed.get(target)
-    if existing is not None:
-        concurrent = tuple(sorted({*existing, *sources}))
-        if len(concurrent) > 1:
-            guidance = f"concurrent sources may be {concurrent!r}, declare graph.add_join({concurrent!r}, {target!r})"
-        else:
-            guidance = f"source {concurrent!r} contributes more than one path to the same target"
-        raise GraphValidationError(
-            f"target {target!r} has multiple activation gates without an explicit Join; {guidance}"
-        )
-    indexed[target] = sources
-    return tuple(sorted(indexed.items()))
-
-
-def _frontier_control_base(
-    frontier: _ControlFrontier,
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
-    joins_by_source: dict[GraphNodeId, list[CompiledJoin]],
-) -> tuple[_ControlCandidates, tuple[_ControlJoinProgress, ...]]:
-    """Resolve route-independent successors and relative Join occurrences."""
-
-    candidates: _ControlCandidates = ()
-    occurrences: dict[tuple[CompiledJoin, int], set[GraphNodeId]] = {
-        (plan, target_offset): set(arrived) for plan, target_offset, arrived in frontier.join_progress
-    }
-    for source in frontier.nodes:
-        for target in sorted(direct_targets[source]):
-            candidates = _with_control_candidate(candidates, target, (source,))
-        for plan in joins_by_source[source]:
-            key = (plan, plan.target_offset(source))
-            arrived = occurrences.setdefault(key, set())
-            arrived.add(source)
-
-    remaining: list[_ControlJoinProgress] = []
-    for (plan, target_offset), arrived in sorted(
-        occurrences.items(),
-        key=lambda item: (item[0][0].identity, item[0][1]),
-    ):
-        complete = set(plan.identity.sources) == arrived
-        if complete:
-            if plan.identity.target != END:
-                candidates = _with_control_candidate(candidates, plan.identity.target, plan.identity.sources)
-        else:
-            remaining.append((plan, target_offset - 1, tuple(sorted(arrived))))
-    return candidates, tuple(remaining)
-
-
-def _terminal_route_domains(
-    nodes: tuple[GraphNodeId, ...],
-    route_options: dict[GraphNodeId, tuple[GraphRouteId | None, ...]],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
-) -> tuple[tuple[GraphRouteId | None, ...], ...]:
-    """Return each node's choices that emit no conditional successor."""
-
-    domains: list[tuple[GraphRouteId | None, ...]] = []
-    for node_id in nodes:
-        conditional = conditional_targets[node_id]
-        terminal = (
-            tuple(route for route, target in conditional.items() if target == END)
-            if conditional
-            else route_options[node_id]
-        )
-        if not terminal:
-            return ()
-        domains.append(terminal)
-    return tuple(domains)
-
-
-def _frontier_successors(
-    frontier: _ControlFrontier,
-    candidates: _ControlCandidates,
-    join_progress: tuple[_ControlJoinProgress, ...],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
-) -> tuple[_ControlFrontier, ...]:
-    """Expand declared conditional choices into canonical next frontiers."""
-
-    alternatives = {candidates}
-    for source in frontier.nodes:
-        conditional = conditional_targets[source]
-        if not conditional:
-            continue
-        expanded: set[_ControlCandidates] = set()
-        for current in alternatives:
-            for target in sorted(set(conditional.values())):
-                expanded.add(current if target == END else _with_control_candidate(current, target, (source,)))
-        alternatives = expanded
-    return tuple(
-        sorted(
-            (
-                _ControlFrontier(tuple(target for target, _sources in candidate), join_progress)
-                for candidate in alternatives
-                if candidate
-            ),
-            key=lambda successor: (
-                successor.nodes,
-                tuple(
-                    (plan.identity, target_offset, arrived) for plan, target_offset, arrived in successor.join_progress
-                ),
-            ),
-        )
-    )
-
-
-def _completion_routes(
-    entries: tuple[GraphNodeId, ...],
-    route_options: dict[GraphNodeId, tuple[GraphRouteId | None, ...]],
-    direct_targets: dict[GraphNodeId, set[GraphNodeId]],
-    conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]],
-    joins_by_source: dict[GraphNodeId, list[CompiledJoin]],
-) -> frozenset[GraphRouteId | None]:
-    """Prove every reachable control frontier and return its completion domain.
-
-    A canonical frontier plus relative Join progress is a finite control state.
-    Advancing that state with the compiler-owned route domains preserves the
-    branch that activated a node and naturally gives repeated activations a new
-    occurrence.  This is the same superstep boundary used by runtime routing,
-    without executing nodes or manufacturing a parallel runtime snapshot.  The
-    successful frontiers found here are the sole owner of the graph's exported
-    completion domain; early route events that must advance are not completions.
-
-    Join plans reach this proof only after ``_compile_join_occurrence_plans`` has
-    proved a synchronized repeatable cohort or one absolute target coordinate.
-    Consequently an occurrence cannot repeat a source, complete before offset
-    one, or remain partial at offset one; the untrusted runtime state boundary
-    independently validates those invariants when applying persisted evidence.
-    """
-
-    initial = _ControlFrontier(tuple(sorted(entries)))
-    pending = [initial]
-    seen: set[_ControlFrontier] = set()
-    completion_routes: set[GraphRouteId | None] = set()
-    while pending:
-        frontier = pending.pop()
-        if frontier in seen:
-            continue
-        seen.add(frontier)
-        candidates, join_progress = _frontier_control_base(frontier, direct_targets, joins_by_source)
-        if not candidates and not join_progress:
-            domains = _terminal_route_domains(frontier.nodes, route_options, conditional_targets)
-            if domains:
-                exposed = frozenset(route for domain in domains for route in domain)
-                if len(domains) > 1 and len(exposed) > 1:
-                    raise GraphValidationError("terminal frontier may expose conflicting completion routes")
-                completion_routes.update(exposed)
-        pending.extend(
-            successor
-            for successor in reversed(_frontier_successors(frontier, candidates, join_progress, conditional_targets))
-            if successor not in seen
-        )
-    if not completion_routes:
-        raise GraphValidationError("graph has no statically viable successful completion")
-    return frozenset(completion_routes)
 
 
 def _terminal_gates(
@@ -1291,7 +1120,7 @@ def _compile_definition(
             joins_by_target[join.identity.target].append(join)
         for source in join.identity.sources:
             joins_by_source[source].append(join)
-    completion_routes = _completion_routes(
+    completion_routes = prove_completion_routes(
         entries,
         route_options,
         direct_targets,

@@ -92,6 +92,65 @@ def test_compiler_rejects_different_routes_on_one_fixed_terminal_frontier() -> N
         GraphCompiler(definition).compile()
 
 
+def test_compiler_composes_independent_terminal_choices_without_cartesian_expansion() -> None:
+    branch_count = 128
+    nodes: list[CallableNodeDefinition[str]] = []
+    edges: list[ConditionalEdge | DirectEdge] = []
+    entries: list[GraphNodeId] = []
+    for index in range(branch_count):
+        choice = GraphNodeId(f"choice-{index}")
+        left = GraphNodeId(f"left-{index}")
+        right = GraphNodeId(f"right-{index}")
+        nodes.extend((node(str(choice)), node(str(left)), node(str(right))))
+        entries.append(choice)
+        edges.extend(
+            (
+                ConditionalEdge(choice, GraphRouteId("left"), left),
+                ConditionalEdge(choice, GraphRouteId("right"), right),
+                DirectEdge(left, END),
+                DirectEdge(right, END),
+            )
+        )
+
+    compiled = GraphCompiler(graph(nodes=tuple(nodes), edges=tuple(edges), entries=tuple(entries))).compile()
+
+    assert compiled.completion_routes == frozenset((None,))
+
+
+def test_compiler_preserves_condition_correlation_for_an_early_terminal_branch() -> None:
+    definition = graph(
+        nodes=(node("early"), node("choice"), node("later")),
+        edges=(
+            ConditionalEdge(GraphNodeId("early"), GraphRouteId("early"), END),
+            ConditionalEdge(GraphNodeId("choice"), GraphRouteId("continue"), GraphNodeId("later")),
+            ConditionalEdge(GraphNodeId("choice"), GraphRouteId("finish-now"), END),
+            ConditionalEdge(GraphNodeId("later"), GraphRouteId("later"), END),
+        ),
+        entries=(GraphNodeId("early"), GraphNodeId("choice")),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_keeps_cycle_route_occurrences_distinct() -> None:
+    definition = graph(
+        nodes=(node("b"), node("d"), node("c")),
+        edges=(
+            DirectEdge(GraphNodeId("b"), GraphNodeId("d")),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("z"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("x"), END),
+            ConditionalEdge(GraphNodeId("d"), GraphRouteId("z"), GraphNodeId("c")),
+            ConditionalEdge(GraphNodeId("d"), GraphRouteId("x"), END),
+            ConditionalEdge(GraphNodeId("c"), GraphRouteId("z"), END),
+        ),
+        entries=(GraphNodeId("b"),),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
 def test_compiler_rejects_different_exported_routes_on_one_fixed_terminal_frontier() -> None:
     definition = graph(
         nodes=(

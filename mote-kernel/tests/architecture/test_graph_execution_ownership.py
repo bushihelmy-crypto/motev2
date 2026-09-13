@@ -331,7 +331,7 @@ def test_frame_codecs_are_invoked_only_by_the_codec_owner() -> None:
     ]
 
 
-def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() -> None:
+def test_compiled_routing_is_interpreted_by_runtime_routing_and_compiler_proof() -> None:
     owners: dict[str, set[str]] = {
         "direct_targets": set(),
         "conditional_targets": set(),
@@ -343,11 +343,14 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
                 owners[node.attr].add(relative)
 
     assert owners == {
-        # Routing is the sole interpreter of the compiled control topology.
-        # Recovery projects route choices through its typed routing projection
-        # and therefore cannot grow a second topology interpreter.
-        "direct_targets": {"execution/engine/routing.py"},
-        "conditional_targets": {"execution/engine/routing.py"},
+        # Runtime routing is the sole dynamic interpreter.  The compiler-owned
+        # symbolic proof reads the same lowered topology to establish the
+        # static completion domain; it does not schedule or execute a second
+        # path.
+        "direct_targets": {"execution/engine/routing.py", "execution/graph/frontier_proof.py"},
+        "conditional_targets": {"execution/engine/routing.py", "execution/graph/frontier_proof.py"},
+        # The proof receives the already-lowered Join index as an input; only
+        # runtime routing dereferences the transition-plan field itself.
         "joins_by_source": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
