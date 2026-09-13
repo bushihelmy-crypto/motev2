@@ -14,6 +14,7 @@ from tests.execution.persistence_fixtures import (
     nested_graph,
 )
 
+import mote_kernel.execution.persistence as persistence_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.persistence import (
@@ -27,6 +28,7 @@ from mote_kernel.state.graph_state import (
     GraphEvidenceCommitment,
     GraphExecutionAttemptId,
     GraphNodeId,
+    GraphRouteId,
 )
 
 
@@ -76,6 +78,7 @@ async def test_valid_evidence_commitment_cannot_bypass_the_bound_codec(
             foreign,
             publication.birth,
             publication.provenance,
+            None,
         )
         activation = publication.coordinate.activation
         settlements = tuple(
@@ -316,6 +319,7 @@ async def test_persistence_commit_binds_publication_to_its_exact_settlement(mism
             publication.frame,
             publication.birth,
             publication.provenance,
+            None,
         )
     else:
         provenance = ExecutionPublicationProvenance(
@@ -329,11 +333,40 @@ async def test_persistence_commit_binds_publication_to_its_exact_settlement(mism
             publication.frame,
             publication.birth,
             provenance,
+            None,
         )
     writes = replace(request.writes, publications=(changed,))
 
     with pytest.raises(Graph.SnapshotMismatchError, match="authoritative settlement"):
         replace(request, writes=writes)
+
+
+@pytest.mark.asyncio
+async def test_persistence_commit_binds_publication_route_to_its_exact_settlement() -> None:
+    store = MemoryPersistence[str]()
+    await linear_graph([]).run(
+        Graph.values(value="input"), run_id="run", commit=DurableGraphCommit(STRING_CODEC, store)
+    )
+    request = next(item for item in store.requests if item.writes.publications)
+    publication = request.writes.publications[0]
+    changed = capture_publication(
+        publication.coordinate,
+        publication.frame,
+        publication.birth,
+        publication.provenance,
+        GraphRouteId("forged-route"),
+    )
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="authoritative settlement"):
+        replace(request, writes=replace(request.writes, publications=(changed,)))
+    with pytest.raises(Graph.SnapshotMismatchError, match="lacks its authoritative terminal settlement"):
+        persistence_module._settlement_route_for(  # pyright: ignore[reportPrivateUsage]
+            request.candidate_state,
+            replace(
+                publication.coordinate,
+                activation=replace(publication.coordinate.activation, node_id=GraphNodeId("unknown")),
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -392,7 +425,7 @@ async def test_publication_birth_facts_must_match_the_authoritative_settlement(
             else publication.birth
         )
         provenance = publication.provenance if fact == "revision" else ExecutionPublicationProvenance(forged_token)
-        changed = capture_publication(publication.coordinate, publication.frame, birth, provenance)
+        changed = capture_publication(publication.coordinate, publication.frame, birth, provenance, None)
         checkpoint = replace(
             checkpoint,
             publications=tuple(changed if item is publication else item for item in checkpoint.publications),
@@ -450,8 +483,8 @@ async def test_sibling_payload_swap_with_recaptured_records_cannot_change_value_
     swapped = tuple(
         sorted(
             (
-                capture_publication(first.coordinate, second.frame, first.birth, first.provenance),
-                capture_publication(second.coordinate, first.frame, second.birth, second.provenance),
+                capture_publication(first.coordinate, second.frame, first.birth, first.provenance, None),
+                capture_publication(second.coordinate, first.frame, second.birth, second.provenance, None),
             ),
             key=lambda item: item.coordinate,
         )
@@ -555,6 +588,7 @@ async def test_completed_publications_exactly_match_the_full_settlement_ledger(d
             first.frame,
             first.birth,
             first.provenance,
+            None,
         )
         publications = tuple(sorted((*checkpoint.publications, invented), key=lambda item: item.coordinate))
     committed = len(store.requests)
@@ -565,4 +599,23 @@ async def test_completed_publications_exactly_match_the_full_settlement_ledger(d
             )
         )
     assert len(store.requests) == committed
+    assert calls == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_durable_checkpoint_rejects_a_replaced_completed_route() -> None:
+    store = MemoryPersistence[str]()
+    calls: list[str] = []
+    await linear_graph(calls).run(
+        Graph.values(value="input"), run_id="run", commit=DurableGraphCommit(STRING_CODEC, store)
+    )
+    checkpoint = deepcopy(store.checkpoint())
+    object.__setattr__(
+        checkpoint,
+        "root_state",
+        replace(checkpoint.root_state, completion_route=GraphRouteId("replaced")),
+    )
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="authoritative root state"):
+        GraphRecovery(checkpoint, DurableGraphCommit(STRING_CODEC, store))
     assert calls == ["first", "second"]

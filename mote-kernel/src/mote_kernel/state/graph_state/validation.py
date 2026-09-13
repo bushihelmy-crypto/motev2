@@ -148,6 +148,21 @@ def _validate_settled_publications(state: GraphRunState) -> None:
             raise GraphStateTransitionError("current successful frontier and publication ledger disagree")
 
 
+def _validate_completed_graph_provenance(state: GraphRunState) -> None:
+    """Validate the durable settlement that survives completion frontier clearing."""
+
+    terminal = tuple(
+        item for item in state.settled_publications if item.reference.activation.superstep == state.superstep
+    )
+    if not terminal:
+        raise GraphStateTransitionError("completed graph lacks terminal settlement provenance")
+    if any(item.commit_revision >= state.revision for item in terminal):
+        raise GraphStateTransitionError("terminal settlement must precede the completed state revision")
+    routes = tuple(dict.fromkeys(item.reference.route for item in terminal))
+    if len(routes) != 1 or routes[0] != state.completion_route:
+        raise GraphStateTransitionError("completed graph route does not match terminal settlement provenance")
+
+
 def _validate_join_occurrence(
     state: GraphRunState,
     occurrence: GraphJoinOccurrenceIdentity,
@@ -403,6 +418,10 @@ def _validate_graph_run_state(state: GraphRunState) -> None:
                 raise GraphStateTransitionError("a completed graph must use the canonical empty position")
             if state.abort is not None:
                 raise GraphStateTransitionError("a completed graph cannot retain an abort")
+            # A durable completed state has no live frontier; its terminal
+            # settlement is the only state-owned route provenance left.
+            if state.graph_input_evidence is not None:
+                _validate_completed_graph_provenance(state)
         case GraphRunStatus.FAILED:
             if (
                 not state.frontier.nodes

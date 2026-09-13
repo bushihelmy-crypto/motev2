@@ -749,6 +749,36 @@ def test_completed_lifecycle_rejects_execution_lease() -> None:
         validate_graph_run_state(completed_with_execution)
 
 
+def test_durable_completed_state_requires_terminal_settlement_provenance() -> None:
+    terminal = ActivationReference(
+        GraphActivationIdentity(GraphRunId("run"), 0, A),
+        GraphRouteId("done"),
+    )
+    completed = replace(
+        running(),
+        status=GraphRunStatus.COMPLETED,
+        frontier=GraphFrontierState(()),
+        revision=2,
+        execution_sequence=1,
+        graph_input_evidence=GraphEvidenceCommitment(b"i" * 32),
+        settled_publications=(GraphPublicationSettlement(terminal, 1, SETTLEMENT_EXECUTION),),
+        completion_route=GraphRouteId("done"),
+    )
+
+    validate_graph_run_state(completed)
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement provenance"):
+        validate_graph_run_state(replace(completed, completion_route=GraphRouteId("other")))
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement provenance"):
+        validate_graph_run_state(replace(completed, settled_publications=()))
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement must precede"):
+        validate_graph_run_state(
+            replace(
+                completed,
+                settled_publications=(GraphPublicationSettlement(terminal, 2, SETTLEMENT_EXECUTION),),
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "case",
     [

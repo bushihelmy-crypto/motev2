@@ -55,10 +55,12 @@ from mote_kernel.session import (
     encode_session_carrier,
 )
 from mote_kernel.state.graph_state import (
+    ActivationReference,
     GraphActivationIdentity,
     GraphConfigCursor,
     GraphEvidenceCommitment,
     GraphNodeId,
+    GraphRouteId,
     GraphRunId,
     GraphRunState,
     GraphRunStatus,
@@ -94,6 +96,7 @@ _PublicationCommitmentMetadata = tuple[
     str,
     int,
     _ConfigCommitmentParts,
+    GraphRouteId | None,
 ]
 
 
@@ -179,9 +182,16 @@ def _publication_commitment(
     frame: EncodedFrame,
     birth: GraphCommitKey,
     provenance: ExecutionPublicationProvenance,
+    settlement_reference: ActivationReference,
 ) -> GraphEvidenceCommitment:
     token = require_publication_confirmation(birth.revision, provenance)
     activation = coordinate.activation
+    if settlement_reference.activation != GraphActivationIdentity(
+        activation.scope_run.graph_run_id,
+        activation.superstep,
+        activation.node_id,
+    ):
+        raise SnapshotMismatchError("publication settlement reference does not match its coordinate")
     return _commitment(
         b"mote.graph-publication-evidence.v1",
         (
@@ -197,6 +207,7 @@ def _publication_commitment(
             frame.codec_id,
             frame.codec_version,
             _config_parts(frame.config_cursor),
+            settlement_reference.route,
         ),
         frame.payload,
     )
@@ -292,6 +303,7 @@ class PersistedPublication(Generic[GraphValueT]):
     frame: EncodedFrame
     birth: GraphCommitKey
     provenance: ExecutionPublicationProvenance
+    settlement_reference: ActivationReference
     evidence: GraphEvidenceCommitment
 
     def __post_init__(self) -> None:
@@ -300,19 +312,34 @@ class PersistedPublication(Generic[GraphValueT]):
         birth = _admit_commit_key(self.birth)
         try:
             provenance = ExecutionPublicationProvenance.admit(self.provenance)
+            settlement_reference = ActivationReference(
+                GraphActivationIdentity(
+                    self.settlement_reference.activation.run_id,
+                    self.settlement_reference.activation.superstep,
+                    self.settlement_reference.activation.node_id,
+                ),
+                self.settlement_reference.route,
+            )
             evidence = GraphEvidenceCommitment.admit(self.evidence)
-        except ValueError as error:
+        except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("persistent publication confirmation is malformed") from error
         if birth.run_id != coordinate.activation.scope_run.graph_run_id or birth.revision < 1:
             raise SnapshotMismatchError("persistent publication birth commit is inconsistent")
-        if evidence != _publication_commitment(coordinate, frame, birth, provenance):
+        if evidence != _publication_commitment(coordinate, frame, birth, provenance, settlement_reference):
             raise SnapshotMismatchError("persistent publication commitment does not match its complete evidence")
 
     def admit(self) -> "PersistedPublication[GraphValueT]":
         if type(self) is not PersistedPublication:
             raise SnapshotMismatchError("persistent publication must be an exact typed record")
         try:
-            return PersistedPublication(self.coordinate, self.frame, self.birth, self.provenance, self.evidence)
+            return PersistedPublication(
+                self.coordinate,
+                self.frame,
+                self.birth,
+                self.provenance,
+                self.settlement_reference,
+                self.evidence,
+            )
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("persistent publication is malformed") from error
 
@@ -322,14 +349,41 @@ def _capture_publication(
     frame: EncodedFrame,
     birth: GraphCommitKey,
     provenance: ExecutionPublicationProvenance,
+    settlement_route: GraphRouteId | None,
 ) -> PersistedPublication[GraphValueT]:
+    activation = coordinate.activation
+    settlement_reference = ActivationReference(
+        GraphActivationIdentity(
+            activation.scope_run.graph_run_id,
+            activation.superstep,
+            activation.node_id,
+        ),
+        settlement_route,
+    )
     return PersistedPublication(
         coordinate,
         frame,
         birth,
         provenance,
-        _publication_commitment(coordinate, frame, birth, provenance),
+        settlement_reference,
+        _publication_commitment(coordinate, frame, birth, provenance, settlement_reference),
     )
+
+
+def _settlement_route_for(
+    state: GraphRunState,
+    coordinate: PublicationAvailabilityCoordinate[GraphValueT],
+) -> GraphRouteId | None:
+    activation = coordinate.activation
+    identity = GraphActivationIdentity(
+        activation.scope_run.graph_run_id,
+        activation.superstep,
+        activation.node_id,
+    )
+    matches = tuple(item for item in state.settled_publications if item.reference.activation == identity)
+    if len(matches) != 1:
+        raise SnapshotMismatchError("publication lacks its authoritative terminal settlement")
+    return matches[0].reference.route
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +495,8 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
             settlement = matches[0]
             token = require_publication_confirmation(publication.birth.revision, publication.provenance)
             if (
-                settlement.commit_revision != publication.birth.revision
+                settlement.reference != publication.settlement_reference
+                or settlement.commit_revision != publication.birth.revision
                 or settlement.execution != token
                 or settlement.evidence != publication.evidence
             ):
@@ -549,6 +604,7 @@ class DurableGraphCommit(Generic[GraphValueT]):
                 _encode_frame(evidence.frame, self.codec),
                 writes.commit_key,
                 evidence.provenance,
+                _settlement_route_for(transition.candidate_state, evidence.coordinate),
             )
             for evidence in writes.publications
         )
@@ -845,6 +901,7 @@ def restore_checkpoint(
         token = require_publication_confirmation(publication.birth.revision, publication.provenance)
         if (
             len(matches) != 1
+            or matches[0].reference != publication.settlement_reference
             or matches[0].commit_revision != publication.birth.revision
             or matches[0].execution != token
             or matches[0].evidence != publication.evidence

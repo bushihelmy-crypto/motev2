@@ -21,6 +21,7 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
 )
 from mote_kernel.state.graph_state import (
+    GraphActivationIdentity,
     GraphConfigCursor,
     GraphDefinitionId,
     GraphDefinitionVersion,
@@ -28,6 +29,7 @@ from mote_kernel.state.graph_state import (
     GraphExecutionAttemptId,
     GraphExecutionToken,
     GraphNodeId,
+    GraphRouteId,
     GraphRunId,
 )
 
@@ -55,6 +57,7 @@ def publication(
     payload: bytes = b"publication-payload",
     revision: int = 7,
     cursor: GraphConfigCursor | None = CURSOR,
+    route: GraphRouteId | None = None,
 ) -> PersistedPublication[str]:
     coordinate = PublicationAvailabilityCoordinate[str](
         StableActivation(SCOPE_RUN, 3, GraphNodeId(node_id)),
@@ -64,7 +67,7 @@ def publication(
     provenance = ExecutionPublicationProvenance(
         GraphExecutionToken(2, GraphExecutionAttemptId("attempt")),
     )
-    return capture_publication(coordinate, EncodedFrame("codec", 1, payload, cursor), birth, provenance)
+    return capture_publication(coordinate, EncodedFrame("codec", 1, payload, cursor), birth, provenance, route)
 
 
 def test_graph_input_commitment_has_one_domain_separated_canonical_encoding() -> None:
@@ -105,12 +108,34 @@ def test_publication_commitment_has_one_domain_separated_canonical_encoding() ->
             "codec",
             1,
             (CURSOR.definition_id, CURSOR.definition_version, CURSOR.revision, CURSOR.digest),
+            None,
         ),
         b"publication-payload",
     )
 
     assert record.evidence.digest == expected
     assert record.evidence != graph_input().evidence
+
+
+def test_publication_commitment_binds_the_terminal_settlement_route() -> None:
+    selected = publication(route=GraphRouteId("done"))
+    continued = publication()
+
+    assert selected.evidence != continued.evidence
+    assert selected.settlement_reference.route == GraphRouteId("done")
+    with pytest.raises(SnapshotMismatchError, match="complete evidence"):
+        replace(
+            selected,
+            settlement_reference=replace(selected.settlement_reference, route=None),
+        )
+    with pytest.raises(SnapshotMismatchError, match="settlement reference"):
+        replace(
+            selected,
+            settlement_reference=replace(
+                selected.settlement_reference,
+                activation=GraphActivationIdentity(RUN_ID, 4, GraphNodeId("node")),
+            ),
+        )
 
 
 INPUT_MUTATIONS: tuple[Callable[[PersistedGraphInput[str]], PersistedGraphInput[str]], ...] = (

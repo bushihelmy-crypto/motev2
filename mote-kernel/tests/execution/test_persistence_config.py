@@ -182,6 +182,7 @@ async def test_frame_config_must_belong_to_its_owning_state(segment: str, foreig
             ),
             publication.birth,
             publication.provenance,
+            None,
         )
         activation = publication.coordinate.activation
         settlements = tuple(
