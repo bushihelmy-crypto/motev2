@@ -936,7 +936,7 @@ async def test_nested_graph_terminal_route_drives_parent_conditional_edge() -> N
         return Graph.success(Graph.values(), route="done")
 
     child = Graph[str]("nested.route.child")
-    child.add_node("leaf", leaf, inputs={}, outputs={})
+    child.add_node("leaf", leaf, inputs={}, outputs={}, exported_routes=("done",))
     child.set_outputs({})
 
     parent = Graph[str]("nested.route.parent")

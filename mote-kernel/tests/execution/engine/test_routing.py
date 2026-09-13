@@ -28,6 +28,7 @@ from mote_kernel.execution.engine.routing import (
     publication_history_window,
     resolve_routing,
     resolve_routing_facts,
+    settled_activation_admission_error,
     transition_admission_error,
     validate_routing_contribution,
 )
@@ -119,6 +120,7 @@ class _RoutingEvaluationView(Protocol):
 
 class _RoutingPrivateView(Protocol):
     RoutingFacts: Callable[..., _RoutingEvaluationView]
+    _completion_route: Callable[..., GraphRouteId | None]
     _declared_joins: Callable[..., object]
     _frontier_gate_error: Callable[..., object]
     _gate_matches_cause: Callable[..., object]
@@ -240,6 +242,18 @@ class _RoutingPrivateView(Protocol):
             activation_superstep,
             frames,
         )
+
+    @staticmethod
+    def completion_route(
+        module: object,
+        graph: CompiledGraph[GraphValueT],
+        state: GraphRunState,
+    ) -> GraphRouteId | None:
+        function = cast(
+            Callable[[CompiledGraph[GraphValueT], GraphRunState], GraphRouteId | None],
+            cast(_RoutingPrivateView, module)._completion_route,
+        )
+        return function(graph, state)
 
 
 def test_selected_control_target_with_missing_input_aborts_before_advance() -> None:
@@ -756,18 +770,34 @@ def test_routing_validator_rejects_topology_incompatible_contribution() -> None:
             GraphNodeId("a"),
             SelectGraphRoute(GraphRouteId("unknown")),
         )
-    # A terminal node without conditional edges may export an opaque route;
-    # its containing nested graph can use that value on its own conditional
-    # edges.
+    # A terminal node without conditional edges must declare every exported
+    # route in its immutable node contract.
     validate_routing_contribution(
-        topology("a"),
+        topology("a", exported_routes={"a": frozenset((GraphRouteId("route"),))}),
         GraphNodeId("a"),
         SelectGraphRoute(GraphRouteId("route")),
     )
+    with pytest.raises(UnknownRouteError, match="undeclared exported route"):
+        validate_routing_contribution(topology("a"), GraphNodeId("a"), SelectGraphRoute(GraphRouteId("route")))
+    with pytest.raises(InvalidRoutingCommandError, match="declared exported route"):
+        validate_routing_contribution(
+            topology("a", exported_routes={"a": frozenset((GraphRouteId("route"),))}),
+            GraphNodeId("a"),
+            ContinueGraphRouting(),
+        )
     with pytest.raises(InvalidRoutingCommandError, match="unknown node"):
         validate_routing_contribution(topology("a"), GraphNodeId("foreign"), ContinueGraphRouting())
     with pytest.raises(InvalidRoutingCommandError, match="unsupported"):
         validate_routing_contribution(topology("a"), GraphNodeId("a"), cast(GraphRoutingContribution, object()))
+
+
+def test_settled_admission_rejects_none_for_an_exported_terminal_route() -> None:
+    graph = topology("a", exported_routes={"a": frozenset((GraphRouteId("done"),))})
+    state = with_settled_references(running_state(frontier=("a",)), (reference("a"),))
+
+    assert settled_activation_admission_error(graph, state) == (
+        "settled activation 'a' selected an undeclared exported route None"
+    )
 
 
 def test_join_fires_only_after_all_sources_arrive_across_supersteps() -> None:
@@ -1022,12 +1052,16 @@ def test_persisted_join_progress_order_does_not_change_decision() -> None:
 def test_same_step_join_to_end_completes_and_self_loop_reactivates_node() -> None:
     joined = topology("a", "b", edges=(join(("a", "b"), END),), entries=("a", "b"))
     assert resolve_contributions(joined, continue_for("a", "b"), ()) == expected_complete(revision=2)
-    # A control loop is only valid when the compiled topology also exposes a
-    # normal exit; the direct END edge keeps this regression about reactivation
-    # rather than relying on the execution limit as completion.
-    loop = topology("a", edges=(direct("a", "a"), direct("a", END)))
-    assert resolve_contributions(loop, continue_for("a"), ()) == expected_advance(
-        (routed("a", reference("a")),),
+    loop = topology(
+        "a",
+        edges=(conditional("a", "again", "a"), conditional("a", "done", END)),
+    )
+    assert resolve_contributions(
+        loop,
+        ((GraphNodeId("a"), SelectGraphRoute(GraphRouteId("again"))),),
+        (),
+    ) == expected_advance(
+        (routed("a", reference("a", route="again")),),
         revision=1,
     )
 
@@ -1465,41 +1499,13 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         == "a terminal frontier has no settled routing contribution"
     )
 
-    conflicting_graph = topology(
-        "a",
-        "b",
-        edges=(conditional("a", "left", END), conditional("b", "right", END)),
-        entries=("a", "b"),
-    )
-    conflicting_previous = with_settled_references(
-        replace(
-            running_state(frontier=("a", "b")),
-            frontier=GraphFrontierState(
-                (
-                    GraphFrontierNode(
-                        GraphNodeId("a"),
-                        SucceededGraphNode(SelectGraphRoute(GraphRouteId("left"))),
-                        StartActivationCause(),
-                    ),
-                    GraphFrontierNode(
-                        GraphNodeId("b"),
-                        SucceededGraphNode(SelectGraphRoute(GraphRouteId("right"))),
-                        StartActivationCause(),
-                    ),
-                )
-            ),
-        ),
-        (reference("a", route="left"), reference("b", route="right")),
-    )
-    assert (
-        transition_admission_error(
-            conflicting_graph,
-            conflicting_previous,
-            CompleteGraphFrontier(0),
-            completed,
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        topology(
+            "a",
+            "b",
+            edges=(conditional("a", "left", END), conditional("b", "right", END)),
+            entries=("a", "b"),
         )
-        == "terminal frontier exposes conflicting completion routes"
-    )
 
     assert (
         transition_admission_error(
@@ -1510,6 +1516,41 @@ def test_completion_transition_admission_replays_the_previous_control_decision()
         )
         == "graph completion route does not match the terminal frontier"
     )
+
+
+def test_completion_route_rejects_two_distinct_runtime_terminal_routes() -> None:
+    graph = topology(
+        "decision",
+        "left",
+        "right",
+        edges=(
+            conditional("decision", "left", "left"),
+            conditional("decision", "right", "right"),
+            conditional("left", "left-done", END),
+            conditional("right", "right-done", END),
+        ),
+        entries=("decision",),
+    )
+    state = replace(
+        running_state(frontier=("left", "right")),
+        frontier=GraphFrontierState(
+            (
+                GraphFrontierNode(
+                    GraphNodeId("left"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("left-done"))),
+                    StartActivationCause(),
+                ),
+                GraphFrontierNode(
+                    GraphNodeId("right"),
+                    SucceededGraphNode(SelectGraphRoute(GraphRouteId("right-done"))),
+                    StartActivationCause(),
+                ),
+            )
+        ),
+    )
+
+    with pytest.raises(RoutingDeadlockError, match="conflicting completion routes"):
+        _RoutingPrivateView.completion_route(routing_module, graph, state)
 
 
 def predecessor_binding(graph: CompiledGraph[int]) -> ResolvedInputBinding[int]:

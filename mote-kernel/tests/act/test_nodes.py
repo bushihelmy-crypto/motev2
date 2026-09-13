@@ -660,7 +660,13 @@ def _hook(
         GraphNodeId(node_id),
         stage,
     )
-    return HookNode(slot, _plan(), runtime, admission)
+    return HookNode(
+        slot,
+        _plan(),
+        runtime,
+        admission,
+        exported_routes=tuple(str(stage) for stage in ActHookStage),
+    )
 
 
 def _act(ports: _Ports, runtime: _HookRuntime) -> _InspectableActGraph:

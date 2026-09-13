@@ -100,7 +100,12 @@ class ActNode(
             ActHookEnvelope,
             HookStateT,
             HookCommandT,
-        ].from_config(config, selected.hook_slot, failover=hook_failover)
+        ].from_config(
+            config,
+            selected.hook_slot,
+            exported_routes=tuple(str(stage) for stage in ActHookStage),
+            failover=hook_failover,
+        )
         return cls(
             str(selected.definition_id),
             version=int(selected.definition_version),

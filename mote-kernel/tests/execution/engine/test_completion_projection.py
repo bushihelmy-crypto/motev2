@@ -10,6 +10,7 @@ from tests.execution.engine.factories import (
     running_state,
     task_success,
     terminal_state,
+    topology,
 )
 
 from mote_kernel.execution import Graph
@@ -261,7 +262,9 @@ def test_unknown_canonical_task_cannot_settle_a_pending_task() -> None:
 
 
 def test_terminal_success_route_is_carried_as_an_exported_completion_route() -> None:
-    graph, state, tasks = planned()
+    state = running_state(frontier=("a",))
+    graph = topology("a", exported_routes={"a": frozenset((GraphRouteId("exported"),))})
+    tasks = plan_tasks(graph, state, ExecutionLimits())
 
     command = settle_result(
         graph,

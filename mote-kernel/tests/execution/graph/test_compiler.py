@@ -78,6 +78,135 @@ def test_conditional_edge_to_end_is_retained_as_a_terminal_route() -> None:
     assert compiled.transition.activation_gates[GraphNodeId("a")] == ()
 
 
+def test_compiler_rejects_different_routes_on_one_fixed_terminal_frontier() -> None:
+    definition = graph(
+        nodes=(node("left"), node("right")),
+        edges=(
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("left"), END),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("right"), END),
+        ),
+        entries=(GraphNodeId("left"), GraphNodeId("right")),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_rejects_different_exported_routes_on_one_fixed_terminal_frontier() -> None:
+    definition = graph(
+        nodes=(
+            replace(node("left"), exported_routes=frozenset((GraphRouteId("left"),))),
+            replace(node("right"), exported_routes=frozenset((GraphRouteId("right"),))),
+        ),
+        entries=(GraphNodeId("left"), GraphNodeId("right")),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_rejects_different_routes_on_a_cyclic_terminal_frontier() -> None:
+    definition = graph(
+        nodes=(node("left"), node("right")),
+        edges=(
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("again"), GraphNodeId("left")),
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("left"), END),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("again"), GraphNodeId("right")),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("right"), END),
+        ),
+        entries=(GraphNodeId("left"), GraphNodeId("right")),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_accepts_same_route_on_a_cyclic_terminal_frontier() -> None:
+    definition = graph(
+        nodes=(node("left"), node("right")),
+        edges=(
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("again"), GraphNodeId("left")),
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("done"), END),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("again"), GraphNodeId("right")),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("done"), END),
+        ),
+        entries=(GraphNodeId("left"), GraphNodeId("right")),
+    )
+
+    assert GraphCompiler(definition).compile().completion_routes == frozenset((GraphRouteId("done"),))
+
+
+def test_compiler_rejects_different_routes_on_join_produced_terminal_frontier() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("a", "b", "left", "d", "e", "right")),
+        edges=(
+            JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("left")),
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("left"), END),
+            JoinEdge((GraphNodeId("d"), GraphNodeId("e")), GraphNodeId("right")),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("right"), END),
+        ),
+        entries=tuple(GraphNodeId(node_id) for node_id in ("a", "b", "d", "e")),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicting completion routes"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_accepts_same_route_on_join_produced_terminal_frontier() -> None:
+    definition = graph(
+        nodes=tuple(node(node_id) for node_id in ("a", "b", "left", "d", "e", "right")),
+        edges=(
+            JoinEdge((GraphNodeId("a"), GraphNodeId("b")), GraphNodeId("left")),
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("done"), END),
+            JoinEdge((GraphNodeId("d"), GraphNodeId("e")), GraphNodeId("right")),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("done"), END),
+        ),
+        entries=tuple(GraphNodeId(node_id) for node_id in ("a", "b", "d", "e")),
+    )
+
+    assert GraphCompiler(definition).compile().completion_routes == frozenset((GraphRouteId("done"),))
+
+
+def test_compiler_omits_early_routes_that_cannot_reach_the_final_frontier() -> None:
+    definition = graph(
+        nodes=(node("left"), node("right"), node("tail"), node("finish")),
+        edges=(
+            ConditionalEdge(GraphNodeId("left"), GraphRouteId("left"), END),
+            ConditionalEdge(GraphNodeId("right"), GraphRouteId("right"), END),
+            DirectEdge(GraphNodeId("tail"), GraphNodeId("finish")),
+            DirectEdge(GraphNodeId("finish"), END),
+        ),
+        entries=(GraphNodeId("left"), GraphNodeId("right"), GraphNodeId("tail")),
+    )
+
+    compiled = GraphCompiler(definition).compile()
+
+    assert compiled.completion_routes == frozenset((None,))
+
+
+def test_terminal_callable_route_declaration_is_exact_and_compiled() -> None:
+    definition = graph(
+        nodes=(replace(node("a"), exported_routes=frozenset((GraphRouteId("done"),))),),
+    )
+
+    compiled = GraphCompiler(definition).compile()
+
+    assert compiled.completion_routes == frozenset((GraphRouteId("done"),))
+
+
+def test_compiler_rejects_exported_routes_on_a_nonterminal_callable() -> None:
+    definition = graph(
+        nodes=(
+            replace(node("source"), exported_routes=frozenset((GraphRouteId("done"),))),
+            node("target"),
+        ),
+        edges=(DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
+    )
+
+    with pytest.raises(GraphValidationError, match="not a terminal callable"):
+        GraphCompiler(definition).compile()
+
+
 def test_cyclic_join_compiles_when_every_source_shares_one_activation_cohort() -> None:
     definition = graph(
         nodes=(node("tick"), node("left"), node("right"), node("joined")),
@@ -151,6 +280,21 @@ def test_control_cycles_without_a_successful_exit_are_rejected() -> None:
         GraphCompiler(cycle).compile()
     with pytest.raises(GraphValidationError, match="no statically reachable successful exit"):
         GraphCompiler(self_loop).compile()
+
+
+def test_compiler_rejects_a_cycle_that_only_exposes_a_nonterminal_direct_exit() -> None:
+    definition = graph(
+        nodes=(node("zero"), node("one")),
+        edges=(
+            ConditionalEdge(GraphNodeId("one"), GraphRouteId("loop"), GraphNodeId("zero")),
+            DirectEdge(GraphNodeId("zero"), END),
+            DirectEdge(GraphNodeId("zero"), GraphNodeId("one")),
+        ),
+        entries=(GraphNodeId("one"), GraphNodeId("zero")),
+    )
+
+    with pytest.raises(GraphValidationError, match="no statically viable successful completion"):
+        GraphCompiler(definition).compile()
 
 
 @pytest.mark.parametrize(

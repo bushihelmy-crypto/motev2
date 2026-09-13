@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
@@ -169,6 +170,7 @@ class HookNode(
         slot: HookSlotId,
         /,
         *,
+        exported_routes: Collection[str] = (),
         failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
         | HookFailoverDecorator
         | None = None,
@@ -188,6 +190,7 @@ class HookNode(
             selected.plan,
             selected.invocation,
             selected.payload_admission,
+            exported_routes=exported_routes,
             failover=failover,
             assembly_snapshot_key=config.snapshot.key,
         )
@@ -203,6 +206,7 @@ class HookNode(
         | None,
         payload_admission: HookPayloadAdmission[PriorityConfigT, ValueT, StateT, CommandT] | None,
         *,
+        exported_routes: Collection[str] = (),
         failover: HookFailoverDecorators[PriorityConfigT, ValueT, StateT, CommandT]
         | HookFailoverDecorator
         | None = None,
@@ -278,6 +282,7 @@ class HookNode(
                 )
             },
             outputs={HookValueName.RESULT: result_type},
+            exported_routes=exported_routes,
         )
         self.add_edge(Graph.START, HookNodeId.P1)
         self.add_edge(HookNodeId.P1, HookNodeId.P2)

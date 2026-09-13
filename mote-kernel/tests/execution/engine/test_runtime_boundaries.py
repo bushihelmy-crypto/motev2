@@ -801,7 +801,7 @@ async def test_scheduler_rejects_empty_duplicate_nested_and_invalid_outcomes() -
         GraphDefinition(
             definition_id=GraphDefinitionId("terminal.route"),
             version=GraphDefinitionVersion(1),
-            nodes=(string_node("a", terminal),),
+            nodes=(replace(string_node("a", terminal), exported_routes=frozenset((GraphRouteId("exported"),))),),
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),

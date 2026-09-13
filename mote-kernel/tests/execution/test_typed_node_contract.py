@@ -653,6 +653,7 @@ async def test_typed_nested_completion_route_is_consumed_by_the_parent_graph() -
         materialize=lambda _values: EmptyInput(),
         output_name="value",
         output_type=Right,
+        exported_routes=("chosen",),
     )
     child.add_edge("choose", Graph.END)
     child.set_outputs({"value": child_output})

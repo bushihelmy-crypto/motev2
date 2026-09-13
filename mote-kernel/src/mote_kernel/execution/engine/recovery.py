@@ -229,11 +229,6 @@ class RecoveryTransferState(Generic[GraphValueT]):
     children: tuple[ScopedRunEvidence, ...]
     admitted_actions: tuple[AdmittedResumeFact, ...]
     invocation_new_children: tuple[GraphNodeId, ...] = ()
-    # A recovery proof may have to simulate a nested terminal callable whose
-    # exported route is only produced when the callable actually runs.  Keep
-    # that knowledge bit in the transfer identity so a known ``None`` route
-    # is never folded together with an as-yet unknown route.
-    completion_route_known: bool = True
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -255,7 +250,6 @@ class _ScopeBoundary(Generic[GraphValueT]):
     kind: _ScopeBoundaryKind
     availability: RecoveryAvailabilityCoordinates[GraphValueT]
     binding: ScopedStateBinding
-    completion_route_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,19 +268,15 @@ class _RecoveryWorkItem(Generic[GraphValueT]):
     live: tuple[GraphNodeId, ...] = ()
     children: tuple[ScopedRunEvidence, ...] = ()
     invocation_new_children: tuple[GraphNodeId, ...] = ()
-    completion_route_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class _NestedOutcome(Generic[GraphValueT]):
     node_id: GraphNodeId
     boundary: _ScopeBoundary[GraphValueT]
-    # ``None`` means ContinueGraphRouting for an ordinary nested node.  A
-    # simulated child may not yet have a materialized terminal route; in that
-    # case ``route_known`` is false.  If the parent has a conditional domain,
-    # the projection expands that unknown into one outcome per declared route.
+    # ``None`` is the completed child's actual ordinary route, not an unknown
+    # proof value.  Every completed child snapshot owns its exact route.
     route: GraphRouteId | None = None
-    route_known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,7 +303,6 @@ class _RecoveryCycleSignature:
     current_resume_inputs: tuple[_CycleFrameKey, ...]
     current_child_boundaries: tuple[_CycleFrameKey, ...]
     invocation_new_children: tuple[GraphNodeId, ...]
-    completion_route_known: bool
 
 
 @dataclass(slots=True)
@@ -528,7 +517,6 @@ def recovery_traversal_key(state: RecoveryTransferState[GraphValueT]) -> Recover
         )
     parts.append(str(len(state.invocation_new_children)))
     parts.extend(_atom(node_id) for node_id in state.invocation_new_children)
-    parts.append(str(state.completion_route_known))
     return RecoveryTraversalKey(tuple(parts))
 
 
@@ -544,7 +532,6 @@ def _transfer_state(
         tuple(sorted(item.children, key=lambda child: child.scope_run)),
         family.admitted_actions,
         tuple(sorted(item.invocation_new_children)),
-        item.completion_route_known,
     )
 
 
@@ -640,7 +627,6 @@ def _recovery_cycle_signature(
         current_resume_inputs=current_resume_inputs,
         current_child_boundaries=tuple(sorted(current_child_boundaries)),
         invocation_new_children=tuple(sorted(item.invocation_new_children)),
-        completion_route_known=item.completion_route_known,
     )
 
 
@@ -691,35 +677,7 @@ def _initial_children(
     return tuple(sorted(dispositions, key=lambda disposition: disposition.scope_run))
 
 
-def _boundary(
-    kind: _ScopeBoundaryKind,
-    binding: ScopedStateBinding,
-    availability: RecoveryAvailabilityCoordinates[GraphValueT],
-    completion_route_known: bool = True,
-) -> _ScopeBoundary[GraphValueT]:
-    return _ScopeBoundary(
-        kind,
-        availability,
-        binding,
-        completion_route_known,
-    )
-
-
-def _terminal_route_is_unknown(
-    graph: CompiledGraph[GraphValueT],
-    node_id: GraphNodeId,
-) -> bool:
-    """Whether a simulated callable may export a route only at execution time."""
-
-    return not (
-        graph.transition.conditional_targets[node_id]
-        or graph.transition.direct_targets[node_id]
-        or graph.transition.joins_by_source[node_id]
-    )
-
-
 def _completed_child_outcomes(
-    parent_graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
     child_graph: CompiledGraph[GraphValueT],
     boundary: _ScopeBoundary[GraphValueT],
@@ -741,25 +699,8 @@ def _completed_child_outcomes(
         boundary.kind,
         availability,
         boundary.binding,
-        boundary.completion_route_known,
     )
-    if boundary.completion_route_known:
-        return (_NestedOutcome(node_id, projected_boundary, boundary.binding.state.completion_route, True),)
-
-    # A simulated nested child has no callable output frame from which its
-    # terminal exported route could be observed.  If the parent node declares
-    # a conditional domain, every declared route is a legal conservative
-    # projection.  Otherwise preserve the unknown bit; a terminal parent can
-    # carry it upward, while a non-terminal parent fails closed below.
-    conditional = tuple(parent_graph.transition.conditional_targets[node_id])
-    if conditional:
-        return tuple(_NestedOutcome(node_id, projected_boundary, route, True) for route in conditional)
-    # With no parent conditional domain there is no route choice that the
-    # recovery proof can materialize.  Project the conservative Continue
-    # contribution and retain ``route_known=False`` so an outer conditional
-    # parent can expand it later.  The real execution path still validates any
-    # non-None route against this node's topology.
-    return (_NestedOutcome(node_id, projected_boundary, None, False),)
+    return (_NestedOutcome(node_id, projected_boundary, boundary.binding.state.completion_route),)
 
 
 def _child_outcomes(
@@ -809,24 +750,24 @@ def _child_outcomes(
                 f"resume actions {family.action_node_ids()!r} require completed child output history/nested boundary "
                 f"at {coordinate!r}"
             )
-        boundary = _boundary(
+        boundary = _ScopeBoundary(
             _ScopeBoundaryKind.COMPLETED,
-            child_binding,
             child_availability,
+            child_binding,
         )
-        return _completed_child_outcomes(parent_graph, node_id, child_graph, boundary)
+        return _completed_child_outcomes(node_id, child_graph, boundary)
     if child_state.status is GraphRunStatus.FAILED:
-        boundary = _boundary(
+        boundary = _ScopeBoundary(
             _ScopeBoundaryKind.FAILED,
-            child_binding,
             child_availability,
+            child_binding,
         )
         return (_NestedOutcome(node_id, boundary),)
     if child_state.status is GraphRunStatus.ABORTED:
-        boundary = _boundary(
+        boundary = _ScopeBoundary(
             _ScopeBoundaryKind.ABORTED,
-            child_binding,
             child_availability,
+            child_binding,
         )
         return (_NestedOutcome(node_id, boundary),)
     boundaries = _prove_scope(
@@ -838,7 +779,7 @@ def _child_outcomes(
     outcomes: list[_NestedOutcome[GraphValueT]] = []
     for boundary in boundaries:
         if boundary.kind is _ScopeBoundaryKind.COMPLETED:
-            outcomes.extend(_completed_child_outcomes(parent_graph, node_id, child_graph, boundary))
+            outcomes.extend(_completed_child_outcomes(node_id, child_graph, boundary))
         else:
             outcomes.append(_NestedOutcome(node_id, boundary))
     return tuple(outcomes)
@@ -999,7 +940,7 @@ def _expand_quiescent_executable(
     try:
         tasks = plan_tasks(graph, state, family.limits)
     except ExecutionLimitError:
-        return (_boundary(_ScopeBoundaryKind.EXECUTION_LIMIT, binding, item.availability),)
+        return (_ScopeBoundary(_ScopeBoundaryKind.EXECUTION_LIMIT, item.availability, binding),)
     nested_ids = tuple(task.node_id for task in tasks if task.node_id in graph.nested_graphs)
     children = _initial_children(
         graph,
@@ -1040,11 +981,10 @@ def _expand_quiescent_executable(
             and outcome_kinds == frozenset((_ScopeBoundaryKind.AWAITING_RESUME,))
         ):
             successors.append(
-                _boundary(
+                _ScopeBoundary(
                     _ScopeBoundaryKind.AWAITING_RESUME,
-                    binding,
                     combination.availability,
-                    item.completion_route_known,
+                    binding,
                 )
             )
             continue
@@ -1080,11 +1020,6 @@ def _expand_quiescent_executable(
             combination,
         )
         outcome_children = tuple(outcome.boundary.binding for outcome in combination.outcomes)
-        completion_route_known = item.completion_route_known and all(
-            outcome.route_known
-            for outcome in combination.outcomes
-            if outcome.boundary.kind is _ScopeBoundaryKind.COMPLETED
-        )
         live = _select_live(graph, settled, family.limits, ())
         if not live:
             settled = _finish_recovery_execution(settled, outcome_children)
@@ -1095,7 +1030,6 @@ def _expand_quiescent_executable(
                 live,
                 outcome_children or children,
                 (),
-                completion_route_known,
             )
         )
     return tuple(successors)
@@ -1111,7 +1045,7 @@ def _expand_live(
     successors: list[_RecoveryWorkItem[GraphValueT]] = []
     node_id = item.live[0]
     remaining_live = item.live[1:]
-    routes = tuple(graph.transition.conditional_targets[node_id]) or (None,)
+    routes = graph.transition.route_options[node_id]
     for route in routes:
         settled = reduce_graph_run(
             binding.state,
@@ -1125,9 +1059,6 @@ def _expand_live(
             )
         )
         live = _select_live(graph, settled, family.limits, remaining_live)
-        completion_route_known = item.completion_route_known and not (
-            route is None and _terminal_route_is_unknown(graph, node_id)
-        )
         if not live:
             settled = _finish_recovery_execution(settled, item.children)
         successors.append(
@@ -1137,7 +1068,6 @@ def _expand_live(
                 live,
                 item.children,
                 item.invocation_new_children,
-                completion_route_known,
             )
         )
     return tuple(successors)
@@ -1166,11 +1096,10 @@ def _resolve_quiescent(
         )
     resolved = reduce_graph_run(state, command)
     if isinstance(command, CompleteGraphFrontier):
-        return _boundary(
+        return _ScopeBoundary(
             _ScopeBoundaryKind.COMPLETED,
-            ScopedStateBinding(scope_run, resolved),
             item.availability,
-            item.completion_route_known,
+            ScopedStateBinding(scope_run, resolved),
         )
     invocation_new = tuple(node_id for node_id in pending_node_ids(resolved.frontier) if node_id in graph.nested_graphs)
     return _RecoveryWorkItem(
@@ -1179,7 +1108,6 @@ def _resolve_quiescent(
         (),
         (),
         invocation_new,
-        item.completion_route_known,
     )
 
 
@@ -1201,7 +1129,6 @@ def _prove_scope(
         availability,
         children=_initial_children(graph, binding, family, invocation_new),
         invocation_new_children=invocation_new,
-        completion_route_known=True,
     )
     family.budget.admit(1)
     sequence = 0
@@ -1243,31 +1170,28 @@ def _prove_scope(
                     f"at {scope_run!r}"
                 )
             boundaries.add(
-                _boundary(
+                _ScopeBoundary(
                     _ScopeBoundaryKind.COMPLETED,
-                    item.binding,
                     item.availability,
-                    item.completion_route_known,
+                    item.binding,
                 )
             )
             continue
         if current.status is GraphRunStatus.FAILED:
             boundaries.add(
-                _boundary(
+                _ScopeBoundary(
                     _ScopeBoundaryKind.FAILED,
-                    item.binding,
                     item.availability,
-                    item.completion_route_known,
+                    item.binding,
                 )
             )
             continue
         if current.status is GraphRunStatus.ABORTED:
             boundaries.add(
-                _boundary(
+                _ScopeBoundary(
                     _ScopeBoundaryKind.ABORTED,
-                    item.binding,
                     item.availability,
-                    item.completion_route_known,
+                    item.binding,
                 )
             )
             continue
@@ -1276,11 +1200,10 @@ def _prove_scope(
             raise SnapshotMismatchError("running recovery state retained a terminal failed frontier")
         if status is GraphFrontierStatus.AWAITING_RESUME:
             boundaries.add(
-                _boundary(
+                _ScopeBoundary(
                     _ScopeBoundaryKind.AWAITING_RESUME,
-                    item.binding,
                     item.availability,
-                    item.completion_route_known,
+                    item.binding,
                 )
             )
             continue
@@ -1299,11 +1222,10 @@ def _prove_scope(
             previous_superstep = cycle_entries.get(signature) if signature is not None else None
             if previous_superstep is not None and previous_superstep < current.superstep:
                 boundaries.add(
-                    _boundary(
+                    _ScopeBoundary(
                         _ScopeBoundaryKind.BOUNDED_RECURRENCE,
-                        item.binding,
                         item.availability,
-                        item.completion_route_known,
+                        item.binding,
                     )
                 )
                 continue
@@ -1330,7 +1252,6 @@ def _prove_scope(
                         (),
                         family.admitted_actions,
                         (),
-                        boundary.completion_route_known,
                     )
                 ),
             ),
@@ -1387,7 +1308,6 @@ def preflight_recovery(
             (),
             seed.admitted_actions,
             (),
-            boundary.completion_route_known,
         )
         for boundary in boundaries
     )

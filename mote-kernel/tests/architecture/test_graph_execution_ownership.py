@@ -343,13 +343,12 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
                 owners[node.attr].add(relative)
 
     assert owners == {
-        # Recovery preflight must replay the same compiled control topology
-        # when projecting a nested terminal route.  It does not own a second
-        # topology; it only reads the immutable transition plan owned by the
-        # compiler.
-        "direct_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
-        "conditional_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
-        "joins_by_source": {"execution/engine/recovery.py", "execution/engine/routing.py"},
+        # Routing is the sole interpreter of the compiled control topology.
+        # Recovery projects route choices through its typed routing projection
+        # and therefore cannot grow a second topology interpreter.
+        "direct_targets": {"execution/engine/routing.py"},
+        "conditional_targets": {"execution/engine/routing.py"},
+        "joins_by_source": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
     forbidden = {"materializations", "graph_outputs"}
@@ -597,6 +596,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "entries": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
+        "route_options": "FrozenMap[GraphNodeId, tuple[GraphRouteId | None, ...]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
@@ -616,6 +616,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "transition": "FrontierTransitionPlan[GraphValueT]",
         "resources": "FrozenMap[ResourceId, ResourceDefinition]",
         "resume_input": "FrameCodec[GraphValueT] | None",
+        "completion_routes": "frozenset[GraphRouteId | None]",
     }
     assert all(isinstance(statement, ast.AnnAssign) for statement in compiled_graph.body)
 

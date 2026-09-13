@@ -45,6 +45,7 @@ from mote_kernel.think.contract import (
     ThinkRequest,
     ThinkStep,
 )
+from mote_kernel.think.identity import ThinkNodeId
 from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort, RouterPort
 
 InvocationRequestT = TypeVar("InvocationRequestT")
@@ -357,6 +358,7 @@ def make_hook(
         make_plan(),
         runtime,
         admission,
+        exported_routes=tuple(str(node_id) for node_id in ThinkNodeId if node_id is not ThinkNodeId.HOOK),
     )
     return hook
 

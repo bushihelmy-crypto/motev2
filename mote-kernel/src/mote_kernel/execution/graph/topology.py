@@ -86,6 +86,7 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
+    route_options: FrozenMap[GraphNodeId, tuple[GraphRouteId | None, ...]]
     joins_by_source: FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
@@ -105,6 +106,9 @@ class CompiledGraph(Generic[GraphValueT]):
     transition: FrontierTransitionPlan[GraphValueT]
     resources: FrozenMap[ResourceId, ResourceDefinition]
     resume_input: FrameCodec[GraphValueT] | None
+    # Exact declared domain of completion labels reachable at this graph's
+    # successful frontiers. ``None`` is the ordinary no-route completion.
+    completion_routes: frozenset[GraphRouteId | None]
 
 
 def _compiled_graph_at_scope(

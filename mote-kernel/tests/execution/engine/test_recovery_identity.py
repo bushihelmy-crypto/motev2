@@ -125,7 +125,6 @@ class _NestedOutcomeView(Protocol):
     node_id: GraphNodeId
     boundary: _RecoveryBoundaryView
     route: GraphRouteId | None
-    route_known: bool
 
 
 class _NestedCombinationView(Protocol):
@@ -150,7 +149,6 @@ class _BoundaryKindView(Protocol):
 
 
 class _RecoveryPrivateView(Protocol):
-    _boundary: Callable[..., _RecoveryBoundaryView]
     _child_outcomes: Callable[..., tuple[_NestedOutcomeView, ...]]
     _completed_child_outcomes: Callable[..., tuple[_NestedOutcomeView, ...]]
     _settlement_coordinate: Callable[[GraphRunState, GraphFrontierNode], _SettlementCoordinateView]
@@ -161,6 +159,7 @@ class _RecoveryPrivateView(Protocol):
     _RecoveryFamily: Callable[..., _RecoveryFamilyView]
     _RecoveryProofBudget: Callable[..., object]
     _RecoveryWorkItem: Callable[..., _RecoveryWorkItemView]
+    _ScopeBoundary: Callable[..., _RecoveryBoundaryView]
     _ScopeBoundaryKind: _BoundaryKindView
     _settle_nested_outcomes: Callable[..., tuple[GraphRunState, RecoveryAvailabilityCoordinates[str]]]
 
@@ -170,31 +169,28 @@ class _RecoveryPrivateView(Protocol):
         kind: object,
         binding: ScopedStateBinding,
         availability: RecoveryAvailabilityCoordinates[str],
-        completion_route_known: bool = True,
     ) -> _RecoveryBoundaryView:
-        return cast(_RecoveryPrivateView, module)._boundary(
+        return cast(_RecoveryPrivateView, module)._ScopeBoundary(
             kind,
-            binding,
             availability,
-            completion_route_known,
+            binding,
         )
 
     @staticmethod
     def completed_child_outcomes(
         module: object,
-        parent_graph: CompiledGraph[str],
         node_id: GraphNodeId,
         child_graph: CompiledGraph[str],
         boundary: _RecoveryBoundaryView,
     ) -> tuple[_NestedOutcomeView, ...]:
         function = cast(
             Callable[
-                [CompiledGraph[str], GraphNodeId, CompiledGraph[str], _RecoveryBoundaryView],
+                [GraphNodeId, CompiledGraph[str], _RecoveryBoundaryView],
                 tuple[_NestedOutcomeView, ...],
             ],
             cast(_RecoveryPrivateView, module)._completed_child_outcomes,
         )
-        return function(parent_graph, node_id, child_graph, boundary)
+        return function(node_id, child_graph, boundary)
 
     @staticmethod
     def child_outcomes(
@@ -374,7 +370,6 @@ def baseline_transfer() -> RecoveryTransferState[str]:
         ),
     )
     assert boundaries
-    assert boundaries[0].completion_route_known is False
     return boundaries[0]
 
 
@@ -973,7 +968,6 @@ def test_recovery_preflight_rejects_invalid_binding_sets_and_unfenced_execution(
     assert len(terminal) == 1
     assert terminal[0].binding.state.status is GraphRunStatus.COMPLETED
     assert terminal[0].binding.state.execution_sequence == completed.execution_sequence
-    assert terminal[0].completion_route_known is True
 
 
 def test_recovery_preflight_requires_exact_resume_input_availability_for_each_interrupt_action() -> None:
@@ -1479,7 +1473,6 @@ def test_recovery_projects_a_completed_child_config_successor_into_parent_settle
     )
     outcome = _RecoveryPrivateView.completed_child_outcomes(
         recovery_module,
-        graph,
         GraphNodeId("child"),
         child_graph,
         boundary,
@@ -1498,62 +1491,6 @@ def test_recovery_projects_a_completed_child_config_successor_into_parent_settle
     )
 
     assert settled.config_cursor == successor_cursor
-
-
-def conditional_nested_graph() -> tuple[CompiledGraph[str], CompiledGraph[str]]:
-    child = Graph[str]("recovery.route-projection.child")
-    child.add_node("leaf", empty_node, inputs={}, outputs={})
-    child.set_outputs({})
-
-    parent = Graph[str]("recovery.route-projection.parent")
-    parent.add_node("child", child, inputs={})
-    parent.add_node("left", empty_node, inputs={}, outputs={})
-    parent.add_node("right", empty_node, inputs={}, outputs={})
-    parent.add_edge("child", "left", "left")
-    parent.add_edge("child", "right", "right")
-    parent.add_edge("left", Graph.END)
-    parent.add_edge("right", Graph.END)
-    parent.set_outputs({})
-
-    compiled_parent = _GraphPrivateView.compile(parent).graph
-    return compiled_parent, compiled_parent.nested_graphs[GraphNodeId("child")]
-
-
-def test_recovery_expands_an_unknown_completed_child_route_over_the_parent_domain() -> None:
-    parent_graph, child_graph = conditional_nested_graph()
-    parent_state = reduce_graph_run(
-        None,
-        project_start_graph_command(parent_graph, GraphRunId("route-projection-parent")),
-    )
-    parent_scope = root_scope_run(parent_state.run_id)
-    parent_activation = GraphActivationIdentity(parent_state.run_id, 0, GraphNodeId("child"))
-    child_scope = child_scope_run_for_activation(parent_scope, parent_activation)
-    child_state = reduce_graph_run(
-        None,
-        project_start_graph_command(child_graph, child_scope.graph_run_id, parent_activation),
-    )
-    completed_child = replace(child_state, status=GraphRunStatus.COMPLETED, frontier=GraphFrontierState(()))
-    boundary = _RecoveryPrivateView.boundary(
-        recovery_module,
-        _RecoveryPrivateView.boundary_kind(recovery_module).COMPLETED,
-        ScopedStateBinding(child_scope, completed_child),
-        RecoveryAvailabilityCoordinates(),
-        completion_route_known=False,
-    )
-
-    outcomes = _RecoveryPrivateView.completed_child_outcomes(
-        recovery_module,
-        parent_graph,
-        GraphNodeId("child"),
-        child_graph,
-        boundary,
-    )
-
-    assert tuple(outcome.route for outcome in outcomes) == (
-        GraphRouteId("left"),
-        GraphRouteId("right"),
-    )
-    assert all(outcome.route_known for outcome in outcomes)
 
 
 def test_recovery_cycle_signature_keeps_a_current_child_boundary() -> None:

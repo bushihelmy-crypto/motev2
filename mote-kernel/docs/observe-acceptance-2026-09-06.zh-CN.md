@@ -4,6 +4,10 @@
 
 本次验收对象仅为 `src/mote_kernel/observe` 及 `tests/observe`。
 
+后续边界修订（2026-09-11）：`ObservationQueuePort` 使用无参 `read()`，消费位置由 queue
+provider 自己持有并在 ACK 后推进；`ObserveRequest` 只携带 runtime 提供的 `hook_state`。结果中
+出现的 cursor/boundary 是 provider 返回的证据，不是 Hook state 或调用方要维护的游标。
+
 **Observe 包内实现已经按当前职责边界完成。** 它是可嵌入父 Graph 的 nested Graph，包含两个
 业务状态节点和一个共享 Hook；负责取得 observation、将 observation 写入对应 capability、返回
 当前观察类型及结算证据，不负责 ReAct 的顶层路由和结束判断。
@@ -114,7 +118,7 @@ Observe 只接收以下六个 capability：
 
 | Port | Observe 使用的能力 | 事实 owner |
 | --- | --- | --- |
-| `ObservationQueuePort` | `read_after`、`register_wait` | Queue provider |
+| `ObservationQueuePort` | `read()`、`register_wait` | Queue provider（位置由 provider 持有） |
 | `BackgroundTaskPort` | 按 observation boundary 取得 snapshot | Task provider |
 | `ConfigObservationPort` | 应用完整 Config batch 并返回 receipt | Config provider |
 | `ContextObservationPort` | 追加一个完整非 Config batch 并返回 receipt | Context provider |

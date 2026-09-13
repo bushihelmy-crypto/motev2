@@ -250,23 +250,27 @@ def validate_routing_contribution(
     if type(contribution) not in (ContinueGraphRouting, SelectGraphRoute):
         raise InvalidRoutingCommandError("routing contribution has an unsupported variant")
     conditional = graph.transition.conditional_targets[node_id]
+    options = graph.transition.route_options[node_id]
     if isinstance(contribution, ContinueGraphRouting):
         if conditional:
             raise InvalidRoutingCommandError("a conditional node must select one declared route")
-    else:
-        if conditional:
-            if contribution.route not in conditional:
-                raise UnknownRouteError("node selected an unknown conditional route")
-            return
-        # A route on a node without conditional edges is an exported terminal
-        # route.  It is carried in the completed graph state so a parent
-        # nested node can route from the child's return value.  It cannot be
-        # used on a node that still has a local successor: accepting it there
-        # would silently discard a control decision.
-        if graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]:
-            raise InvalidRoutingCommandError(
-                "a route may be returned without conditional edges only by a terminal node"
-            )
+        if None not in options:
+            raise InvalidRoutingCommandError("a terminal node must select one declared exported route")
+        return
+    # A route on a node without conditional edges is an exported terminal
+    # route.  It is carried in the completed graph state so a parent nested
+    # node can route from the child's return value.  It cannot be used on a
+    # node that still has a local successor: accepting it there would
+    # silently discard a control decision.
+    if not conditional and (graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]):
+        raise InvalidRoutingCommandError("a route may be returned without conditional edges only by a terminal node")
+    if contribution.route not in options:
+        message = (
+            "node selected an unknown conditional route"
+            if conditional
+            else "node selected an undeclared exported route"
+        )
+        raise UnknownRouteError(message)
 
 
 def settled_activation_admission_error(
@@ -289,15 +293,16 @@ def settled_activation_admission_error(
             return f"settled activation references unknown node {node_id!r}"
         conditional = graph.transition.conditional_targets[node_id]
         route = reference.route
+        options = graph.transition.route_options[node_id]
+        if route is None and conditional:
+            return f"conditional settled activation {node_id!r} lacks its selected route"
+        if route in options:
+            continue
         if conditional:
-            if route is None:
-                return f"conditional settled activation {node_id!r} lacks its selected route"
-            if route not in conditional:
-                return f"settled activation {node_id!r} selected an unknown route {route!r}"
-        elif route is not None and (
-            graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]
-        ):
+            return f"settled activation {node_id!r} selected an unknown route {route!r}"
+        if graph.transition.direct_targets[node_id] or graph.transition.joins_by_source[node_id]:
             return f"non-terminal settled activation {node_id!r} selected route {route!r}"
+        return f"settled activation {node_id!r} selected an undeclared exported route {route!r}"
     return None
 
 

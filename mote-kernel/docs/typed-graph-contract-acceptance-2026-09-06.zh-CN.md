@@ -2,6 +2,11 @@
 
 状态：**本轮 Graph/State code review 已完成；通用 nested typed output boundary 与 recovery preflight 标记缺口已修复；专项门禁已运行。**
 
+> 后续更正（2026-09-12）：本文关于 `completion_route_known` 与 unknown completed-child route 的结论仅是当时的历史记录，
+> 已被 [Terminal completion route / frontier proof 验收指引](./terminal-completion-route-acceptance-2026-09-12.zh-CN.md)
+> 取代。该布尔镜像没有生产入口，现已整链删除；当前契约以 compiler-owned route domain 和
+> `GraphRunState.completion_route` 为准。
+
 本文验收 `mote_kernel.execution.Graph` 的 typed contract、frame admission、唯一 typed
 adapter、通用 nested output handle，以及 recovery preflight 结果投影。Act、Think、Observe、
 Hook、Failover、Invocation 的业务语义和持久化实现仍由各自 owner 负责；本轮只验收它们通过

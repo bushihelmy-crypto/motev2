@@ -867,6 +867,95 @@ async def test_mutually_exclusive_routes_converge_without_repeating_the_shared_n
 
 
 @pytest.mark.asyncio
+async def test_compile_rejects_a_conditional_early_terminal_route_conflict() -> None:
+    calls: list[str] = []
+
+    async def early(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("early")
+        return Graph.success(Graph.values(), route="early")
+
+    async def choice(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("choice")
+        return Graph.success(Graph.values(), route="finish-now")
+
+    async def later(_values: Graph.Values[str]) -> Graph.Outcome[str]:
+        calls.append("later")
+        return Graph.success(Graph.values(), route="later")
+
+    graph = Graph[str]("public.terminal-proof.conditional-early-exit")
+    graph.add_node("early", early, inputs={}, outputs={}, exported_routes=("early",))
+    graph.add_node("choice", choice, inputs={}, outputs={})
+    graph.add_node("later", later, inputs={}, outputs={}, exported_routes=("later",))
+    graph.add_edge(Graph.START, "early")
+    graph.add_edge(Graph.START, "choice")
+    graph.add_edge("choice", "continue", "later")
+    graph.add_edge("choice", "finish-now", Graph.END)
+    graph.set_outputs({})
+
+    with pytest.raises(Graph.ValidationError, match="conflicting completion routes"):
+        await graph.run(Graph.values())
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_compile_clears_early_terminal_routes_when_an_unconditional_tail_advances() -> None:
+    async def routed(route: str, _values: Graph.Values[str]) -> Graph.Outcome[str]:
+        return Graph.success(Graph.values(), route=route)
+
+    async def ordinary(_values: Graph.Values[str]) -> Graph.Values[str]:
+        return Graph.values()
+
+    graph = Graph[str]("public.terminal-proof.unconditional-tail")
+    graph.add_node(
+        "left",
+        lambda values: routed("left", values),
+        inputs={},
+        outputs={},
+        exported_routes=("left",),
+    )
+    graph.add_node(
+        "right",
+        lambda values: routed("right", values),
+        inputs={},
+        outputs={},
+        exported_routes=("right",),
+    )
+    graph.add_node("tail", ordinary, inputs={}, outputs={})
+    graph.add_node("finish", ordinary, inputs={}, outputs={})
+    graph.add_edge(Graph.START, "left")
+    graph.add_edge(Graph.START, "right")
+    graph.add_edge(Graph.START, "tail")
+    graph.add_edge("tail", "finish")
+    graph.set_outputs({})
+
+    result = await graph.run(Graph.values())
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.state.completion_route is None
+
+
+@pytest.mark.asyncio
+async def test_compile_rejects_routes_from_different_cycle_occurrences_in_one_terminal_frontier() -> None:
+    async def must_not_run(_values: Graph.Values[str]) -> Graph.Values[str]:
+        raise AssertionError("compiler invoked a graph node")
+
+    graph = Graph[str]("public.terminal-proof.cycle-occurrences")
+    for node_id in ("b", "c", "d"):
+        graph.add_node(node_id, must_not_run, inputs={}, outputs={})
+    graph.add_edge(Graph.START, "b")
+    graph.add_edge("b", "d")
+    graph.add_edge("b", "z", "b")
+    graph.add_edge("b", "x", Graph.END)
+    graph.add_edge("d", "z", "c")
+    graph.add_edge("d", "x", Graph.END)
+    graph.add_edge("c", "z", Graph.END)
+    graph.set_outputs({})
+
+    with pytest.raises(Graph.ValidationError, match="conflicting completion routes"):
+        await graph.run(Graph.values())
+
+
+@pytest.mark.asyncio
 async def test_noncyclic_join_result_is_independent_of_branch_completion_order() -> None:
     async def run_in_order(order: tuple[str, str]) -> tuple[str, tuple[str, ...]]:
         started = {node_id: asyncio.Event() for node_id in ("left", "right")}

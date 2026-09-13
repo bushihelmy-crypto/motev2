@@ -513,6 +513,28 @@ Recovery 的 worklist、cycle signature、child-outcome combination、bounded re
 - 当前共享工作树含同事未完成的 persistence/Agent/gateway 改动，工作树全量 complexity ratchet 不能
   代表 G5；本项不暂存、不回滚、不改写这些并行改动，待整合后再执行仓库级全量门禁。
 
+### 2026-09-12：terminal completion route 声明与 frontier proof 收口
+
+- `CallableNodeDefinition` 现在声明 terminal callable 可导出的 route 域；Graph facade 在唯一入口完成规范化，
+  compiler 将 callable/nested 的 route 域降为 `transition.route_options` 和 `CompiledGraph.completion_routes`；
+  routing、recovery 和 nested parent 只消费这份编译事实，不再保留未知 route fallback 或第二执行路径；
+- compiler 在 definition 阶段拒绝暴露不同 route 且可共同到达的 terminal frontier，也拒绝无成功出口的 control cycle、
+  非 terminal callable 的 exported route，以及 parent 与 child route 域不一致；runtime 仍在自己的异常边界复核贡献；
+- 独立 reviewer 指出的 conditional branch 相关性和 cycle activation occurrence 两个 P1 已通过 canonical frontier fixed point
+  闭环；successful frontier 的发现、冲突判断和 `CompiledGraph.completion_routes` 生成现在只有 `_completion_routes()` 一个 owner，
+  旧的全局 `final_level` 剪枝、pairwise gate proof 和 terminal-event 第二扫描均已删除；
+- reviewer 指出的 `completion_route_known=False` P2 已整链删除；completed child 只消费 state-owned route，future recovery branch
+  只枚举 compiler-owned `route_options`，不保留 synthetic/legacy unknown-route 状态；
+- `CompiledGraph.completion_routes` 由 compiler 必须显式提供，且只包含真实可达 successful frontier 的 route；早期必然被后续
+  superstep 清除的 route 不再污染 nested contract；
+- 定向 Graph/compiler/routing/recovery 测试 182 passed；全量 pytest 3031 passed，行/分支覆盖率 100.00%；Strict Pyright 0 errors；
+  complexity ratchet 22 passed、zero-debt health PASS。新增 proof 没有提高峰值或 health ceiling；相对提交基线净减少
+  8 个顶层定义、9 个函数和 17 条内部调用边，精确值已写入 `pyproject.toml`；完整 `make check` 和 monorepo 全量
+  pre-commit 均已通过。
+- 独立 reviewer 的验收顺序、owner 矩阵、terminal-frontier proof 检查项和复现命令见
+  [`terminal-completion-route-acceptance-2026-09-12.zh-CN.md`](./terminal-completion-route-acceptance-2026-09-12.zh-CN.md)。本文是审查指引，
+  不另建治理状态或第二事实清单。
+
 ### Kernel 持久化分阶段工作
 
 后端无关的 Kernel 持久化与 `agent.py` 恢复装配，按

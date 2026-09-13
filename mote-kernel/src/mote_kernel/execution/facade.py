@@ -1,7 +1,7 @@
 """Single public graph composition and execution facade."""
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, cast, overload
@@ -406,6 +406,7 @@ class Graph(Generic[GraphValueT]):
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> Self: ...
 
     @overload
@@ -420,6 +421,7 @@ class Graph(Generic[GraphValueT]):
         output_name: str,
         output_type: type[OutputT],
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> NodeOutputRef[OutputT]: ...
 
     @overload
@@ -454,9 +456,17 @@ class Graph(Generic[GraphValueT]):
         output_name: str | None = None,
         output_type: type[OutputT] | None = None,
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> Self | NodeOutputRef[OutputT]:
         state = self._require_mutable()
         canonical_id = GraphNodeId(canonical_port_name(node_id, kind="node"))
+        if isinstance(exported_routes, str):
+            raise GraphValidationError("exported routes must be a collection of route names")
+        canonical_exported_routes = frozenset(
+            GraphRouteId(canonical_port_name(route, kind="exported route")) for route in exported_routes
+        )
+        if len(canonical_exported_routes) != len(exported_routes):
+            raise GraphValidationError("a node cannot repeat one exported route")
         typed_fields = (
             input_type is not None,
             materialize is not None,
@@ -468,8 +478,16 @@ class Graph(Generic[GraphValueT]):
         typed = all(typed_fields)
         typed_assembly: TypedNodeAssembly[GraphValueT, OutputT] | None = None
         if isinstance(operation, Graph):
-            if typed or outputs is not None or resources or not isinstance(inputs, Mapping):
-                raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")
+            if (
+                typed
+                or outputs is not None
+                or resources
+                or canonical_exported_routes
+                or not isinstance(inputs, Mapping)
+            ):
+                raise GraphValidationError(
+                    "nested graph nodes do not declare parent outputs, resources, or exported routes"
+                )
             bindings = normalize_input_bindings(inputs)
             candidate: NodeCandidate[GraphValueT] = _NestedNodeCandidate(
                 canonical_id,
@@ -493,6 +511,7 @@ class Graph(Generic[GraphValueT]):
                     cast(str, output_name),
                     cast(type[OutputT], output_type),
                     resource_ids,
+                    canonical_exported_routes,
                 )
                 candidate = typed_assembly.definition
             else:
@@ -506,6 +525,7 @@ class Graph(Generic[GraphValueT]):
                     bindings,
                     declarations,
                     resource_ids,
+                    canonical_exported_routes,
                 )
             known = {resource.resource_id for resource in state.resources}
             added = tuple(ResourceDefinition(resource_id) for resource_id in resource_ids if resource_id not in known)

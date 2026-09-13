@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TypeVar
 
@@ -83,12 +84,18 @@ def task_success(task: GraphTask, value: ValueT, route: str | None = None) -> Ta
     return TaskSuccess(task, node_output(value), route)
 
 
-def callable_node(node_id: str) -> CallableNodeDefinition[str]:
+def callable_node(
+    node_id: str,
+    *,
+    exported_routes: frozenset[GraphRouteId] = frozenset(),
+) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
         make_node_invoker(identity),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
+        (),
+        exported_routes,
     )
 
 
@@ -96,6 +103,7 @@ def _compile(
     node_ids: tuple[str, ...],
     edges: tuple[Edge, ...],
     entries: tuple[str, ...],
+    exported_routes: Mapping[str, frozenset[GraphRouteId]],
 ) -> CompiledGraph[str]:
     incoming = {edge.target for edge in edges if edge.target != Graph.END}
     explicit_entries = tuple(GraphNodeId(node_id) for node_id in entries if GraphNodeId(node_id) in incoming)
@@ -103,7 +111,10 @@ def _compile(
         GraphDefinition(
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(callable_node(node_id) for node_id in node_ids),
+            nodes=tuple(
+                callable_node(node_id, exported_routes=exported_routes.get(node_id, frozenset()))
+                for node_id in node_ids
+            ),
             edges=edges,
             entries=explicit_entries,
             outputs=normalize_graph_output_declarations({}),
@@ -116,15 +127,16 @@ def compiled_graph(
     entries: tuple[str, ...] = ("a",),
     edges: tuple[Edge, ...] = (),
 ) -> CompiledGraph[str]:
-    return _compile(node_ids, edges, entries)
+    return _compile(node_ids, edges, entries, {})
 
 
 def topology(
     *node_ids: str,
     edges: tuple[Edge, ...] = (),
     entries: tuple[str, ...] = ("a",),
+    exported_routes: Mapping[str, frozenset[GraphRouteId]] | None = None,
 ) -> CompiledGraph[str]:
-    return _compile(node_ids, edges, entries)
+    return _compile(node_ids, edges, entries, {} if exported_routes is None else exported_routes)
 
 
 def direct(source: str, target: str) -> DirectEdge:
@@ -194,14 +206,19 @@ def running_state(
     definition_id: str = "test.graph",
     version: int = 1,
     join_progress: tuple[GraphJoinProgress, ...] = (),
+    frontier_route: str | None = None,
 ) -> GraphRunState:
     canonical_run_id = GraphRunId(run_id)
+    route = None if frontier_route is None else GraphRouteId(frontier_route)
 
     settled_references = tuple(
         sorted(
             {reference for progress in join_progress for reference in progress.arrived}
             | {
-                ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, GraphNodeId(node_id)))
+                ActivationReference(
+                    GraphActivationIdentity(canonical_run_id, superstep - 1, GraphNodeId(node_id)),
+                    route,
+                )
                 for node_id in frontier
                 if superstep > 0
             },
@@ -214,7 +231,12 @@ def running_state(
         if superstep == 0:
             return StartActivationCause()
         return RoutedActivationCause(
-            (ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, node_id)),)
+            (
+                ActivationReference(
+                    GraphActivationIdentity(canonical_run_id, superstep - 1, node_id),
+                    route,
+                ),
+            )
         )
 
     return GraphRunState(

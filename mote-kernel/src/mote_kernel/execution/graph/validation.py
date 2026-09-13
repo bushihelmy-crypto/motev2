@@ -41,7 +41,9 @@ def require_graph_identity(value: str, *, kind: str) -> None:
         raise InvalidGraphIdentityError(f"{kind} identity must be a non-empty trimmed string")
 
 
-def _validate_resources(definition: GraphDefinition[GraphValueT]) -> None:
+def _validate_callable_declarations(definition: GraphDefinition[GraphValueT]) -> None:
+    """Validate every immutable resource and route declaration owned by a callable."""
+
     resource_ids = tuple(resource.resource_id for resource in definition.resources)
     if len(resource_ids) != len(set(resource_ids)):
         raise InvalidResourceDefinitionError("graph resources require unique resource IDs")
@@ -50,14 +52,16 @@ def _validate_resources(definition: GraphDefinition[GraphValueT]) -> None:
             require_graph_identity(resource_id, kind="resource")
         except InvalidGraphIdentityError as error:
             raise InvalidResourceDefinitionError(str(error)) from error
-    known = frozenset(resource_ids)
+    known_resources = frozenset(resource_ids)
     for node in definition.nodes:
         if not isinstance(node, CallableNodeDefinition):
             continue
         if len(node.resources) != len(set(node.resources)):
             raise InvalidResourceDefinitionError(f"node {node.node_id!r} repeats a resource requirement")
-        if not set(node.resources) <= known:
+        if not set(node.resources) <= known_resources:
             raise InvalidResourceDefinitionError(f"node {node.node_id!r} references an unknown resource")
+        for route in node.exported_routes:
+            require_graph_identity(route, kind="exported route")
 
 
 def _validate_edges(
@@ -132,7 +136,7 @@ def _validate_definition(
         nodes_by_id[node_id] = node
     if len(nodes_by_id) != len(definition.nodes):
         raise DuplicateNodeError("graph definition contains duplicate node identities")
-    _validate_resources(definition)
+    _validate_callable_declarations(definition)
     _validate_edges(definition, nodes_by_id)
     binding = definition.resume_input
     if binding is not None:

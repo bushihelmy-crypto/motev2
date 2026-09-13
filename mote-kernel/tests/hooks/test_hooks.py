@@ -376,8 +376,15 @@ def _node(
         HookStageResult[str, Increment],
     ],
     plan: HookPlan[PriorityConfig] | None = None,
+    exported_routes: tuple[str, ...] = (),
 ) -> HookNode[PriorityConfig, str, Counter, Increment]:
-    return HookNode(_slot(), _plan() if plan is None else plan, invocation, _admission())
+    return HookNode(
+        _slot(),
+        _plan() if plan is None else plan,
+        invocation,
+        _admission(),
+        exported_routes=exported_routes,
+    )
 
 
 def _admission(
@@ -709,7 +716,7 @@ async def test_hook_node_composes_as_a_nested_graph() -> None:
 
 @pytest.mark.asyncio
 async def test_hook_completion_exports_the_originating_node_route() -> None:
-    hook = _node(SerialRuntime())
+    hook = _node(SerialRuntime(), exported_routes=("origin",))
     parent = Graph[HookGraphValue]("hook.route.parent")
     request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node(
@@ -1327,7 +1334,7 @@ async def test_sync_invocation_capability_fails_at_the_async_boundary() -> None:
 @pytest.mark.asyncio
 async def test_concurrent_hook_runs_keep_progress_and_state_isolated() -> None:
     runtime = YieldingRuntime()
-    node = _node(runtime)
+    node = _node(runtime, exported_routes=("first", "second"))
     first_request = HookActivationRequest("first", Counter(1), GraphNodeId("first"))
     second_request = HookActivationRequest("second", Counter(2), GraphNodeId("second"))
 
@@ -1356,7 +1363,7 @@ async def test_hook_without_origin_node_id_completes_without_an_exported_route()
 
 @pytest.mark.asyncio
 async def test_hook_nested_completion_route_selects_the_parent_declared_branch() -> None:
-    hook = _node(SerialRuntime())
+    hook = _node(SerialRuntime(), exported_routes=("left", "right"))
     parent = Graph[HookGraphValue]("hook.route.conditional")
     request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
@@ -1387,14 +1394,14 @@ async def test_hook_nested_completion_route_selects_the_parent_declared_branch()
 
 @pytest.mark.asyncio
 async def test_hook_nested_completion_rejects_an_undeclared_route() -> None:
-    hook = _node(SerialRuntime())
+    hook = _node(SerialRuntime(), exported_routes=("known",))
     parent = Graph[HookGraphValue]("hook.route.unknown")
     request_type = cast(type[HookGraphValue], HookActivationRequest)
     parent.add_node("hook", hook, inputs={"request": Graph.graph_input("request", request_type)})
     parent.add_edge("hook", "known", Graph.END)
     parent.set_outputs({"result": parent.output_ref("hook", "result")})
 
-    with pytest.raises(Graph.RoutingError, match="unknown conditional route"):
+    with pytest.raises(Graph.RoutingError, match="undeclared exported route"):
         await parent.run(Graph.values(request=HookActivationRequest("x", Counter(1), GraphNodeId("unknown"))))
 
 

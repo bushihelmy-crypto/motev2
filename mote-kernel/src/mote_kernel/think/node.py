@@ -187,7 +187,12 @@ class ThinkNode(
             ThinkFrame[ThinkStep, HookStateT],
             HookStateT,
             HookCommandT,
-        ].from_config(config, selected.hook_slot, failover=hook_failover)
+        ].from_config(
+            config,
+            selected.hook_slot,
+            exported_routes=tuple(str(node_id) for node_id in ThinkNodeId if node_id is not ThinkNodeId.HOOK),
+            failover=hook_failover,
+        )
         return cls(
             str(selected.definition_id),
             version=int(selected.definition_version),

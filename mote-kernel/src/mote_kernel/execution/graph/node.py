@@ -24,7 +24,7 @@ from mote_kernel.execution.graph.values import (
 )
 from mote_kernel.execution.resource import ResourceId
 from mote_kernel.session import AgentSessionActivation, AgentSessionCarrier
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 InputT_contra = TypeVar("InputT_contra", contravariant=True)
@@ -145,6 +145,11 @@ class CallableNodeDefinition(Generic[GraphValueT]):
     inputs: InputBindings[GraphValueT]
     outputs: OutputDeclarations[GraphValueT]
     resources: tuple[ResourceId, ...] = ()
+    # A non-empty declaration is the exact completion-route domain for a
+    # terminal callable without conditional edges.  An empty declaration means
+    # that the callable must use ordinary no-route completion.  Conditional
+    # route domains remain owned by the graph's edges.
+    exported_routes: frozenset[GraphRouteId] = frozenset()
 
 
 __all__ = [

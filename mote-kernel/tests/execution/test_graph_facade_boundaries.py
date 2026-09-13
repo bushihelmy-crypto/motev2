@@ -92,6 +92,10 @@ def test_builder_local_failures_leave_a_clean_retry_surface() -> None:
         add_node("bad-operation", cast(NodeCallable[str], 1), inputs={}, outputs={})
     with pytest.raises(Graph.ValidationError, match="explicit outputs"):
         add_node("missing-outputs", empty, inputs={})
+    with pytest.raises(Graph.ValidationError, match="collection"):
+        graph.add_node("string-routes", empty, inputs={}, outputs={}, exported_routes="done")
+    with pytest.raises(Graph.ValidationError, match="repeat"):
+        graph.add_node("duplicate-routes", empty, inputs={}, outputs={}, exported_routes=("done", "done"))
 
     child = Graph[str]("facade.builder-local-failures.child")
     child.add_node("leaf", empty, inputs={}, outputs={})

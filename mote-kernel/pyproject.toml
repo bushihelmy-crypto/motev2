@@ -245,6 +245,16 @@ quote-style = "double"
 # owner-Config provenance boundaries add one typed outcome edge and one
 # projection edge; the values below are the exact measured shape after those
 # boundaries, not spare budget.
+# The 2026-09-12 terminal-route review keeps completion-route declaration and
+# terminal-frontier coexistence proof in the compiler, while routing and
+# recovery consume the one lowered `route_options` map. Successful frontier
+# discovery is also the sole producer of `completion_routes`; there is no
+# parallel terminal-event scan, fallback route, or second execution path. The
+# four added ambiguous-dispatch hits are statically typed local-dict iteration,
+# and the one added linear-chain hit is a substantive frontier transition
+# phase. Rewriting either for the metric would obscure the proof. Peak function
+# complexity and every zero-debt-health ceiling remain closed, while all
+# measured structural reductions are ratcheted here immediately.
 [tool.mote_kernel.complexity_ratchet]
 top_level_definitions = 1173
 type_definitions = 729
@@ -256,7 +266,7 @@ statement_clone_pairs = 118
 near_clone_pairs = 66
 record_shape_clone_pairs = 42
 thin_single_use_helpers = 0
-single_use_private_dataclasses = 22
+single_use_private_dataclasses = 21
 test_only_private_definitions = 0
 function_definitions = 1139
 method_definitions = 679

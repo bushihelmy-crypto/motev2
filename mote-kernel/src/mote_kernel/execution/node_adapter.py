@@ -42,7 +42,7 @@ from mote_kernel.execution.graph.values import (
 )
 from mote_kernel.execution.resource import ResourceId
 from mote_kernel.session import AgentSessionActivation
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 InputT = TypeVar("InputT")
@@ -144,6 +144,7 @@ def make_typed_node_assembly(
     output_name: str,
     output_type: type[OutputT],
     resources: tuple[ResourceId, ...],
+    exported_routes: frozenset[GraphRouteId] = frozenset(),
 ) -> TypedNodeAssembly[GraphValueT, OutputT]:
     """Validate and lower a typed node into the sole callable definition shape."""
 
@@ -180,7 +181,14 @@ def make_typed_node_assembly(
     )
     lowered_inputs = InputBindings(tuple(InputBinding(binding.name, binding.source) for binding in ordered))
     declarations = cast(OutputDeclarations[GraphValueT], OutputDeclarations((output,)))
-    definition = CallableNodeDefinition(node_id, invoker, lowered_inputs, declarations, resources)
+    definition = CallableNodeDefinition(
+        node_id,
+        invoker,
+        lowered_inputs,
+        declarations,
+        resources,
+        exported_routes,
+    )
     return TypedNodeAssembly(definition, NodeOutputRef(node_id, output.name, output.descriptor))
 
 

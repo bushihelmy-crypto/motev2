@@ -101,6 +101,7 @@ from mote_kernel.observe.identity import (
     ObservationCursor,
     ObservationWait,
     ObserveHookStage,
+    ObserveNodeId,
     WaitRegistration,
 )
 from mote_kernel.observe.node import ObserveNode
@@ -121,6 +122,7 @@ from mote_kernel.think.contract import (
     ThinkRequest,
     ThinkStep,
 )
+from mote_kernel.think.identity import ThinkNodeId
 from mote_kernel.think.node import ThinkNode
 
 
@@ -192,6 +194,7 @@ def make_hook(
     state_type: type[StateT],
     command_type: type[CommandT],
     transition: HookTransitionAdmission[ValueT, StateT, CommandT] | None = None,
+    exported_routes: tuple[str, ...] = (),
 ) -> HookNode[Priority, ValueT, StateT, CommandT]:
     admission = HookPayloadAdmission(
         Priority,
@@ -210,6 +213,7 @@ def make_hook(
         hook_plan(),
         PassThroughInvocation[ValueT, StateT, CommandT](),
         admission,
+        exported_routes=exported_routes,
     )
 
 
@@ -497,6 +501,10 @@ def make_observe_node(
         SharedState,
         ObserveCommand,
         admission,
+        (
+            str(ObserveNodeId.GET_OBSERVATION),
+            str(ObserveNodeId.WRITE_OBSERVATION),
+        ),
     )
     return ObserveNode(
         definition_id,
@@ -521,6 +529,7 @@ def make_think_node(
         cast(type[ThinkFrame[ThinkStep, SharedState]], ThinkFrame),
         SharedState,
         ThinkCommand,
+        exported_routes=tuple(str(node_id) for node_id in ThinkNodeId if node_id is not ThinkNodeId.HOOK),
     )
     return ThinkNode(
         definition_id,
@@ -547,6 +556,7 @@ def make_act_node(
         SharedState,
         ActCommand,
         admission,
+        tuple(str(stage) for stage in ActHookStage),
     )
     return ActNode(
         definition_id,

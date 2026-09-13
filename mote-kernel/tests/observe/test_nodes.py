@@ -70,6 +70,7 @@ from mote_kernel.observe.identity import (
     ObservationCursor,
     ObservationWait,
     ObserveHookStage,
+    ObserveNodeId,
     WaitRegistration,
 )
 from mote_kernel.observe.node import GetObservationNode, WriteObservationNode
@@ -357,7 +358,16 @@ def _hook(
         GraphNodeId("hook"),
         HookStage.AFTER_NODE,
     )
-    return HookNode(slot, _plan(), invocation, admission)
+    return HookNode(
+        slot,
+        _plan(),
+        invocation,
+        admission,
+        exported_routes=(
+            str(ObserveNodeId.GET_OBSERVATION),
+            str(ObserveNodeId.WRITE_OBSERVATION),
+        ),
+    )
 
 
 def _observe(ports: _Ports, invocation: _HookInvocation) -> _InspectableObserveGraph:

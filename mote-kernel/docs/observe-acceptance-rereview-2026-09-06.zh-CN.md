@@ -68,13 +68,16 @@ Act 的装配期检查（[`act/node.py:103`](/home/longert/motev2/mote-kernel/sr
 
 ## 复审判定方法与调用链
 
+以下调用链按 2026-09-11 的接口修订阅读：Queue provider 自己持有消费位置，Observe 只调用无参
+`read()`；旧稿中出现的 `read_after(cursor)` 仅是历史命名，不再是当前契约。
+
 按用户给出的最高原则，先判断 owner、调用链和不变量，再用门禁证明没有回归。当前实际调用链为：
 
 ```text
 Graph.run
   -> get_observation
        ObserveRequest admission
-       -> ObservationQueuePort.read_after
+       -> ObservationQueuePort.read()
        -> BackgroundTaskPort.snapshot
        -> ObserveFrame / AFTER_GET HookRequest
   -> shared Hook (Plan -> P1 -> P2 -> P3)
