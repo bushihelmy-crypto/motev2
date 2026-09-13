@@ -26,6 +26,34 @@ class ActIdentityError(ValueError):
     """Raised when an Act identity or opaque wrapper has an invalid shape."""
 
 
+class ActNodeId(StrEnum):
+    """The closed node identities owned by the Act graph."""
+
+    RESOLVE = "resolve"
+    HOOK = "hook"
+    AUTHORIZE = "authorize"
+    EXECUTE = "execute"
+    SETTLE = "settle"
+
+
+class ActHookStage(StrEnum):
+    """The business node whose completed value is entering the shared Hook."""
+
+    RESOLVE = ActNodeId.RESOLVE
+    AUTHORIZE = ActNodeId.AUTHORIZE
+    EXECUTE = ActNodeId.EXECUTE
+    SETTLE = ActNodeId.SETTLE
+
+
+class ActValueName(StrEnum):
+    """The closed value-port names owned by the Act graph."""
+
+    REQUEST = "request"
+    HOOK_REQUEST = "hook_request"
+    HOOK_RESULT = "hook_result"
+    RESULT = "result"
+
+
 def _require_bounded_text(value: str, field: str, maximum: int, /) -> None:
     if type(value) is not str or not value or value != value.strip() or "\n" in value or "\r" in value:
         raise ActIdentityError(f"{field} must be a non-empty trimmed single-line string")
@@ -174,7 +202,7 @@ class ActSlotId(HookGraphValue):
         if type(self.definition_version) is not int or self.definition_version < 1:
             raise ActIdentityError("Act definition version must be an exact positive integer")
         _require_bounded_text(self.node_id, "Act slot node id", _IDENTITY_MAX_BYTES)
-        if self.node_id not in ("resolve", "authorize", "execute", "settle"):
+        if self.node_id not in tuple(str(stage) for stage in ActHookStage):
             raise ActIdentityError("Act slot node id must be resolve, authorize, execute, or settle")
 
 
@@ -208,20 +236,13 @@ class ToolExecutionIdentity(HookGraphValue):
             raise ActIdentityError("execution identity digest must be an ArgumentsDigest")
 
 
-class ActHookStage(StrEnum):
-    """The stage whose completed value is entering the shared Hook."""
-
-    RESOLVE = "resolve"
-    AUTHORIZE = "authorize"
-    EXECUTE = "execute"
-    SETTLE = "settle"
-
-
 __all__ = [
     "ActHookStage",
     "ActIdentityError",
     "ActInvocationKey",
+    "ActNodeId",
     "ActSlotId",
+    "ActValueName",
     "ArgumentsDigest",
     "CallerIdentityRef",
     "OpaqueArguments",

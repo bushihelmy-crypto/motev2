@@ -1,5 +1,4 @@
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from typing import Protocol, TypeAlias, TypeVar, cast
 
 import pytest
@@ -8,7 +7,6 @@ from tests.execution.graph.factories import compiled_join
 import mote_kernel.execution.graph.compiler as compiler_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import (
-    DuplicateBoundaryError,
     GraphValidationError,
     UnknownNodeError,
 )
@@ -40,15 +38,8 @@ GraphValueT = TypeVar("GraphValueT")
 RawActivationGate: TypeAlias = tuple[tuple[GraphNodeId, GraphRouteId | None], ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _RouteRequirementProofView:
-    requirements: tuple[tuple[GraphNodeId, frozenset[GraphRouteId]], ...]
-    exact: bool
-
-
 class _CompilerPrivateView(Protocol):
     _can_reach: Callable[..., bool]
-    _gates_can_coexist: Callable[..., bool]
     _repeatable_nodes: Callable[..., frozenset[GraphNodeId]]
 
     @staticmethod
@@ -59,28 +50,6 @@ class _CompilerPrivateView(Protocol):
         successors: dict[GraphNodeId, set[GraphNodeId]],
     ) -> bool:
         return cast(_CompilerPrivateView, module)._can_reach(source, target, successors)
-
-    @staticmethod
-    def gates_can_coexist(
-        module: object,
-        first: RawActivationGate,
-        second: RawActivationGate,
-        requirements: dict[GraphNodeId, _RouteRequirementProofView] | None = None,
-        conditional_targets: dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None = None,
-    ) -> bool:
-        function = cast(
-            Callable[
-                [
-                    RawActivationGate,
-                    RawActivationGate,
-                    dict[GraphNodeId, _RouteRequirementProofView] | None,
-                    dict[GraphNodeId, dict[GraphRouteId, GraphNodeId]] | None,
-                ],
-                bool,
-            ],
-            cast(_CompilerPrivateView, module)._gates_can_coexist,
-        )
-        return function(first, second, requirements, conditional_targets)
 
     @staticmethod
     def repeatable_nodes(
@@ -283,11 +252,12 @@ def test_compiler_accepts_data_binding_and_direct_control_for_the_same_pair() ->
     assert binding.source == NodeOutputPort(GraphNodeId("source"), "value")
 
 
-def test_compiler_rejects_explicit_start_that_duplicates_automatic_entry() -> None:
+def test_compiler_deduplicates_explicit_start_that_is_an_automatic_entry() -> None:
     entry = node("entry", inputs={}, outputs={})
 
-    with pytest.raises(DuplicateBoundaryError, match="automatic entry"):
-        GraphCompiler(definition((entry,), entries=("entry",))).compile()
+    compiled = GraphCompiler(definition((entry,), entries=("entry",))).compile()
+
+    assert compiled.transition.entries == (GraphNodeId("entry"),)
 
 
 def test_compiler_rejects_explicit_start_target_requiring_node_output() -> None:
@@ -443,7 +413,8 @@ def test_compiler_uses_relative_selection_for_loop_producer_with_direct_activati
         definition(
             (source, target),
             edges=(
-                DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("again"), GraphNodeId("source")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("done"), END),
                 DirectEdge(GraphNodeId("source"), GraphNodeId("target")),
             ),
             entries=("source",),
@@ -471,7 +442,7 @@ def test_compiler_uses_relative_selection_for_same_source_conditional_routes() -
         definition(
             (source, target),
             edges=(
-                DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("again"), GraphNodeId("source")),
                 ConditionalEdge(GraphNodeId("source"), GraphRouteId("left"), GraphNodeId("target")),
                 ConditionalEdge(GraphNodeId("source"), GraphRouteId("right"), GraphNodeId("target")),
             ),
@@ -508,8 +479,8 @@ def test_compiler_uses_relative_selection_for_loop_graph_output() -> None:
         definition(
             (source,),
             edges=(
-                DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
-                DirectEdge(GraphNodeId("source"), END),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("again"), GraphNodeId("source")),
+                ConditionalEdge(GraphNodeId("source"), GraphRouteId("done"), END),
             ),
             entries=("source",),
             outputs=normalize_graph_output_declarations({"value": Graph.node_output("source", "value")}),
@@ -526,8 +497,10 @@ def test_compiler_rejects_repeatable_terminal_join_sources_before_output_selecti
     source = node("source", inputs={}, outputs={"value": str})
     gate = node("gate", inputs={}, outputs={})
     edges = (
-        DirectEdge(GraphNodeId("source"), GraphNodeId("source")),
-        DirectEdge(GraphNodeId("gate"), GraphNodeId("gate")),
+        ConditionalEdge(GraphNodeId("source"), GraphRouteId("again"), GraphNodeId("source")),
+        ConditionalEdge(GraphNodeId("source"), GraphRouteId("done"), END),
+        ConditionalEdge(GraphNodeId("gate"), GraphRouteId("again"), GraphNodeId("gate")),
+        ConditionalEdge(GraphNodeId("gate"), GraphRouteId("done"), END),
         JoinEdge((GraphNodeId("source"), GraphNodeId("gate")), END),
     )
 
@@ -696,24 +669,23 @@ def test_compiler_rejects_a_join_when_a_direct_path_can_coexist_with_the_selecte
         ).compile()
 
 
-def test_join_produced_and_ordinary_sources_cannot_merge_without_an_explicit_join() -> None:
-    with pytest.raises(GraphValidationError, match="multiple activation gates"):
-        GraphCompiler(
-            definition(
-                tuple(
-                    node(node_id, inputs={}, outputs={})
-                    for node_id in ("source", "left", "right", "joined", "ordinary", "target")
-                ),
-                edges=(
-                    DirectEdge(GraphNodeId("source"), GraphNodeId("left")),
-                    DirectEdge(GraphNodeId("source"), GraphNodeId("right")),
-                    DirectEdge(GraphNodeId("source"), GraphNodeId("ordinary")),
-                    JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
-                    DirectEdge(GraphNodeId("joined"), GraphNodeId("target")),
-                    DirectEdge(GraphNodeId("ordinary"), GraphNodeId("target")),
-                ),
-            )
-        ).compile()
+def test_join_produced_and_ordinary_paths_may_activate_a_target_in_different_frontiers() -> None:
+    GraphCompiler(
+        definition(
+            tuple(
+                node(node_id, inputs={}, outputs={})
+                for node_id in ("source", "left", "right", "joined", "ordinary", "target")
+            ),
+            edges=(
+                DirectEdge(GraphNodeId("source"), GraphNodeId("left")),
+                DirectEdge(GraphNodeId("source"), GraphNodeId("right")),
+                DirectEdge(GraphNodeId("source"), GraphNodeId("ordinary")),
+                JoinEdge((GraphNodeId("left"), GraphNodeId("right")), GraphNodeId("joined")),
+                DirectEdge(GraphNodeId("joined"), GraphNodeId("target")),
+                DirectEdge(GraphNodeId("ordinary"), GraphNodeId("target")),
+            ),
+        )
+    ).compile()
 
 
 def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
@@ -728,6 +700,7 @@ def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
                 edges=(
                     ConditionalEdge(GraphNodeId("decision"), GraphRouteId("left"), GraphNodeId("left")),
                     ConditionalEdge(GraphNodeId("decision"), GraphRouteId("right"), GraphNodeId("right")),
+                    ConditionalEdge(GraphNodeId("decision"), GraphRouteId("done"), END),
                     DirectEdge(GraphNodeId("left"), GraphNodeId("decision")),
                     DirectEdge(GraphNodeId("right"), GraphNodeId("decision")),
                     JoinEdge((GraphNodeId("left"), GraphNodeId("right")), END),
@@ -735,29 +708,6 @@ def test_compiler_rejects_cyclic_join_with_ambiguous_return_gates() -> None:
                 entries=("decision",),
             )
         ).compile()
-
-
-def test_gate_coexistence_checks_route_requirements_and_simple_gate_shapes() -> None:
-    source = GraphNodeId("source")
-    left = GraphRouteId("left")
-    right = GraphRouteId("right")
-    requirements = {
-        source: _RouteRequirementProofView(
-            ((source, frozenset({left})),),
-            True,
-        )
-    }
-    conditional_targets = {source: {left: GraphNodeId("left"), right: GraphNodeId("right")}}
-
-    assert not _CompilerPrivateView.gates_can_coexist(
-        compiler_module,
-        ((source, right),),
-        ((source, left),),
-        requirements,
-        conditional_targets,
-    )
-    assert _CompilerPrivateView.gates_can_coexist(compiler_module, (), ((source, left),))
-    assert not _CompilerPrivateView.gates_can_coexist(compiler_module, ((source, left),), ((source, right),))
 
 
 def test_reachability_proof_fails_closed_at_boundary_shapes() -> None:

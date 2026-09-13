@@ -1,21 +1,28 @@
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
-from tests.execution.engine.factories import callable_node, compiled_graph, join_progress, running_state, terminal_state
+from tests.execution.engine.factories import (
+    callable_node,
+    compiled_graph,
+    join_progress,
+    publication_settlements,
+    running_state,
+    terminal_state,
+)
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.task import GraphTask, task_identity
 from mote_kernel.execution.errors import ExecutionLimitError, InvalidExecutionSnapshotError, SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import DirectEdge
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
 from mote_kernel.execution.graph.ports import (
     normalize_graph_output_declarations,
     normalize_input_bindings,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.state.graph_state import (
@@ -34,6 +41,7 @@ from mote_kernel.state.graph_state import (
     GraphNodeInterruptIdentity,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
+    GraphRouteId,
     GraphRunId,
     GraphRunStatus,
     InterruptedGraphNode,
@@ -48,6 +56,11 @@ def test_planner_materializes_only_pending_nodes_in_canonical_order() -> None:
     state = running_state(frontier=("a", "b", "c"))
     state = replace(
         state,
+        execution_sequence=1,
+        revision=1,
+        settled_publications=publication_settlements(
+            (ActivationReference(GraphActivationIdentity(state.run_id, 0, GraphNodeId("c"))),),
+        ),
         frontier=GraphFrontierState(
             (
                 state.frontier.nodes[0],
@@ -90,13 +103,17 @@ def test_planner_excludes_every_nonpending_settlement_variant() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = running_state(frontier=("a", "b", "c", "d"))
     state = replace(
         state,
         execution_sequence=1,
+        revision=1,
+        settled_publications=publication_settlements(
+            (ActivationReference(GraphActivationIdentity(state.run_id, 0, GraphNodeId("d"))),),
+        ),
         resume_input_codec=GraphResumeInputCodec(GraphResumeInputCodecId("input.v1"), 1),
         frontier=GraphFrontierState(
             (
@@ -246,14 +263,18 @@ def test_superstep_limit_is_exact_and_parallel_limit_does_not_reject_frontier() 
         "b",
         entries=("a", "b"),
         edges=(
-            DirectEdge(GraphNodeId("a"), GraphNodeId("a")),
-            DirectEdge(GraphNodeId("a"), END),
-            DirectEdge(GraphNodeId("b"), GraphNodeId("b")),
-            DirectEdge(GraphNodeId("b"), END),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("again"), GraphNodeId("a")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("done"), END),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("again"), GraphNodeId("b")),
+            ConditionalEdge(GraphNodeId("b"), GraphRouteId("done"), END),
         ),
     )
     with pytest.raises(ExecutionLimitError, match="superstep"):
-        plan_tasks(graph, running_state(superstep=3, frontier=("a", "b")), ExecutionLimits(max_supersteps=3))
+        plan_tasks(
+            graph,
+            running_state(superstep=3, frontier=("a", "b"), frontier_route="again"),
+            ExecutionLimits(max_supersteps=3),
+        )
     assert len(plan_tasks(graph, running_state(frontier=("a", "b")), ExecutionLimits(max_parallel_tasks=1))) == 2
     assert len(plan_tasks(graph, running_state(frontier=("a", "b")), ExecutionLimits(max_parallel_tasks=2))) == 2
 
@@ -262,11 +283,11 @@ def test_last_allowed_superstep_is_plannable() -> None:
     graph = compiled_graph(
         "a",
         edges=(
-            DirectEdge(GraphNodeId("a"), GraphNodeId("a")),
-            DirectEdge(GraphNodeId("a"), END),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("again"), GraphNodeId("a")),
+            ConditionalEdge(GraphNodeId("a"), GraphRouteId("done"), END),
         ),
     )
-    assert plan_tasks(graph, running_state(superstep=2), ExecutionLimits(max_supersteps=3))
+    assert plan_tasks(graph, running_state(superstep=2, frontier_route="again"), ExecutionLimits(max_supersteps=3))
 
 
 def test_terminal_state_ignores_exhausted_superstep_limit() -> None:

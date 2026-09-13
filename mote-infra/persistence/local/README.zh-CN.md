@@ -14,7 +14,11 @@ Container 与 Persistence 是两个独立选择。无论 Agent 承载在 local�
     └── persistenced/    配置与独立服务装配
 
     tests/
-    └── package.rs   外部包导入 smoke test
+    ├── package.rs       外部包导入 smoke test
+    ├── unit.rs          crate 级 smoke tests
+    ├── integration.rs   元数据与 owner 文档检查
+    ├── architecture.rs  不固化候选边界的架构与 hygiene 检查
+    └── complexity.rs    精确的生产代码复杂度棘轮
 
 这三个目录是用于推进讨论的候选职责，不是已经稳定的分包契约。第一条由真实调用方驱动的存储纵切完成前，不用架构测试固化目录或依赖方向，也不承诺外部调用方可以直接依赖这些模块。
 
@@ -31,10 +35,18 @@ Container 与 Persistence 是两个独立选择。无论 Agent 承载在 local�
     make format
     make check
 
-依赖许可证、来源和漏洞检查需要先安装 cargo-deny：
+`make check` 与 Local Execution 执行相同的确定性阶段：结构、工具链、格式、
+Clippy、架构、复杂度、文档、Cargo hygiene、许可证、聚焦测试、构建和打包
+验证。各目标说明见 [`docs/testing.md`](docs/testing.md)。
+
+依赖、许可证、来源、漏洞和秘密扫描需要先安装 cargo-deny 与 detect-secrets：
 
     cargo install cargo-deny --version 0.19.7 --locked
+    python -m pip install detect-secrets==1.5.0
     make security
+
+安全门禁还需要 `detect-secrets==1.5.0`，并使用 monorepo 的 baseline 扫描
+本项目。
 
 根目录 conformance 是跨语言和 durable protocol 的唯一 owner。本项目的协议变更必须同时更新对应 conformance schema 与 cases。
 

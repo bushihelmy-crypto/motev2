@@ -21,35 +21,10 @@ cd mote-infra/persistence/local
 make check
 ```
 
-For the Cloudflare Python Persistence implementation:
+For the Cloudflare Container and object-local persistence implementation:
 
 ```bash
-cd mote-infra/persistence/cloudflare/python
-uv sync --locked
-make check
-```
-
-For the Cloudflare TypeScript Persistence implementation:
-
-```bash
-cd mote-infra/persistence/cloudflare/ts
-pnpm install --frozen-lockfile
-pnpm run check
-```
-
-For the Cloudflare Python Container:
-
-```bash
-cd mote-resource/container/cloudflare/python
-uv sync --locked
-pnpm install --frozen-lockfile
-make check
-```
-
-For the Cloudflare TypeScript Container:
-
-```bash
-cd mote-resource/container/cloudflare/ts
+cd mote-resource/container/cloudflare
 pnpm install --frozen-lockfile
 pnpm run check
 ```

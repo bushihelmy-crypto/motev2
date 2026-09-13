@@ -1,11 +1,13 @@
 """Scoped node-input materialization and graph-local resume codecs."""
 
-from typing import TypeVar, cast
+from typing import TypeVar
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.engine.routing import (
-    _graph_input_coordinate,
-    _node_output_coordinate,
-    predecessor_source_for_cause,
+    binding_source_coordinate,
+    frame_coordinate_available,
+    graph_input_availability_coordinate,
+    publication_availability_coordinate,
 )
 from mote_kernel.execution.errors import (
     GraphValueAdmissionError,
@@ -17,9 +19,8 @@ from mote_kernel.execution.graph.ports import (
     CompiledPredecessorInput,
     GraphInputPort,
     MaterializationPlan,
-    NodeOutputPort,
-    PublicationSelection,
-    require_publication_selection,
+    ResolvedInputBinding,
+    ResolvedValueSource,
 )
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
@@ -37,7 +38,9 @@ from mote_kernel.execution.run_context import (
     ScopedFrameAvailability,
     ScopedFrameIndex,
 )
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
+    GraphActivationCause,
     GraphActivationIdentity,
     GraphFrontierNode,
     GraphNodeId,
@@ -45,6 +48,8 @@ from mote_kernel.state.graph_state import (
     GraphRunState,
     OverrideGraphNodeInput,
     PendingGraphNode,
+    RoutedActivationCause,
+    StartActivationCause,
     frontier_node,
 )
 
@@ -87,80 +92,133 @@ def encode_resume_input(
     binding = graph.resume_input
     if binding is None:
         raise SnapshotMismatchError("graph does not define a resume input codec")
-    try:
-        payload = binding.encoder(values)
-    except Exception as error:
-        raise GraphValueAdmissionError("resume input encoder rejected the value frame") from error
-    if type(payload) is not bytes:
-        raise GraphValueAdmissionError("resume input encoder must return bytes")
-    return OverrideGraphNodeInput(GraphResumeInputPayload(payload))
-
-
-def _admit_override(
-    graph: CompiledGraph[GraphValueT],
-    node_id: GraphNodeId,
-    values: _GraphValues[GraphValueT],
-) -> NodeInputFrame[GraphValueT]:
-    plan = _require_node_materialization(graph, node_id)
-    return _make_node_input_frame(
-        tuple(NamedValue(name, value) for name, value in values.items()),
-        plan.descriptor.declarations,
-    )
+    return OverrideGraphNodeInput(GraphResumeInputPayload(binding.encode(values)))
 
 
 def decode_resume_input(
     graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
     payload: bytes,
+    *,
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     binding = graph.resume_input
     if binding is None:
         raise SnapshotMismatchError("input override is missing its compiled graph decoder")
-    try:
-        candidate = cast(_GraphValues[GraphValueT] | bytes, binding.decoder(payload))
-    except Exception as error:
-        raise GraphValueAdmissionError("resume input decoder rejected its opaque payload") from error
-    if not isinstance(candidate, _GraphValues):
-        raise GraphValueAdmissionError("resume input decoder must return Graph.Values")
-    return _admit_override(graph, node_id, candidate)
+    candidate = binding.decode(payload)
+    plan = _require_node_materialization(graph, node_id)
+    inherited = _select_activation_config(
+        (activation_config, candidate.activation_config),
+        conflict_message="resume input and activation cause carry different Config snapshots",
+    )
+    return _make_node_input_frame(
+        tuple(NamedValue(name, value) for name, value in candidate.items()),
+        plan.descriptor.declarations,
+        activation_config=inherited,
+        session=session,
+    )
 
 
-def _source_coordinate(
+def _select_activation_config(
+    candidates: tuple[Config | None, ...],
+    *,
+    conflict_message: str,
+) -> Config | None:
+    """Select one immutable Config from the current activation evidence."""
+
+    selected: Config | None = None
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            require_config(candidate)
+        except ConfigContractError as error:
+            raise GraphValueAdmissionError("activation Config is malformed") from error
+        if selected is None:
+            selected = candidate
+        elif selected != candidate:
+            raise SnapshotMismatchError(conflict_message)
+    return selected
+
+
+def _cause_coordinates(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
-    anchor_superstep: int,
-    source: GraphInputPort | NodeOutputPort,
-    publication: PublicationSelection | None,
-) -> GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT]:
-    if isinstance(source, GraphInputPort):
-        return _graph_input_coordinate(graph, scope_run)
-    selection = require_publication_selection(
-        publication,
-        SnapshotMismatchError("compiled node-output binding lacks its activation selection"),
+    node: GraphFrontierNode,
+) -> tuple[GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT], ...]:
+    """Project the frame coordinates carried by a pending activation cause."""
+    cause = node.cause
+    if type(cause) is StartActivationCause:
+        coordinates: tuple[
+            GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+            ...,
+        ] = (graph_input_availability_coordinate(graph, scope_run),)
+    elif type(cause) is RoutedActivationCause:
+        try:
+            coordinates = tuple(
+                publication_availability_coordinate(graph, scope_run, reference.activation)
+                for reference in cause.references
+            )
+        except (AttributeError, KeyError, TypeError) as error:
+            raise SnapshotMismatchError("pending activation cause references an unknown publication") from error
+    else:
+        raise SnapshotMismatchError("pending activation has an unsupported cause")
+    return coordinates
+
+
+def activation_config_for_cause(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    node: GraphFrontierNode,
+    frames: ScopedFrameIndex[GraphValueT],
+) -> Config | None:
+    """Project the one Config carried by a pending activation's cause."""
+
+    coordinates = _cause_coordinates(graph, scope_run, node)
+
+    candidates: list[Config | None] = []
+    for coordinate in coordinates:
+        try:
+            candidates.append(frames.lookup(coordinate).frame.activation_config)
+        except SnapshotMismatchError:
+            # Config is optional execution metadata.  A recovered or manually
+            # assembled frame index may omit it while the node still has all
+            # business inputs required for execution.
+            continue
+    return _select_activation_config(
+        tuple(candidates),
+        conflict_message="node inputs combine different activation Config snapshots",
     )
-    return _node_output_coordinate(graph, scope_run, source, selection.resolve(anchor_superstep))
 
 
-def _predecessor_source_for_state(
-    state: GraphRunState,
-    input_name: str,
-    binding: CompiledPredecessorInput,
-) -> tuple[NodeOutputPort, int]:
-    try:
-        node = frontier_node(state.frontier, binding.target)
-        if node is None:
-            raise InvalidRoutingCommandError("predecessor-bound activation is not present in the current frontier")
-        selected = predecessor_source_for_cause(
-            state,
-            binding.target,
-            input_name,
-            state.superstep,
-            node.cause,
-            binding,
+def _materialization_config(
+    candidates: tuple[Config | None, ...],
+    owner_session: AgentSessionCarrier | None,
+) -> Config | None:
+    """Keep historical Config provenance separate from the current owner.
+
+    A recovered frame can legitimately carry an earlier Config revision.  Once
+    a caller-owned Session is available, its Config is the metadata for the
+    node being materialized; the historical candidates are still individually
+    admitted, but must not compete with that current owner snapshot.
+    """
+
+    if owner_session is None:
+        return _select_activation_config(
+            candidates,
+            conflict_message="node inputs combine different activation Config snapshots",
         )
-    except InvalidRoutingCommandError as error:
-        raise SnapshotMismatchError(str(error)) from error
-    return selected.source, selected.predecessor.superstep
+    for candidate in candidates:
+        if candidate is not None:
+            _select_activation_config(
+                (candidate,),
+                conflict_message="historical node input Config is malformed",
+            )
+    return _select_activation_config(
+        (owner_session.config,),
+        conflict_message="owner AgentSession Config is malformed",
+    )
 
 
 def node_inputs_available(
@@ -173,34 +231,34 @@ def node_inputs_available(
 ) -> bool:
     plan = _require_node_materialization(graph, node_id)
     has_predecessor = any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries)
+    cause: GraphActivationCause | None = None
+    node: GraphFrontierNode | None = None
     if state is not None:
+        node = frontier_node(state.frontier, node_id)
         if state.run_id != scope_run.graph_run_id:
             raise SnapshotMismatchError("predecessor input availability scope does not match authoritative state")
         if has_predecessor and activation_superstep != state.superstep:
             raise SnapshotMismatchError("predecessor input availability coordinate does not match authoritative state")
-    for binding in plan.bindings.entries:
-        effective = binding.source
-        if isinstance(effective, CompiledPredecessorInput):
-            if state is None:
-                raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
-            effective, predecessor_superstep = _predecessor_source_for_state(
-                state,
-                binding.destination.local_name,
-                effective,
-            )
-            coordinate = _node_output_coordinate(graph, scope_run, effective, predecessor_superstep)
+        if node is None:
+            if has_predecessor:
+                raise SnapshotMismatchError("predecessor-bound activation is not present in the current frontier")
         else:
-            coordinate = _source_coordinate(
+            cause = node.cause
+    elif has_predecessor:
+        raise SnapshotMismatchError("predecessor input availability requires authoritative graph state")
+    for binding in plan.bindings.entries:
+        try:
+            _source, coordinate = binding_source_coordinate(
                 graph,
+                state,
                 scope_run,
                 activation_superstep,
-                effective,
-                binding.publication,
+                binding,
+                cause=cause,
             )
-        if isinstance(coordinate, GraphInputAvailabilityCoordinate):
-            if not frames.has_graph_input(coordinate):
-                return False
-        elif not frames.has_publication(coordinate):
+        except InvalidRoutingCommandError as error:
+            raise SnapshotMismatchError(str(error)) from error
+        if not frame_coordinate_available(frames, coordinate):
             return False
     return True
 
@@ -243,6 +301,8 @@ def materialize_node_input(
     scope_run: ScopeRunCoordinate,
     frames: ScopedFrameIndex[GraphValueT],
     node_id: GraphNodeId,
+    *,
+    owner_session: AgentSessionCarrier | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     require_resume_input_binding(graph, state)
     if state.run_id != scope_run.graph_run_id:
@@ -261,25 +321,56 @@ def materialize_node_input(
     if isinstance(effective_input, OverrideGraphNodeInput):
         if has_predecessor:
             raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
-        return decode_resume_input(graph, node_id, bytes(effective_input.payload))
+        inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+        effective_config = _materialization_config((inherited_config,), owner_session)
+        return decode_resume_input(
+            graph,
+            node_id,
+            bytes(effective_input.payload),
+            activation_config=effective_config,
+            session=owner_session,
+        )
     resume_coordinate = _resume_input_coordinate(activation, plan)
     if not has_predecessor:
         try:
-            return frames.lookup(resume_coordinate).frame
+            cached = frames.lookup(resume_coordinate).frame
         except SnapshotMismatchError:
-            pass
-    entries: list[NamedValue[GraphValueT]] = []
-    for binding in plan.bindings.entries:
-        source = binding.source
-        if isinstance(source, CompiledPredecessorInput):
-            source, predecessor_superstep = _predecessor_source_for_state(
-                state,
-                binding.destination.local_name,
-                source,
+            cached = None
+        if cached is not None:
+            inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+            effective_config = _materialization_config(
+                (inherited_config, cached.activation_config),
+                owner_session,
             )
-            coordinate = _node_output_coordinate(graph, scope_run, source, predecessor_superstep)
-        else:
-            coordinate = _source_coordinate(graph, scope_run, state.superstep, source, binding.publication)
+            return _make_node_input_frame(
+                cached.entries,
+                plan.descriptor.declarations,
+                activation_config=effective_config,
+                session=owner_session,
+            )
+    resolved_bindings: list[
+        tuple[
+            ResolvedValueSource,
+            GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT],
+            ResolvedInputBinding[GraphValueT],
+        ]
+    ] = []
+    for binding in plan.bindings.entries:
+        try:
+            source, coordinate = binding_source_coordinate(
+                graph,
+                state,
+                scope_run,
+                state.superstep,
+                binding,
+                cause=node.cause,
+            )
+        except InvalidRoutingCommandError as error:
+            raise SnapshotMismatchError(str(error)) from error
+        resolved_bindings.append((source, coordinate, binding))
+    entries: list[NamedValue[GraphValueT]] = []
+    source_configs: list[Config | None] = []
+    for source, coordinate, binding in resolved_bindings:
         if isinstance(source, GraphInputPort):
             value_name = source.name
             unavailable = f"graph input {source.name!r}"
@@ -290,9 +381,16 @@ def materialize_node_input(
             frame = frames.lookup(coordinate).frame
         except SnapshotMismatchError as error:
             raise GraphValueUnavailableError(f"{unavailable} is unavailable at {scope_run!r}") from error
+        source_configs.append(frame.activation_config)
         value = _frame_value(frame, value_name)
         entries.append(NamedValue(binding.destination.local_name, value))
-    return _make_node_input_frame(tuple(entries), plan.descriptor.declarations)
+    inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+    return _make_node_input_frame(
+        tuple(entries),
+        plan.descriptor.declarations,
+        activation_config=_materialization_config((inherited_config, *source_configs), owner_session),
+        session=owner_session,
+    )
 
 
 __all__ = ["_require_node_materialization", "_resume_input_coordinate"]

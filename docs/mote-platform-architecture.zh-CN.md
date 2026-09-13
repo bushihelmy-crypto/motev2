@@ -45,7 +45,7 @@ Mote 不是一个“模型加工具”的 Agent 框架，而是一套面向 Agen
                  conformance/ 横跨所有语言边界
 ```
 
-这不是一条强制的同步调用链。Control、Resource、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。所有具体调用基础设施统一归 `mote-infra/invocation`，所有具体存储基础设施统一归 `mote-infra/persistence`。
+这不是一条强制的同步调用链。Control、Resource、Kernel 和 Runtime 可以通过进程内调用、RPC、队列或远程 worker 部署；图中表达的是职责与权威方向。所有具体调用基础设施统一归 `mote-infra/invocation`，所有具体存储基础设施统一归 `mote-infra/persistence`。工具执行的固定入口是 `Kernel → mote-infra/invocation → execution/local`；Local Execution 按不可变路由配置决定本地执行或沿 `local → remote` 转发，远端 transport 和目标解析仍由 Invocation 基础设施承接。
 
 ## 2. 设计目标
 
@@ -162,7 +162,7 @@ Runtime 服务可以互相调用。禁止的是多份权威事实，而不是服
 
 ### 3.6 Persistence：统一可靠机制
 
-Persistence 按 backend 实现持久化与可靠执行机制。本地实现以 Rust 为主；Cloudflare 的 Python 与 TypeScript Adapter 使用各自运行时提供的 Durable Object SQLite API：
+Persistence 按 backend 实现持久化与可靠执行机制。本地实现以 Rust 为主；Cloudflare 的 TypeScript Durable Object Adapter 与 Container 放在同一个部署项目中，因为只有 DO 宿主能拿到 `ctx.storage`：
 
 - revisioned aggregate state 与 CAS；
 - 原子 commit；
@@ -686,9 +686,7 @@ motev2/
 │   ├── container/         Agent/Kernel 容器宿主
 │   │   ├── local/
 │   │   ├── docker/
-│   │   └── cloudflare/
-│   │       ├── python/    Python Worker 与 Durable Object Container
-│   │       └── ts/        TypeScript Worker 与 Durable Object Container
+│   │   └── cloudflare/    TypeScript Worker/DO Container 与对象私有 SQLite
 │   └── embodiment/        物理本体能力（机器人等）
 ├── mote-kernel/           Python：Agent Flow 语义
 ├── mote-runtime/
@@ -697,7 +695,10 @@ motev2/
 │   ├── gateway/
 │   ├── approval/
 │   ├── eventbus/
-│   └── terminal/          Rust 为主，可含 provider adapters
+│   ├── terminal/          Rust 为主，可含 provider adapters
+│   └── execution/
+│       ├── local/         Kernel 经 Invocation 进入的本地执行策略边界
+│       └── remote/        Local 选择远端分支后的执行实现
 ├── mote-infra/            基础设施适配器
 │   ├── invocation/        唯一调用基础设施
 │   │   ├── contract/      窄类型调用契约
@@ -708,16 +709,13 @@ motev2/
 │   │       ├── grpc/
 │   │       └── websocket/
 │   ├── persistence/       部署相关的持久化与可靠执行机制
-│   │   ├── local/         Rust：本地与宿主机原生实现
-│   │   └── cloudflare/    Cloudflare Durable Object SQLite Adapters
-│   │       ├── python/    Python persistence Adapter
-│   │       └── ts/         TypeScript persistence Adapter
+│   │   └── local/         Rust：本地与宿主机原生实现
 └── conformance/           跨语言 observable contracts
 ```
 
 这是目标所有权图。Cloudflare Container 脚手架位于
 `mote-resource/container`，Embodiment provider 按实际消费者逐步落地；
-`mote-infra/invocation` 与 `mote-infra/persistence` 是平行且唯一的调用/存储基础设施 owner，对应 CI 必须保持独立。Invocation 的 local/RPC 实现按实际协议消费者逐步落地。空目录或单纯重命名不算完成分层。
+`mote-infra/invocation` 与 `mote-infra/persistence` 继续负责通用调用/存储机制，Cloudflare 专属 Adapter 因 `ctx.storage` 只能在 DO 内取得而物理合并到 `mote-resource/container/cloudflare`。Invocation 的 local/RPC 实现按实际协议消费者逐步落地。空目录或单纯重命名不算完成分层。
 
 ## 15. Persistence 的并行开发顺序
 

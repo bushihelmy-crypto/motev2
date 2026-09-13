@@ -1,7 +1,7 @@
 import pytest
 
 from mote_kernel.execution import Graph
-from mote_kernel.execution.commit import GraphTransition
+from mote_kernel.execution.commit import GraphCommitError, GraphTransition
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.errors import GraphValueUnavailableError
 from mote_kernel.execution.family_driver import admit_continued_root, fresh_root, project_graph_result
@@ -15,10 +15,11 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
+from mote_kernel.execution.graph_result import _CompiledFamilyIdentity
 from mote_kernel.execution.identity import root_scope_run
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import make_node_invoker
-from mote_kernel.execution.run_context import ScopedFrameIndex, _CompiledFamilyIdentity
+from mote_kernel.execution.run_context import ScopedFrameIndex
 from mote_kernel.state.graph_state import (
     ActivationReference,
     AdvanceGraphFrontier,
@@ -120,6 +121,7 @@ async def run_loop(
             evidence_reader,
             disposition,
             recovered=False,
+            commit=commit,
         )
     finally:
         await root.release()
@@ -296,8 +298,10 @@ async def test_recovery_requires_the_exact_loop_publication_after_a_lost_repeat_
         lost,
     )
     try:
-        with pytest.raises(RuntimeError, match="acknowledgement was lost"):
+        with pytest.raises(GraphCommitError) as caught:
             await root.drive_quantum()
+        assert isinstance(caught.value.cause, RuntimeError)
+        assert str(caught.value.cause) == "advance acknowledgement was lost"
         assert lost.candidate is not None
         candidate = lost.candidate
         transient_frames = root.frames
@@ -344,6 +348,7 @@ async def test_recovery_requires_the_exact_loop_publication_after_a_lost_repeat_
             evidence_reader,
             disposition,
             recovered=False,
+            commit=None,
         )
     finally:
         await continued_root.release()

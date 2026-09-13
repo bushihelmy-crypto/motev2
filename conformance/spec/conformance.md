@@ -21,6 +21,20 @@ The keywords MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, and
 6. A runner MUST report its language, implementation version, supported protocol versions, executed case identities, and pass/fail/skip disposition.
 7. Unsupported REQUIRED protocol versions are failures, not skips. A suite MAY be skipped only when it is not enabled in the manifest.
 
+For a protocol whose vector envelope carries both a candidate and an
+expected outcome, the runner MUST validate accepted candidates against the
+protocol schema before invoking implementation code. A vector whose expected
+outcome is `reject` is an admission test: its candidate is intentionally
+invalid and MUST be passed through the same admission validator so the runner
+can compare the typed rejection. It MUST NOT be silently dropped as a malformed
+case.
+
+Protocol schemas MAY expose named `$defs` for values that are compared in
+different envelope positions. The protocol's normative specification MUST
+identify those definitions and the runner MUST use the identified definition;
+it MUST NOT infer a shape from a language implementation's reflection or type
+names.
+
 ## Reports
 
 Each implementation SHOULD emit a machine-readable report containing:

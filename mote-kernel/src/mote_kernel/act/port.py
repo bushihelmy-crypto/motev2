@@ -9,6 +9,7 @@ wraps a whole graph.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from mote_kernel.act.contract import (
@@ -90,18 +91,38 @@ class ToolExchangeWriter(Protocol):
     async def write(self, request: ToolExchangeWriteRequest, /) -> ToolExchangeWriteResult: ...
 
 
-def require_act_port_contracts(
-    resolve_port: ResolvePort | None,
-    authorize_port: AuthorizePort | None,
-    execute_port: ExecutePort | None,
-    settlement_port: SettlementPort | None,
-    exchange_writer: ToolExchangeWriter | None,
-    /,
-) -> tuple[str, int]:
-    """Validate all required Act capabilities before Graph assembly."""
+AuthorizeCodecBinding = tuple[str, int]
 
-    if not isinstance(resolve_port, ResolvePort) or not callable(resolve_port.resolve):
-        raise ActContractError("ActNode requires a ResolvePort")
+
+@dataclass(frozen=True, slots=True)
+class AuthorizeCodecCapture:
+    """Provenance for a single-read Authorize codec binding.
+
+    This is an Act-internal assembly value and is not part of the package
+    level failover API.
+    """
+
+    port: AuthorizePort
+    binding: AuthorizeCodecBinding
+
+
+def _validate_codec_binding(binding: AuthorizeCodecBinding, /) -> AuthorizeCodecBinding:
+    """Validate an immutable codec identity captured at one assembly edge."""
+
+    if type(binding) is not tuple or len(binding) != 2:
+        raise ActContractError("AuthorizePort codec binding must be a (codec_id, codec_version) tuple")
+    codec_id = binding[0]
+    codec_version = binding[1]
+    if not is_canonical_identity(codec_id):
+        raise ActContractError("AuthorizePort.codec_id must be a canonical string")
+    if type(codec_version) is not int or codec_version < 1:
+        raise ActContractError("AuthorizePort.codec_version must be a positive integer")
+    return codec_id, codec_version
+
+
+def capture_authorize_port_binding(authorize_port: AuthorizePort | None, /) -> AuthorizeCodecCapture:
+    """Capture one Authorize Port contract together with its provenance."""
+
     if authorize_port is None:
         raise ActContractError("ActNode requires an AuthorizePort")
     try:
@@ -125,10 +146,74 @@ def require_act_port_contracts(
         )
     ):
         raise ActContractError("ActNode requires an AuthorizePort")
-    if not is_canonical_identity(codec_id):
-        raise ActContractError("AuthorizePort.codec_id must be a canonical string")
-    if type(codec_version) is not int or codec_version < 1:
-        raise ActContractError("AuthorizePort.codec_version must be a positive integer")
+    return AuthorizeCodecCapture(authorize_port, _validate_codec_binding((codec_id, codec_version)))
+
+
+def capture_authorize_port_contract(authorize_port: AuthorizePort | None, /) -> AuthorizeCodecBinding:
+    """Admit one Authorize Port and read its synchronous codec metadata once."""
+
+    return capture_authorize_port_binding(authorize_port).binding
+
+
+def _validate_authorize_methods(authorize_port: AuthorizePort | None, /) -> None:
+    """Validate callable methods without touching synchronous codec properties."""
+
+    if authorize_port is None:
+        raise ActContractError("ActNode requires an AuthorizePort")
+    try:
+        operations = (
+            authorize_port.request_authorization,
+            authorize_port.encode_interrupt,
+            authorize_port.build_resume_input,
+            authorize_port.encode_graph_input,
+            authorize_port.decode_graph_input,
+        )
+    except AttributeError as error:
+        raise ActContractError("ActNode requires an AuthorizePort") from error
+    if not all(callable(operation) for operation in operations):
+        raise ActContractError("ActNode requires an AuthorizePort")
+
+
+def _require_authorize_codec_binding(
+    authorize_port: AuthorizePort | None,
+    binding: AuthorizeCodecBinding | None,
+    capture: AuthorizeCodecCapture | None,
+    /,
+) -> AuthorizeCodecBinding:
+    if capture is not None:
+        if authorize_port is None or capture.port is not authorize_port:
+            raise ActContractError("AuthorizePort codec binding provenance does not match the Port")
+        captured = _validate_codec_binding(capture.binding)
+        if binding is not None and _validate_codec_binding(binding) != captured:
+            raise ActContractError("AuthorizePort codec binding does not match the captured contract")
+        _validate_authorize_methods(authorize_port)
+        return captured
+    captured = capture_authorize_port_binding(authorize_port)
+    if binding is not None and _validate_codec_binding(binding) != captured.binding:
+        raise ActContractError("AuthorizePort codec binding does not match the Port contract")
+    return captured.binding
+
+
+def require_act_port_contracts(
+    resolve_port: ResolvePort | None,
+    authorize_port: AuthorizePort | None,
+    execute_port: ExecutePort | None,
+    settlement_port: SettlementPort | None,
+    exchange_writer: ToolExchangeWriter | None,
+    /,
+    *,
+    authorize_codec_binding: AuthorizeCodecBinding | None = None,
+    authorize_codec_capture: AuthorizeCodecCapture | None = None,
+) -> tuple[str, int]:
+    """Validate all required Act capabilities before Graph assembly."""
+
+    if not isinstance(resolve_port, ResolvePort) or not callable(resolve_port.resolve):
+        raise ActContractError("ActNode requires a ResolvePort")
+    codec_id, codec_version = _require_authorize_codec_binding(
+        authorize_port,
+        authorize_codec_binding,
+        authorize_codec_capture,
+    )
     if not isinstance(execute_port, ExecutePort) or not callable(execute_port.execute):
         raise ActContractError("ActNode requires an ExecutePort")
     if not isinstance(settlement_port, SettlementPort) or not callable(settlement_port.project):

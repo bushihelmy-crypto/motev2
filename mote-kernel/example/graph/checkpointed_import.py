@@ -1,9 +1,10 @@
-"""带提交检查点的导入流程：进程重启后只凭 authoritative state 继续。
+"""进程内提交与控制态恢复示例，不是持久化恢复示例。
 
-``StateStore`` is intentionally tiny and in-memory so the example stays
-runnable without infrastructure.  A production adapter would atomically
-write ``transition.candidate_state`` to its durable store and return that exact
-candidate before the graph advances.
+``StateStore`` records transitions only in memory. Rebuilding the Graph below
+retains that memory and explicitly supplies the complete approval resume
+input. It does not demonstrate process restart, stored business frames, or a
+durable checkpoint read. Production recovery requires the complete atomic
+state/value contract and the Agent wiring described in the persistence plan.
 """
 
 import asyncio
@@ -33,7 +34,7 @@ def _empty_transitions() -> list[Graph.Transition[ImportJob]]:
 
 @dataclass(slots=True)
 class StateStore:
-    """A caller-owned commit adapter standing in for a durable state store."""
+    """A caller-owned in-memory transition recorder, not a persistence adapter."""
 
     state: Graph.State | None = None
     transitions: list[Graph.Transition[ImportJob]] = field(default_factory=_empty_transitions)
@@ -71,7 +72,7 @@ def decode_import_job(payload: bytes) -> Graph.Values[ImportJob]:
 
 
 async def parse_source(values: Graph.Values[ImportJob]) -> Graph.Values[ImportJob]:
-    """Parse the source and persist the parsed checkpoint through the commit port."""
+    """Publish the parsed job for the next acknowledged graph transition."""
 
     return Graph.values(job=replace(values["job"], status=ImportStatus.PARSED))
 
@@ -92,7 +93,7 @@ async def load_records(values: Graph.Values[ImportJob]) -> Graph.Values[ImportJo
 
 
 def build_graph() -> Graph[ImportJob]:
-    """Build a fresh graph definition for the initial run or a restarted worker."""
+    """Build a fresh graph object for initial execution or control-only recovery."""
 
     graph = Graph[ImportJob]("example.checkpointed-import")
     graph.set_resume_codec("import-job", 1, encode_import_job, decode_import_job)
@@ -136,7 +137,6 @@ async def main() -> None:
         print("提交检查点缺失，无法安全恢复。")
         return
 
-    # 模拟 worker 重启: 恢复时重新装配 graph, 只读取 store 中的 state.
     approved = ImportJob(source, True, ImportStatus.PARSED)
     recovered_graph = build_graph()
     completed = await recovered_graph.run(

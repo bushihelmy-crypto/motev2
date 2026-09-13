@@ -11,6 +11,7 @@ from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import ExecutableTask
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
 from mote_kernel.execution.executor import GraphExecutor
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
@@ -21,7 +22,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.limits import ExecutionLimits
@@ -63,6 +63,7 @@ def node(
     operation: NodeCallable[str],
     *,
     resources: tuple[ResourceId, ...] = (),
+    exported_routes: frozenset[GraphRouteId] = frozenset(),
 ) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
@@ -70,6 +71,7 @@ def node(
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
         resources,
+        exported_routes,
     )
 
 
@@ -112,7 +114,7 @@ def interrupt_graph(
             edges=(),
             entries=(),
             outputs=normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(
+            resume_input=FrameCodec(
                 GraphResumeInputCodecId("session.v1"),
                 1,
                 codec.encode,
@@ -833,8 +835,8 @@ async def test_invalid_routing_completion_drains_a_typed_sibling() -> None:
 
 
 async def test_invalid_queued_routing_completion_becomes_an_ordinary_error() -> None:
-    async def valid(values: Graph.Values[str]) -> Graph.Values[str]:
-        return values
+    async def valid(values: Graph.Values[str]) -> Graph.SuccessOutcome[str]:
+        return Graph.success(values, route="go")
 
     async def invalid(values: Graph.Values[str]) -> Graph.Values[str]:
         return values
@@ -844,8 +846,11 @@ async def test_invalid_queued_routing_completion_becomes_an_ordinary_error() -> 
             definition_id=GraphDefinitionId("session.queued-invalid-route"),
             version=GraphDefinitionVersion(1),
             nodes=(node("a", valid), node("b", invalid)),
-            edges=(ConditionalEdge(GraphNodeId("b"), GraphRouteId("go"), END),),
-            entries=(),
+            edges=(
+                ConditionalEdge(GraphNodeId("a"), GraphRouteId("go"), END),
+                ConditionalEdge(GraphNodeId("b"), GraphRouteId("go"), END),
+            ),
+            entries=(GraphNodeId("a"), GraphNodeId("b")),
             outputs=normalize_graph_output_declarations({}),
         )
     ).compile()

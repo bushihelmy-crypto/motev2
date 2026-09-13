@@ -12,6 +12,9 @@ publish = false
 include = [
     "src/**",
     "tests/**",
+    "docs/**",
+    "quality/**",
+    "scripts/**",
     "AGENTS.md",
     "CHANGELOG.md",
     "Cargo.lock",
@@ -25,6 +28,9 @@ include = [
     "third_party_licenses/**",
 ]
 
+[features]
+default = []
+
 [lib]
 name = "mote_infra_persistence_local"
 path = "src/lib.rs"
@@ -32,3 +38,12 @@ path = "src/lib.rs"
 [lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = "warn"
+correctness = "deny"
+suspicious = "deny"
+
+[package.metadata.docs.rs]
+all-features = true

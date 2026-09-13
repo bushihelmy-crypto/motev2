@@ -1,6 +1,8 @@
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TypeVar
 
+from mote_kernel.config import Config, ConfigSnapshot, ConfigSnapshotKey
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.graph.compiler import GraphCompiler
@@ -16,6 +18,7 @@ from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import NodeOutputFrame, _frame_value, _make_node_output_frame
 from mote_kernel.execution.node_adapter import make_node_invoker
 from mote_kernel.execution.result import TaskSuccess
+from mote_kernel.loop.config import ReActRuntimeConfig
 from mote_kernel.state.graph_state import (
     ActivationReference,
     FailedGraphNode,
@@ -35,6 +38,7 @@ from mote_kernel.state.graph_state import (
     GraphJoinOccurrenceIdentity,
     GraphJoinProgress,
     GraphNodeId,
+    GraphPublicationSettlement,
     GraphRouteId,
     GraphRunId,
     GraphRunState,
@@ -46,6 +50,19 @@ from mote_kernel.state.graph_state import (
 )
 
 ValueT = TypeVar("ValueT")
+
+
+def activation_config(revision: int = 1) -> Config:
+    """Build a complete, domain-neutral Config for execution boundary tests."""
+
+    key = ConfigSnapshotKey(
+        GraphDefinitionId(f"test.config.{revision}"),
+        GraphDefinitionVersion(1),
+        revision,
+    )
+    snapshot = ConfigSnapshot.capture(key, f'{{"revision":{revision}}}'.encode())
+    projection = ReActRuntimeConfig(key, key.definition_id, key.definition_version)
+    return Config(snapshot, projection, projection, projection, projection, (projection,))
 
 
 async def identity(values: Graph.Values[str]) -> Graph.Values[str]:
@@ -67,12 +84,18 @@ def task_success(task: GraphTask, value: ValueT, route: str | None = None) -> Ta
     return TaskSuccess(task, node_output(value), route)
 
 
-def callable_node(node_id: str) -> CallableNodeDefinition[str]:
+def callable_node(
+    node_id: str,
+    *,
+    exported_routes: frozenset[GraphRouteId] = frozenset(),
+) -> CallableNodeDefinition[str]:
     return CallableNodeDefinition(
         GraphNodeId(node_id),
         make_node_invoker(identity),
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
         normalize_output_declarations({"value": str}),
+        (),
+        exported_routes,
     )
 
 
@@ -80,6 +103,7 @@ def _compile(
     node_ids: tuple[str, ...],
     edges: tuple[Edge, ...],
     entries: tuple[str, ...],
+    exported_routes: Mapping[str, frozenset[GraphRouteId]],
 ) -> CompiledGraph[str]:
     incoming = {edge.target for edge in edges if edge.target != Graph.END}
     explicit_entries = tuple(GraphNodeId(node_id) for node_id in entries if GraphNodeId(node_id) in incoming)
@@ -87,7 +111,10 @@ def _compile(
         GraphDefinition(
             definition_id=GraphDefinitionId("test.graph"),
             version=GraphDefinitionVersion(1),
-            nodes=tuple(callable_node(node_id) for node_id in node_ids),
+            nodes=tuple(
+                callable_node(node_id, exported_routes=exported_routes.get(node_id, frozenset()))
+                for node_id in node_ids
+            ),
             edges=edges,
             entries=explicit_entries,
             outputs=normalize_graph_output_declarations({}),
@@ -100,15 +127,16 @@ def compiled_graph(
     entries: tuple[str, ...] = ("a",),
     edges: tuple[Edge, ...] = (),
 ) -> CompiledGraph[str]:
-    return _compile(node_ids, edges, entries)
+    return _compile(node_ids, edges, entries, {})
 
 
 def topology(
     *node_ids: str,
     edges: tuple[Edge, ...] = (),
     entries: tuple[str, ...] = ("a",),
+    exported_routes: Mapping[str, frozenset[GraphRouteId]] | None = None,
 ) -> CompiledGraph[str]:
-    return _compile(node_ids, edges, entries)
+    return _compile(node_ids, edges, entries, {} if exported_routes is None else exported_routes)
 
 
 def direct(source: str, target: str) -> DirectEdge:
@@ -156,6 +184,19 @@ def join_progress(
     )
 
 
+def publication_settlements(
+    references: tuple[ActivationReference, ...],
+    *,
+    first_revision: int = 1,
+    execution: GraphExecutionToken | None = None,
+) -> tuple[GraphPublicationSettlement, ...]:
+    token = execution or GraphExecutionToken(1, GraphExecutionAttemptId("test-settlement"))
+    return tuple(
+        GraphPublicationSettlement(reference, first_revision + offset, token)
+        for offset, reference in enumerate(sorted(references, key=ActivationReference.canonical_key))
+    )
+
+
 def running_state(
     *,
     superstep: int = 0,
@@ -165,26 +206,37 @@ def running_state(
     definition_id: str = "test.graph",
     version: int = 1,
     join_progress: tuple[GraphJoinProgress, ...] = (),
+    frontier_route: str | None = None,
 ) -> GraphRunState:
     canonical_run_id = GraphRunId(run_id)
+    route = None if frontier_route is None else GraphRouteId(frontier_route)
 
-    settled_activations = tuple(
+    settled_references = tuple(
         sorted(
             {reference for progress in join_progress for reference in progress.arrived}
             | {
-                ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, GraphNodeId(node_id)))
+                ActivationReference(
+                    GraphActivationIdentity(canonical_run_id, superstep - 1, GraphNodeId(node_id)),
+                    route,
+                )
                 for node_id in frontier
                 if superstep > 0
             },
             key=ActivationReference.canonical_key,
         )
     )
+    settlements = publication_settlements(settled_references)
 
     def cause(node_id: GraphNodeId) -> GraphActivationCause:
         if superstep == 0:
             return StartActivationCause()
         return RoutedActivationCause(
-            (ActivationReference(GraphActivationIdentity(canonical_run_id, superstep - 1, node_id)),)
+            (
+                ActivationReference(
+                    GraphActivationIdentity(canonical_run_id, superstep - 1, node_id),
+                    route,
+                ),
+            )
         )
 
     return GraphRunState(
@@ -204,8 +256,9 @@ def running_state(
             )
         ),
         join_progress=join_progress,
-        settled_activations=settled_activations,
-        revision=revision,
+        settled_publications=settlements,
+        execution_sequence=1 if settlements else 0,
+        revision=max(revision, len(settlements)),
     )
 
 

@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["typing-extensions>=4.12"]
 
 [project.optional-dependencies]
 dev = [
@@ -171,55 +171,154 @@ quote-style = "double"
 # edges keep compilation and node adaptation in their existing narrow owner
 # modules.  They are retained as reviewed ownership cost while every measured
 # reduction below is ratcheted immediately.
+# The 2026-09-07 successor review then made the route-independent control
+# successor relation a single compiler rule shared by topology proof and
+# compilation.  Route-sensitive event expansion and Join augmentation remain
+# separate because they have different proof boundaries; this removes their
+# duplicated static successor derivation without introducing a second topology
+# model.
+# The follow-up call-chain review keeps Join/end declarations immutable once
+# parsed, evaluates reachability before Join augmentation, and makes the
+# compiled input-binding coordinate (including predecessor provenance) one
+# owner shared by availability and materialization.  Single-use routing and
+# override forwarding layers were removed; frame lookup and error boundaries
+# remain typed and local to their existing owners.
+# This pass keeps the compiler's node/input/control phases explicit (each phase
+# has one typed owner and preserves validation order), while lowering edge
+# normalization to one endpoint path.  Joint-path analysis now reuses the
+# already-expanded successor relation instead of rebuilding it.  Recovery's
+# historical Join index likewise keys each source occurrence once; these are
+# structural ownership/performance changes, not threshold-only helper splits.
+# Think model selection is now one explicit Router node because the external
+# Router Runtime call needs its own durable recovery, cancellation, Hook, and
+# audit boundary before inference.  Its required typed Port replaces the static
+# assembly-time model binding; RouterStep carries the selected immutable model
+# through the existing Graph snapshot without adding another runner or state
+# owner.  The request, step, node-input, Port contract/adapter, and callable are
+# distinct boundary owners, so their measured structural cost is retained.
+# Port declaration normalization now has one shared canonical-name/mapping
+# owner; each public normalizer keeps its own value-domain admission and
+# exception boundary.  The small owner cost is retained because it removes
+# three repeated declaration loops and one normalized near-clone shape.
+# Contract-edge exception constructors use their fixed ValueError/Exception
+# owners directly; Hook tuple admission is a validation-only operation, so it
+# carries the existing CommandT element relation without a pseudo-narrowed
+# return.  The four resulting annotation nodes are retained as the explicit
+# typed boundary cost.
+# The 2026-09-09 full-kernel review then checked the current branch shape across
+# Config, Hook, Act, Think, Observe, Loop, and Failover.  The older checked-in
+# ceiling predated those already-accepted typed projections and boundary tests;
+# this pass removes duplicate Port-set/decorator paths and activation-time
+# normalization while preserving each domain's error boundary.  The values
+# below are the exact post-review measurement (not a blanket allowance): future
+# reductions must lower them immediately, and any growth still requires the
+# same owner/call-chain review.
+# The 2026-09-10 G1/G9 closure keeps one invocation-local RoutingFacts
+# evaluation and projects activation Config only from the cause/source frames
+# already owned by the execution index.  Join declaration/index validation,
+# resume materialization, and empty nested-output metadata therefore gain
+# explicit boundary checks without a second state/config owner or execution
+# path.  The values below are the exact measured post-closure shape; they are
+# ratcheted after the call-chain review rather than used as a blanket waiver.
+# The 2026-09-11 P2 persistence review keeps GraphRunState as the single state
+# owner while adding exact publication birth evidence, backend-neutral atomic
+# commit records, and Agent-only authority/recovery wiring. The added decision
+# and admission nodes are required external-boundary proofs, not parallel
+# execution paths or forwarding abstractions. The deepest path grows through
+# Agent -> durable commit -> reducer confirmation while its total cognitive
+# cost decreases; zero-debt health and peak function complexity remain closed.
+# The 2026-09-11 AgentSession boundary adds one explicit caller-owned snapshot,
+# one codec-owned durable envelope, and their atomic Graph commit/checkpoint
+# fields. The duplicate admission branches are deliberate: runtime session
+# values and durable bytes have different exception and Config-cursor owners.
+# The 2026-09-11 follow-up review also removes the unreachable continuation
+# Session guard and keeps failure/abort successor propagation on the existing
+# commit path. The nested-child recovery closure then keeps a newer child
+# Session valid while its parent waits, binds checkpoint admission to any
+# confirmed family scope, and adds the deterministic recovery regression. The
+# values below are the exact post-review measurement, not spare budget for
+# unrelated growth.
+# The 2026-09-12 family-owner closure removes per-scope Session mirrors and
+# serializes Session selection, durable confirmation/reconcile, and owner
+# advancement behind one family lock. Its two transition factories and owner
+# type are required by that call chain. The final explicit-successor and
+# owner-Config provenance boundaries add one typed outcome edge and one
+# projection edge; the values below are the exact measured shape after those
+# boundaries, not spare budget.
+# The 2026-09-12 terminal-route review keeps completion-route declaration and
+# terminal-frontier coexistence proof in the compiler, while routing and
+# recovery consume the one lowered `route_options` map. Successful frontier
+# discovery is also the sole producer of `completion_routes`; there is no
+# parallel terminal-event scan, fallback route, or second execution path. The
+# four added ambiguous-dispatch hits are statically typed local-dict iteration,
+# and the one added linear-chain hit is a substantive frontier transition
+# phase. Rewriting either for the metric would obscure the proof. Peak function
+# complexity and every zero-debt-health ceiling remain closed, while all
+# measured structural reductions are ratcheted here immediately.
+# The 2026-09-13 P2 compiler proof replaces Cartesian frontier enumeration and
+# node-level route-requirement merging with one compiler-owned symbolic BDD
+# relation.  The relation preserves branch correlation and activation
+# occurrences while keeping independent choices factored; explicit iterative
+# BDD traversals also remove Python recursion depth from the proof algorithm.
+# The resulting structural growth is the real cost of this single proof owner,
+# not a metric-driven helper split.  These values are the exact reviewed
+# measurement; peak function complexity and zero-debt health remain closed.
+# The 2026-09-13 distributed-completion boundary binds a durable completed
+# state to its terminal settlement ledger and binds each persisted publication
+# to the same route-bearing settlement.  This is one state owner and one
+# durable evidence path; it does not add an authenticity/hostile-network
+# layer, a second execution path, or a commitment domain version.  The private
+# settlement lookup and completed-state proof are substantive provenance
+# checks, and their measured shape is ratcheted here after review.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 955
-type_definitions = 601
-dataclass_types = 380
-dataclass_fields = 957
-decision_points = 2893
-logical_clone_pairs = 39
-statement_clone_pairs = 44
-near_clone_pairs = 30
-record_shape_clone_pairs = 36
-thin_single_use_helpers = 1
-single_use_private_dataclasses = 22
+top_level_definitions = 1168
+type_definitions = 734
+dataclass_types = 457
+dataclass_fields = 1184
+decision_points = 3986
+logical_clone_pairs = 66
+statement_clone_pairs = 124
+near_clone_pairs = 65
+record_shape_clone_pairs = 42
+thin_single_use_helpers = 0
+single_use_private_dataclasses = 23
 test_only_private_definitions = 0
-function_definitions = 845
-method_definitions = 475
-nested_function_definitions = 18
-semantic_nodes = 56967
-cognitive_complexity = 3724
-await_points = 148
-exception_handlers = 111
-attribute_writes = 101
+function_definitions = 1161
+method_definitions = 712
+nested_function_definitions = 17
+semantic_nodes = 80764
+cognitive_complexity = 5117
+await_points = 167
+exception_handlers = 249
+attribute_writes = 136
 task_creations = 16
-max_cyclomatic_complexity = 77
-max_cognitive_complexity = 119
+max_cyclomatic_complexity = 49
+max_cognitive_complexity = 60
 max_nesting_depth = 6
-internal_call_edges = 1180
+internal_call_edges = 1658
 recursive_call_components = 5
-max_call_fan_out = 22
+max_call_fan_out = 24
 max_call_chain_depth = 17
-max_call_chain_cognitive = 325
-cross_module_call_edges = 1157
-cross_module_call_pairs = 334
-max_runtime_module_fan_out = 25
-internal_import_edges = 507
+max_call_chain_cognitive = 324
+cross_module_call_edges = 1565
+cross_module_call_pairs = 452
+max_runtime_module_fan_out = 30
+internal_import_edges = 733
 import_cycle_components = 0
-max_module_fan_out = 26
-max_module_dependency_depth = 30
-ambiguous_internal_dispatches = 62
-transparent_private_definitions = 31
+max_module_fan_out = 31
+max_module_dependency_depth = 33
+ambiguous_internal_dispatches = 94
+transparent_private_definitions = 38
 thin_single_use_methods = 4
-low_usage_private_definitions = 201
-linear_private_call_chain_links = 37
-production_unreferenced_definitions = 9
-low_cohesion_classes = 4
+low_usage_private_definitions = 239
+linear_private_call_chain_links = 40
+production_unreferenced_definitions = 13
+low_cohesion_classes = 9
 max_methods_per_class = 33
-max_fields_per_class = 38
+max_fields_per_class = 39
 max_class_components = 18
-complexity_hotspots = 109
-stateful_async_hotspots = 10
+complexity_hotspots = 147
+stateful_async_hotspots = 11
 unused_private_definitions = 0
 unread_private_fields = 0
 unconsumed_internal_async_calls = 0

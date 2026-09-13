@@ -110,7 +110,7 @@ inputs={
 - cause 是 `RoutedActivationCause`；
 - cause 不是 Join，并且只含一个 `ActivationReference`；
 - reference 与当前 run 相同，且其 superstep 精确等于 target superstep 减一；
-- reference 已存在于 `GraphRunState.settled_activations`；
+- reference 已存在于 `GraphRunState.settled_publications`；
 - reference 的 node 是 compiler 列出的合法 source。
 
 满足后，运行时按以下 exact coordinate 读取：

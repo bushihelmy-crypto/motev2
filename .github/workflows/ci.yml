@@ -30,13 +30,6 @@ jobs:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: mote-kernel/pyproject.toml
-      - uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.12.3"
-          enable-cache: true
-          cache-dependency-glob: |
-            mote-infra/persistence/cloudflare/python/uv.lock
-            mote-resource/container/cloudflare/python/uv.lock
       - uses: pnpm/action-setup@v4
         with:
           version: 10.30.3
@@ -44,19 +37,11 @@ jobs:
         with:
           node-version: "24"
           cache: pnpm
-          cache-dependency-path: |
-            mote-infra/persistence/cloudflare/ts/pnpm-lock.yaml
-            mote-resource/container/cloudflare/ts/pnpm-lock.yaml
+          cache-dependency-path: mote-resource/container/cloudflare/pnpm-lock.yaml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[dev]'
-      - run: uv sync --locked
-        working-directory: mote-infra/persistence/cloudflare/python
-      - run: uv sync --locked
-        working-directory: mote-resource/container/cloudflare/python
       - run: pnpm install --frozen-lockfile
-        working-directory: mote-infra/persistence/cloudflare/ts
-      - run: pnpm install --frozen-lockfile
-        working-directory: mote-resource/container/cloudflare/ts
+        working-directory: mote-resource/container/cloudflare
       - run: pre-commit run --all-files
         working-directory: .
       - run: python -m ruff check src tests
@@ -121,66 +106,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo +stable test --locked --all-targets --all-features
 
-  persistence-cloudflare-python-quality:
+  container-cloudflare-quality:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: mote-infra/persistence/cloudflare/python
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.12.3"
-          enable-cache: true
-          cache-dependency-glob: mote-infra/persistence/cloudflare/python/uv.lock
-      - run: uv sync --locked
-      - run: make check
-
-  persistence-cloudflare-ts-quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: mote-infra/persistence/cloudflare/ts
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          package_json_file: mote-infra/persistence/cloudflare/ts/package.json
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-          cache: pnpm
-          cache-dependency-path: mote-infra/persistence/cloudflare/ts/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
-
-  container-cloudflare-ts-quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: mote-resource/container/cloudflare/ts
+        working-directory: mote-resource/container/cloudflare
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: mote-resource/container/cloudflare/ts/package.json
+          package_json_file: mote-resource/container/cloudflare/package.json
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: pnpm
-          cache-dependency-path: mote-resource/container/cloudflare/ts/pnpm-lock.yaml
+          cache-dependency-path: mote-resource/container/cloudflare/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check:ci
 
-  container-cloudflare-ts-node-tests:
+  container-cloudflare-node-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -189,48 +136,18 @@ jobs:
         node-version: ["22.19", "24", "26"]
     defaults:
       run:
-        working-directory: mote-resource/container/cloudflare/ts
+        working-directory: mote-resource/container/cloudflare
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          package_json_file: mote-resource/container/cloudflare/ts/package.json
+          package_json_file: mote-resource/container/cloudflare/package.json
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
-          cache-dependency-path: mote-resource/container/cloudflare/ts/pnpm-lock.yaml
+          cache-dependency-path: mote-resource/container/cloudflare/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test
-
-  container-cloudflare-python-quality:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: mote-resource/container/cloudflare/python
-    env:
-      WRANGLER_SEND_METRICS: "false"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@v7
-        with:
-          version: "0.12.3"
-          enable-cache: true
-          cache-dependency-glob: mote-resource/container/cloudflare/python/uv.lock
-      - uses: pnpm/action-setup@v4
-        with:
-          package_json_file: mote-resource/container/cloudflare/python/package.json
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-          cache: pnpm
-          cache-dependency-path: mote-resource/container/cloudflare/python/pnpm-lock.yaml
-      - run: uv sync --locked
-      - run: pnpm install --frozen-lockfile
-      - run: make check

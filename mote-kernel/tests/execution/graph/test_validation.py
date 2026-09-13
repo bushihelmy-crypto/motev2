@@ -16,13 +16,13 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
     UnreachableNodeError,
 )
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
 from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, Edge, JoinEdge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations, normalize_input_bindings
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
     GraphDefinitionId,
@@ -48,7 +48,7 @@ def definition(
     nodes: tuple[CallableNodeDefinition[str], ...] = (),
     edges: tuple[Edge, ...] = (),
     entries: tuple[GraphNodeId, ...] = (),
-    resume_input: ResumeInputBinding[str] | None = None,
+    resume_input: FrameCodec[str] | None = None,
 ) -> GraphDefinition[str]:
     return GraphDefinition(
         GraphDefinitionId(definition_id),
@@ -270,6 +270,6 @@ def test_resume_input_codec_version_must_be_positive() -> None:
                 "graph",
                 1,
                 nodes=(node("a"),),
-                resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 0, codec.encode, codec.decode),
+                resume_input=FrameCodec(GraphResumeInputCodecId("input"), 0, codec.encode, codec.decode),
             )
         ).compile()

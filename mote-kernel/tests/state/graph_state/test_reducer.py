@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from typing import cast
 
 import pytest
@@ -12,6 +12,7 @@ from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphEvidenceCommitment,
     GraphExecutionAttemptId,
     GraphFailure,
     GraphFrontierActivation,
@@ -25,6 +26,7 @@ from mote_kernel.state.graph_state import (
     StartActivationCause,
     StartGraphRun,
     SucceededGraphNodeOutcome,
+    admit_graph_run_confirmation,
     reduce_graph_run,
 )
 
@@ -121,3 +123,21 @@ def test_terminal_failure_cannot_be_overwritten_by_abort() -> None:
 def test_unknown_runtime_command_fails_closed() -> None:
     with pytest.raises(GraphStateTransitionError):
         reduce_graph_run(start(), cast(GraphRunCommand, object()))
+
+
+def test_confirmation_evidence_cannot_hide_an_unrelated_state_change() -> None:
+    command = StartGraphRun(
+        GraphRunId("run"),
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        (GraphFrontierActivation(A, StartActivationCause()),),
+    )
+    successor = reduce_graph_run(None, command)
+    confirmed = replace(
+        successor,
+        graph_input_evidence=GraphEvidenceCommitment(b"e" * 32),
+        config_digest="unexpected-config",
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="exact reducer successor"):
+        admit_graph_run_confirmation(None, command, confirmed)

@@ -1,0 +1,9 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.unknown_version",
+  "description": "A request schema version outside the released profile is rejected deterministically.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "execution_media"},
+  "input": {"kind": "media", "schema_version": 2, "operation_id": "reject-version-1", "model_id": "model.image", "operation": "image_generation", "modality": "image", "mode": "unary", "input": {"kind": "image_generation", "prompt": "hello"}, "features": []},
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

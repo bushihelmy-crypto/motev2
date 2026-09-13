@@ -14,6 +14,7 @@ from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
 from mote_kernel.hooks.contract import HookGraphValue, HookResult
 from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.think.identity import ThinkNodeId
 
 PayloadT_contra = TypeVar("PayloadT_contra", contravariant=True)
 SystemPromptT_co = TypeVar("SystemPromptT_co", covariant=True)
@@ -23,6 +24,7 @@ ContextRequestT_contra = TypeVar("ContextRequestT_contra", contravariant=True)
 ContextFrameT_co = TypeVar("ContextFrameT_co", covariant=True)
 CompactRequestT_contra = TypeVar("CompactRequestT_contra", contravariant=True)
 CompactedContextT_co = TypeVar("CompactedContextT_co", covariant=True)
+RouterRequestT_contra = TypeVar("RouterRequestT_contra", contravariant=True)
 InferenceRequestT_contra = TypeVar("InferenceRequestT_contra", contravariant=True)
 InferenceResultT_co = TypeVar("InferenceResultT_co", covariant=True)
 CommandRequestT_contra = TypeVar("CommandRequestT_contra", contravariant=True)
@@ -122,7 +124,7 @@ class CompactedContext(HookGraphValue, Generic[CompactedSnapshotT]):
 
 @dataclass(frozen=True, slots=True)
 class ModelBinding(HookGraphValue):
-    """An immutable model identity captured at Think assembly time."""
+    """An immutable model identity selected by the Router stage."""
 
     provider_id: str
     model_id: str
@@ -187,6 +189,21 @@ class CompactRequest(
 
 
 @dataclass(frozen=True, slots=True)
+class RouterRequest(
+    HookGraphValue,
+    Generic[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
+):
+    """The model-facing facts sent to :class:`RouterPort`."""
+
+    prompt: PromptFrame[SystemPromptT, PlaceholderT, UserPromptT]
+    compacted: CompactedContext[CompactedSnapshotT]
+
+    def __post_init__(self) -> None:
+        _require_exact(self.prompt, PromptFrame, "router request prompt")
+        _require_exact(self.compacted, CompactedContext, "router request compacted context")
+
+
+@dataclass(frozen=True, slots=True)
 class InferenceRequest(
     HookGraphValue,
     Generic[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
@@ -231,98 +248,6 @@ class ContextNodeInput(
     def __post_init__(self) -> None:
         _require_exact(self.request, ThinkRequest, "context node request")
         _require_exact(self.hook_result, HookResult, "context node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class CompactNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        ContextSnapshotT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Compact node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            ContextStep[SystemPromptT, PlaceholderT, UserPromptT, ContextSnapshotT],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "compact node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class InferenceNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        ContextSnapshotT,
-        CompactedSnapshotT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Inference node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            CompactStep[
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                ContextSnapshotT,
-                CompactedSnapshotT,
-            ],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "inference node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class CommandNodeInput(
-    HookGraphValue,
-    Generic[
-        HookStateT,
-        SystemPromptT,
-        PlaceholderT,
-        UserPromptT,
-        CompactedSnapshotT,
-        ModelOutputT,
-        HookCommandT,
-    ],
-):
-    """Typed materialization input for the Command node."""
-
-    hook_result: HookResult[
-        ThinkFrame[
-            InferenceStep[
-                SystemPromptT,
-                PlaceholderT,
-                UserPromptT,
-                CompactedSnapshotT,
-                ModelOutputT,
-            ],
-            HookStateT,
-        ],
-        HookCommandT,
-    ]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "command node HookResult")
 
 
 class ThinkStep(HookGraphValue):
@@ -377,6 +302,23 @@ class CompactStep(
 
 
 @dataclass(frozen=True, slots=True)
+class RouterStep(
+    ThinkStep,
+    Generic[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
+):
+    """The model binding selected after the Router stage completes."""
+
+    prompt: PromptFrame[SystemPromptT, PlaceholderT, UserPromptT]
+    compacted: CompactedContext[CompactedSnapshotT]
+    model: ModelBinding
+
+    def __post_init__(self) -> None:
+        _require_exact(self.prompt, PromptFrame, "router step prompt")
+        _require_exact(self.compacted, CompactedContext, "router step compacted context")
+        _require_exact(self.model, ModelBinding, "router step model")
+
+
+@dataclass(frozen=True, slots=True)
 class InferenceStep(
     ThinkStep,
     Generic[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT, ModelOutputT],
@@ -385,11 +327,13 @@ class InferenceStep(
 
     prompt: PromptFrame[SystemPromptT, PlaceholderT, UserPromptT]
     compacted: CompactedContext[CompactedSnapshotT]
+    model: ModelBinding
     inference: InferenceResult[ModelOutputT]
 
     def __post_init__(self) -> None:
         _require_exact(self.prompt, PromptFrame, "inference step prompt")
         _require_exact(self.compacted, CompactedContext, "inference step compacted context")
+        _require_exact(self.model, ModelBinding, "inference step model")
         _require_exact(self.inference, InferenceResult, "inference step result")
 
 
@@ -402,12 +346,14 @@ class CommandStep(
 
     prompt: PromptFrame[SystemPromptT, PlaceholderT, UserPromptT]
     compacted: CompactedContext[CompactedSnapshotT]
+    model: ModelBinding
     inference: InferenceResult[ModelOutputT]
     core: ThinkCoreResult[CommandT]
 
     def __post_init__(self) -> None:
         _require_exact(self.prompt, PromptFrame, "command step prompt")
         _require_exact(self.compacted, CompactedContext, "command step compacted context")
+        _require_exact(self.model, ModelBinding, "command step model")
         _require_exact(self.inference, InferenceResult, "command step result")
         _require_exact(self.core, ThinkCoreResult, "command step core result")
 
@@ -418,6 +364,7 @@ _THINK_STEP_VARIANTS: tuple[type[ThinkStep], ...] = (
     PromptStep,
     ContextStep,
     CompactStep,
+    RouterStep,
     InferenceStep,
     CommandStep,
 )
@@ -449,8 +396,8 @@ def admit_prompt_frame(
     return _admit_stage_frame(
         result,
         expected_step=PromptStep,
-        expected_node=GraphNodeId("prompt"),
-        stage="context",
+        expected_node=GraphNodeId(str(ThinkNodeId.PROMPT)),
+        stage=ThinkNodeId.CONTEXT,
         expected_state=state,
     )
 
@@ -467,8 +414,8 @@ def admit_context_frame(
     return _admit_stage_frame(
         result,
         expected_step=ContextStep,
-        expected_node=GraphNodeId("context"),
-        stage="compact",
+        expected_node=GraphNodeId(str(ThinkNodeId.CONTEXT)),
+        stage=ThinkNodeId.COMPACT,
     )
 
 
@@ -490,8 +437,31 @@ def admit_compact_frame(
     return _admit_stage_frame(
         result,
         expected_step=CompactStep,
-        expected_node=GraphNodeId("compact"),
-        stage="inference",
+        expected_node=GraphNodeId(str(ThinkNodeId.COMPACT)),
+        stage=ThinkNodeId.ROUTER,
+    )
+
+
+def admit_router_frame(
+    result: HookResult[
+        ThinkFrame[
+            RouterStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
+            HookStateT,
+        ],
+        HookCommandT,
+    ],
+    /,
+) -> ThinkFrame[
+    RouterStep[SystemPromptT, PlaceholderT, UserPromptT, CompactedSnapshotT],
+    HookStateT,
+]:
+    """Admit the frame returned by the Router Hook activation."""
+
+    return _admit_stage_frame(
+        result,
+        expected_step=RouterStep,
+        expected_node=GraphNodeId(str(ThinkNodeId.ROUTER)),
+        stage=ThinkNodeId.INFERENCE,
     )
 
 
@@ -513,8 +483,8 @@ def admit_inference_frame(
     return _admit_stage_frame(
         result,
         expected_step=InferenceStep,
-        expected_node=GraphNodeId("inference"),
-        stage="command",
+        expected_node=GraphNodeId(str(ThinkNodeId.INFERENCE)),
+        stage=ThinkNodeId.COMMAND,
     )
 
 
@@ -523,7 +493,7 @@ def _admit_stage_frame(
     *,
     expected_step: type[StageT],
     expected_node: GraphNodeId,
-    stage: str,
+    stage: ThinkNodeId,
     expected_state: HookStateT | None = None,
 ) -> ThinkFrame[StageT, HookStateT]:
     """Admit one Hook result at a Think stage boundary.
@@ -536,6 +506,7 @@ def _admit_stage_frame(
     recover a type from a ``Graph.Values`` mapping.
     """
 
+    _require_exact(result, HookResult, f"{stage} node HookResult")
     raw_frame = result.value
     if type(raw_frame) is not ThinkFrame:
         raise ThinkContractError(f"{stage} HookResult must contain a ThinkFrame")
@@ -583,6 +554,13 @@ class CompactPort(Protocol[CompactRequestT_contra, CompactedContextT_co]):
 
 
 @runtime_checkable
+class RouterPort(Protocol[RouterRequestT_contra]):
+    """Select one immutable model binding for the model-facing request."""
+
+    async def route_model(self, request: RouterRequestT_contra, /) -> ModelBinding: ...
+
+
+@runtime_checkable
 class InferencePort(Protocol[InferenceRequestT_contra, InferenceResultT_co]):
     """Invoke the already assembled model request once."""
 
@@ -615,6 +593,9 @@ __all__ = [
     "PromptFrame",
     "PromptPort",
     "PromptStep",
+    "RouterPort",
+    "RouterRequest",
+    "RouterStep",
     "ThinkContractError",
     "ThinkCoreResult",
     "ThinkFrame",

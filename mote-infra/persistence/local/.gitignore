@@ -36,3 +36,4 @@ Thumbs.db
 # Local tooling
 .pre-commit-cache/
 *.log
+*.sock

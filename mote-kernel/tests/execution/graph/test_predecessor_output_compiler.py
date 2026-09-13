@@ -12,6 +12,7 @@ from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEd
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     CompiledPredecessorInput,
+    GraphInputPort,
     GraphInputRef,
     NodeOutputRef,
     PredecessorOutputRef,
@@ -117,7 +118,7 @@ def test_compiler_accepts_an_explicit_initializer_for_a_self_loop() -> None:
     )
 
 
-def test_compiler_rejects_a_predecessor_bound_start_target() -> None:
+def test_compiler_records_a_graph_input_case_for_a_predecessor_bound_start_target() -> None:
     definition = GraphDefinition(
         GraphDefinitionId("predecessor.start"),
         GraphDefinitionVersion(1),
@@ -130,8 +131,68 @@ def test_compiler_rejects_a_predecessor_bound_start_target() -> None:
         normalize_graph_output_declarations({}),
     )
 
-    with pytest.raises(GraphValidationError, match="cannot be activated from START"):
+    compiled = GraphCompiler(definition).compile()
+
+    binding = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0]
+    assert isinstance(binding.source, CompiledPredecessorInput)
+    assert binding.source.start_input == GraphInputPort("value")
+    assert tuple(declaration.name for declaration in compiled.graph_input_descriptor.declarations.entries) == ("value",)
+
+
+def test_compiler_rejects_a_predecessor_input_without_a_routed_control_source() -> None:
+    definition = GraphDefinition(
+        GraphDefinitionId("predecessor.no-source"),
+        GraphDefinitionVersion(1),
+        (
+            node("source", outputs={"value": str}),
+            node("target", inputs={"value": Graph.node_output("value")}),
+        ),
+        (),
+        (),
+        normalize_graph_output_declarations({}),
+    )
+
+    with pytest.raises(GraphValidationError, match="no routed predecessor type source"):
         GraphCompiler(definition).compile()
+
+
+def test_compiler_rejects_a_start_causal_input_with_a_conflicting_graph_input_type() -> None:
+    definition = GraphDefinition(
+        GraphDefinitionId("predecessor.start-conflict"),
+        GraphDefinitionVersion(1),
+        (
+            node("source", outputs={"value": str}),
+            node("target", inputs={"value": Graph.node_output("value")}),
+            node("context", inputs={"value": Graph.graph_input("value", int)}),
+        ),
+        (DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
+        (GraphNodeId("target"),),
+        normalize_graph_output_declarations({}),
+    )
+
+    with pytest.raises(GraphValidationError, match="conflicts with its START causal input"):
+        GraphCompiler(definition).compile()
+
+
+def test_compiler_reuses_an_existing_graph_input_descriptor_for_a_start_causal_input() -> None:
+    definition = GraphDefinition(
+        GraphDefinitionId("predecessor.start-shared"),
+        GraphDefinitionVersion(1),
+        (
+            node("source", outputs={"value": str}),
+            node("target", inputs={"value": Graph.node_output("value")}),
+            node("context", inputs={"value": Graph.graph_input("value", str)}),
+        ),
+        (DirectEdge(GraphNodeId("source"), GraphNodeId("target")),),
+        (GraphNodeId("target"),),
+        normalize_graph_output_declarations({}),
+    )
+
+    compiled = GraphCompiler(definition).compile()
+
+    binding = compiled.transition.materializations[GraphNodeId("target")].bindings.entries[0]
+    descriptor = compiled.graph_input_descriptor.declarations.entries[0].descriptor
+    assert binding.descriptor is descriptor
 
 
 def test_compiler_rejects_a_join_as_an_implicit_predecessor() -> None:

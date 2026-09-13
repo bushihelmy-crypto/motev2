@@ -18,7 +18,6 @@ from mote_kernel.failover.plan import (
     FailoverBindingMode,
     FailoverConfigRevision,
     FailoverConfigSnapshot,
-    FailoverConfigSource,
     FailoverOperationId,
     FailoverPlan,
     FailoverPortId,
@@ -359,18 +358,3 @@ def test_retry_context_carries_only_failover_owned_usage_and_cursors() -> None:
 def test_retry_context_rejects_invalid_values(factory: InvalidFactory) -> None:
     with pytest.raises(FailoverContractError):
         factory()
-
-
-class _Source:
-    def __init__(self, snapshot: FailoverConfigSnapshot[str]) -> None:
-        self._snapshot = snapshot
-
-    def snapshot(self) -> FailoverConfigSnapshot[str]:
-        return self._snapshot
-
-
-def test_config_source_protocol_is_snapshot_only() -> None:
-    snapshot = FailoverConfigSnapshot(FailoverConfigRevision(1), _profile())
-    source: FailoverConfigSource[str] = _Source(snapshot)
-
-    assert source.snapshot() is snapshot

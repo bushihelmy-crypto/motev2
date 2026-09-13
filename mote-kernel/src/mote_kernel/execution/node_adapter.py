@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar, cast
 
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.node import (
     CallableNodeDefinition,
@@ -17,6 +18,7 @@ from mote_kernel.execution.graph.outcome import (
     _GraphFailureOutcome,
     _GraphInterruptOutcome,
     _GraphSuccessOutcome,
+    _success,
 )
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
@@ -39,7 +41,8 @@ from mote_kernel.execution.graph.values import (
     admit_exact,
 )
 from mote_kernel.execution.resource import ResourceId
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.session import AgentSessionActivation
+from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 InputT = TypeVar("InputT")
@@ -63,7 +66,7 @@ class _ValuesNodeInvoker(Generic[GraphValueT]):
         frame: NodeInputFrame[GraphValueT],
         /,
     ) -> _GraphValues[GraphValueT] | GraphOutcome[GraphValueT]:
-        return await self.operation(_public_values(frame))
+        return await self.operation(_public_values(frame, session=frame.session))
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,12 +92,41 @@ class _TypedNodeInvoker(Generic[GraphValueT, InputT, OutputT]):
         result = await self.operation(typed_input)
         if type(result) in (_GraphSuccessOutcome, _GraphFailureOutcome, _GraphInterruptOutcome):
             return cast(GraphOutcome[GraphValueT], result)
+        output_session = None
+        if type(result) is AgentSessionActivation:
+            activation = cast(AgentSessionActivation[OutputT], result)
+            candidate = activation.value
+            output_config = activation.session.config
+            output_session = activation.session
+        elif type(result) is ConfigActivation:
+            activation = cast(ConfigActivation[OutputT], result)
+            candidate = activation.value
+            output_config = activation.activation_config
+        else:
+            candidate = cast(OutputT, result)
+            output_config = None
         admitted = admit_exact(
-            cast(OutputT, result),
+            candidate,
             self.output.descriptor,
             kind=f"typed node output {self.output.name!r}",
         )
-        return cast(_GraphValues[GraphValueT], _make_single_graph_value(self.output.name, admitted))
+        # A ConfigActivation is execution metadata, never the declared domain
+        # output.  Observe can use it to publish a successor Config for the
+        # next activation without putting that Config in a business DTO.
+        if output_config is None:
+            output_config = inputs.activation_config
+        output = cast(
+            _GraphValues[GraphValueT],
+            _make_single_graph_value(
+                self.output.name,
+                admitted,
+                output_config,
+                None if output_session is None else output_session,
+            ),
+        )
+        if output_session is not None:
+            return _success(output, session=output_session)
+        return output
 
 
 def make_node_invoker(operation: NodeCallable[GraphValueT]) -> NodeInvoker[GraphValueT]:
@@ -112,6 +144,7 @@ def make_typed_node_assembly(
     output_name: str,
     output_type: type[OutputT],
     resources: tuple[ResourceId, ...],
+    exported_routes: frozenset[GraphRouteId] = frozenset(),
 ) -> TypedNodeAssembly[GraphValueT, OutputT]:
     """Validate and lower a typed node into the sole callable definition shape."""
 
@@ -148,7 +181,14 @@ def make_typed_node_assembly(
     )
     lowered_inputs = InputBindings(tuple(InputBinding(binding.name, binding.source) for binding in ordered))
     declarations = cast(OutputDeclarations[GraphValueT], OutputDeclarations((output,)))
-    definition = CallableNodeDefinition(node_id, invoker, lowered_inputs, declarations, resources)
+    definition = CallableNodeDefinition(
+        node_id,
+        invoker,
+        lowered_inputs,
+        declarations,
+        resources,
+        exported_routes,
+    )
     return TypedNodeAssembly(definition, NodeOutputRef(node_id, output.name, output.descriptor))
 
 

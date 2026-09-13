@@ -2,7 +2,7 @@ from dataclasses import replace
 from typing import Protocol, cast
 
 import pytest
-from tests.execution.engine.factories import compiled_graph, node_output, running_state, task_success
+from tests.execution.engine.factories import activation_config, compiled_graph, node_output, running_state, task_success
 
 import mote_kernel.execution.commit as commit_module
 from mote_kernel.execution import Graph
@@ -29,10 +29,12 @@ from mote_kernel.execution.run_context import (
     GraphPublicationEvidence,
     PublicationAvailabilityCoordinate,
 )
+from mote_kernel.session import AgentSession, AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     ClaimGraphExecution,
     ContinueGraphRouting,
     FailedGraphNodeOutcome,
+    GraphEvidenceCommitment,
     GraphExecutionAttemptId,
     GraphFailure,
     GraphNodeId,
@@ -74,6 +76,7 @@ class _TransitionConstructor(Protocol):
         candidate_state: GraphRunState,
         writes: commit_module.GraphCommitWriteSet[str],
         _seal: object,
+        agent_session: AgentSessionCarrier | None = None,
     ) -> commit_module.GraphTransition[str]: ...
 
 
@@ -149,6 +152,9 @@ def _forge_transition(
     base: commit_module.GraphTransition[str],
     *,
     writes: commit_module.GraphCommitWriteSet[str],
+    command: GraphRunCommand | None = None,
+    candidate_state: GraphRunState | None = None,
+    agent_session: AgentSessionCarrier | None = None,
     seal: object | None = None,
 ) -> commit_module.GraphTransition[str]:
     transition_seal = _CommitPrivateView.transition_seal(commit_module) if seal is None else seal
@@ -156,9 +162,10 @@ def _forge_transition(
     return constructor(
         scope=base.scope,
         previous_state=base.previous_state,
-        command=base.command,
-        candidate_state=base.candidate_state,
+        command=base.command if command is None else command,
+        candidate_state=base.candidate_state if candidate_state is None else candidate_state,
         writes=writes,
+        agent_session=agent_session,
         _seal=transition_seal,
     )
 
@@ -236,6 +243,39 @@ def test_transition_seal_and_write_set_binding_are_owner_only() -> None:
     )
     with pytest.raises(SnapshotMismatchError, match="bound to the candidate"):
         _forge_transition(base, writes=mismatched)
+
+
+def test_transition_and_prepare_admission_bind_a_valid_agent_session() -> None:
+    base = _start_transition()
+    with pytest.raises(SnapshotMismatchError, match="AgentSession is malformed"):
+        _forge_transition(
+            base,
+            writes=base.writes,
+            agent_session=cast(AgentSessionCarrier, object()),
+        )
+
+    scope_run = root_scope_run(GraphRunId("run"))
+    command = project_start_graph_command(_graph(), scope_run.graph_run_id)
+    with pytest.raises(SnapshotMismatchError, match="candidate Config"):
+        commit_module.prepare_transition(
+            scope_run,
+            None,
+            command,
+            None,
+            graph=_graph(),
+            graph_input=admit_graph_input(_graph(), Graph.values(value="input")),
+            agent_session=AgentSession("hook", "context", activation_config(1)),
+        )
+    with pytest.raises(SnapshotMismatchError, match="AgentSession is malformed"):
+        commit_module.prepare_transition(
+            scope_run,
+            None,
+            command,
+            None,
+            graph=_graph(),
+            graph_input=admit_graph_input(_graph(), Graph.values(value="input")),
+            agent_session=cast(AgentSessionCarrier, object()),
+        )
 
 
 def test_transition_seal_enforces_command_specific_write_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,6 +362,83 @@ def test_transition_seal_enforces_command_specific_write_evidence(monkeypatch: p
     monkeypatch.setattr(commit_module.GraphCommitWriteSet, "publications", original_publications)
     with pytest.raises(SnapshotMismatchError, match="only SettleGraphNode"):
         _forge_transition(claim_base, writes=non_settle_with_settlement)
+
+
+def test_transition_seal_rejects_command_state_and_result_evidence_disagreement() -> None:
+    commitment = GraphEvidenceCommitment(b"i" * 32)
+    start = _start_transition()
+    with pytest.raises(SnapshotMismatchError, match="candidate is not bound"):
+        _forge_transition(
+            start,
+            writes=start.writes,
+            candidate_state=replace(start.candidate_state, graph_input_evidence=commitment),
+        )
+
+    graph, claimed, settle_command, settle_result = _settlement_parts()
+    settlement = commit_module.prepare_transition(
+        root_scope_run(claimed.run_id),
+        claimed,
+        settle_command,
+        settle_result,
+        graph=graph,
+    )
+    failed_command = replace(
+        settle_command,
+        outcome=FailedGraphNodeOutcome(GraphNodeId("a"), GraphFailure("failed")),
+    )
+    with pytest.raises(SnapshotMismatchError, match="successful state outcome"):
+        _forge_transition(
+            settlement,
+            writes=settlement.writes,
+            command=failed_command,
+        )
+    with pytest.raises(SnapshotMismatchError, match="candidate is not bound"):
+        _forge_transition(
+            settlement,
+            writes=settlement.writes,
+            candidate_state=replace(settlement.candidate_state, settled_publications=()),
+        )
+
+
+def test_durable_evidence_binding_is_one_closed_refinement_per_value_transition() -> None:
+    first = GraphEvidenceCommitment(b"a" * 32)
+    second = GraphEvidenceCommitment(b"b" * 32)
+    start = _start_transition()
+    with pytest.raises(SnapshotMismatchError, match="exactly one graph input commitment"):
+        commit_module.bind_transition_evidence(start)
+    with pytest.raises(SnapshotMismatchError, match="exactly one graph input commitment"):
+        commit_module.bind_transition_evidence(start, graph_input=first, publication=second)
+    bound_start = commit_module.bind_transition_evidence(start, graph_input=first)
+    with pytest.raises(SnapshotMismatchError, match="cannot be replaced"):
+        commit_module.bind_transition_evidence(bound_start, graph_input=second)
+
+    graph, claimed, settle_command, settle_result = _settlement_parts()
+    settlement = commit_module.prepare_transition(
+        root_scope_run(claimed.run_id),
+        claimed,
+        settle_command,
+        settle_result,
+        graph=graph,
+    )
+    with pytest.raises(SnapshotMismatchError, match="exactly one publication commitment"):
+        commit_module.bind_transition_evidence(settlement)
+    with pytest.raises(SnapshotMismatchError, match="exactly one publication commitment"):
+        commit_module.bind_transition_evidence(settlement, graph_input=first, publication=second)
+    bound_settlement = commit_module.bind_transition_evidence(settlement, publication=first)
+    with pytest.raises(SnapshotMismatchError, match="cannot be replaced"):
+        commit_module.bind_transition_evidence(bound_settlement, publication=second)
+
+    state = running_state()
+    claim = ClaimGraphExecution(state.revision, GraphExecutionAttemptId("claim"), None)
+    non_value = commit_module.prepare_transition(
+        root_scope_run(state.run_id),
+        state,
+        claim,
+        None,
+        graph=_graph(),
+    )
+    with pytest.raises(SnapshotMismatchError, match="only value-producing transitions"):
+        commit_module.bind_transition_evidence(non_value, graph_input=first)
 
 
 def test_prepare_transition_requires_matching_frame_evidence() -> None:

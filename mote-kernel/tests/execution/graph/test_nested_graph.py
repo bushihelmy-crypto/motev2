@@ -1,9 +1,10 @@
 from dataclasses import replace
 
 import pytest
-from tests.execution.graph.factories import node
+from tests.execution.graph.factories import graph, node
 
 from mote_kernel.execution import Graph
+from mote_kernel.execution.engine.routing import validate_routing_contribution
 from mote_kernel.execution.errors import (
     DuplicateEdgeError,
     DuplicateGraphDefinitionError,
@@ -14,13 +15,21 @@ from mote_kernel.execution.errors import (
     UnknownNodeError,
 )
 from mote_kernel.execution.graph.compiler import GraphCompiler
+from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
-from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge
+from mote_kernel.execution.graph.edge import ConditionalEdge, DirectEdge, JoinEdge
+from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import (
     normalize_graph_output_declarations,
     normalize_input_bindings,
 )
-from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId, GraphRouteId
+from mote_kernel.state.graph_state import (
+    ContinueGraphRouting,
+    GraphDefinitionId,
+    GraphDefinitionVersion,
+    GraphNodeId,
+    GraphRouteId,
+)
 
 
 def nested(node_id: str, graph: GraphDefinition[str]) -> NestedGraphNodeDefinition[str]:
@@ -28,6 +37,14 @@ def nested(node_id: str, graph: GraphDefinition[str]) -> NestedGraphNodeDefiniti
         GraphNodeId(node_id),
         graph,
         normalize_input_bindings({"value": Graph.graph_input("value", str)}),
+    )
+
+
+def nested_without_inputs(node_id: str, graph: GraphDefinition[str]) -> NestedGraphNodeDefinition[str]:
+    return NestedGraphNodeDefinition(
+        GraphNodeId(node_id),
+        graph,
+        normalize_input_bindings({}),
     )
 
 
@@ -346,3 +363,147 @@ def test_indirect_recursive_nested_graph_fails_with_typed_error() -> None:
 
     with pytest.raises(RecursiveGraphDefinitionError):
         GraphCompiler(root).compile()
+
+
+def _route_child(route: str | None) -> GraphDefinition[str]:
+    leaf = replace(node("leaf"), inputs=normalize_input_bindings({}))
+    if route is not None:
+        leaf = replace(leaf, exported_routes=frozenset((GraphRouteId(route),)))
+    return GraphDefinition(
+        GraphDefinitionId("route-child.graph"),
+        GraphDefinitionVersion(1),
+        (leaf,),
+        (DirectEdge(GraphNodeId("leaf"), END),),
+        (),
+        normalize_graph_output_declarations({}),
+    )
+
+
+def _route_parent(
+    child: GraphDefinition[str],
+    edges: tuple[ConditionalEdge | DirectEdge | JoinEdge, ...],
+    *extra_nodes: CallableNodeDefinition[str],
+) -> GraphDefinition[str]:
+    return GraphDefinition(
+        GraphDefinitionId("route-parent.graph"),
+        GraphDefinitionVersion(1),
+        (nested_without_inputs("child", child), *extra_nodes),
+        edges,
+        (),
+        normalize_graph_output_declarations({}),
+    )
+
+
+def _mixed_route_child() -> GraphDefinition[str]:
+    branch = replace(node("branch"), inputs=normalize_input_bindings({}))
+    tail = replace(node("tail"), inputs=normalize_input_bindings({}))
+    return GraphDefinition(
+        GraphDefinitionId("mixed-route-child.graph"),
+        GraphDefinitionVersion(1),
+        (branch, tail),
+        (
+            ConditionalEdge(GraphNodeId("branch"), GraphRouteId("done"), END),
+            ConditionalEdge(GraphNodeId("branch"), GraphRouteId("continue"), GraphNodeId("tail")),
+            DirectEdge(GraphNodeId("tail"), END),
+        ),
+        (GraphNodeId("branch"),),
+        normalize_graph_output_declarations({}),
+    )
+
+
+def test_nested_completion_routes_must_be_covered_by_parent_conditional_edges() -> None:
+    child = _route_child("done")
+    parent = _route_parent(
+        child,
+        (ConditionalEdge(GraphNodeId("child"), GraphRouteId("other"), END),),
+    )
+
+    with pytest.raises(GraphValidationError, match="not declared by its conditional edges"):
+        GraphCompiler(parent).compile()
+
+
+def test_nested_parent_cannot_declare_a_route_the_child_never_exposes() -> None:
+    child = _route_child("done")
+    parent = _route_parent(
+        child,
+        (
+            ConditionalEdge(GraphNodeId("child"), GraphRouteId("done"), END),
+            ConditionalEdge(GraphNodeId("child"), GraphRouteId("other"), END),
+        ),
+    )
+
+    with pytest.raises(GraphValidationError, match="child cannot expose"):
+        GraphCompiler(parent).compile()
+
+
+def test_nested_no_route_completion_cannot_enter_parent_conditional_edges() -> None:
+    child = _route_child(None)
+    parent = _route_parent(
+        child,
+        (ConditionalEdge(GraphNodeId("child"), GraphRouteId("done"), END),),
+    )
+
+    with pytest.raises(GraphValidationError, match="not declared by its conditional edges"):
+        GraphCompiler(parent).compile()
+
+
+def test_terminal_nested_completion_route_is_preserved_without_parent_successor() -> None:
+    compiled = GraphCompiler(_route_parent(_route_child("done"), ())).compile()
+
+    assert compiled.completion_routes == frozenset((GraphRouteId("done"),))
+
+
+def test_nested_none_completion_route_remains_a_valid_parent_continuation() -> None:
+    compiled = GraphCompiler(_route_parent(_mixed_route_child(), ())).compile()
+    child_id = GraphNodeId("child")
+
+    assert compiled.completion_routes == frozenset((None, GraphRouteId("done")))
+    assert compiled.transition.route_options[child_id] == (None, GraphRouteId("done"))
+    validate_routing_contribution(compiled, child_id, ContinueGraphRouting())
+
+
+def test_nested_completion_route_cannot_skip_a_parent_successor() -> None:
+    parent = _route_parent(
+        _route_child("done"),
+        (
+            DirectEdge(GraphNodeId("child"), GraphNodeId("target")),
+            DirectEdge(GraphNodeId("target"), END),
+        ),
+        node("target"),
+    )
+
+    with pytest.raises(GraphValidationError, match="before its control successors complete"):
+        GraphCompiler(parent).compile()
+
+
+def test_callable_exported_route_cannot_share_a_conditional_domain() -> None:
+    callable_node = replace(node("a"), exported_routes=frozenset((GraphRouteId("done"),)))
+    definition = graph(
+        nodes=(callable_node,),
+        edges=(ConditionalEdge(GraphNodeId("a"), GraphRouteId("done"), END),),
+    )
+
+    with pytest.raises(GraphValidationError, match="not a terminal callable"):
+        GraphCompiler(definition).compile()
+
+
+def test_callable_exported_route_cannot_be_a_join_source() -> None:
+    callable_node = replace(node("a"), exported_routes=frozenset((GraphRouteId("done"),)))
+    definition = graph(
+        nodes=(callable_node, node("b")),
+        edges=(JoinEdge((GraphNodeId("a"), GraphNodeId("b")), END),),
+        entries=(GraphNodeId("a"), GraphNodeId("b")),
+    )
+
+    with pytest.raises(GraphValidationError, match="not a terminal callable"):
+        GraphCompiler(definition).compile()
+
+
+def test_callable_exported_route_may_use_an_explicit_direct_end() -> None:
+    callable_node = replace(node("a"), exported_routes=frozenset((GraphRouteId("done"),)))
+    definition = graph(
+        nodes=(callable_node,),
+        edges=(DirectEdge(GraphNodeId("a"), END),),
+    )
+
+    assert GraphCompiler(definition).compile().completion_routes == frozenset((GraphRouteId("done"),))

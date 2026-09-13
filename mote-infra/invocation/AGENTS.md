@@ -1,6 +1,7 @@
 # Mote Infrastructure Invocation engineering rules
 
 - This is Mote's sole invocation infrastructure owner. Invocation contracts, explicit resolution, local implementations, and RPC implementations belong here; do not create a parallel invoker in Kernel, Resource, Runtime, or Persistence.
+- For tool execution, Kernel always enters this boundary first, and Invocation delivers the request to `mote-runtime/execution/local`. Local Execution owns the configuration-driven semantic decision to handle locally or take the `local -> remote` branch; this boundary owns ingress, endpoint resolution, and transport mechanics and must not reinterpret tool routing policy.
 - Keep contracts narrow and typed. Kernel and other callers see their owner-defined Port and typed result, not transport, resolver, or backend-specific values.
 - `contract/` owns only invocation-level contracts; shared observable cross-language schemas remain in `conformance/`.
 - `resolver/` binds an explicitly configured capability to one implementation. Do not add hidden discovery, fallback, or mutable registries.

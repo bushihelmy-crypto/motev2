@@ -1,10 +1,10 @@
 # Mote Infrastructure Persistence engineering rules
 
-- This boundary owns concrete persistence, compare-and-swap, schema, migration, serialization, and transaction mechanisms.
-- It is the sole storage infrastructure owner under `mote-infra`; invocation contracts, resolution, and local/RPC implementations live in the parallel `mote-infra/invocation` boundary.
+- This boundary owns portable persistence, compare-and-swap, schema, migration, serialization, and transaction mechanisms.
+- It is the storage infrastructure owner under `mote-infra`; invocation contracts, resolution, and local/RPC implementations live in the parallel `mote-infra/invocation` boundary. The Cloudflare Durable Object SQLite Adapter is the platform-bound exception and lives in the single Cloudflare deployment project because `ctx.storage` cannot leave its Durable Object.
 - `mote-kernel` owns the `Commit` Port contract and Agent flow semantics. Persistence implementations satisfy the contract structurally and must not import Kernel, Container, Control, Product, or Runtime code.
 - Persistence-backend selection belongs to Port configuration and is independent of Container selection. A Container may expose platform capabilities, but it must not select or require a Persistence backend.
-- A backend constructor accepts only the capabilities it needs. Cloudflare SQLite accepts Durable Object storage; a remote backend accepts its client or endpoint configuration.
+- A backend constructor accepts only the capabilities it needs. A local backend accepts its database capability; a remote backend accepts its client or endpoint configuration.
 - Public APIs remain narrow. Backend-specific storage handles, SQL cursors, errors, schemas, and transaction types do not cross the Port boundary.
 - Cross-language observable contract changes must update `conformance/` and every affected runner in the same change.
 - Preserve user changes and inspect the relevant Git diff before editing.

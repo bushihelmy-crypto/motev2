@@ -2,7 +2,9 @@ from dataclasses import dataclass, replace
 from typing import Never, TypeAlias, cast
 
 import pytest
+from tests.execution.engine.factories import activation_config
 
+from mote_kernel.config import ConfigActivation
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import _make_node_inputs
 from mote_kernel.execution.graph.ports import (
@@ -15,6 +17,7 @@ from mote_kernel.execution.graph.ports import (
 )
 from mote_kernel.execution.graph.values import NamedValue, _make_node_input_frame
 from mote_kernel.execution.node_adapter import make_typed_node_assembly
+from mote_kernel.session import AgentSession, AgentSessionActivation
 from mote_kernel.state.graph_state import GraphNodeId
 
 
@@ -85,6 +88,68 @@ async def test_typed_node_materializes_one_dto_and_publishes_one_typed_output() 
     assert isinstance(result, Graph.CompletedResult)
     assert result.outputs["result"] == Combined("value:7")
     assert received == [PairRequest(Left("value"), Right(7))]
+
+
+@pytest.mark.asyncio
+async def test_typed_node_publishes_config_activation_metadata_without_changing_output_type() -> None:
+    graph = Graph[PipelineValue]("typed.config-activation")
+    source = Graph.bind("source", Graph.graph_input("source", Left))
+    runtime_config = activation_config(1)
+
+    async def operation(value: Left) -> ConfigActivation[Combined]:
+        return ConfigActivation(Combined(value.value), runtime_config)
+
+    output = graph.add_node(
+        "node",
+        operation,
+        inputs=(source,),
+        input_type=Left,
+        materialize=lambda values: values.get(source),
+        output_name="result",
+        output_type=Combined,
+    )
+    graph.add_edge("node", Graph.END)
+    graph.set_outputs({"result": output})
+
+    result = await graph.run(Graph.values(source=Left("value")), activation_config=runtime_config)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["result"] == Combined("value")
+
+
+@pytest.mark.asyncio
+async def test_typed_node_can_publish_an_explicit_agent_session_successor() -> None:
+    graph = Graph[PipelineValue]("typed.session-activation")
+    source = Graph.bind("source", Graph.graph_input("source", Left))
+    initial = AgentSession("hook-1", "context-1")
+    successor = AgentSession("hook-2", "context-2")
+    received_sessions: list[AgentSession[str, str] | None] = []
+
+    async def operation(value: Left) -> AgentSessionActivation[Combined]:
+        return AgentSessionActivation(Combined(value.value), successor)
+
+    def materialize(values: Graph.Inputs[PipelineValue]) -> Left:
+        received_sessions.append(cast(AgentSession[str, str] | None, values.session))
+        return values.get(source)
+
+    output = graph.add_node(
+        "node",
+        operation,
+        inputs=(source,),
+        input_type=Left,
+        materialize=materialize,
+        output_name="result",
+        output_type=Combined,
+    )
+    graph.add_edge("node", Graph.END)
+    graph.set_outputs({"result": output})
+
+    result = await graph.run(Graph.values(source=Left("value")), session=initial)
+
+    assert isinstance(result, Graph.CompletedResult)
+    assert result.outputs["result"] == Combined("value")
+    assert result.session == successor
+    assert received_sessions == [initial]
 
 
 @pytest.mark.asyncio
@@ -588,6 +653,7 @@ async def test_typed_nested_completion_route_is_consumed_by_the_parent_graph() -
         materialize=lambda _values: EmptyInput(),
         output_name="value",
         output_type=Right,
+        exported_routes=("chosen",),
     )
     child.add_edge("choose", Graph.END)
     child.set_outputs({"value": child_output})

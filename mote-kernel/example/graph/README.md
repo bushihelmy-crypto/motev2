@@ -1,12 +1,23 @@
 # Graph examples / 图示例
 
-These runnable examples use only `mote_kernel.execution.Graph`, the public graph composition and execution facade.
+These examples compose and execute graphs only through `mote_kernel.execution.Graph`, the public graph facade.
+The durable Agent example adds the external authority/persistence wiring in `mote_kernel.Agent`, not another runner.
 The node callables keep graph state explicit: execution decisions and recoverable values travel through typed graph
 inputs, outcomes, state, and resume actions. The modules are grouped from basic topology through recovery and
 operational boundaries, so a reader can start with one small graph and then choose a production pattern.
 
-这些可运行示例只使用公开门面 `mote_kernel.execution.Graph`。图的执行决定与可恢复值都通过有类型的 graph input、
+这些示例统一使用公开门面 `mote_kernel.execution.Graph` 构建和执行图；持久 Agent 示例额外使用 `mote_kernel.Agent`
+完成外部权限/持久化接线，不建立另一套 runner。图的执行决定与可恢复值都通过有类型的 graph input、
 outcome、state 和 resume action 显式传递。示例从基础拓扑逐步覆盖恢复和运行边界，读者可以先运行一个小图，再按需求选择生产方案。
+
+The standalone modules use in-memory commits and process-local state/continuations. Reassembling a Graph is not a process
+restart or durable recovery. Production recovery needs an atomic state/value commit and a complete checkpoint read;
+the backend-independent contracts and Agent integration stages are defined in the
+[persistence plan](../../docs/kernel-persistence-implementation-plan.zh-CN.md).
+
+独立运行的模块使用内存提交与进程内 state/continuation；重建 Graph 对象不代表进程重启或持久恢复。生产持久化必须
+原子提交 state 和完整值证据、读取完整 checkpoint；`durable_agent_import` 通过必需 Ports 演示这种接线，不内置后端。
+协议无关契约与阶段状态以实施计划为准。
 
 | Module | Scenario |
 | --- | --- |
@@ -20,7 +31,8 @@ outcome、state 和 resume action 显式传递。示例从基础拓扑逐步覆�
 | `concurrent_runs` | Multiple independent runs on one graph instance / 同一 graph 实例上的独立并行 run |
 | `human_in_the_loop` | Interrupt, graph reassembly, and state-only resume / 中断、重新装配与仅凭状态恢复 |
 | `resource_customer_report` | Parallel reads, an exclusive resource, and a join / 并行读取、独占资源与汇合 |
-| `checkpointed_import` | Commit callback and state-only restart / commit 回调与仅凭状态重启 |
+| `checkpointed_import` | In-memory commit and explicit control-only resume / 内存提交与显式控制态恢复 |
+| `durable_agent_import` | Injected authority/store, cold Agent resume / 注入权限与存储，Agent 冷恢复 |
 | `bounded_execution` | Superstep budget and fail-closed retry / superstep 预算与安全停止后重试 |
 | `partial_commit_recovery` | Partial commit handoff and scoped retry / 部分提交交接与作用域重试 |
 | `cancellation_abort` | Caller cancellation and `AbortedResult` / 调用方取消与 `AbortedResult` |
@@ -40,7 +52,8 @@ outcome、state 和 resume action 显式传递。示例从基础拓扑逐步覆�
 | 并行处理多个请求 / Serve concurrent requests | `concurrent_runs` | `asyncio.gather`, independent run state |
 | 等待人工决定 / Wait for a human | `human_in_the_loop` | `Graph.interrupt`, `resume_interrupted` |
 | 并发访问共享能力 / Limit a shared capability | `resource_customer_report` | `resources=(...)`, `max_parallel_tasks` |
-| 每次推进都落检查点 / Checkpoint every transition | `checkpointed_import` | `commit=...`, state-only `run(state=...)` |
+| 观察每次提交确认 / Observe transition confirmation | `checkpointed_import` | `commit=...`, state-only `run(state=...)` |
+| 接入持久 Agent / Wire a durable Agent | `durable_agent_import` | `AgentStart`, `AgentResume`, injected Ports |
 | 保护长流程预算 / Bound a long run | `bounded_execution` | `max_supersteps`, `Graph.ExecutionLimitError` |
 | 提交只确认了前缀 / Commit confirms a prefix | `partial_commit_recovery` | `Graph.PartialCommitError` |
 | 主动停止运行 / Stop from the caller | `cancellation_abort` | task cancellation, `Graph.AbortedResult` |
@@ -132,36 +145,40 @@ selects one exact predecessor publication; the engine never scans for the latest
 Compiler 会从控制拓扑推导所有可能前驱；每个前驱都必须发布同名、完全相同类型的输出，而且这些路径必须可证明互斥。
 运行时只根据 State 持有的 activation cause 读取一个精确前驱 publication，绝不会扫描“最新值”。
 
-A START activation has no predecessor, so a causal-input node cannot be a root. A Join activation has several
-predecessors, so its target must name each required fixed producer explicitly instead of using the one-argument form.
-These rules fail at compile time. Concrete publication persistence is still the responsibility of a future durable
-store; the current continuation carries that evidence only in process.
+A causal-input node may explicitly be a START entry: the compiler binds that activation to graph input and later
+activations to exact routed predecessors. A Join activation has several predecessors, so its target must name each
+required fixed producer instead of implicitly choosing one. Persistence and transient continuation share those same
+compiled coordinates; a continuation itself remains process-local and non-serializable.
 
-START activation 没有前驱，因此 causal-input node 不能作为 root；Join activation 有多个前驱，因此目标必须用两参数
-形式显式读取各个固定 producer，不能使用一参数形式。这些错误都会在编译期拒绝。具体 publication 的持久化仍属于未来
-durable store；当前 continuation 只在进程内携带这些 evidence。
+causal-input node 可以显式声明为 START entry；compiler 将首轮 graph input 与后续 routed predecessor 分别编入 binding。
+Join target 仍必须显式读取固定 producer，不能隐式选择某一个前驱。持久化与 transient continuation 共用这些 compiled
+坐标，但 continuation 本身始终是不可序列化的进程内证据。
 
 ## 恢复动作 / Resume actions
 
-An interrupt returns an `AwaitingResumeResult`. Persist its `state` through the commit port, then answer the exact
-interrupt identity. A typed node failure is different: it durably terminates the graph and returns `FailedResult`;
+An interrupt returns an `AwaitingResumeResult`; answer its exact interrupt identity. Durable operation must commit
+state and complete value evidence together, not state alone. A typed node failure terminates the graph with `FailedResult`;
 retry policy belongs in an explicit graph topology around the protected port, not in a hidden executor resume path.
 
-中断会返回 `AwaitingResumeResult`。通过 commit port 持久化 `state`，再用精确的 interrupt identity 回答。类型化 node failure
-则不同：它会持久化终止 graph 并返回 `FailedResult`；重试策略应由包裹目标 port 的显式 graph 拓扑表达，而不是藏在执行器恢复分支里。
+中断会返回 `AwaitingResumeResult`，回答必须携带精确的 interrupt identity。持久运行需要原子提交 state 与完整值证据，
+不能只保存 state。类型化 node failure 会终止 graph 并返回 `FailedResult`；重试策略属于包裹目标 port 的显式 graph 拓扑。
 
 | Situation | Action | Example |
 | --- | --- | --- |
 | 等待人工回答 / human answer | `resume_interrupted(node, interrupt_id, values)` | `human_in_the_loop` |
 | 子图内 node / nested node | add `scope=("child", ...)` | `nested_batch_review` |
 
-Use `continuation=result.continuation` when the in-memory frame evidence is needed (transient continuation). A
-state-only invocation is appropriate when the required values are already durable or supplied by an override action.
+Use `continuation=result.continuation` when process-local frame evidence is needed. A continuation retains its original
+commit port, including after a partial handoff: omit `commit` to inherit it; replacing it is rejected. A
+state-only invocation can continue only when it needs no missing frames, or an explicit override supplies all required
+inputs. It never loads durable values on its own.
 For nested in-flight children, the opaque continuation carries child state bindings, as shown in
 `nested_batch_review`.
 
-需要内存 frame evidence 时传入 `continuation=result.continuation`（transient continuation）；如果所需值已经持久化，
-或由 override action 提供，则可以只传 `state`。嵌套子图尚在执行时，opaque continuation 还携带 child state binding，
+需要进程内 frame evidence 时传入 `continuation=result.continuation`；它同时保留原 commit port，partial handoff 也不例外。
+省略 `commit` 会继承原 port，不能改绑。只有无需缺失 frame，或
+override 显式提供了全部所需输入，才可进行 state-only 控制态恢复。只传 `state` 不会自动加载持久值。
+嵌套子图尚在执行时，opaque continuation 还携带 child state binding，
 `nested_batch_review` 展示了这一点。
 
 ## 结果与运行边界 / Results and run boundaries
@@ -170,7 +187,7 @@ For nested in-flight children, the opaque continuation carries child state bindi
 | --- | --- | --- |
 | `CompletedResult` | 所有 terminal gate 已完成 / all terminal gates completed | most modules |
 | `AwaitingResumeResult` | interrupt 正在等待精确回答 / an interrupt awaits an exact answer | `human_in_the_loop` |
-| `FailedResult` | failure 已持久化终止 / a failure durably terminated the run | focused contract tests |
+| `FailedResult` | failure 已确认并终止 / a confirmed failure terminated the run | focused contract tests |
 | `AbortedResult` | authoritative state 已终止，不会继续执行 / state is terminally aborted | `cancellation_abort` |
 | `ExecutionLimitError` | 本次 invocation 预算耗尽 / invocation budget exhausted | `bounded_execution` |
 | `PartialCommitError` | 只有部分 scope 被 commit 确认 / only a prefix was confirmed | `partial_commit_recovery` |
@@ -217,17 +234,40 @@ python -m example.graph.versioned_deployment
 The caller supplies only the root `run_id`. Nested child run identities are internal to their child owners.
 
 `resource_customer_report` shows that two nodes can share the exclusive `customer-db` resource while an unrelated
-cache read remains eligible to run. The `checkpointed_import` store is an in-memory teaching adapter; replace it with
-an atomic database transaction in a real application.
+cache read remains eligible to run. The `checkpointed_import` store is an in-memory recorder; replacing its single
+state assignment with SQL would still omit durable value evidence and the complete recovery read contract.
 
 `resource_customer_report` 展示两个节点共享独占的 `customer-db`，而无关的缓存读取仍可并发执行。
-`checkpointed_import` 中的 store 只是便于运行的内存教学适配器；实际应用应替换为原子数据库事务。
+`checkpointed_import` 中的 store 只是内存记录器；仅把 state 赋值替换成 SQL，仍缺少持久值证据与完整恢复读取契约。
 `bounded_execution` 先用过小的 `max_supersteps` 安全停止，再用新的 run ID 和足够预算重新运行。
-`partial_commit_recovery` 和 `cancellation_abort` 是两个运行边界示例：分别展示部分确认交接和调用方取消后的终止状态。
+`partial_commit_recovery` 通过同一个故障注入 port 展示部分确认交接和恢复，不能换成另一个成功回调绕过故障。
+它与 `cancellation_abort` 都是进程内运行边界示例，不是持久冷恢复适配器。
 `versioned_deployment` 展示拓扑升级时递增 `version`，旧 state 会被拒绝，随后以新 run 显式启动。
 
 `partial_commit_recovery` and `cancellation_abort` cover the two operational handoffs that are easiest to miss in a
 first integration. `versioned_deployment` shows the explicit version boundary for a topology change.
+
+## 持久 Agent 接线 / Durable Agent wiring
+
+`durable_agent_import.build_agent(persistence, authority)` reuses the business DTO, Graph topology and versioned codec
+from `checkpointed_import`. Its `demonstrate(...)` function starts an explicitly identified run, receives an interrupt,
+then answers through a fresh Agent instance. Only business results cross the caller boundary; no state or continuation
+is carried into the resume call. Supply real `PersistencePort[ImportJob]` and `AuthorityPort` capabilities at the
+composition root. This module intentionally has no standalone fake-backend entry point.
+
+`durable_agent_import.build_agent(persistence, authority)` 复用 `checkpointed_import` 的业务 DTO、Graph 拓扑与版本化
+codec。`demonstrate(...)` 显式创建 run、收到 interrupt 后，以新 Agent 实例读取存储并回答。外部只传业务结果和精确
+问题，不向 resume 传 state 或 continuation。装配方必须提供 `PersistencePort[ImportJob]` 和 `AuthorityPort`；
+示例不添加一个伪后端让模块看起来可以独立运行，也不选择数据库、传输或 Container。
+
+`tests/agent/test_example.py` verifies both snapshot and receipt-journal adapters against this exact example.
+`tests/agent/test_process_recovery.py` separately proves a real process exit after persisting a publication but before
+its acknowledgement: the next process recovers with new Agent/Graph/codec objects and never reruns that producer.
+The file adapter in that test is a sequential-process fixture, not a production database or an authority implementation.
+
+同一示例由 `tests/agent/test_example.py` 在 snapshot 和 receipt-journal 两种测试适配器上验证。
+`tests/agent/test_process_recovery.py` 独立验证 publication 落盘、ack 前退出后，由新进程/新 Agent/新 Graph/新 codec
+恢复且不重跑 producer。测试文件适配器只证明顺序进程交接，不冒充生产数据库或真实权限仲裁实现。
 
 ## 覆盖边界 / Coverage boundary
 
@@ -247,12 +287,12 @@ tampering. Those cases teach fail-closed contracts rather than application topol
 接管、terminal failure、node-origin cancellation、cleanup 故障和 continuation 篡改。这些是 fail-closed contract，
 不是业务拓扑。
 
-For a nested in-flight recovery, keep the opaque continuation together with the state. A state-only call cannot invent
-child run bindings or historical frames that were not durably recorded; `nested_batch_review` makes this requirement
-visible by passing both values.
+For a nested in-flight handoff in the same process, retain the opaque continuation together with state, as shown by
+`nested_batch_review`. Do not serialize it. Cold recovery instead requires the complete durable family read, including
+an explicit authoritative negative read for any current child that has never been created.
 
-嵌套子图尚在运行时恢复，应将 opaque continuation 与 state 一起保存。仅凭 state 无法凭空恢复未持久化的 child run binding
-或历史 frame；`nested_batch_review` 明确传入了两者。
+嵌套子图的同进程交接需同时保留 state 和 opaque continuation，`nested_batch_review` 展示了此用法；不能序列化它。
+冷恢复必须读取完整 durable family，对尚未创建的当前 child 提供显式权威 negative read，不能把漏读当成从未创建。
 
 The contract-level assertions live in `tests/execution/test_graph_api.py`, `tests/execution/test_interrupt_flow.py`,
 `tests/execution/test_graph_recovery_contract.py`, and `tests/execution/test_family_driver_local_ownership.py`.

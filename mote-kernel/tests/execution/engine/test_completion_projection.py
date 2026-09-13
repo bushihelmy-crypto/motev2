@@ -10,6 +10,7 @@ from tests.execution.engine.factories import (
     running_state,
     task_success,
     terminal_state,
+    topology,
 )
 
 from mote_kernel.execution import Graph
@@ -17,11 +18,11 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.task import GraphTask, TaskId, task_identity
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import TaskFailure, TaskInterrupt, TaskResult, TaskSuccess
 from mote_kernel.state.graph_state import (
@@ -92,7 +93,7 @@ def test_interrupt_result_projects_a_structured_identity() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = running_state(definition_id="graph")
@@ -261,7 +262,9 @@ def test_unknown_canonical_task_cannot_settle_a_pending_task() -> None:
 
 
 def test_terminal_success_route_is_carried_as_an_exported_completion_route() -> None:
-    graph, state, tasks = planned()
+    state = running_state(frontier=("a",))
+    graph = topology("a", exported_routes={"a": frozenset((GraphRouteId("exported"),))})
+    tasks = plan_tasks(graph, state, ExecutionLimits())
 
     command = settle_result(
         graph,
@@ -299,7 +302,7 @@ def test_interrupt_projection_uses_the_current_execution_generation() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input.v1"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = replace(

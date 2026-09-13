@@ -7,11 +7,10 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from mote_kernel.execution.errors import GraphValidationError
 from mote_kernel.execution.graph.ports import canonical_nominal_type
-from mote_kernel.hooks.plan import HookConfigSnapshot, HookPlan, HookPriorityPlan
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.hooks.plan import HookPlan, HookPriorityPlan
+from mote_kernel.state.graph_state import GraphConfigCursor, GraphNodeId
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
-ConfigT = TypeVar("ConfigT")
 PriorityConfigT = TypeVar("PriorityConfigT")
 ValueT = TypeVar("ValueT")
 StateT = TypeVar("StateT")
@@ -35,7 +34,7 @@ class HookTransitionAdmission(Protocol[ValueT, StateT, CommandT]):
 
     def admit_transition(
         self,
-        request: HookRequest[ValueT, StateT],
+        request: HookActivationRequest[ValueT, StateT],
         result: HookStageResult[ValueT, CommandT],
         /,
     ) -> None: ...
@@ -54,32 +53,37 @@ def _admit_exact(payload: PayloadT, expected: type[PayloadT], field: str, /) -> 
     return payload
 
 
+def _require_tuple(value: tuple[CommandT, ...], field: str, error_type: type[Exception], /) -> None:
+    """Keep tuple-shape admission in the Hook contract owner."""
+
+    if type(value) is not tuple:
+        raise error_type(f"{field} must be a tuple")
+
+
 def _admit_node_id(node_id: GraphNodeId | None, field: str, /) -> None:
     if node_id is not None and not is_canonical_identity(node_id):
         raise HookContractError(f"{field} must be a canonical GraphNodeId or None")
 
 
 @dataclass(frozen=True, slots=True)
-class HookRequest(HookGraphValue, Generic[ValueT, StateT]):
-    """The current value and owner-provided read-only state for one priority.
+class HookActivationRequest(HookGraphValue, Generic[ValueT, StateT]):
+    """Kernel-only business envelope entering the shared Hook graph.
 
-    The owner supplies an immutable state value or read-only view; freezing this
-    envelope does not deep-freeze the payload.
+    The complete Config lives beside this value in execution activation
+    metadata.  Only the business value, read-only state and parent-owned node
+    identity are present here.
     """
 
     value: ValueT
     state: StateT
-    # Identity of the business node whose result is entering the shared Hook.
-    # Generic callers may omit it; family graphs always provide the canonical
-    # GraphNodeId so the parent graph can route the nested completion.
     node_id: GraphNodeId | None = None
 
     def __post_init__(self) -> None:
-        _admit_node_id(self.node_id, "hook request node_id")
+        _admit_node_id(self.node_id, "hook activation request node_id")
 
 
 @dataclass(frozen=True, slots=True)
-class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, CommandT]):
+class HookPayloadAdmission(Generic[PriorityConfigT, ValueT, StateT, CommandT]):
     """The one nominal runtime contract for a concrete Hook payload family.
 
     Python type parameters disappear at runtime.  The composition root therefore
@@ -87,7 +91,6 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
     immutable admission contract instead of guessing from annotations.
     """
 
-    config_type: type[ConfigT]
     priority_config_type: type[PriorityConfigT]
     value_type: type[ValueT]
     state_type: type[StateT]
@@ -95,7 +98,6 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
     transition_admission: HookTransitionAdmission[ValueT, StateT, CommandT] | None = None
 
     def __post_init__(self) -> None:
-        _validate_nominal_type(self.config_type, "config")
         _validate_nominal_type(self.priority_config_type, "priority config")
         _validate_nominal_type(self.value_type, "value")
         _validate_nominal_type(self.state_type, "state")
@@ -109,46 +111,41 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
             if not callable(admit_transition):
                 raise HookContractError("hook transition admission must satisfy HookTransitionAdmission")
 
-    def admit_snapshot(
-        self,
-        snapshot: HookConfigSnapshot[ConfigT],
-        /,
-    ) -> HookConfigSnapshot[ConfigT]:
-        if type(snapshot) is not HookConfigSnapshot:
-            raise HookContractError("hook config source must return a HookConfigSnapshot")
-        _admit_exact(snapshot.config, self.config_type, "config")
-        return snapshot
-
     def admit_plan(self, plan: HookPlan[PriorityConfigT], /) -> HookPlan[PriorityConfigT]:
         if type(plan) is not HookPlan:
-            raise HookContractError("hook plan loader must return a HookPlan")
+            raise HookContractError("hook node requires a HookPlan")
         for priority_name, priority_plan in (
             ("P1", plan.p1),
             ("P2", plan.p2),
-            ("P3", plan.p3),
         ):
             if type(priority_plan) is not HookPriorityPlan:
                 raise HookContractError(f"hook plan {priority_name} must be a HookPriorityPlan")
             _admit_exact(priority_plan.config, self.priority_config_type, f"{priority_name} config")
         return plan
 
-    def admit_request(self, request: HookRequest[ValueT, StateT], /) -> HookRequest[ValueT, StateT]:
-        if type(request) is not HookRequest:
-            raise HookContractError("hook invocation must contain a HookRequest")
+    def admit_request(
+        self,
+        request: HookActivationRequest[ValueT, StateT],
+        /,
+    ) -> HookActivationRequest[ValueT, StateT]:
+        if type(request) is not HookActivationRequest:
+            raise HookContractError("hook activation must contain a HookActivationRequest")
         _admit_exact(request.value, self.value_type, "value")
         _admit_exact(request.state, self.state_type, "state")
-        _admit_node_id(request.node_id, "hook request node_id")
+        _admit_node_id(request.node_id, "hook activation request node_id")
         return request
 
     def admit_invocation_request(
         self,
-        request: HookInvocationRequest[PriorityConfigT, ValueT, StateT],
+        request: HookInvocationRequest[PriorityConfigT, ValueT],
         /,
-    ) -> HookInvocationRequest[PriorityConfigT, ValueT, StateT]:
+    ) -> HookInvocationRequest[PriorityConfigT, ValueT]:
         if type(request) is not HookInvocationRequest:
-            raise HookContractError("hook invocation request must be a HookInvocationRequest")
-        _admit_exact(request.config, self.priority_config_type, "priority config")
-        self.admit_request(request.request)
+            raise HookContractError("hook invocation boundary requires a HookInvocationRequest")
+        _admit_exact(request.hook_config, self.priority_config_type, "hook priority config")
+        _admit_exact(request.payload, self.value_type, "hook payload")
+        if request.config_cursor is not None and type(request.config_cursor) is not GraphConfigCursor:
+            raise HookContractError("hook invocation config_cursor must be a GraphConfigCursor or None")
         return request
 
     def admit_stage_result(
@@ -159,15 +156,14 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         if type(result) is not HookStageResult:
             raise HookContractError("hook invocation must return a HookStageResult")
         _admit_exact(result.value, self.value_type, "value")
-        if type(result.commands) is not tuple:
-            raise HookContractError("hook stage result commands must be a tuple")
+        _require_tuple(result.commands, "hook stage result commands", HookContractError)
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
         return result
 
     def admit_transition(
         self,
-        request: HookRequest[ValueT, StateT],
+        request: HookActivationRequest[ValueT, StateT],
         result: HookStageResult[ValueT, CommandT],
         /,
     ) -> None:
@@ -179,8 +175,7 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
         if type(result) is not HookResult:
             raise HookContractError("hook result must be a HookResult")
         _admit_exact(result.value, self.value_type, "value")
-        if type(result.commands) is not tuple:
-            raise HookContractError("hook result commands must be a tuple")
+        _require_tuple(result.commands, "hook result commands", HookContractError)
         for command in result.commands:
             _admit_exact(command, self.command_type, "command")
         _admit_node_id(result.node_id, "hook result node_id")
@@ -188,19 +183,23 @@ class HookPayloadAdmission(Generic[ConfigT, PriorityConfigT, ValueT, StateT, Com
 
 
 @dataclass(frozen=True, slots=True)
-class HookInvocationRequest(HookGraphValue, Generic[PriorityConfigT, ValueT, StateT]):
-    """Hook-owned typed envelope passed through the shared Invocation.
+class HookInvocationRequest(HookGraphValue, Generic[PriorityConfigT, ValueT]):
+    """The narrow DTO crossing the Hook ``Invocation`` boundary.
 
-    A concrete invocation adapter admits the config and payload types before
-    constructing the stage result.
+    ``hook_config`` is the current P1 or P2 priority projection.  ``payload``
+    is the business value only; the Kernel activation envelope, state and
+    routing identity are intentionally absent.  ``config_cursor`` lets a
+    local or remote implementation correlate the call with the immutable
+    snapshot without granting it access to the complete Config.
     """
 
-    config: PriorityConfigT
-    request: HookRequest[ValueT, StateT]
+    hook_config: PriorityConfigT
+    payload: ValueT
+    config_cursor: GraphConfigCursor | None = None
 
     def __post_init__(self) -> None:
-        if type(self.request) is not HookRequest:
-            raise TypeError("hook invocation request must contain a HookRequest")
+        if self.config_cursor is not None and type(self.config_cursor) is not GraphConfigCursor:
+            raise TypeError("hook invocation config_cursor must be a GraphConfigCursor or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,46 +213,27 @@ class HookStageResult(HookGraphValue, Generic[ValueT, CommandT]):
     commands: tuple[CommandT, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.commands) is not tuple:
-            raise TypeError("hook stage result commands must be a tuple")
+        _require_tuple(self.commands, "hook stage result commands", TypeError)
 
 
 @dataclass(frozen=True, slots=True)
 class HookResult(HookGraphValue, Generic[ValueT, CommandT]):
-    """The HookNode's final value and P1-to-P3 ordered command delta."""
+    """The HookNode's final value and P1-to-P2 ordered command delta."""
 
     value: ValueT
     commands: tuple[CommandT, ...] = ()
     node_id: GraphNodeId | None = None
 
     def __post_init__(self) -> None:
-        if type(self.commands) is not tuple:
-            raise TypeError("hook result commands must be a tuple")
+        _require_tuple(self.commands, "hook result commands", TypeError)
         _admit_node_id(self.node_id, "hook result node_id")
 
 
-@runtime_checkable
-class HookConfigSource(Protocol[ConfigT]):
-    """Read the current immutable configuration once for a HookNode invocation."""
-
-    def snapshot(self) -> HookConfigSnapshot[ConfigT]: ...
-
-
-@runtime_checkable
-class HookPlanLoader(Protocol[ConfigT, PriorityConfigT]):
-    """Build one immutable dynamic plan from the captured configuration."""
-
-    def load(self, snapshot: HookConfigSnapshot[ConfigT], /) -> HookPlan[PriorityConfigT]: ...
-
-
 __all__ = [
-    "HookConfigSource",
     "HookContractError",
     "HookGraphValue",
     "HookInvocationRequest",
     "HookPayloadAdmission",
-    "HookPlanLoader",
-    "HookRequest",
     "HookResult",
     "HookStageResult",
     "HookTransitionAdmission",

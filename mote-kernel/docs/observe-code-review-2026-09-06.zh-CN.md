@@ -20,7 +20,7 @@ Graph commit 之前发生却没有 pending receipt/reconcile，ACK 和 resume �
 Graph.run
   -> get_observation
        request admission
-       -> ObservationQueuePort.read_after
+       -> ObservationQueuePort.read()（旧稿为 read_after）
        -> BackgroundTaskPort.snapshot
        -> ObserveFrame / AFTER_GET HookRequest
   -> shared Hook (Plan -> P1 -> P2 -> P3)
@@ -123,7 +123,7 @@ Port 调用没有接收共同的 activation/idempotency key（[`src/mote_kernel/
 至 `:167` 组合出来，不能用于防止调用本身的重复。只校验返回 receipt 的字符串并不能证明 effect
 已绑定到 exact batch。
 
-并发重入同样没有 claim/lease 边界：`read_after()` 只有 caller cursor，没有 run/activation
+并发重入同样没有 claim/lease 边界：旧版 `read_after()` 只有 caller cursor，没有 run/activation
 身份，两个 Graph run 可以同时读取同一个未 ack batch；随后两个 `apply/append` 也没有共同 key
 可让 provider 在调用入口做 CAS。即使两次 Graph publication 都提交成功，外部 effect 仍会执行两次。
 现有“并发”测试只是让 mock 在两个调用中返回两个不同 batch，未覆盖同一 cursor/同一 delivery 的
@@ -338,7 +338,7 @@ same-cursor concurrent effects [('x',), ('x',)]
 `partial effects` 和
 `post-settlement effects` 是 provider 成功后再失败/取消的恢复边界，不是攻击流量或远程未授权测试。
 两个补充 probe 都只替换本地 adapter：前者让 Hook 返回同 concrete class 的新 state，后者让两个
-并发 `read_after(cursor=0)` 返回同一 immutable `Available`；没有网络、未授权或渗透步骤。
+并发旧版 `read_after(cursor=0)` 返回同一 immutable `Available`；没有网络、未授权或渗透步骤。
 
 ## 已有的正向部分
 

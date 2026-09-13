@@ -136,13 +136,21 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphCommitWriteSet",
                 "GraphTransition",
                 "GraphCommit",
+                "GraphCommitError",
                 "prepare_transition",
                 "confirm_transition",
-                "commit_transition",
                 "apply_commit_writes",
             }
         ),
-        "execution/graph/resume_input.py": frozenset({"ResumeInputBinding"}),
+        "execution/graph/codec.py": frozenset({"FrameCodec"}),
+        "session.py": frozenset(
+            {
+                "AgentSession",
+                "AgentSessionCodec",
+                "AgentSessionContractError",
+                "EncodedAgentSession",
+            }
+        ),
         "execution/engine/resume_input.py": frozenset(
             {
                 "require_resume_input_binding",
@@ -172,7 +180,21 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphInputEvidence",
                 "GraphPublicationEvidence",
                 "ScopedFrameIndex",
+                "ScopedStateBinding",
+            }
+        ),
+        "execution/graph_result.py": frozenset(
+            {
+                "ContinuationSnapshot",
+                "_CompiledFamilyIdentity",
                 "_GraphContinuation",
+                "_make_continuation",
+                "_admit_continuation",
+                "_PartialCommitError",
+                "_CompletedGraphResult",
+                "_AwaitingResumeGraphResult",
+                "_FailedGraphResult",
+                "_AbortedGraphResult",
             }
         ),
         "execution/engine/routing.py": frozenset(
@@ -230,16 +252,26 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
     assert _class_fields("execution/graph/outcome.py", "_GraphSuccessOutcome") == {
         "output": "_GraphValues[GraphValueT]",
         "route": "str | None",
+        "session": "AgentSessionCarrier | None",
         "_seal": "InitVar[_OutcomeSeal]",
     }
 
 
 def test_production_continuation_has_no_hidden_mutation_path() -> None:
-    source = (PACKAGE_ROOT / "execution" / "run_context.py").read_text()
+    source = (PACKAGE_ROOT / "execution" / "graph_result.py").read_text()
 
     assert "object.__setattr__" not in source
     assert "def checkpoint(" not in source
     assert "_checkpoint_continuation" not in source
+    assert _class_fields("execution/graph_result.py", "ContinuationSnapshot") == {
+        "family_identity": "_CompiledFamilyIdentity",
+        "root_state": "GraphRunState",
+        "child_runs": "tuple[ScopedRunEvidence, ...]",
+        "frames": "ScopedFrameIndex[GraphValueT]",
+        "recovered": "bool",
+        "commit": "GraphCommit[GraphValueT] | None",
+        "session": "AgentSessionCarrier | None",
+    }
 
 
 def test_resource_state_identities_are_owned_by_the_durable_model() -> None:
@@ -282,7 +314,7 @@ def test_graph_state_does_not_process_compiled_or_generic_inputs() -> None:
     )
 
 
-def test_resume_codec_is_invoked_only_by_its_node_input_materializer() -> None:
+def test_frame_codecs_are_invoked_only_by_the_codec_owner() -> None:
     invocation_owners: list[tuple[str, str]] = []
     for relative, tree in _production_modules():
         for node in ast.walk(tree):
@@ -292,12 +324,14 @@ def test_resume_codec_is_invoked_only_by_its_node_input_materializer() -> None:
                 invocation_owners.append((relative, node.func.attr))
 
     assert sorted(invocation_owners) == [
-        ("execution/engine/resume_input.py", "decoder"),
-        ("execution/engine/resume_input.py", "encoder"),
+        ("execution/graph/codec.py", "decoder"),
+        ("execution/graph/codec.py", "encoder"),
+        ("session.py", "decoder"),
+        ("session.py", "encoder"),
     ]
 
 
-def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() -> None:
+def test_compiled_routing_is_interpreted_by_runtime_routing_and_compiler_proof() -> None:
     owners: dict[str, set[str]] = {
         "direct_targets": set(),
         "conditional_targets": set(),
@@ -309,13 +343,15 @@ def test_compiled_routing_is_interpreted_only_by_routing_and_snapshot_guard() ->
                 owners[node.attr].add(relative)
 
     assert owners == {
-        # Recovery preflight must replay the same compiled control topology
-        # when projecting a nested terminal route.  It does not own a second
-        # topology; it only reads the immutable transition plan owned by the
-        # compiler.
-        "direct_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
-        "conditional_targets": {"execution/engine/recovery.py", "execution/engine/routing.py"},
-        "joins_by_source": {"execution/engine/recovery.py", "execution/engine/routing.py"},
+        # Runtime routing is the sole dynamic interpreter.  The compiler-owned
+        # symbolic proof reads the same lowered topology to establish the
+        # static completion domain; it does not schedule or execute a second
+        # path.
+        "direct_targets": {"execution/engine/routing.py", "execution/graph/frontier_proof.py"},
+        "conditional_targets": {"execution/engine/routing.py", "execution/graph/frontier_proof.py"},
+        # The proof receives the already-lowered Join index as an input; only
+        # runtime routing dereferences the transition-plan field itself.
+        "joins_by_source": {"execution/engine/routing.py"},
     }
     recovery = _module("execution/engine/recovery.py")
     forbidden = {"materializations", "graph_outputs"}
@@ -460,8 +496,8 @@ def test_public_graph_is_a_stateless_facade_over_the_authoritative_transition_pa
         "execution/claim.py",
         "execution/commit.py",
         "execution/engine/recovery.py",
-        "execution/engine/session.py",
         "execution/invocation.py",
+        "state/graph_state/reducer.py",
     )
 
     public_tree = _module("execution/__init__.py")
@@ -481,7 +517,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
 
     assert (
         not {
-            "_PlannedState",
+            "ScopedStateBinding",
             "PlannedFence",
             "PlannedResume",
             "project_graph_result",
@@ -492,7 +528,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
     assert _symbol_owners(
         frozenset(
             {
-                "_PlannedState",
+                "ScopedStateBinding",
                 "PlannedFence",
                 "PlannedResume",
                 "GraphTransition",
@@ -500,7 +536,7 @@ def test_graph_facade_delegates_private_runtime_orchestration() -> None:
             }
         )
     ) == {
-        "_PlannedState": ("execution/invocation.py",),
+        "ScopedStateBinding": ("execution/run_context.py",),
         "PlannedFence": ("execution/invocation.py",),
         "PlannedResume": ("execution/invocation.py",),
         "GraphTransition": ("execution/commit.py",),
@@ -563,6 +599,7 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "entries": "tuple[GraphNodeId, ...]",
         "direct_targets": "FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]",
         "conditional_targets": "FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]",
+        "route_options": "FrozenMap[GraphNodeId, tuple[GraphRouteId | None, ...]]",
         "joins_by_source": "FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]",
         "materializations": "FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]",
         "publications": "FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]",
@@ -581,7 +618,8 @@ def test_frontier_transition_plan_is_the_single_compiled_execution_lowering() ->
         "graph_output_descriptor": "FrameDescriptor[GraphValueT]",
         "transition": "FrontierTransitionPlan[GraphValueT]",
         "resources": "FrozenMap[ResourceId, ResourceDefinition]",
-        "resume_input": "ResumeInputBinding[GraphValueT] | None",
+        "resume_input": "FrameCodec[GraphValueT] | None",
+        "completion_routes": "frozenset[GraphRouteId | None]",
     }
     assert all(isinstance(statement, ast.AnnAssign) for statement in compiled_graph.body)
 
@@ -601,3 +639,60 @@ def test_recovery_consumes_shared_claim_and_settlement_lowering() -> None:
 
     assert not forbidden & names
     assert {"claim_resource_snapshot", "project_claim_command", "project_success_settlement"} <= names
+
+
+def test_agent_is_immutable_wiring_not_another_runtime_state_or_runner() -> None:
+    assert set(_class_fields("agent.py", "Agent")) == {
+        "agent_id",
+        "assemble",
+        "codec",
+        "persistence",
+        "authority",
+        "config",
+        "session_codec",
+        "max_commit_attempts",
+        "limits",
+    }
+    tree = _module("agent.py")
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
+    assert not imported & {
+        "sqlite3",
+        "pickle",
+        "json",
+        "mote_kernel.execution.family_driver",
+        "mote_kernel.execution.executor",
+    }
+    assert not any(module.startswith("mote_kernel.execution.engine") for module in imported)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert not names & {"GraphRunState", "GraphTransition", "reduce_graph_run", "FenceGraphExecution", "AbortGraphRun"}
+    assert "GraphRecovery" in names
+    tasks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "create_task"
+    ]
+    assert len(tasks) == 2
+    assert {ast.unparse(node.args[0].func) for node in tasks if isinstance(node.args[0], ast.Call)} == {
+        "self.authority.acquire",
+        "self.authority.release",
+    }
+
+
+def test_commit_source_and_child_read_rules_have_one_owner() -> None:
+    assert _symbol_owners(frozenset({"GraphCommitError", "child_run_reads", "Agent", "AgentRunKey"})) == {
+        "GraphCommitError": ("execution/commit.py",),
+        "child_run_reads": ("execution/invocation.py",),
+        "Agent": ("agent.py",),
+        "AgentRunKey": ("persistence.py",),
+    }
+    retired = {"_commit_origin_cancellation", "consume_commit_origin_cancellation", "_validate_child_run_evidence"}
+    for _relative, tree in _production_modules():
+        assert not retired & {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        assert not retired & _defined_names(tree)
+    writer = _top_level_definition("agent.py", "_AuthorizedGraphWriter")
+    calls = {
+        node.func.attr
+        for node in ast.walk(writer)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert calls == {"admit", "commit", "reconcile"}

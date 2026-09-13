@@ -1,9 +1,10 @@
 """部分提交后的恢复：用 ``Graph.PartialCommitError`` 接住精确确认的前缀。
 
 This is an operational example rather than a business topology.  Two child
-scopes are resumed together; the durable commit adapter confirms ``left`` and
+scopes are resumed together; the same commit port confirms ``left`` and
 fails on ``right``.  The error hands back the confirmed state and continuation,
-so a later invocation retries only the unconfirmed scope.
+so a later invocation retries only the unconfirmed scope through that bound port.
+The in-memory fault injector demonstrates handoff, not durable cold recovery.
 """
 
 import asyncio
@@ -49,18 +50,14 @@ def build_child(definition_id: str) -> Graph[str]:
 class FailOnScopeCommit:
     """A deterministic commit-port fault injector for the teaching example."""
 
-    failed_scope: tuple[str, ...]
+    failed_scope: tuple[str, ...] | None = None
     transitions: list[Graph.Transition[str]] = field(default_factory=_empty_transitions)
 
     async def __call__(self, transition: Graph.Transition[str], /) -> Graph.State:
         self.transitions.append(transition)
         if transition.scope == self.failed_scope:
-            raise RuntimeError(f"durable store unavailable at scope {self.failed_scope!r}")
+            raise RuntimeError(f"injected commit outage at scope {self.failed_scope!r}")
         return transition.candidate_state
-
-
-async def accept_commit(transition: Graph.Transition[str], /) -> Graph.State:
-    return transition.candidate_state
 
 
 def build_graph() -> Graph[str]:
@@ -83,14 +80,15 @@ def build_graph() -> Graph[str]:
 
 async def main() -> None:
     graph = build_graph()
-    paused = await graph.run(Graph.values(left="", right=""), run_id="partial-commit")
+    faulty = FailOnScopeCommit()
+    paused = await graph.run(Graph.values(left="", right=""), run_id="partial-commit", commit=faulty)
     if not isinstance(paused, Graph.AwaitingResumeResult):
         print("没有等待外部结果的节点。")
         return
 
     left = Graph.values(value="left-result")
     right = Graph.values(value="right-result")
-    faulty = FailOnScopeCommit(("right",))
+    faulty.failed_scope = ("right",)
     interrupt_by_scope = {interrupt.scope: interrupt for interrupt in paused.interrupts}
     try:
         await graph.run(
@@ -110,13 +108,13 @@ async def main() -> None:
                     scope=("right",),
                 ),
             ),
-            commit=faulty,
         )
     except Graph.Error as error:
         if not isinstance(error, Graph.PartialCommitError):
             raise
         partial = cast(Graph.PartialCommitError[str], error)
         print(f"已确认前缀，失败作用域：{partial.failed_scope}")
+        faulty.failed_scope = None
         recovered = await graph.run(
             state=partial.state,
             continuation=partial.continuation,
@@ -128,7 +126,6 @@ async def main() -> None:
                     scope=("right",),
                 ),
             ),
-            commit=accept_commit,
         )
     else:
         print("提交没有触发故障。")

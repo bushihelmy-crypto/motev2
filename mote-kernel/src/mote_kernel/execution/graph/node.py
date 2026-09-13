@@ -4,6 +4,7 @@ from collections.abc import Awaitable
 from dataclasses import InitVar, dataclass
 from typing import Generic, Protocol, TypeVar
 
+from mote_kernel.config import Config, ConfigActivation
 from mote_kernel.execution.errors import GraphValueAdmissionError
 from mote_kernel.execution.graph.outcome import (
     GraphOutcome,
@@ -22,7 +23,8 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
 )
 from mote_kernel.execution.resource import ResourceId
-from mote_kernel.state.graph_state import GraphNodeId
+from mote_kernel.session import AgentSessionActivation, AgentSessionCarrier
+from mote_kernel.state.graph_state import GraphNodeId, GraphRouteId
 
 GraphValueT = TypeVar("GraphValueT")
 InputT_contra = TypeVar("InputT_contra", contravariant=True)
@@ -53,7 +55,14 @@ class NodeOperation(Protocol[InputT_contra, OutputT_co]):
         self,
         value: InputT_contra,
         /,
-    ) -> Awaitable[OutputT_co | _GraphSuccessOutcome[OutputT_co] | _GraphFailureOutcome | _GraphInterruptOutcome]: ...
+    ) -> Awaitable[
+        OutputT_co
+        | ConfigActivation[OutputT_co]
+        | AgentSessionActivation[OutputT_co]
+        | _GraphSuccessOutcome[OutputT_co]
+        | _GraphFailureOutcome
+        | _GraphInterruptOutcome
+    ]: ...
 
 
 class NodeInvoker(Protocol[GraphValueT]):
@@ -97,6 +106,22 @@ class NodeInputs(Generic[GraphValueT]):
             descriptor,
         )
 
+    @property
+    def activation_config(self) -> Config | None:
+        """The complete Config attached to this node activation, if any.
+
+        This is execution metadata.  Domain materializers use it to enrich
+        their local request carrier; ordinary graph values remain unchanged.
+        """
+
+        return self._frame.activation_config
+
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        """Return the immutable AgentSession for this activation, if present."""
+
+        return self._frame.session
+
 
 def _make_node_inputs(
     frame: NodeInputFrame[GraphValueT],
@@ -120,6 +145,11 @@ class CallableNodeDefinition(Generic[GraphValueT]):
     inputs: InputBindings[GraphValueT]
     outputs: OutputDeclarations[GraphValueT]
     resources: tuple[ResourceId, ...] = ()
+    # A non-empty declaration is the exact completion-route domain for a
+    # terminal callable without conditional edges.  An empty declaration means
+    # that the callable must use ordinary no-route completion.  Conditional
+    # route domains remain owned by the graph's edges.
+    exported_routes: frozenset[GraphRouteId] = frozenset()
 
 
 __all__ = [

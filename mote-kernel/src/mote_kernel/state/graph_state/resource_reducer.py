@@ -22,6 +22,8 @@ def _require_identity(value: str, kind: str) -> None:
 
 
 def _validate_snapshot(snapshot: ResourceSnapshot) -> None:
+    """Validate one snapshot's shape and its bidirectional ownership links."""
+
     resource_ids = tuple(resource.resource_id for resource in snapshot.resources)
     if len(resource_ids) != len(frozenset(resource_ids)):
         raise ResourceTransitionError("resources snapshot repeats a resource")
@@ -35,7 +37,6 @@ def _validate_snapshot(snapshot: ResourceSnapshot) -> None:
                 raise ResourceTransitionError("resource owner cannot also be waiting")
         for waiter in resource.waiters:
             _require_identity(waiter, "node")
-
     acquisitions = {acquisition.node_id: acquisition for acquisition in snapshot.acquisitions}
     if len(acquisitions) != len(snapshot.acquisitions):
         raise ResourceTransitionError("resources snapshot repeats an acquisition")
@@ -68,7 +69,6 @@ def _validate_snapshot(snapshot: ResourceSnapshot) -> None:
             resource = snapshot.resources[positions[acquisition.waiting_for]]
             if acquisition.node_id not in resource.waiters:
                 raise ResourceTransitionError("waiting acquisition is absent from the resource queue")
-
     participants = frozenset(acquisitions)
     for resource in snapshot.resources:
         if resource.owner is not None and resource.owner not in participants:
@@ -151,16 +151,21 @@ def _release(snapshot: ResourceSnapshot, node_id: GraphNodeId) -> ResourceSnapsh
 
 
 def _apply_command(snapshot: ResourceSnapshot, command: ResourceCommand) -> ResourceSnapshot:
+    """Apply one already-admitted command without re-validating the snapshot.
+
+    Validation belongs to the public transition and recovery boundaries below.
+    Keeping this primitive pure also lets snapshot replay verify one history
+    without traversing every intermediate snapshot twice.
+    """
+
     match command:
         case AcquireResources():
-            result = _acquire(snapshot, command)
+            return _acquire(snapshot, command)
         case ReleaseResources():
             _require_identity(command.node_id, "node")
-            result = _release(snapshot, command.node_id)
+            return _release(snapshot, command.node_id)
         case _:
             raise ResourceTransitionError("resource command has an unsupported variant")
-    _validate_snapshot(result)
-    return result
 
 
 def reduce_resources(snapshot: ResourceSnapshot, command: ResourceCommand) -> ResourceSnapshot:
@@ -173,7 +178,7 @@ def reduce_resources(snapshot: ResourceSnapshot, command: ResourceCommand) -> Re
 
 
 def validate_resource_snapshot(snapshot: ResourceSnapshot) -> None:
-    """Reject a corrupt resource snapshot without changing it."""
+    """Reject a corrupt snapshot or one that cannot be replayed by the reducer."""
 
     _validate_snapshot(snapshot)
     replayed = ResourceSnapshot(tuple(ResourceLock(resource.resource_id) for resource in snapshot.resources))

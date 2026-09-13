@@ -1,10 +1,13 @@
 from typing import cast
 
 import pytest
+from tests.execution.engine.factories import activation_config
 
+import mote_kernel.execution.graph.outcome as outcome_owner
 import mote_kernel.execution.graph.values as values_owner
+from mote_kernel.config import Config
 from mote_kernel.execution import Graph
-from mote_kernel.execution.errors import GraphValueAdmissionError
+from mote_kernel.execution.errors import GraphValueAdmissionError, NodeExecutionContractError
 from mote_kernel.execution.graph.ports import NominalTypeDescriptor, normalize_output_declarations
 from mote_kernel.execution.graph.values import (
     GraphOutputView,
@@ -19,6 +22,12 @@ from mote_kernel.execution.graph.values import (
     _make_graph_input_frame,
     _make_node_input_frame,
 )
+from mote_kernel.session import AgentSession, AgentSessionCarrier
+
+_admit_session = values_owner._admit_session  # pyright: ignore[reportPrivateUsage]
+_merge_session = values_owner._merge_session  # pyright: ignore[reportPrivateUsage]
+_require_session_config = values_owner._require_session_config  # pyright: ignore[reportPrivateUsage]
+_outcome_seal = outcome_owner._OUTCOME_SEAL  # pyright: ignore[reportPrivateUsage]
 
 
 def test_values_factory_copies_and_canonically_orders_keyword_values() -> None:
@@ -62,6 +71,71 @@ def test_values_and_frame_admission_rejects_each_malformed_internal_shape() -> N
     malformed_name = NamedValue(cast(str, 1), 1)
     with pytest.raises(GraphValueAdmissionError, match="malformed canonical names"):
         _make_node_input_frame((malformed_name,), declarations)
+
+    malformed_values = Graph.values(value=1)
+    object.__setattr__(malformed_values, "_entries", (cast(NamedValue[int], None),))
+    with pytest.raises(GraphValueAdmissionError, match="malformed canonical entries"):
+        malformed_values.admit()
+
+
+def test_frame_factories_reject_malformed_and_conflicting_activation_configs() -> None:
+    declarations = normalize_output_declarations({"value": int})
+    malformed = cast("Config", object())
+    with pytest.raises(GraphValueAdmissionError, match="activation Config is malformed"):
+        values_owner._make_single_graph_value("value", 1, malformed)
+
+    first = activation_config(1)
+    second = activation_config(2)
+    values = values_owner._make_single_graph_value("value", 1, first)
+    with pytest.raises(GraphValueAdmissionError, match="values and activation Config disagree"):
+        _make_graph_input_frame(values, declarations, second)
+    with pytest.raises(GraphValueAdmissionError, match="values and activation Config disagree"):
+        values_owner._make_node_output_frame(values, declarations, second)
+
+
+def test_session_admission_keeps_one_snapshot_and_rejects_conflicts() -> None:
+    first = AgentSession("hook-1", "context-1")
+    second = AgentSession("hook-2", "context-2")
+    with pytest.raises(GraphValueAdmissionError, match="malformed session"):
+        _admit_session(cast(AgentSessionCarrier, object()), error_message="malformed session")
+
+    config_first = activation_config(11)
+    config_second = activation_config(12)
+    with pytest.raises(GraphValueAdmissionError, match="Config conflict"):
+        _require_session_config(
+            config_first,
+            AgentSession("hook", "context", config_second),
+            conflict_message="Config conflict",
+        )
+    with pytest.raises(GraphValueAdmissionError, match="Session conflict"):
+        _merge_session(
+            first,
+            second,
+            malformed_message="malformed session",
+            conflict_message="Session conflict",
+        )
+    assert (
+        _merge_session(
+            first,
+            first,
+            malformed_message="malformed session",
+            conflict_message="Session conflict",
+        )
+        == first
+    )
+
+
+def test_success_outcome_admission_rejects_a_forged_session_at_each_factory_boundary() -> None:
+    forged = cast(AgentSession[str, str], object())
+    with pytest.raises(NodeExecutionContractError, match="malformed AgentSession"):
+        Graph.success(Graph.values(value=1), session=forged)
+    with pytest.raises(NodeExecutionContractError, match="malformed AgentSession"):
+        outcome_owner._GraphSuccessOutcome(
+            output=Graph.values(value=1),
+            route=None,
+            session=forged,
+            _seal=_outcome_seal,
+        )
 
 
 def test_each_frame_admission_rejects_a_foreign_nominal_frame() -> None:

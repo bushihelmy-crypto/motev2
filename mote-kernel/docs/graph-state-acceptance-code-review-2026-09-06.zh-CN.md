@@ -2,6 +2,11 @@
 
 状态：**代码 review 通过；未发现正常公开调用和分布式恢复边界下的阻塞问题；本轮未运行测试和门禁**
 
+> 后续更正（2026-09-12）：本文关于 route-known/unknown recovery 模拟的结论仅是当时的历史记录，已被
+> [Terminal completion route / frontier proof 验收指引](./terminal-completion-route-acceptance-2026-09-12.zh-CN.md)
+> 取代。`completion_route_known` 没有生产入口，现已整链删除；completed child 的实际 route 只由
+> `GraphRunState.completion_route` 拥有。
+
 审查基线：`HEAD 277b7a8` 及其当前工作树中的 Graph/State 增量；该提交只新增 Think 测试，未改变本轮 Graph/State
 生产调用链；本轮不修改生产代码。
 

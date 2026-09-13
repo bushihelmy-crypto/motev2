@@ -2,8 +2,9 @@
 
 from collections.abc import Iterator, Mapping
 from dataclasses import InitVar, dataclass, field
-from typing import Generic, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.errors import GraphValidationError, GraphValueAdmissionError
 from mote_kernel.execution.graph.ports import (
     NominalTypeDescriptor,
@@ -11,6 +12,7 @@ from mote_kernel.execution.graph.ports import (
     canonical_nominal_type,
     canonical_port_name,
 )
+from mote_kernel.session import AgentSessionCarrier, admit_session_carrier
 
 FactoryValueT = TypeVar("FactoryValueT")
 GraphValueT = TypeVar("GraphValueT")
@@ -24,6 +26,14 @@ class NamedValue(Generic[GraphValueT_co]):
     value: GraphValueT_co
 
 
+class _FrameEntries(Protocol[GraphValueT_co]):
+    @property
+    def entries(self) -> tuple[NamedValue[GraphValueT_co], ...]: ...
+
+
+FrameT = TypeVar("FrameT", bound=_FrameEntries[object])
+
+
 class _ValuesSeal:
     __slots__ = ()
 
@@ -31,14 +41,119 @@ class _ValuesSeal:
 _VALUES_SEAL = _ValuesSeal()
 
 
+def _admit_activation_config(
+    activation_config: Config | None,
+    *,
+    error_message: str,
+) -> Config | None:
+    """Admit execution metadata once at the concrete frame/value owner."""
+
+    if activation_config is None:
+        return None
+    try:
+        require_config(activation_config)
+    except ConfigContractError as error:
+        raise GraphValueAdmissionError(error_message) from error
+    return activation_config
+
+
+def _merge_activation_config(
+    inherited: Config | None,
+    supplied: Config | None,
+    *,
+    malformed_message: str,
+    conflict_message: str,
+) -> Config | None:
+    """Apply one explicit Config to a value while preserving its provenance."""
+
+    if supplied is None:
+        return inherited
+    admitted = _admit_activation_config(supplied, error_message=malformed_message)
+    if inherited is not None and inherited != admitted:
+        raise GraphValueAdmissionError(conflict_message)
+    return admitted
+
+
+def _admit_session(
+    session: AgentSessionCarrier | None,
+    *,
+    error_message: str,
+) -> AgentSessionCarrier | None:
+    """Admit the caller-owned Session carried as execution metadata."""
+
+    if session is None:
+        return None
+    try:
+        admitted = admit_session_carrier(session)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise GraphValueAdmissionError(error_message) from error
+    return admitted
+
+
+def _session_config(session: AgentSessionCarrier | None) -> Config | None:
+    return None if session is None else session.config
+
+
+def _require_session_config(
+    activation_config: Config | None,
+    session: AgentSessionCarrier | None,
+    *,
+    conflict_message: str,
+) -> Config | None:
+    """Keep the execution Config and its Session cursor on one snapshot."""
+
+    session_config = _session_config(session)
+    if activation_config is not None and session_config is not None and activation_config != session_config:
+        raise GraphValueAdmissionError(conflict_message)
+    return activation_config if activation_config is not None else session_config
+
+
+def _merge_session(
+    inherited: AgentSessionCarrier | None,
+    supplied: AgentSessionCarrier | None,
+    *,
+    malformed_message: str,
+    conflict_message: str,
+) -> AgentSessionCarrier | None:
+    """Require one exact Session when multiple input frames contribute it."""
+
+    if supplied is None:
+        return _admit_session(inherited, error_message=malformed_message)
+    admitted = _admit_session(supplied, error_message=malformed_message)
+    if inherited is not None:
+        inherited = _admit_session(inherited, error_message=malformed_message)
+        if inherited != admitted:
+            raise GraphValueAdmissionError(conflict_message)
+    return admitted
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _GraphValues(Generic[GraphValueT_co]):
     _entries: tuple[NamedValue[GraphValueT_co], ...] = field(repr=False)
+    # The complete activation Config is execution metadata, not a named
+    # business value.  Keeping it beside the values lets every nested graph
+    # inherit the exact same activation without putting Config in Invocation
+    # payloads or changing ordinary Graph value descriptors.
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
+    session: AgentSessionCarrier | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_ValuesSeal]
 
     def __post_init__(self, _seal: _ValuesSeal) -> None:
         if _seal is not _VALUES_SEAL:
             raise GraphValueAdmissionError("Graph values require their canonical owner construction")
+        _admit_activation_config(
+            self.activation_config,
+            error_message="graph values carry a malformed activation Config",
+        )
+        _admit_session(
+            self.session,
+            error_message="graph values carry a malformed AgentSession",
+        )
+        _require_session_config(
+            self.activation_config,
+            self.session,
+            conflict_message="graph values activation Config disagrees with AgentSession",
+        )
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -65,6 +180,31 @@ class _GraphValues(Generic[GraphValueT_co]):
     def items(self) -> tuple[tuple[str, GraphValueT_co], ...]:
         return tuple((entry.name, entry.value) for entry in self._entries)
 
+    def admit(self) -> None:
+        try:
+            entries = self._entries
+            activation_config = self.activation_config
+            if type(entries) is not tuple or any(type(entry) is not NamedValue for entry in entries):
+                raise GraphValueAdmissionError("graph values contain malformed canonical entries")
+            names = tuple(entry.name for entry in entries)
+            if any(
+                type(name) is not str or not name or name.strip() != name or "\n" in name or "\r" in name
+                for name in names
+            ) or names != tuple(sorted(set(names))):
+                raise GraphValueAdmissionError("graph values contain malformed canonical names")
+            _admit_activation_config(
+                activation_config,
+                error_message="graph values carry a malformed activation Config",
+            )
+            _admit_session(
+                self.session,
+                error_message="graph values carry a malformed AgentSession",
+            )
+        except GraphValueAdmissionError:
+            raise
+        except (AttributeError, TypeError, ValueError) as error:
+            raise GraphValueAdmissionError("graph values are malformed") from error
+
 
 class _FrameSeal:
     __slots__ = ()
@@ -76,41 +216,68 @@ _FRAME_SEAL = _FrameSeal()
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GraphInputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("graph input frames require their canonical owner")
+        _admit_activation_config(
+            self.activation_config,
+            error_message="graph input frame carries a malformed activation Config",
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NodeInputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
+    session: AgentSessionCarrier | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("node input frames require their canonical owner")
+        _admit_activation_config(
+            self.activation_config,
+            error_message="node input frame carries a malformed activation Config",
+        )
+        _admit_session(self.session, error_message="node input frame carries a malformed AgentSession")
+        _require_session_config(
+            self.activation_config,
+            self.session,
+            conflict_message="node input frame Config disagrees with AgentSession",
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class NodeOutputFrame(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("node output frames require their canonical owner")
+        _admit_activation_config(
+            self.activation_config,
+            error_message="node output frame carries a malformed activation Config",
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GraphOutputView(Generic[GraphValueT_co]):
     entries: tuple[NamedValue[GraphValueT_co], ...]
+    activation_config: Config | None = field(default=None, repr=False, compare=True)
     _seal: InitVar[_FrameSeal]
 
     def __post_init__(self, _seal: _FrameSeal) -> None:
         if _seal is not _FRAME_SEAL:
             raise GraphValueAdmissionError("graph output views require their canonical owner")
+        _admit_activation_config(
+            self.activation_config,
+            error_message="graph output view carries a malformed activation Config",
+        )
 
 
 def _normalize_mapping(values: Mapping[str, GraphValueT]) -> tuple[NamedValue[GraphValueT], ...]:
@@ -119,22 +286,36 @@ def _normalize_mapping(values: Mapping[str, GraphValueT]) -> tuple[NamedValue[Gr
 
 def _make_graph_values(**values: FactoryValueT) -> _GraphValues[FactoryValueT]:
     entries = _normalize_mapping(values)
-    return _GraphValues(_entries=entries, _seal=_VALUES_SEAL)
+    return _GraphValues(_entries=entries, activation_config=None, session=None, _seal=_VALUES_SEAL)
 
 
-def _make_single_graph_value(name: str, value: FactoryValueT) -> _GraphValues[FactoryValueT]:
+def _make_single_graph_value(
+    name: str,
+    value: FactoryValueT,
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
+) -> _GraphValues[FactoryValueT]:
     entry = NamedValue(canonical_port_name(name, kind="value"), value)
-    return _GraphValues(_entries=(entry,), _seal=_VALUES_SEAL)
+    activation_config = _admit_activation_config(
+        activation_config,
+        error_message="graph value activation Config is malformed",
+    )
+    session = _admit_session(
+        session,
+        error_message="graph value AgentSession is malformed",
+    )
+    return _GraphValues(
+        _entries=(entry,),
+        activation_config=activation_config,
+        session=session,
+        _seal=_VALUES_SEAL,
+    )
 
 
 def _require_graph_values(values: _GraphValues[GraphValueT]) -> _GraphValues[GraphValueT]:
     if type(values) is not _GraphValues:
         raise GraphValueAdmissionError("graph values must be produced by Graph.values()")
-    names = values.keys()
-    if any(
-        type(name) is not str or not name or name.strip() != name or "\n" in name or "\r" in name for name in names
-    ) or names != tuple(sorted(set(names))):
-        raise GraphValueAdmissionError("graph values contain malformed canonical names")
+    values.admit()
     return values
 
 
@@ -193,52 +374,103 @@ def _admit_entries(
     return entries
 
 
+def _admit_frame(
+    frame: FrameT,
+    expected: type[FrameT],
+    declarations: OutputDeclarations[GraphValueT],
+    *,
+    wrong_type_message: str,
+    kind: str,
+) -> FrameT:
+    """Admit one sealed frame against its compiled declaration."""
+
+    if type(frame) is not expected:
+        raise GraphValueAdmissionError(wrong_type_message)
+    _admit_entries(frame.entries, declarations, kind=kind)
+    return frame
+
+
 def _admit_graph_input_frame(
     frame: GraphInputFrame[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
-    if type(frame) is not GraphInputFrame:
-        raise GraphValueAdmissionError("graph input frame has the wrong nominal type")
-    _admit_entries(frame.entries, declarations, kind="graph input")
-    return frame
+    return _admit_frame(
+        frame,
+        GraphInputFrame,
+        declarations,
+        wrong_type_message="graph input frame has the wrong nominal type",
+        kind="graph input",
+    )
 
 
 def _admit_node_input_frame(
     frame: NodeInputFrame[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
 ) -> NodeInputFrame[GraphValueT]:
-    if type(frame) is not NodeInputFrame:
-        raise GraphValueAdmissionError("node input frame has the wrong nominal type")
-    _admit_entries(frame.entries, declarations, kind="node input")
-    return frame
+    return _admit_frame(
+        frame,
+        NodeInputFrame,
+        declarations,
+        wrong_type_message="node input frame has the wrong nominal type",
+        kind="node input",
+    )
 
 
 def _admit_node_output_frame(
     frame: NodeOutputFrame[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
-    if type(frame) is not NodeOutputFrame:
-        raise GraphValueAdmissionError("node output frame has the wrong nominal type")
-    _admit_entries(frame.entries, declarations, kind="node output")
-    return frame
+    return _admit_frame(
+        frame,
+        NodeOutputFrame,
+        declarations,
+        wrong_type_message="node output frame has the wrong nominal type",
+        kind="node output",
+    )
 
 
 def _admit_graph_output_view(
     frame: GraphOutputView[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
 ) -> GraphOutputView[GraphValueT]:
-    if type(frame) is not GraphOutputView:
-        raise GraphValueAdmissionError("graph output view has the wrong nominal type")
-    _admit_entries(frame.entries, declarations, kind="graph output")
-    return frame
+    return _admit_frame(
+        frame,
+        GraphOutputView,
+        declarations,
+        wrong_type_message="graph output view has the wrong nominal type",
+        kind="graph output",
+    )
 
 
 def _make_graph_input_frame(
     values: _GraphValues[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="graph input")
-    return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
+    inherited = _merge_activation_config(
+        values.activation_config,
+        activation_config,
+        malformed_message="graph input activation Config is malformed",
+        conflict_message="graph input values and activation Config disagree",
+    )
+    inherited_session = _merge_session(
+        values.session,
+        session,
+        malformed_message="graph input AgentSession is malformed",
+        conflict_message="graph input values and AgentSession disagree",
+    )
+    inherited = _require_session_config(
+        inherited,
+        inherited_session,
+        conflict_message="graph input Config and AgentSession disagree",
+    )
+    return GraphInputFrame(
+        entries=entries,
+        activation_config=inherited,
+        _seal=_FRAME_SEAL,
+    )
 
 
 def _graph_input_from_node_input(
@@ -246,23 +478,65 @@ def _graph_input_from_node_input(
     declarations: OutputDeclarations[GraphValueT],
 ) -> GraphInputFrame[GraphValueT]:
     entries = _admit_entries(frame.entries, declarations, kind="nested graph input")
-    return GraphInputFrame(entries=entries, _seal=_FRAME_SEAL)
+    return GraphInputFrame(
+        entries=entries,
+        activation_config=frame.activation_config,
+        _seal=_FRAME_SEAL,
+    )
+
+
+def replace_graph_input_config(
+    frame: GraphInputFrame[GraphValueT],
+    activation_config: Config | None,
+) -> GraphInputFrame[GraphValueT]:
+    """Rebind only the transient start metadata to the family Session."""
+
+    return GraphInputFrame(
+        entries=frame.entries,
+        activation_config=_admit_activation_config(
+            activation_config,
+            error_message="graph input activation Config is malformed",
+        ),
+        _seal=_FRAME_SEAL,
+    )
 
 
 def _make_node_input_frame(
     entries: tuple[NamedValue[GraphValueT], ...],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="node input")
-    return NodeInputFrame(entries=admitted, _seal=_FRAME_SEAL)
+    inherited = _admit_activation_config(
+        activation_config,
+        error_message="node input activation Config is malformed",
+    )
+    admitted_session = _admit_session(
+        session,
+        error_message="node input AgentSession is malformed",
+    )
+    inherited = _require_session_config(
+        inherited,
+        admitted_session,
+        conflict_message="node input Config and AgentSession disagree",
+    )
+    return NodeInputFrame(entries=admitted, activation_config=inherited, session=admitted_session, _seal=_FRAME_SEAL)
 
 
 def _make_node_output_frame(
     values: _GraphValues[GraphValueT],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(_entries_of(values), declarations, kind="node output")
-    return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
+    inherited = _merge_activation_config(
+        values.activation_config,
+        activation_config,
+        malformed_message="node output activation Config is malformed",
+        conflict_message="node output values and activation Config disagree",
+    )
+    return NodeOutputFrame(entries=entries, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _node_output_from_view(
@@ -270,21 +544,37 @@ def _node_output_from_view(
     declarations: OutputDeclarations[GraphValueT],
 ) -> NodeOutputFrame[GraphValueT]:
     entries = _admit_entries(view.entries, declarations, kind="nested node output")
-    return NodeOutputFrame(entries=entries, _seal=_FRAME_SEAL)
+    return NodeOutputFrame(
+        entries=entries,
+        activation_config=view.activation_config,
+        _seal=_FRAME_SEAL,
+    )
 
 
 def _make_graph_output_view(
     entries: tuple[NamedValue[GraphValueT], ...],
     declarations: OutputDeclarations[GraphValueT],
+    activation_config: Config | None = None,
 ) -> GraphOutputView[GraphValueT]:
     admitted = _admit_entries(entries, declarations, kind="graph output")
-    return GraphOutputView(entries=admitted, _seal=_FRAME_SEAL)
+    inherited = _admit_activation_config(
+        activation_config,
+        error_message="graph output activation Config is malformed",
+    )
+    return GraphOutputView(entries=admitted, activation_config=inherited, _seal=_FRAME_SEAL)
 
 
 def _public_values(
     frame: NodeInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT] | GraphOutputView[GraphValueT],
+    *,
+    session: AgentSessionCarrier | None = None,
 ) -> _GraphValues[GraphValueT]:
-    return _GraphValues(_entries=frame.entries, _seal=_VALUES_SEAL)
+    return _GraphValues(
+        _entries=frame.entries,
+        activation_config=frame.activation_config,
+        session=_admit_session(session, error_message="graph values carry a malformed AgentSession"),
+        _seal=_VALUES_SEAL,
+    )
 
 
 def _frame_value(

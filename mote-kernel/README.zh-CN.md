@@ -2,7 +2,7 @@
 
 Mote Kernel 是一个以状态机为核心、支持持久恢复的 Agent Kernel。图控制执行，状态机控制事实。
 
-项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面；executor、session、request/result、拓扑和状态 command 均为内部基础设施，不作为并列公共入口。
+项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面；execution session、request/result、拓扑和状态 command 均为内部基础设施，不作为并列公共入口；调用方拥有的 `mote_kernel.AgentSession` 是显式的运行快照边界。
 
 ```python
 from mote_kernel.execution import Graph
@@ -31,16 +31,54 @@ Callable node 通过 `add_node()` 直接声明具名输入绑定与 exact 具名
 执行边，因此每个 node-output consumer 还必须声明 incoming control edge。仅依赖 graph input 或没有输入的 root
 仍是 automatic entry；`set_outputs()` 只投影结果，不激活节点。`Graph.values()` 构造 immutable concrete frame。
 
-`Graph.feedback(initial=..., repeat=...)` 为 callable node 的一个输入显式声明“首轮 graph input、后续紧邻上一轮
-node output”。compiler 当前只准入封闭的直接自反馈形状：一个 callable root target、一条显式 `START` 边、一条
-self route、一条 `END` route，并从 target 的 repeat publication 投影 graph output。这是进程内构图契约，不增加
-跨进程 concrete value recovery。
+`Graph.node_output()` 有两个 typed 重载：`Graph.node_output("producer", "name")` 固定读取某个 producer，
+`Graph.node_output("name")` 读取实际激活本次节点的唯一控制前驱。因果输入节点也可以显式声明为 START entry；
+compiler 会把首轮 graph input case 和后续 routed predecessor cases 一并写入 immutable binding。Join target
+仍不能隐式挑选某一个前驱值；多个入边只有在 control-flow proof 能证明互斥时才会被准入。runtime 只根据
+State-owned activation cause 选择编译好的 graph input 或 exact predecessor publication，不扫描“最新值”。
+瞬时 frame 与后端无关的持久值证据复用同一套准入规则；Kernel 不内置具体持久化后端。
 
-`Graph.run()` 只有 new run、transient continuation 和 control-only state recovery 三类 closed 入口。Completed、aborted 与 awaiting-resume result 都携带 authoritative state 和 non-optional opaque continuation；选择性恢复动作同样由该 `Graph` 门面创建。可选异步 commit callback 会逐条收到 scoped reducer candidate，包括每一个 node settlement；只有 callback 精确确认的 state 才能继续执行。本项目不内置具体 Store，也不提供跨进程 concrete value recovery。
+`Graph.run()` 支持 new run、进程内 continuation 与 control-only state recovery；其 owner-internal durable recovery
+接缝将完整 checkpoint 准入到同一执行路径，不另建 runner。Completed、failed、aborted 与 awaiting-resume result 都携带
+authoritative state 和 non-optional opaque continuation；选择性恢复动作仍由同一个门面创建。可选异步 commit callback
+逐条收到 scoped reducer candidate 与完整写集，只有精确确认后才安装 state/value。仅传 state 不会读取缺失值，
+continuation 也不可序列化。所有 continuation（包括 partial handoff）保留原 commit capability：省略或传 `None`
+都继承原对象，改绑在执行前拒绝。持久恢复的读写共用绑定 commit 的同一个 codec；换能力必须重新读取权威 checkpoint，
+不能降级为内存提交。每个持久值只使用一份 State-owned evidence commitment，统一绑定 availability coordinate、
+descriptor、birth commit、codec、payload、Config cursor（含缺席）以及 publication settlement provenance。
+`Agent` 将权威读取、精确 Config 解析、执行权限和提交对账接入同一 seam；具体后端实现不进入 Kernel。
+阶段状态与验证记录以[实施计划](docs/kernel-persistence-implementation-plan.zh-CN.md)为准。
 
 传入仍带 active execution lease 的 state，等价于调用方明确确认旧 attempt 已停止或丢失；此时 `run()` 才会 fence 并 reclaim 该 lease。这个边界不负责并发存活 worker 的仲裁，也不保证外部 Port 副作用 exactly-once。
 
 公共执行异常同样收敛在门面命名空间：`Graph.Error` 是统一基类；`Graph.ValidationError`、`Graph.SnapshotMismatchError`、`Graph.ExecutionLimitError` 以及 value admission/unavailability/publication errors 用于精确捕获。
+
+## 持久 Agent 入口
+
+`mote_kernel.Agent` 只保存不可变接线，不驻留 runtime state，也不是第二个 runner。构造时提供 `agent_id`、Graph
+装配函数、typed frame codec、`PersistencePort` 和 `AuthorityPort`。每次 `Agent.run(request)` 都按排他权限获取、
+权威读取、Graph 装配/准入、执行、业务结果投影、权限释放的顺序完成；执行任务全部收敛后才释放权限。
+
+- `AgentStart(run_id, values)` 只创建从未存在的 run；已有 run 必须报冲突。
+- `AgentResume(run_id, answers=())` 读取并继续已有 run，也用于终态回放。`AgentAnswer` 将返回的精确 interrupt
+  问题与 typed 业务回答配对；调用者不接触 state、continuation 或逐次替换 commit 的入口。
+- 可选 `AgentConfig` 提供 Config store/resolver 及精确初始 key；恢复只解析 state/frame 引用的历史快照。
+  Graph 自己的 Config 更新 command 仍由 Observe 消费并随 settlement 持久化；节点仍可以在显式返回的完整
+  `AgentSession` successor 中放入已解析的 Config，Kernel 不猜测也不合并这个字段。这里的 Config snapshot cursor
+  与已删除的 Observe 调用方 cursor 无关。
+- `AgentSession(hook_state, context, config)` 是调用方拥有的跨节点/跨 run 快照。节点需要更新时，必须通过
+  `Graph.success(..., session=...)` 返回完整 successor；typed 节点也可返回
+  `Graph.SessionActivation(value, session)`。Graph state 与完整 Session envelope 使用同一个原子 commit；
+  `AgentResult.session` 是最后一份已确认快照，只有 Runtime 显式传给下一次 `AgentStart` 才会复用。Session
+  的 Config 持久化只保存既有 cursor；引用的 immutable snapshot 必须先由 Config owner 保存。一次 Graph
+  invocation/family 只有一份由 root 与 child 共享的串行 Session owner：无 successor 的 transition 在进入提交边界
+  时读取 owner 当前值，显式完整 successor 按确认 receipt 顺序生效。恢复时历史 frame 保留自己的 provenance，
+  不覆盖当前 owner Session。
+- 未知 Graph 提交仅对账同一不可变请求；只有已证明 `NotApplied` 才在显式 `max_commit_attempts` 上限内重发。
+  权限失效、冲突、错误 receipt 或结果仍未知直接停止，不基于旧内存写 cleanup。工具执行对账属于 Runtime。
+
+[持久 Agent 导入示例](example/graph/durable_agent_import.py)复用原有业务拓扑和 codec，只注入 Ports，不选择数据库、
+传输协议或 Container。ReAct END 后的新任务仍由上层驱动。
 
 ## 文档导航
 

@@ -3,9 +3,12 @@ from typing import Protocol, cast
 
 import pytest
 
+import mote_kernel.execution.facade as facade_module
+from mote_kernel.config import Config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import NodeCallable
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import GraphRunState, StartGraphRun
 
 
@@ -89,6 +92,10 @@ def test_builder_local_failures_leave_a_clean_retry_surface() -> None:
         add_node("bad-operation", cast(NodeCallable[str], 1), inputs={}, outputs={})
     with pytest.raises(Graph.ValidationError, match="explicit outputs"):
         add_node("missing-outputs", empty, inputs={})
+    with pytest.raises(Graph.ValidationError, match="collection"):
+        graph.add_node("string-routes", empty, inputs={}, outputs={}, exported_routes="done")
+    with pytest.raises(Graph.ValidationError, match="repeat"):
+        graph.add_node("duplicate-routes", empty, inputs={}, outputs={}, exported_routes=("done", "done"))
 
     child = Graph[str]("facade.builder-local-failures.child")
     child.add_node("leaf", empty, inputs={}, outputs={})
@@ -222,6 +229,16 @@ async def test_resume_dispatch_rejects_non_tuple_noncanonical_and_unknown_scope(
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_a_malformed_activation_session_before_graph_admission() -> None:
+    graph = Graph[str]("facade.malformed-session")
+    graph.add_node("empty", empty, inputs={}, outputs={})
+    graph.set_outputs({})
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="activation Session is malformed"):
+        await graph.run(Graph.values(), session=cast(AgentSessionCarrier, object()))
+
+
+@pytest.mark.asyncio
 async def test_resume_scope_requires_the_current_child_snapshot() -> None:
     child = Graph[str]("facade.missing-resume-child.child")
     child.add_node("leaf", fail, inputs={}, outputs={})
@@ -280,9 +297,30 @@ async def test_state_run_runtime_dispatch_rejects_explicit_values_before_compila
     uncompiled = Graph[str]("facade.state-dispatch.uncompiled")
     uncompiled.add_node("node", empty, inputs={}, outputs={})
     run = cast(RuntimeRun, uncompiled.run)
+    malformed_config = cast(Config, object())
     with pytest.raises(Graph.SnapshotMismatchError, match="do not accept values"):
         await run(None, state=completed.state)
+    with pytest.raises(Graph.SnapshotMismatchError, match="cannot replace their activation Config"):
+        await uncompiled.run(state=completed.state, activation_config=malformed_config)
 
     uncompiled.set_outputs({})
+    with pytest.raises(Graph.SnapshotMismatchError, match="activation Config is malformed"):
+        await uncompiled.run(Graph.values(), activation_config=malformed_config)
     result = await uncompiled.run(Graph.values())
     assert isinstance(result, Graph.CompletedResult)
+
+
+@pytest.mark.asyncio
+async def test_new_run_does_not_mask_unexpected_config_validation_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = Graph[str]("facade.config-error-boundary")
+    graph.add_node("node", empty, inputs={}, outputs={})
+    graph.set_outputs({})
+
+    def reject(_config: Config) -> Config:
+        raise RuntimeError("config validator failed unexpectedly")
+
+    monkeypatch.setattr(facade_module, "require_config", reject)
+    with pytest.raises(RuntimeError, match="config validator failed unexpectedly"):
+        await graph.run(Graph.values(), activation_config=cast(Config, object()))

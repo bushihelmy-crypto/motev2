@@ -1,12 +1,18 @@
 # Observe 子图实施设计：两个业务节点、一个共享 Hook 与 ReAct 路由
 
-最后更新：2026-09-06
+最后更新：2026-09-11
 
 状态：**Observe v1 实施完成**。本文冻结 `mote_kernel.observe` 的 v1 图契约和实现边界；
 ReAct 顶层图及其父级跳转策略仍由 ReAct owner 负责，不在本次实现范围内。
 `ReAct` 是唯一顶层 Graph；`Observe`、`Think`、`Act` 是 ReAct 的业务节点，其中
 `Observe` 是一个 nested Graph。Observe 不拥有 ReAct 的顶层路由，也不把每个纯函数步骤
 拆成 Graph 节点。
+
+**2026-09-11 边界修订：** `ObserveRequest` 不再携带 cursor，`ObservationQueuePort` 改为无参
+`read()`。队列 provider 自己持有并持久化消费位置，在 ACK 确认后推进；返回值里的 cursor 只
+是边界证据。Hook state 由 runtime caller 在每次 Graph activation/run 的输入输出之间负责保存，
+Observe/Graph 不在对象成员里保留跨 run 的隐藏 state。当前 Graph 一次 run 内仍按既有 typed
+Graph/Hook contract 传递 state；若 runtime 将节点拆成独立 run，则由 runtime 在相邻 run 之间回传。
 
 Graph 节点的判断标准是：它必须是需要独立状态、恢复、重试、取消、资源控制或审计的最小
 业务块。Observe 不解释消息、不生成父图路由；`ObservationQueuePort` 在一个明确的读取边界
@@ -131,7 +137,8 @@ ReAct CompletionCandidate
 ```
 
 阻塞是 Graph interrupt/resume 边界，不是进程内永久 `Queue.get()`。wake 只提示有状态
-变化；恢复后必须通过 `ObservationQueuePort` 从 durable stream 按 cursor 重读，不能把 wake payload 当作业务消息。
+变化；恢复后必须通过 `ObservationQueuePort.read()` 让 provider 从自己的 durable 位置重读，不能把
+wake payload 当作业务消息。
 
 ### 0.5 Capability Port 持有事实，Role 只负责装配
 
@@ -563,12 +570,13 @@ v1 的默认业务策略固定为“完整 FIFO 批量、观察到什么就返�
 配置值上失效，低优先级的 Tool/User/Assistant 仍按 FIFO batch 操作并确认，绝不会被 Config
 单独淘汰或标记为已处理。
 
-1. **Queue Port 返回完整 batch。** `ObservationQueuePort.read_after(cursor)` 从 cursor
-   开始读取一个完整、原子、同一 revision 的 batch；Observe 不因出现第二种 family 而截断、
+1. **Queue Port 返回完整 batch。** `ObservationQueuePort.read()` 从 provider 自己的 durable
+   位置读取一个完整、原子、同一 revision 的 batch；Observe 不因出现第二种 family 而截断、
    延后或丢弃任何 delivery。
 2. **先校验非 Config 互斥。** 一个合法 batch 可以包含 Config 和一种非 Config family；
    Tool/User/Assistant 不能在同一个 batch 混合。若 queue Port 返回混合 family，直接返回
-   typed `Conflict`，不推进 cursor、不调用任何 settlement Port、不 ack，也不进入 Hook。
+   typed `Conflict`，provider 不推进自己的位置；Observe 不调用任何 settlement Port、不 ack，
+   也不进入 Hook。
 3. **Config 与非 Config 一起结算。** batch 中有 Config 时，`ConfigObservationPort` 按 FIFO
    应用；有非 Config 时，`ContextObservationPort` 把该 family 的全部 payload 按 FIFO 一次
    写入 Context。Config 只在自身 batch 内覆盖较早 Config，不覆盖其他 delivery。
@@ -702,8 +710,9 @@ admission。Hook 不得改变 business stage、只读 `hook_state` 或由原 req
 函数/Port 调用，不是 Graph edge：
 
 ```text
-ObserveRequest.cursor
-    -> ObservationQueuePort.read_after()
+ObserveRequest(hook_state)
+    -> ObservationQueuePort.read()
+       （位置由 provider 自己决定）
        （返回完整 FIFO batch，不截断）
     -> BackgroundTaskPort.snapshot(boundary)（仅在 Available 时）
     -> family validation（Tool/User/Assistant 互斥）
@@ -859,7 +868,7 @@ observation variant。Queue provider 必须维护 FIFO，并按原子读取边�
 child settlement
     -> typed observation projection
     -> ObservationQueuePort provider 的 durable append / outbox
-    -> Observe ObservationQueuePort.read_after(cursor)
+    -> Observe ObservationQueuePort.read()
 ```
 
 delivery identity 必须由 child activation/settlement 坐标确定性生成；重复投递由 queue
@@ -891,13 +900,13 @@ receipt-based reconcile；不能
 
 ### 8.1 两种等待边界
 
-1. `get_observation` 发现 cursor 后没有消息：这是“没有观察内容”的 transport wait，可由
+1. `get_observation` 发现 provider 位置后没有消息：这是“没有观察内容”的 transport wait，可由
    Observe interrupt 或 ReAct 顶层 `await_observation` 表达。
 2. Observe 已返回完成候选，或 ReActPolicy 针对其他状态提出正常 END，但其
    `background_task_snapshot` 仍有 blocking task：这是顶层 ReAct wait，必须通过
    `ObservationQueuePort` 等待新的 delivery。
 
-两者都不创建常驻 task；唤醒后都按 durable cursor 重新 `read_after()`。
+两者都不创建常驻 task；唤醒后都让 provider 按自己的 durable 位置重新 `read()`。
 
 ### 8.2 结束 gate 的唯一顺序
 
@@ -930,7 +939,7 @@ ReActRoute -> WAIT
     -> durable interrupt(ObservationWait(after_cursor))
     -> producer 通过 ObservationQueuePort provider 追加新 delivery
     -> host 精确 resume
-    -> Observe.get_observation 调用 ObservationQueuePort.read_after(after_cursor)
+    -> Observe.get_observation 调用 ObservationQueuePort.read()
     -> validation -> frame construction（get_observation 内部）
     -> hook（第一次激活）
     -> write_observation -> hook（第二次激活）
@@ -990,7 +999,7 @@ recovery path。
 
 ```text
 ObservationQueuePort
-  read_after(cursor) -> ObservationRead  # 一个 FIFO batch + boundary
+  read() -> ObservationRead  # provider 按自己的 durable 位置返回一个 FIFO batch + boundary
   register_wait(wait: ObservationWait) -> WaitRegistration  # atomic recheck
 
 BackgroundTaskPort
@@ -1074,11 +1083,11 @@ reducer、公共执行入口或隐藏 mutable cache。
 
 ### Phase 2：Observation queue/task ingress
 
-1. 接入 `ObservationQueuePort.read_after(cursor)`、多条消息窗口和同 revision
+1. 接入 `ObservationQueuePort.read()`、provider-owned durable position、多条消息窗口和同 revision
    `BackgroundTaskPort.snapshot(boundary)`；
 2. 接入 Config/Context settlement Port、幂等 identity、receipt 和 successor boundary；
 3. 接入 cursor/delivery commit 与 ack 顺序；
-4. 覆盖空队列、重复 delivery、旧 cursor、缺失 delivery 和 revision mismatch。
+4. 覆盖空队列、重复 delivery、provider 位置恢复、缺失 delivery 和 revision mismatch。
 
 ### Phase 3：等待 contract（由 ReAct assembly 消费）
 

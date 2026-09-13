@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from mote_kernel.execution.errors import SnapshotMismatchError
 from mote_kernel.state.graph_state import GraphActivationIdentity, GraphNodeId, GraphRunId, child_graph_run_id
+from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -12,7 +13,11 @@ class ScopeRunCoordinate:
     graph_run_id: GraphRunId
 
     def __post_init__(self) -> None:
-        if any(not segment for segment in self.scope) or not self.graph_run_id:
+        if (
+            type(self.scope) is not tuple
+            or any(not is_canonical_identity(segment) for segment in self.scope)
+            or not is_canonical_identity(self.graph_run_id)
+        ):
             raise SnapshotMismatchError("scope-run coordinate requires canonical scope and run identity")
 
 
@@ -23,7 +28,12 @@ class StableActivation:
     node_id: GraphNodeId
 
     def __post_init__(self) -> None:
-        if self.superstep < 0 or not self.node_id:
+        if (
+            type(self.scope_run) is not ScopeRunCoordinate
+            or type(self.superstep) is not int
+            or self.superstep < 0
+            or not is_canonical_identity(self.node_id)
+        ):
             raise SnapshotMismatchError("stable activation requires a valid superstep and node identity")
 
 
@@ -60,11 +70,35 @@ def child_scope_run_for_activation(
     return child_scope_run(parent_scope_run, parent.superstep, parent.node_id)
 
 
+def parent_activation_for_child(
+    child_scope_run: ScopeRunCoordinate,
+    parent: GraphActivationIdentity,
+) -> StableActivation:
+    """Project a state-owned parent identity from its canonical child scope.
+
+    ``GraphRunState.parent`` owns the durable activation identity.  A child
+    binding only needs its scope coordinate in addition to that state; the
+    scoped execution lookup key is derived here and the deterministic
+    parent-to-child run identity is checked at the same boundary.
+    """
+
+    if type(child_scope_run) is not ScopeRunCoordinate or type(parent) is not GraphActivationIdentity:
+        raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
+    scope = child_scope_run.scope
+    if type(scope) is not tuple or not scope or scope[-1] != parent.node_id:
+        raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
+    parent_scope_run = ScopeRunCoordinate(scope[:-1], parent.run_id)
+    if child_scope_run_for_activation(parent_scope_run, parent) != child_scope_run:
+        raise SnapshotMismatchError("child lineage binding has inconsistent parent coordinates")
+    return stable_activation(parent_scope_run, parent)
+
+
 __all__ = [
     "ScopeRunCoordinate",
     "StableActivation",
     "child_scope_run",
     "child_scope_run_for_activation",
+    "parent_activation_for_child",
     "root_scope_run",
     "stable_activation",
 ]

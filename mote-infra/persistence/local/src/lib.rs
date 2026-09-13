@@ -12,3 +12,11 @@ mod protocol;
 
 /// The package version supplied by Cargo metadata.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_is_static_package_metadata() {
+        assert_eq!(super::VERSION, env!("CARGO_PKG_VERSION"));
+    }
+}

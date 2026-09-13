@@ -2,7 +2,7 @@
 
 Mote Kernel is a durable, state-machine-driven agent kernel. Graphs control execution; state machines control truth.
 
-The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution and state primitives remain internal development surfaces.
+The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution/state primitives remain internal development surfaces, while the caller-owned `mote_kernel.AgentSession` is the explicit runtime snapshot boundary.
 
 ```python
 from mote_kernel.execution import Graph
@@ -33,18 +33,63 @@ control edge. Graph-input-only and zero-input roots remain automatic entries, wh
 projection and never activates a node. `Graph.values()` creates immutable concrete frames.
 
 `Graph.node_output()` has two typed overloads. `Graph.node_output("producer", "name")` reads a fixed producer;
-`Graph.node_output("name")` reads the one control predecessor that actually activated the consumer. Causal-input nodes
-use an ordinary initializer for their first value and cannot be START or Join targets. The compiler derives every
-possible predecessor from the topology, requires the requested output with one exact type on all of them, and admits
-multiple incoming paths only when it can prove them mutually exclusive. Runtime selection comes only from the
-state-owned activation cause and its exact publication—never from a latest-value scan. This is currently an in-process
-value contract; the atomic commit seam is ready, but no concrete cross-process publication store is included.
+`Graph.node_output("name")` reads the one control predecessor that actually activated the consumer. A causal-input
+node may also be an explicit START entry: the compiler records a graph-input case for its first activation and routed
+predecessor cases for later activations. Join targets still cannot implicitly choose one predecessor value. The
+compiler derives every possible predecessor from the topology, requires the requested output with one exact type on
+all of them, and admits multiple incoming paths only when it can prove them mutually exclusive. Runtime selection
+comes only from the state-owned activation cause and its exact publication (or the compiled START input case)—never
+from a latest-value scan. The same admission rules apply to transient frames and backend-independent persistent
+evidence; no concrete persistence backend is included.
 
-`Graph.run()` has closed entry points for a new run, a transient continuation, and control-only state recovery. Every completed, aborted, or awaiting-resume result carries the authoritative state and a non-optional opaque continuation. Selective resume actions come from the same `Graph` facade. An optional async commit callback receives each scoped reducer candidate—including every individual node settlement—and execution proceeds only from the exact state it confirms. No concrete store or cross-process value recovery is included.
+`Graph.run()` supports new runs, process-local continuations and control-only state recovery. Its owner-internal durable
+recovery seam materializes a complete checkpoint into that same execution path; it is not another runner. Every
+completed, failed, aborted, or awaiting-resume result carries authoritative state and a non-optional opaque continuation.
+Selective resume actions come from the same facade. A commit callback receives each scoped reducer candidate and
+complete write set; only confirmed state and values become visible. State-only calls do not load missing values, and
+continuations are not serializable. Every continuation, including a partial-commit handoff, retains its original commit
+capability: omission or `None` inherits it, and a different object is rejected before execution. Durable recovery uses
+its bound commit's single codec for reading and writes; changing capabilities requires an authoritative reread, not an
+in-memory downgrade. One state-owned evidence commitment binds every persisted value to its availability coordinate,
+descriptor, birth commit, codec, payload, Config cursor (including absence), and publication settlement provenance.
+`Agent` wires authoritative loading, exact Config resolution, authority and commit reconciliation into this same seam.
+Concrete backend implementations remain outside Kernel; phase status and evidence are recorded in the
+[implementation plan](docs/kernel-persistence-implementation-plan.zh-CN.md).
 
 Passing a state with an active execution lease explicitly confirms that its previous attempt has stopped or been lost; `run()` may then fence and reclaim that lease. This boundary does not arbitrate concurrently live workers or make external port side effects exactly-once.
 
 Public execution failures are caught through the same namespace: `Graph.Error` is the base, with `Graph.ValidationError`, `Graph.SnapshotMismatchError`, `Graph.ExecutionLimitError`, and the value admission/unavailability/publication errors for precise handling.
+
+## Durable Agent boundary
+
+`mote_kernel.Agent` is immutable wiring, not a resident state cache or another runner. Supply an `agent_id`, a Graph
+assembly callable, one typed frame codec, `PersistencePort` and `AuthorityPort`. Every `Agent.run(request)` acquires
+exclusive authority, reads the store, assembles and admits the Graph, runs it, projects a business result, then releases
+authority after all execution tasks have joined.
+
+- `AgentStart(run_id, values)` creates only a never-created run; an existing run is a conflict.
+- `AgentResume(run_id, answers=())` reads an existing run, including terminal replay. `AgentAnswer` pairs the exact
+  returned interrupt question with typed business values. No state, continuation or per-call commit override is exposed.
+- `AgentConfig` optionally supplies the Config store/resolver and an exact initial key. Recovery resolves only the
+  historical snapshots referenced by state and frames. The existing Graph Config update command remains owned by
+  Observe and persists with its settlement; a node may still put a resolved Config in an explicitly returned complete
+  `AgentSession` successor, and the Kernel never infers or merges that field. This Config snapshot cursor is unrelated
+  to the removed caller-supplied Observe cursor.
+- `AgentSession(hook_state, context, config)` is the caller-owned cross-node/cross-run snapshot. A node that needs to
+  update it returns a complete successor with `Graph.success(..., session=...)` (typed nodes may return
+  `Graph.SessionActivation(value, session)`). Graph state and the full Session envelope share one atomic commit;
+  `AgentResult.session` is the last confirmed snapshot, and a later run reuses it only when the Runtime explicitly
+  passes it to `AgentStart`. Session Config is durable only as its existing Config cursor; the Config owner must save
+  the referenced immutable snapshot before first use. One Graph invocation/family has one serialized Session owner shared
+  by root and child scopes: a no-successor transition selects the owner value when it enters the commit boundary, while
+  an explicit complete successor wins in confirmed receipt order. Historical frames retain their own provenance and do
+  not overwrite the current owner Session during recovery.
+- Unknown Graph commits reconcile the same immutable request. Only proven `NotApplied` outcomes retry, within the
+  explicit `max_commit_attempts` budget. Authority loss, conflict, mismatched receipts and unresolved outcomes stop
+  execution without stale cleanup writes. Runtime, not Kernel, reconciles tool executions.
+
+[Durable Agent import](example/graph/durable_agent_import.py) reuses the import topology and codec with injected Ports;
+it does not choose a database, transport or Container. The next task after ReAct END remains an upper-driver decision.
 
 ## Documentation
 

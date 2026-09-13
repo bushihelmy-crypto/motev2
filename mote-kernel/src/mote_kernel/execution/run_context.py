@@ -1,9 +1,11 @@
-"""Invocation-local scoped frames and opaque continuation snapshots."""
+"""Invocation-local scoped frames and authoritative run evidence."""
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field, replace
-from typing import Generic, Never, Protocol, SupportsIndex, TypeAlias, TypeVar, final, overload
+from bisect import bisect_left
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from typing import Generic, Never, Protocol, Self, TypeAlias, TypeVar, cast, overload
 
 from mote_kernel.execution.errors import (
     GraphValuePublicationError,
@@ -16,10 +18,22 @@ from mote_kernel.execution.graph.values import (
     NodeInputFrame,
     NodeOutputFrame,
 )
-from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
+from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation, parent_activation_for_child
 from mote_kernel.state.graph_state import GraphExecutionToken, GraphRunState
 
 GraphValueT = TypeVar("GraphValueT")
+
+
+class _ComparableCoordinate(Protocol):
+    """Ordering contract for the homogeneous coordinate partitions."""
+
+    def __lt__(self, other: Self, /) -> bool: ...
+
+    def __gt__(self, other: Self, /) -> bool: ...
+
+
+FrameRecordT = TypeVar("FrameRecordT")
+CoordinateT = TypeVar("CoordinateT")
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -94,6 +108,33 @@ class AdmittedGraphInput(Generic[GraphValueT]):
 class ExecutionPublicationProvenance:
     execution_token: GraphExecutionToken
 
+    def __post_init__(self) -> None:
+        try:
+            GraphExecutionToken.admit(self.execution_token)
+        except ValueError as error:
+            raise SnapshotMismatchError("publication has inconsistent execution provenance") from error
+
+    @classmethod
+    def admit(cls, provenance: ExecutionPublicationProvenance, /) -> ExecutionPublicationProvenance:
+        if type(provenance) is not cls:
+            raise ValueError("publication execution provenance is malformed")
+        try:
+            return cls(GraphExecutionToken.admit(provenance.execution_token))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("publication execution provenance is malformed") from error
+
+
+def require_publication_confirmation(
+    acknowledged_revision: int,
+    provenance: ExecutionPublicationProvenance,
+) -> GraphExecutionToken:
+    if type(acknowledged_revision) is not int or acknowledged_revision < 1:
+        raise SnapshotMismatchError("publication has inconsistent coordinates")
+    try:
+        return ExecutionPublicationProvenance.admit(provenance).execution_token
+    except (AttributeError, TypeError, ValueError) as error:
+        raise SnapshotMismatchError("publication has inconsistent execution provenance") from error
+
 
 @dataclass(frozen=True, slots=True, eq=False)
 class ConfirmedPublication(Generic[GraphValueT]):
@@ -160,6 +201,23 @@ class ScopedFrameAvailability(Protocol[GraphValueT]):
     ) -> bool: ...
 
 
+def _insert_frame_record(
+    records: tuple[FrameRecordT, ...],
+    record: FrameRecordT,
+    *,
+    coordinate: Callable[[FrameRecordT], CoordinateT],
+    duplicate_message: str,
+) -> tuple[FrameRecordT, ...]:
+    """Insert one immutable frame record in its canonical coordinate order."""
+
+    record_coordinate = coordinate(record)
+    if any(coordinate(existing) == record_coordinate for existing in records):
+        raise GraphValuePublicationError(duplicate_message)
+    coordinates = tuple(cast(_ComparableCoordinate, coordinate(existing)) for existing in records)
+    position = bisect_left(coordinates, cast(_ComparableCoordinate, record_coordinate))
+    return (*records[:position], record, *records[position:])
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class ScopedFrameIndex(Generic[GraphValueT]):
     graph_inputs: tuple[AdmittedGraphInput[GraphValueT], ...] = ()
@@ -223,172 +281,120 @@ class ScopedFrameIndex(Generic[GraphValueT]):
         coordinate: FrameCoordinate[GraphValueT],
     ) -> FrameRecord[GraphValueT]:
         if isinstance(coordinate, GraphInputAvailabilityCoordinate):
-            for record in self.graph_inputs:
-                if record.coordinate == coordinate:
-                    return record
+            records: tuple[FrameRecord[GraphValueT], ...] = self.graph_inputs
         elif isinstance(coordinate, PublicationAvailabilityCoordinate):
-            for record in self.publications:
-                if record.coordinate == coordinate:
-                    return record
+            records = self.publications
         elif isinstance(coordinate, ResumeInputAvailabilityCoordinate):
-            for record in self.resume_inputs:
-                if record.coordinate == coordinate:
-                    return record
+            records = self.resume_inputs
         else:
-            for record in self.child_boundaries:
-                if record.coordinate == coordinate:
-                    return record
+            if type(coordinate) is not ChildBoundaryAvailabilityCoordinate:
+                raise SnapshotMismatchError("unsupported frame coordinate")
+            records = self.child_boundaries
+        for record in records:
+            if record.coordinate == coordinate:
+                return record
         raise SnapshotMismatchError(f"continuation has no frame at coordinate {coordinate!r}")
 
     def add_graph_input(
         self,
         record: AdmittedGraphInput[GraphValueT],
     ) -> ScopedFrameIndex[GraphValueT]:
-        if any(existing.coordinate == record.coordinate for existing in self.graph_inputs):
-            raise GraphValuePublicationError("graph input coordinate was admitted more than once")
         return replace(
             self,
-            graph_inputs=tuple(sorted((*self.graph_inputs, record), key=lambda item: item.coordinate)),
+            graph_inputs=_insert_frame_record(
+                self.graph_inputs,
+                record,
+                coordinate=lambda item: item.coordinate,
+                duplicate_message="graph input coordinate was admitted more than once",
+            ),
         )
 
     def add_publication(
         self,
         record: ConfirmedPublication[GraphValueT],
     ) -> ScopedFrameIndex[GraphValueT]:
-        if any(existing.coordinate == record.coordinate for existing in self.publications):
-            raise GraphValuePublicationError("stable activation was published more than once")
         return replace(
             self,
-            publications=tuple(sorted((*self.publications, record), key=lambda item: item.coordinate)),
+            publications=_insert_frame_record(
+                self.publications,
+                record,
+                coordinate=lambda item: item.coordinate,
+                duplicate_message="stable activation was published more than once",
+            ),
         )
 
     def add_resume_input(
         self,
         record: AdmittedResumeInput[GraphValueT],
     ) -> ScopedFrameIndex[GraphValueT]:
-        if any(existing.coordinate == record.coordinate for existing in self.resume_inputs):
-            raise GraphValuePublicationError("resume input coordinate was admitted more than once")
         return replace(
             self,
-            resume_inputs=tuple(sorted((*self.resume_inputs, record), key=lambda item: item.coordinate)),
+            resume_inputs=_insert_frame_record(
+                self.resume_inputs,
+                record,
+                coordinate=lambda item: item.coordinate,
+                duplicate_message="resume input coordinate was admitted more than once",
+            ),
         )
 
     def add_child_boundary(
         self,
         record: ConfirmedChildBoundary[GraphValueT],
     ) -> ScopedFrameIndex[GraphValueT]:
-        if any(existing.coordinate == record.coordinate for existing in self.child_boundaries):
-            raise GraphValuePublicationError("child boundary coordinate was confirmed more than once")
         return replace(
             self,
-            child_boundaries=tuple(sorted((*self.child_boundaries, record), key=lambda item: item.coordinate)),
+            child_boundaries=_insert_frame_record(
+                self.child_boundaries,
+                record,
+                coordinate=lambda item: item.coordinate,
+                duplicate_message="child boundary coordinate was confirmed more than once",
+            ),
         )
 
 
-@dataclass(frozen=True, slots=True, eq=False)
-class _CompiledFamilyIdentity:
-    pass
+@dataclass(frozen=True, slots=True)
+class ScopedStateBinding:
+    """Bind one scoped coordinate to its authoritative graph state.
+
+    The root and every nested run use this same binding shape.  A nested
+    parent activation is projected from ``GraphRunState.parent`` so the
+    binding never carries a second copy of that identity.
+    """
+
+    scope_run: ScopeRunCoordinate
+    state: GraphRunState
+
+    @property
+    def parent_activation(self) -> StableActivation | None:
+        """Validate and project the State-owned parent identity, if nested."""
+
+        if self.state.run_id != self.scope_run.graph_run_id:
+            raise SnapshotMismatchError("scope-run coordinate does not match its graph state")
+        parent = self.state.parent
+        if parent is None:
+            if self.scope_run.scope:
+                raise SnapshotMismatchError(
+                    "nested graph state does not match its runtime scope: missing its parent activation"
+                )
+            return None
+        if not self.scope_run.scope:
+            raise SnapshotMismatchError("root graph state cannot carry a parent activation")
+        return parent_activation_for_child(self.scope_run, parent)
 
 
 @dataclass(frozen=True, slots=True)
-class ChildStateBinding:
-    coordinate: ScopeRunCoordinate
-    parent_activation: StableActivation
-    state: GraphRunState
+class UncreatedGraphRun:
+    """An explicit authoritative negative read, never inferred from an omitted record."""
+
+    scope_run: ScopeRunCoordinate
+
+    def __post_init__(self) -> None:
+        if type(self.scope_run) is not ScopeRunCoordinate or not self.scope_run.scope:
+            raise SnapshotMismatchError("uncreated child evidence requires a nested scope-run coordinate")
+        replace(self.scope_run)
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
-class _CompleteContinuationSnapshot(Generic[GraphValueT]):
-    family_identity: _CompiledFamilyIdentity
-    root_state: GraphRunState
-    child_states: tuple[ChildStateBinding, ...]
-    frames: ScopedFrameIndex[GraphValueT]
+ScopedRunEvidence: TypeAlias = ScopedStateBinding | UncreatedGraphRun
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
-class _RecoveredContinuationSnapshot(Generic[GraphValueT]):
-    family_identity: _CompiledFamilyIdentity
-    root_state: GraphRunState
-    child_states: tuple[ChildStateBinding, ...]
-    frames: ScopedFrameIndex[GraphValueT]
-
-
-ContinuationSnapshot: TypeAlias = (
-    _CompleteContinuationSnapshot[GraphValueT] | _RecoveredContinuationSnapshot[GraphValueT]
-)
-
-
-class _ContinuationSeal:
-    __slots__ = ()
-
-
-_CONTINUATION_SEAL = _ContinuationSeal()
-
-
-@final
-@dataclass(frozen=True, slots=True, kw_only=True, eq=False, repr=False)
-class _GraphContinuation(Generic[GraphValueT]):
-    _snapshot: ContinuationSnapshot[GraphValueT]
-    _seal: InitVar[_ContinuationSeal]
-
-    def __post_init__(self, _seal: _ContinuationSeal) -> None:
-        if _seal is not _CONTINUATION_SEAL:
-            raise SnapshotMismatchError("continuations can only be produced by a Graph result")
-
-    def admit_snapshot(
-        self,
-        _seal: _ContinuationSeal,
-        family_identity: _CompiledFamilyIdentity,
-        state: GraphRunState,
-    ) -> ContinuationSnapshot[GraphValueT]:
-        if _seal is not _CONTINUATION_SEAL:
-            raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
-        snapshot = self._snapshot
-        if snapshot.family_identity is not family_identity or snapshot.root_state != state:
-            raise SnapshotMismatchError("state and continuation do not belong to the same compiled graph lineage")
-        return snapshot
-
-    def __copy__(self) -> Never:
-        raise SnapshotMismatchError("continuations do not provide a copy contract")
-
-    def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
-        raise SnapshotMismatchError("continuations do not provide a serialization contract")
-
-
-def _admit_continuation(
-    family_identity: _CompiledFamilyIdentity,
-    state: GraphRunState,
-    continuation: _GraphContinuation[GraphValueT],
-) -> ContinuationSnapshot[GraphValueT]:
-    if type(continuation) is not _GraphContinuation:
-        raise SnapshotMismatchError("continuations can only be admitted by their Graph owner")
-    return continuation.admit_snapshot(_CONTINUATION_SEAL, family_identity, state)
-
-
-def _continuation_recovered(snapshot: ContinuationSnapshot[GraphValueT]) -> bool:
-    return isinstance(snapshot, _RecoveredContinuationSnapshot)
-
-
-def _make_continuation(
-    family_identity: _CompiledFamilyIdentity,
-    root_state: GraphRunState,
-    child_states: tuple[ChildStateBinding, ...],
-    frames: ScopedFrameIndex[GraphValueT],
-    *,
-    recovered: bool,
-) -> _GraphContinuation[GraphValueT]:
-    snapshot: ContinuationSnapshot[GraphValueT]
-    if recovered:
-        snapshot = _RecoveredContinuationSnapshot(family_identity, root_state, child_states, frames)
-    else:
-        snapshot = _CompleteContinuationSnapshot(family_identity, root_state, child_states, frames)
-    return _GraphContinuation(_snapshot=snapshot, _seal=_CONTINUATION_SEAL)
-
-
-__all__ = [
-    "_CompiledFamilyIdentity",
-    "_GraphContinuation",
-    "_admit_continuation",
-    "_continuation_recovered",
-    "_make_continuation",
-]
+__all__: list[str] = []

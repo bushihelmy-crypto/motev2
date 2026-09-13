@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
 
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.edge import Edge
 from mote_kernel.execution.graph.node import CallableNodeDefinition
 from mote_kernel.execution.graph.ports import GraphOutputDeclarations, InputBindings
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
@@ -32,7 +32,7 @@ class GraphDefinition(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     outputs: GraphOutputDeclarations[GraphValueT]
     resources: tuple[ResourceDefinition, ...] = ()
-    resume_input: ResumeInputBinding[GraphValueT] | None = None
+    resume_input: FrameCodec[GraphValueT] | None = None
 
 
 __all__: list[str] = []

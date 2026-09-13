@@ -17,6 +17,22 @@ class NegativeTypingCase:
 
 CASES = (
     NegativeTypingCase(
+        "agent_cross_request.py",
+        ("AgentStart[int, Never, Never]", 'parameter "request"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_cross_store.py",
+        ("PersistencePort[int]", 'parameter "persistence"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_no_state.py",
+        ("GraphRunState", 'parameter "request"', "reportArgumentType"),
+    ),
+    NegativeTypingCase(
+        "agent_no_commit_override.py",
+        ('No parameter named "commit"', "reportCallIssue"),
+    ),
+    NegativeTypingCase(
         "logging_node_none_sink.py",
         ('Argument of type "None"', 'parameter "sink"', "reportArgumentType"),
     ),
@@ -292,6 +308,19 @@ def test_node_output_overloads_positive_fixture_is_exact_and_contains_no_unknown
 def test_typed_node_contract_positive_fixture_is_exact_and_contains_no_unknown() -> None:
     completed = subprocess.run(
         ("pyright", "tests/typing_positive/typed_node_contract.py"),
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "Unknown" not in completed.stdout
+
+
+def test_failover_decorators_positive_fixture_is_exact_and_contains_no_unknown() -> None:
+    completed = subprocess.run(
+        ("pyright", "tests/typing_positive/failover_decorators.py"),
         cwd=PROJECT_ROOT,
         check=False,
         capture_output=True,

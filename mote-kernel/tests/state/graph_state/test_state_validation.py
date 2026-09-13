@@ -14,6 +14,7 @@ from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphEvidenceCommitment,
     GraphExecutionAttemptId,
     GraphExecutionLease,
     GraphExecutionToken,
@@ -30,6 +31,7 @@ from mote_kernel.state.graph_state import (
     GraphNodeInterrupt,
     GraphNodeInterruptIdentity,
     GraphNodeSettlement,
+    GraphPublicationSettlement,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
@@ -62,10 +64,32 @@ A = GraphNodeId("a")
 B = GraphNodeId("b")
 C = GraphNodeId("c")
 CODEC = GraphResumeInputCodec(GraphResumeInputCodecId("input.v1"), 1)
+SETTLEMENT_EXECUTION = GraphExecutionToken(1, GraphExecutionAttemptId("settlement"))
 
 
 def arrival(source: GraphNodeId) -> ActivationReference:
     return ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, source))
+
+
+def publication_settlements(
+    references: tuple[ActivationReference, ...],
+) -> tuple[GraphPublicationSettlement, ...]:
+    return tuple(
+        GraphPublicationSettlement(reference, revision, SETTLEMENT_EXECUTION)
+        for revision, reference in enumerate(references, start=1)
+    )
+
+
+def with_publications(
+    state: GraphRunState,
+    references: tuple[ActivationReference, ...],
+) -> GraphRunState:
+    return replace(
+        state,
+        settled_publications=publication_settlements(references),
+        revision=max(state.revision, len(references)),
+        execution_sequence=max(state.execution_sequence, 1 if references else 0),
+    )
 
 
 def join_occurrence(
@@ -155,12 +179,31 @@ def running() -> GraphRunState:
         {"definition_id": GraphDefinitionId(" graph")},
         {"definition_version": GraphDefinitionVersion(0)},
         {"revision": -1},
+        {"definition_version": True},
+        {"superstep": False},
+        {"revision": 0.0},
+        {"execution_sequence": True},
+        {"config_revision": 0},
+        {"config_revision": True},
         {"parent": GraphActivationIdentity(GraphRunId("run"), 0, A)},
     ],
 )
 def test_invalid_run_identity_version_counter_and_parent_fail_closed(mutation: dict[str, object]) -> None:
     with pytest.raises(GraphStateTransitionError):
         validate_graph_run_state(replace(running(), **mutation))  # type: ignore[arg-type]
+
+
+def test_recovered_state_with_missing_config_identity_fails_closed() -> None:
+    state = running()
+    object.__setattr__(state, "config_definition_id", None)
+
+    with pytest.raises(GraphStateTransitionError, match="Config cursor is malformed"):
+        validate_graph_run_state(state)
+
+
+def test_successor_config_revision_requires_its_snapshot_digest_in_authoritative_state() -> None:
+    with pytest.raises(GraphStateTransitionError, match="Config cursor is malformed"):
+        validate_graph_run_state(replace(running(), config_revision=2, config_digest=None))
 
 
 def test_parent_bearing_recovered_state_requires_deterministic_child_run_identity() -> None:
@@ -180,7 +223,9 @@ def later_running() -> GraphRunState:
     return replace(
         running(),
         superstep=1,
-        settled_activations=(arrival(A),),
+        settled_publications=publication_settlements((arrival(A),)),
+        revision=1,
+        execution_sequence=1,
         frontier=GraphFrontierState(
             (
                 GraphFrontierNode(
@@ -275,8 +320,7 @@ def test_join_progress_arrivals_must_use_canonical_reference_order() -> None:
     references = (arrival(A), arrival(B))
     occurrence = join_occurrence((A, B, C), GraphNodeId("target"))
     state = replace(
-        later_running(),
-        settled_activations=references,
+        with_publications(later_running(), references),
         join_progress=(join_progress(tuple(reversed(references)), occurrence=occurrence),),
     )
 
@@ -334,7 +378,7 @@ def test_recovered_activation_cause_validation_fails_closed(
 
 
 def test_recovered_activation_cause_requires_settlement_evidence() -> None:
-    base = replace(later_running(), settled_activations=())
+    base = replace(later_running(), settled_publications=())
     frontier = GraphFrontierState(
         (
             GraphFrontierNode(
@@ -359,8 +403,7 @@ def test_recovered_join_cause_must_name_its_exact_target_coordinate() -> None:
         ),
     )
     state = replace(
-        later_running(),
-        settled_activations=references,
+        with_publications(later_running(), references),
         frontier=GraphFrontierState((GraphFrontierNode(C, PendingGraphNode(UseStepRequestInput()), cause),)),
     )
 
@@ -370,7 +413,7 @@ def test_recovered_join_cause_must_name_its_exact_target_coordinate() -> None:
 
 def test_recovered_routed_causes_reject_missing_or_mismatched_join_identity() -> None:
     references = (arrival(A), arrival(B))
-    base = replace(later_running(), settled_activations=references)
+    base = with_publications(later_running(), references)
 
     ordinary = forged_cause(references)
     ordinary_state = replace(
@@ -426,7 +469,12 @@ def test_failed_status_accepts_success_and_failure_diagnostics() -> None:
             GraphFrontierNode(B, FailedGraphNode(GraphFailure("blocked")), StartActivationCause()),
         )
     )
-    validate_graph_run_state(replace(base, status=GraphRunStatus.FAILED, frontier=diagnostic))
+    validate_graph_run_state(
+        with_publications(
+            replace(base, status=GraphRunStatus.FAILED, frontier=diagnostic),
+            (arrival(A),),
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -461,8 +509,11 @@ def test_frontier_rejects_unsupported_typed_union_variants(
     frontier: GraphFrontierState,
     message: str,
 ) -> None:
+    candidate = replace(running(), frontier=frontier)
+    if any(isinstance(node.settlement, SucceededGraphNode) for node in frontier.nodes):
+        candidate = with_publications(candidate, (arrival(A),))
     with pytest.raises(GraphStateTransitionError, match=message):
-        validate_graph_run_state(replace(running(), frontier=frontier))
+        validate_graph_run_state(candidate)
 
 
 @pytest.mark.parametrize(
@@ -629,14 +680,17 @@ def test_authoritative_resource_shape_guards_are_independently_enforced() -> Non
         (ResourceLock(resource, A),),
         (ResourceAcquisition(A, (resource,), (resource,)),),
     )
-    settled = replace(
-        base,
-        execution_sequence=1,
-        execution=execution,
-        resources=owned_by_a,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+    settled = with_publications(
+        replace(
+            base,
+            execution_sequence=1,
+            execution=execution,
+            resources=owned_by_a,
+            frontier=GraphFrontierState(
+                (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+            ),
         ),
+        (arrival(A),),
     )
     with pytest.raises(GraphStateTransitionError, match="current pending"):
         validate_graph_run_state(settled)
@@ -693,6 +747,36 @@ def test_completed_lifecycle_rejects_execution_lease() -> None:
     )
     with pytest.raises(GraphStateTransitionError, match="only a running graph"):
         validate_graph_run_state(completed_with_execution)
+
+
+def test_durable_completed_state_requires_terminal_settlement_provenance() -> None:
+    terminal = ActivationReference(
+        GraphActivationIdentity(GraphRunId("run"), 0, A),
+        GraphRouteId("done"),
+    )
+    completed = replace(
+        running(),
+        status=GraphRunStatus.COMPLETED,
+        frontier=GraphFrontierState(()),
+        revision=2,
+        execution_sequence=1,
+        graph_input_evidence=GraphEvidenceCommitment(b"i" * 32),
+        settled_publications=(GraphPublicationSettlement(terminal, 1, SETTLEMENT_EXECUTION),),
+        completion_route=GraphRouteId("done"),
+    )
+
+    validate_graph_run_state(completed)
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement provenance"):
+        validate_graph_run_state(replace(completed, completion_route=GraphRouteId("other")))
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement provenance"):
+        validate_graph_run_state(replace(completed, settled_publications=()))
+    with pytest.raises(GraphStateTransitionError, match="terminal settlement must precede"):
+        validate_graph_run_state(
+            replace(
+                completed,
+                settled_publications=(GraphPublicationSettlement(terminal, 2, SETTLEMENT_EXECUTION),),
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -755,24 +839,30 @@ def test_lifecycle_invariants_fail_closed(case: str) -> None:
 
 def test_running_settled_frontier_is_a_valid_quiescent_recovery_boundary() -> None:
     base = running()
-    settled = replace(
-        base,
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+    settled = with_publications(
+        replace(
+            base,
+            frontier=GraphFrontierState(
+                (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+            ),
         ),
+        (arrival(A),),
     )
     validate_graph_run_state(settled)
 
 
 def test_running_settled_frontier_rejects_a_retained_execution_lease() -> None:
     base = running()
-    settled = replace(
-        base,
-        execution_sequence=1,
-        execution=GraphExecutionLease(GraphExecutionToken(1, GraphExecutionAttemptId("attempt"))),
-        frontier=GraphFrontierState(
-            (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+    settled = with_publications(
+        replace(
+            base,
+            execution_sequence=1,
+            execution=GraphExecutionLease(SETTLEMENT_EXECUTION),
+            frontier=GraphFrontierState(
+                (GraphFrontierNode(A, SucceededGraphNode(ContinueGraphRouting()), StartActivationCause()),)
+            ),
         ),
+        (arrival(A),),
     )
     with pytest.raises(GraphStateTransitionError, match="active execution lease"):
         validate_graph_run_state(settled)
@@ -813,53 +903,155 @@ def test_empty_frontier_has_no_derived_status() -> None:
         frontier_status(GraphFrontierState(()))
 
 
-def test_settled_activation_evidence_rejects_malformed_storage_shapes() -> None:
+def test_settled_publication_evidence_rejects_malformed_storage_shapes() -> None:
     base = replace(running(), superstep=2)
 
     with pytest.raises(GraphStateTransitionError, match="evidence must be a tuple"):
-        validate_graph_run_state(replace(base, settled_activations=cast(tuple[ActivationReference, ...], [])))
+        validate_graph_run_state(replace(base, settled_publications=cast(tuple[GraphPublicationSettlement, ...], [])))
 
-    with pytest.raises(GraphStateTransitionError, match="invalid reference"):
-        validate_graph_run_state(replace(base, settled_activations=cast(tuple[ActivationReference, ...], (object(),))))
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(
+            replace(base, settled_publications=cast(tuple[GraphPublicationSettlement, ...], (object(),)))
+        )
+
+    missing_reference = object.__new__(GraphPublicationSettlement)
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(replace(base, settled_publications=(missing_reference,)))
+
+    missing_route = object.__new__(ActivationReference)
+    object.__setattr__(missing_route, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+    malformed_reference = GraphPublicationSettlement(missing_route, 1, SETTLEMENT_EXECUTION)
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(replace(base, settled_publications=(malformed_reference,)))
 
     unhashable = forged_reference(
         GraphActivationIdentity(GraphRunId("run"), 0, A),
         cast(GraphRouteId, []),
     )
-    with pytest.raises(GraphStateTransitionError, match="unhashable value"):
-        validate_graph_run_state(replace(base, settled_activations=(unhashable,)))
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(
+            replace(
+                base,
+                settled_publications=(GraphPublicationSettlement(unhashable, 1, SETTLEMENT_EXECUTION),),
+                revision=1,
+                execution_sequence=1,
+            )
+        )
 
 
-def test_settled_activation_evidence_must_be_canonical_and_unique() -> None:
+def test_execution_token_with_missing_fields_fails_at_state_admission() -> None:
+    with pytest.raises(ValueError, match="execution token is malformed"):
+        GraphExecutionToken.admit(object.__new__(GraphExecutionToken))
+
+
+@pytest.mark.parametrize("digest", [bytearray(b"x" * 32), b"short"])
+def test_evidence_commitment_requires_an_exact_sha256_digest(digest: object) -> None:
+    with pytest.raises(ValueError, match="exact SHA-256"):
+        GraphEvidenceCommitment(cast(bytes, digest))
+
+
+def test_evidence_commitment_readmission_rejects_foreign_and_incomplete_records() -> None:
+    with pytest.raises(ValueError, match="commitment is malformed"):
+        GraphEvidenceCommitment.admit(cast(GraphEvidenceCommitment, object()))
+    with pytest.raises(ValueError, match="commitment is malformed"):
+        GraphEvidenceCommitment.admit(object.__new__(GraphEvidenceCommitment))
+
+
+@pytest.mark.parametrize("missing", ["activation", "route"])
+def test_reference_collection_readmission_handles_each_missing_field(missing: str) -> None:
+    reference = object.__new__(ActivationReference)
+    if missing == "activation":
+        object.__setattr__(reference, "route", None)
+    else:
+        object.__setattr__(reference, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+    cause = RoutedActivationCause((arrival(A),))
+    object.__setattr__(cause, "references", (reference,))
+    state = replace(
+        later_running(),
+        frontier=GraphFrontierState((GraphFrontierNode(A, PendingGraphNode(UseStepRequestInput()), cause),)),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match=r"invalid reference|invalid activation identity"):
+        validate_graph_run_state(state)
+
+
+def test_settled_publication_revision_and_execution_are_bounded_by_the_state() -> None:
+    references = (
+        arrival(A),
+        ActivationReference(GraphActivationIdentity(GraphRunId("run"), 1, B)),
+    )
+    base = with_publications(replace(running(), superstep=2), references)
+    first, second = base.settled_publications
+
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(replace(base, settled_publications=(replace(first, commit_revision=0), second)))
+    with pytest.raises(GraphStateTransitionError, match="revision exceeds"):
+        validate_graph_run_state(
+            replace(base, settled_publications=(replace(first, commit_revision=base.revision + 1), second))
+        )
+    with pytest.raises(GraphStateTransitionError, match="execution exceeds"):
+        validate_graph_run_state(
+            replace(
+                base,
+                settled_publications=(
+                    replace(first, execution=GraphExecutionToken(2, GraphExecutionAttemptId("future"))),
+                    second,
+                ),
+            )
+        )
+    with pytest.raises(GraphStateTransitionError, match="repeats one commit revision"):
+        validate_graph_run_state(
+            replace(base, settled_publications=(first, replace(second, commit_revision=first.commit_revision)))
+        )
+
+
+def test_settlement_readmission_rejects_a_reference_with_missing_fields() -> None:
+    reference = object.__new__(ActivationReference)
+    object.__setattr__(reference, "activation", GraphActivationIdentity(GraphRunId("run"), 0, A))
+    settlement = GraphPublicationSettlement(reference, 1, SETTLEMENT_EXECUTION)
+
+    with pytest.raises(GraphStateTransitionError, match="malformed record"):
+        validate_graph_run_state(
+            replace(
+                running(),
+                superstep=2,
+                settled_publications=(settlement,),
+                revision=1,
+                execution_sequence=1,
+            ),
+        )
+
+
+def test_settled_publication_evidence_must_be_canonical_and_unique() -> None:
     base = replace(running(), superstep=2)
     first = arrival(A)
     second = ActivationReference(GraphActivationIdentity(GraphRunId("run"), 1, B))
 
     with pytest.raises(GraphStateTransitionError, match="canonical and distinct"):
-        validate_graph_run_state(replace(base, settled_activations=(second, first)))
+        validate_graph_run_state(with_publications(base, (second, first)))
 
     duplicate_activation = (
         ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, A)),
         ActivationReference(GraphActivationIdentity(GraphRunId("run"), 0, A), GraphRouteId("retry")),
     )
     with pytest.raises(GraphStateTransitionError, match="repeats one activation"):
-        validate_graph_run_state(replace(base, settled_activations=duplicate_activation))
+        validate_graph_run_state(with_publications(base, duplicate_activation))
 
 
-def test_current_settled_activation_evidence_matches_the_frontier_success() -> None:
+def test_current_settled_publication_evidence_matches_the_frontier_success() -> None:
     base = running()
     current = arrival(A)
 
     with pytest.raises(GraphStateTransitionError, match="invalid coordinate"):
         validate_graph_run_state(
-            replace(
+            with_publications(
                 base,
-                settled_activations=(ActivationReference(GraphActivationIdentity(GraphRunId("other"), 0, A)),),
+                (ActivationReference(GraphActivationIdentity(GraphRunId("other"), 0, A)),),
             )
         )
 
     with pytest.raises(GraphStateTransitionError, match="no successful frontier node"):
-        validate_graph_run_state(replace(base, settled_activations=(current,)))
+        validate_graph_run_state(with_publications(base, (current,)))
 
     selected = replace(
         base,
@@ -869,14 +1061,14 @@ def test_current_settled_activation_evidence_matches_the_frontier_success() -> N
     )
     with pytest.raises(GraphStateTransitionError, match="route does not match"):
         validate_graph_run_state(
-            replace(selected, settled_activations=(ActivationReference(current.activation, GraphRouteId("other")),))
+            with_publications(selected, (ActivationReference(current.activation, GraphRouteId("other")),))
         )
 
 
 def test_join_progress_rejects_duplicate_records_after_each_record_is_validated() -> None:
     base = replace(
         later_running(),
-        settled_activations=(arrival(A),),
+        settled_publications=publication_settlements((arrival(A),)),
         join_progress=(
             join_progress((arrival(A),)),
             join_progress((arrival(A),)),

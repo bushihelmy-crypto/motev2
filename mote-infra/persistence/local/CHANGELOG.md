@@ -18,3 +18,6 @@ The format follows Keep a Changelog, and the project intends to follow Semantic 
 - Pinned Rust and cargo-deny tooling, reproducible Cargo lockfile, dependency policy, and project-local quality commands.
 - Monorepo CI, Rust formatting hook, and automated Cargo dependency update integration.
 - Project-local development, licensing, packaging, and engineering guidance.
+- Deterministic structure, toolchain, architecture, complexity, Cargo hygiene,
+  license, focused-test, build, package, dependency, and secret gates aligned
+  with Local Execution.

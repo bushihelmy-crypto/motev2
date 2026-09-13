@@ -16,8 +16,10 @@ from mote_kernel.state.graph_state import (
     FailedGraphNodeOutcome,
     FenceGraphExecution,
     GraphActivationIdentity,
+    GraphConfigCursor,
     GraphDefinitionId,
     GraphDefinitionVersion,
+    GraphEvidenceCommitment,
     GraphExecutionAttemptId,
     GraphExecutionLease,
     GraphExecutionToken,
@@ -32,6 +34,7 @@ from mote_kernel.state.graph_state import (
     GraphNodeId,
     GraphNodeInterruptIdentity,
     GraphNodeOutcome,
+    GraphPublicationSettlement,
     GraphResumeInputCodec,
     GraphResumeInputCodecId,
     GraphResumeInputPayload,
@@ -113,7 +116,11 @@ def join_progress(
     return GraphJoinProgress(occurrence or join_occurrence(), arrived)
 
 
-def running(*nodes: GraphNodeId, codec: bool = True) -> GraphRunState:
+def running(
+    *nodes: GraphNodeId,
+    codec: bool = True,
+    config_cursor: GraphConfigCursor | None = None,
+) -> GraphRunState:
     return reduce_graph_run(
         None,
         StartGraphRun(
@@ -122,6 +129,7 @@ def running(*nodes: GraphNodeId, codec: bool = True) -> GraphRunState:
             GraphDefinitionVersion(1),
             tuple(GraphFrontierActivation(node, StartActivationCause()) for node in nodes),
             resume_input_codec=CODEC if codec else None,
+            config_cursor=config_cursor,
         ),
     )
 
@@ -138,9 +146,16 @@ def claim(
     )
 
 
-def settle(state: GraphRunState, outcome: GraphNodeOutcome) -> GraphRunState:
+def settle(
+    state: GraphRunState,
+    outcome: GraphNodeOutcome,
+    config_cursor: GraphConfigCursor | None = None,
+) -> GraphRunState:
     assert state.execution is not None
-    return reduce_graph_run(state, SettleGraphNode(state.revision, state.execution.token, outcome))
+    return reduce_graph_run(
+        state,
+        SettleGraphNode(state.revision, state.execution.token, outcome, config_cursor),
+    )
 
 
 def test_start_is_canonical_and_immutable() -> None:
@@ -165,6 +180,11 @@ def test_start_initializes_every_durable_field_and_default_binding() -> None:
     assert state.resume_input_codec == CODEC
     assert state.join_progress == ()
     assert state.resources is state.execution is state.abort is state.parent is None
+    assert state.config_cursor == GraphConfigCursor(
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        1,
+    )
 
 
 def test_successful_reference_projection_ignores_non_successful_settlements() -> None:
@@ -190,16 +210,143 @@ def test_join_progress_delta_rejects_unhashable_historical_arrivals() -> None:
 
 
 def test_start_installs_the_explicit_state_owned_activation_cause() -> None:
+    cursor = GraphConfigCursor(
+        GraphDefinitionId("config"),
+        GraphDefinitionVersion(2),
+        7,
+        "config-v7",
+    )
     command = StartGraphRun(
         GraphRunId("run"),
         GraphDefinitionId("graph"),
         GraphDefinitionVersion(1),
         (GraphFrontierActivation(A, StartActivationCause()),),
+        config_cursor=cursor,
     )
 
     state = reduce_graph_run(None, command)
 
     assert state.frontier.nodes[0].activation == command.activations[0]
+    assert state.config_cursor == cursor
+
+
+def _forged_config_cursor(
+    *,
+    definition_id: object = GraphDefinitionId("config"),
+    definition_version: object = GraphDefinitionVersion(1),
+    revision: object = 1,
+    digest: object = "digest",
+) -> GraphConfigCursor:
+    cursor = object.__new__(GraphConfigCursor)
+    object.__setattr__(cursor, "definition_id", definition_id)
+    object.__setattr__(cursor, "definition_version", definition_version)
+    object.__setattr__(cursor, "revision", revision)
+    object.__setattr__(cursor, "digest", digest)
+    return cursor
+
+
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        cast(GraphConfigCursor, object()),
+        _forged_config_cursor(digest=" "),
+    ],
+)
+def test_start_revalidates_the_single_config_cursor_input(cursor: GraphConfigCursor) -> None:
+    command = StartGraphRun(
+        GraphRunId("run"),
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        (GraphFrontierActivation(A, StartActivationCause()),),
+        config_cursor=cursor,
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="graph start Config cursor is malformed"):
+        reduce_graph_run(None, command)
+
+
+def test_start_revalidates_a_reconstructed_graph_input_commitment() -> None:
+    malformed = object.__new__(GraphEvidenceCommitment)
+    command = StartGraphRun(
+        GraphRunId("run"),
+        GraphDefinitionId("graph"),
+        GraphDefinitionVersion(1),
+        (GraphFrontierActivation(A, StartActivationCause()),),
+        graph_input_evidence=malformed,
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="input evidence is malformed"):
+        reduce_graph_run(None, command)
+
+
+def test_config_cursor_transition_is_monotonic_and_digest_stable() -> None:
+    base = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 1)
+    assert base.transition_to(GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 1)) is base
+    enriched = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 1, "v1")
+    assert base.transition_to(enriched) == enriched
+    with_digest = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 1, "v1")
+    assert with_digest.transition_to(enriched) is with_digest
+    successor = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 2, "v2")
+    assert with_digest.transition_to(successor) == successor
+
+    with pytest.raises(ValueError, match="identity or version"):
+        base.transition_to(GraphConfigCursor(GraphDefinitionId("other"), GraphDefinitionVersion(1), 1))
+    with pytest.raises(ValueError, match="digest conflicts"):
+        with_digest.transition_to(GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 1, "other"))
+    with pytest.raises(ValueError, match=r"successor.*digest"):
+        GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 2)
+    with pytest.raises(ValueError, match="move backwards"):
+        successor.transition_to(with_digest)
+    with pytest.raises(ValueError, match="advance exactly once"):
+        with_digest.transition_to(GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 3, "v3"))
+
+
+def test_settlement_admits_one_successor_config_cursor_for_every_outcome() -> None:
+    cursor = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 2, "v2")
+    leased = claim(running(A, B))
+    first = settle(leased, SucceededGraphNodeOutcome(A, ContinueGraphRouting()), cursor)
+    second = settle(first, SucceededGraphNodeOutcome(B, ContinueGraphRouting()), cursor)
+    assert first.config_cursor == second.config_cursor == cursor
+
+    failed = settle(claim(running(A)), FailedGraphNodeOutcome(A, GraphFailure("failed")), cursor)
+    assert failed.config_cursor == cursor
+    with pytest.raises(GraphStateTransitionError, match="Config cursor is malformed"):
+        settle(
+            claim(running(A)),
+            SucceededGraphNodeOutcome(A, ContinueGraphRouting()),
+            cast(GraphConfigCursor, object()),
+        )
+    with pytest.raises(GraphStateTransitionError, match="advance exactly once"):
+        settle(
+            claim(running(A)),
+            SucceededGraphNodeOutcome(A, ContinueGraphRouting()),
+            GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 3, "v3"),
+        )
+
+
+@pytest.mark.parametrize("outcome_kind", ["failed", "interrupted"])
+def test_only_successful_settlement_can_carry_publication_evidence(outcome_kind: str) -> None:
+    leased = claim(running(A))
+    assert leased.execution is not None
+    if outcome_kind == "failed":
+        outcome: GraphNodeOutcome = FailedGraphNodeOutcome(A, GraphFailure("failed"))
+    else:
+        identity = GraphNodeInterruptIdentity(
+            leased.run_id,
+            leased.superstep,
+            A,
+            leased.execution.token.generation,
+        )
+        outcome = InterruptedGraphNodeOutcome(A, identity, GraphInterruptPayload(b"question"))
+    command = SettleGraphNode(
+        leased.revision,
+        leased.execution.token,
+        outcome,
+        publication_evidence=GraphEvidenceCommitment(b"p" * 32),
+    )
+
+    with pytest.raises(GraphStateTransitionError, match="cannot carry publication evidence"):
+        reduce_graph_run(leased, command)
 
 
 def test_start_rejects_a_routed_activation_cause() -> None:
@@ -1341,7 +1488,13 @@ def test_settlement_rejects_reusing_a_committed_success_evidence_entry() -> None
     assert leased.execution is not None
     duplicate = replace(
         leased,
-        settled_activations=(ActivationReference(GraphActivationIdentity(leased.run_id, 0, A)),),
+        settled_publications=(
+            GraphPublicationSettlement(
+                ActivationReference(GraphActivationIdentity(leased.run_id, 0, A)),
+                leased.revision,
+                leased.execution.token,
+            ),
+        ),
     )
 
     with pytest.raises(GraphStateTransitionError, match="already been committed"):

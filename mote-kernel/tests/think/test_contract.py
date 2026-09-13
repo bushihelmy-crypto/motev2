@@ -22,6 +22,8 @@ from mote_kernel.think.contract import (
     ModelBinding,
     PromptFrame,
     PromptStep,
+    RouterRequest,
+    RouterStep,
     ThinkContractError,
     ThinkCoreResult,
     ThinkFrame,
@@ -134,6 +136,10 @@ def test_exact_request_envelopes_reject_wrong_member_wrappers() -> None:
     with pytest.raises(ThinkContractError, match="ContextFrame"):
         CompactRequest(PROMPT, cast(Never, object()))
     with pytest.raises(ThinkContractError, match="PromptFrame"):
+        RouterRequest(cast(Never, object()), COMPACTED)
+    with pytest.raises(ThinkContractError, match="CompactedContext"):
+        RouterRequest(PROMPT, cast(Never, object()))
+    with pytest.raises(ThinkContractError, match="PromptFrame"):
         InferenceRequest(cast(Never, object()), COMPACTED, MODEL)
     with pytest.raises(ThinkContractError, match="CompactedContext"):
         InferenceRequest(PROMPT, cast(Never, object()), MODEL)
@@ -155,19 +161,29 @@ def test_exact_step_envelopes_reject_wrong_member_wrappers() -> None:
     with pytest.raises(ThinkContractError, match="CompactedContext"):
         CompactStep(PROMPT, CONTEXT, cast(Never, object()))
     with pytest.raises(ThinkContractError, match="PromptFrame"):
-        InferenceStep(cast(Never, object()), COMPACTED, INFERENCE)
+        RouterStep(cast(Never, object()), COMPACTED, MODEL)
     with pytest.raises(ThinkContractError, match="CompactedContext"):
-        InferenceStep(PROMPT, cast(Never, object()), INFERENCE)
-    with pytest.raises(ThinkContractError, match="InferenceResult"):
-        InferenceStep(PROMPT, COMPACTED, cast(Never, object()))
+        RouterStep(PROMPT, cast(Never, object()), MODEL)
+    with pytest.raises(ThinkContractError, match="ModelBinding"):
+        RouterStep(PROMPT, COMPACTED, cast(Never, object()))
     with pytest.raises(ThinkContractError, match="PromptFrame"):
-        CommandStep(cast(Never, object()), COMPACTED, INFERENCE, CORE)
+        InferenceStep(cast(Never, object()), COMPACTED, MODEL, INFERENCE)
     with pytest.raises(ThinkContractError, match="CompactedContext"):
-        CommandStep(PROMPT, cast(Never, object()), INFERENCE, CORE)
+        InferenceStep(PROMPT, cast(Never, object()), MODEL, INFERENCE)
+    with pytest.raises(ThinkContractError, match="ModelBinding"):
+        InferenceStep(PROMPT, COMPACTED, cast(Never, object()), INFERENCE)
     with pytest.raises(ThinkContractError, match="InferenceResult"):
-        CommandStep(PROMPT, COMPACTED, cast(Never, object()), CORE)
+        InferenceStep(PROMPT, COMPACTED, MODEL, cast(Never, object()))
+    with pytest.raises(ThinkContractError, match="PromptFrame"):
+        CommandStep(cast(Never, object()), COMPACTED, MODEL, INFERENCE, CORE)
+    with pytest.raises(ThinkContractError, match="CompactedContext"):
+        CommandStep(PROMPT, cast(Never, object()), MODEL, INFERENCE, CORE)
+    with pytest.raises(ThinkContractError, match="ModelBinding"):
+        CommandStep(PROMPT, COMPACTED, cast(Never, object()), INFERENCE, CORE)
+    with pytest.raises(ThinkContractError, match="InferenceResult"):
+        CommandStep(PROMPT, COMPACTED, MODEL, cast(Never, object()), CORE)
     with pytest.raises(ThinkContractError, match="ThinkCoreResult"):
-        CommandStep(PROMPT, COMPACTED, INFERENCE, cast(Never, object()))
+        CommandStep(PROMPT, COMPACTED, MODEL, INFERENCE, cast(Never, object()))
 
 
 @pytest.mark.parametrize(
@@ -176,8 +192,9 @@ def test_exact_step_envelopes_reject_wrong_member_wrappers() -> None:
         PromptStep(PROMPT),
         ContextStep(PROMPT, CONTEXT),
         CompactStep(PROMPT, CONTEXT, COMPACTED),
-        InferenceStep(PROMPT, COMPACTED, INFERENCE),
-        CommandStep(PROMPT, COMPACTED, INFERENCE, CORE),
+        RouterStep(PROMPT, COMPACTED, MODEL),
+        InferenceStep(PROMPT, COMPACTED, MODEL, INFERENCE),
+        CommandStep(PROMPT, COMPACTED, MODEL, INFERENCE, CORE),
     ],
 )
 def test_frame_accepts_each_closed_stage_variant(step: ThinkStep) -> None:
@@ -205,12 +222,14 @@ def test_envelopes_are_frozen_and_slot_based() -> None:
         CORE,
         ContextRequest(REQUEST, PROMPT),
         CompactRequest(PROMPT, CONTEXT),
+        RouterRequest(PROMPT, COMPACTED),
         InferenceRequest(PROMPT, COMPACTED, MODEL),
         PromptStep(PROMPT),
         ContextStep(PROMPT, CONTEXT),
         CompactStep(PROMPT, CONTEXT, COMPACTED),
-        InferenceStep(PROMPT, COMPACTED, INFERENCE),
-        CommandStep(PROMPT, COMPACTED, INFERENCE, CORE),
+        RouterStep(PROMPT, COMPACTED, MODEL),
+        InferenceStep(PROMPT, COMPACTED, MODEL, INFERENCE),
+        CommandStep(PROMPT, COMPACTED, MODEL, INFERENCE, CORE),
         ThinkFrame(PromptStep(PROMPT), REQUEST.hook_state),
     )
     for value in values:

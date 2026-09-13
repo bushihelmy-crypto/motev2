@@ -18,9 +18,10 @@ from mote_kernel.think.contract import CommandPort as CommandPortContract
 from mote_kernel.think.contract import CompactPort as CompactPortContract
 from mote_kernel.think.contract import ContextPort as ContextPortContract
 from mote_kernel.think.contract import InferencePort as InferencePortContract
+from mote_kernel.think.contract import ModelBinding, ThinkContractError
 from mote_kernel.think.contract import PromptPort as PromptPortContract
-from mote_kernel.think.contract import ThinkContractError
-from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort
+from mote_kernel.think.contract import RouterPort as RouterPortContract
+from mote_kernel.think.port import CommandPort, CompactPort, ContextPort, InferencePort, PromptPort, RouterPort
 
 RequestT = TypeVar("RequestT")
 ResultT = TypeVar("ResultT")
@@ -57,6 +58,10 @@ def _string_contract() -> InvocationTypeContract[str, str]:
     return InvocationTypeContract(str, str)
 
 
+def _router_contract() -> InvocationTypeContract[str, ModelBinding]:
+    return InvocationTypeContract(str, ModelBinding)
+
+
 def test_think_ports_are_frozen_slot_adapters_and_match_contracts() -> None:
     prompt: PromptPort[str, str, str, str] = PromptPort(
         _RecordingInvocation[str, str]("system", []),
@@ -68,6 +73,10 @@ def test_think_ports_are_frozen_slot_adapters_and_match_contracts() -> None:
     )
     context: ContextPort[str, str] = ContextPort(_RecordingInvocation[str, str]("context", []), _string_contract())
     compact: CompactPort[str, str] = CompactPort(_RecordingInvocation[str, str]("compact", []), _string_contract())
+    router: RouterPort[str] = RouterPort(
+        _RecordingInvocation[str, ModelBinding](ModelBinding("provider", "model", 1), []),
+        _router_contract(),
+    )
     inference: InferencePort[str, str] = InferencePort(
         _RecordingInvocation[str, str]("inference", []),
         _string_contract(),
@@ -77,9 +86,10 @@ def test_think_ports_are_frozen_slot_adapters_and_match_contracts() -> None:
     assert isinstance(prompt, PromptPortContract)
     assert isinstance(context, ContextPortContract)
     assert isinstance(compact, CompactPortContract)
+    assert isinstance(router, RouterPortContract)
     assert isinstance(inference, InferencePortContract)
     assert isinstance(command, CommandPortContract)
-    for port in (prompt, context, compact, inference, command):
+    for port in (prompt, context, compact, router, inference, command):
         assert "__dict__" not in type(port).__slots__
     with pytest.raises(FrozenInstanceError):
         context.invocation = cast(object, None)  # type: ignore[misc]
@@ -113,19 +123,23 @@ async def test_stage_ports_forward_the_exact_request_once() -> None:
     request = "request"
     context_result = "context"
     compact_result = "compact"
+    router_result = ModelBinding("provider", "model", 1)
     inference_result = "inference"
     command_result = "command"
     context_invocation = _RecordingInvocation[str, str](context_result, [])
     compact_invocation = _RecordingInvocation[str, str](compact_result, [])
+    router_invocation = _RecordingInvocation[str, ModelBinding](router_result, [])
     inference_invocation = _RecordingInvocation[str, str](inference_result, [])
     command_invocation = _RecordingInvocation[str, str](command_result, [])
 
     assert await ContextPort[str, str](context_invocation, _string_contract()).load_context(request) == context_result
     assert await CompactPort[str, str](compact_invocation, _string_contract()).compact(request) == compact_result
+    assert await RouterPort[str](router_invocation, _router_contract()).route_model(request) is router_result
     assert await InferencePort[str, str](inference_invocation, _string_contract()).infer(request) == inference_result
     assert await CommandPort[str, str](command_invocation, _string_contract()).build_command(request) == command_result
     assert context_invocation.calls == [request]
     assert compact_invocation.calls == [request]
+    assert router_invocation.calls == [request]
     assert inference_invocation.calls == [request]
     assert command_invocation.calls == [request]
 
@@ -151,6 +165,11 @@ async def test_ports_propagate_invocation_errors() -> None:
             _RaisingInvocation[str, str](RuntimeError("compact")),
             _string_contract(),
         ).compact("request")
+    with pytest.raises(RuntimeError):
+        await RouterPort[str](
+            _RaisingInvocation[str, ModelBinding](RuntimeError("router")),
+            _router_contract(),
+        ).route_model("request")
     with pytest.raises(RuntimeError):
         await InferencePort[str, str](
             _RaisingInvocation[str, str](RuntimeError("inference")),
@@ -251,6 +270,8 @@ def test_ports_reject_missing_or_non_callable_invocations_at_assembly() -> None:
         ContextPort[str, str](cast(Never, None), _string_contract())
     with pytest.raises(ValueError, match=r"CompactPort\.invocation"):
         CompactPort[str, str](cast(Never, None), _string_contract())
+    with pytest.raises(ValueError, match=r"RouterPort\.invocation"):
+        RouterPort[str](cast(Never, None), _router_contract())
     with pytest.raises(ValueError, match=r"InferencePort\.invocation"):
         InferencePort[str, str](cast(Never, None), _string_contract())
     with pytest.raises(ValueError, match=r"CommandPort\.invocation"):
@@ -290,6 +311,10 @@ def test_each_stage_port_rejects_a_missing_or_invalid_contract_at_assembly() -> 
         )
     with pytest.raises(ValueError, match=r"CompactPort\.contract"):
         CompactPort[str, str](invocation, cast(Never, None))
+    with pytest.raises(ValueError, match=r"RouterPort\.contract"):
+        RouterPort[str](
+            cast(Never, _RecordingInvocation[str, ModelBinding](ModelBinding("p", "m", 1), [])), cast(Never, None)
+        )
     with pytest.raises(ValueError, match=r"InferencePort\.contract"):
         InferencePort[str, str](invocation, cast(Never, object()))
     with pytest.raises(ValueError, match=r"CommandPort\.contract"):
@@ -309,6 +334,10 @@ async def test_each_stage_port_rejects_a_wrong_result_before_returning_to_the_no
     )
     context = ContextPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
     compact = CompactPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
+    router = RouterPort[str](
+        _RecordingInvocation[str, ModelBinding](cast(ModelBinding, object()), []),
+        _router_contract(),
+    )
     inference = InferencePort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
     command = CommandPort[str, str](_RecordingInvocation[str, str](wrong, []), _string_contract())
 
@@ -323,6 +352,10 @@ async def test_each_stage_port_rejects_a_wrong_result_before_returning_to_the_no
         with pytest.raises(ThinkContractError, match="invocation result") as raised:
             await operation("request")
         assert isinstance(raised.value.__cause__, InvocationBoundaryError)
+
+    with pytest.raises(ThinkContractError, match="invocation result") as raised:
+        await router.route_model("request")
+    assert isinstance(raised.value.__cause__, InvocationBoundaryError)
 
 
 @pytest.mark.asyncio

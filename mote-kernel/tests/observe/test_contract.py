@@ -8,7 +8,7 @@ from typing import Never, cast
 
 import pytest
 
-from mote_kernel.hooks.contract import HookRequest, HookResult
+from mote_kernel.hooks.contract import HookActivationRequest, HookResult
 from mote_kernel.hooks.identity import HookSlotId, HookStage
 from mote_kernel.observe.admission import ObservePayloadAdmission
 from mote_kernel.observe.contract import (
@@ -16,6 +16,7 @@ from mote_kernel.observe.contract import (
     AssistantObservation,
     Available,
     BackgroundTaskSnapshot,
+    ConfigApplyResult,
     ConfigBatch,
     ConfigObservation,
     ConfigSettlementReceipt,
@@ -334,8 +335,8 @@ def test_hook_admission_keeps_the_predecessor_identity_outside_script_output() -
     admission = _admission()
 
     request = cast(
-        HookRequest[ObserveHookEnvelope, HookStateProjection],
-        HookRequest(envelope, _State(), GraphNodeId("write_observation")),
+        HookActivationRequest[ObserveHookEnvelope, HookStateProjection],
+        HookActivationRequest(envelope, _State(), GraphNodeId("write_observation")),
     )
     with pytest.raises(ObserveContractError, match="node_id"):
         admission.admit_hook_request(request)
@@ -781,6 +782,11 @@ def test_settlement_boundary_validation_accepts_only_same_boundary_or_zero_lengt
         ConfigSettlementReceipt((DeliveryId("d"),), read, other_stream, "settlement", _snapshot(2))
 
 
+def test_config_apply_result_requires_its_nominal_receipt() -> None:
+    with pytest.raises(ObserveContractError, match="ConfigSettlementReceipt"):
+        ConfigApplyResult(cast(Never, object()))
+
+
 @pytest.mark.parametrize(
     ("factory", "message"),
     [
@@ -939,10 +945,8 @@ def test_outer_result_values_reject_wrong_nested_nominal_types() -> None:
 
     with pytest.raises(ObserveContractError, match="delivery ack reference"):
         DeliveryAck(cast(Never, object()))
-    with pytest.raises(ObserveContractError, match="cursor"):
-        ObserveRequest(cast(Never, object()), _State())
     with pytest.raises(ObserveContractError, match="hook_state"):
-        ObserveRequest(_cursor(), cast(Never, object()))
+        ObserveRequest(cast(Never, object()))
     with pytest.raises(ObserveContractError, match="frame batch"):
         ObserveFrame(cast(Never, object()), boundary, snapshot)
     with pytest.raises(ObserveContractError, match="background_task_snapshot"):
@@ -1028,10 +1032,11 @@ def test_request_frame_result_and_ack_are_frozen_slot_values() -> None:
     frame = ObserveFrame(batch, boundary, snapshot)
     receipt = _receipt_for((DeliveryId("config"),), config=True)
     result = ObserveResult(ObservationKind.CONFIG, (DeliveryId("config"),), boundary.cursor_range, snapshot, receipt)
-    request = ObserveRequest(_cursor(), _State())
+    request = ObserveRequest(_State())
     ack = DeliveryAck(DeliveryAckReference("stream", (DeliveryId("config"),), "ack"))
     values = (request, frame, result, ack, GetObservationStageValue(frame), WriteObservationStageValue(result))
+    assert not hasattr(request, "cursor")
     for value in values:
         assert "__dict__" not in type(value).__slots__
     with pytest.raises(FrozenInstanceError):
-        request.__setattr__("cursor", _cursor(1))
+        request.__setattr__("hook_state", _State("changed"))

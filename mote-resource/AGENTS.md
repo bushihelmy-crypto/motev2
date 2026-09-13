@@ -2,7 +2,9 @@
 
 - `mote-resource` is an umbrella for resource registration, discovery, lookup,
   capability description, and handle resolution. It is not an owner of Agent
-  Flow semantics, embodiment domain state, or persistence transactions.
+  Flow semantics or embodiment domain state. The Cloudflare Container package
+  additionally co-locates the object-local Durable Object SQLite Adapter that
+  requires its runtime-injected `ctx.storage`.
 - `container/` and `embodiment/` are parallel resource boundaries. A Container
   is an Agent/Kernel host; an Embodiment is a physical body such as a robot.
 - `mote-control` owns Agent identity, lineage, assignment, placement,
@@ -17,9 +19,10 @@
 - Container selection and persistence selection are independent. Kernel Port
   configuration selects the `Commit` backend; a Container may expose optional
   platform capabilities without selecting or requiring that backend.
-- Concrete persistence and transaction mechanisms belong only to
-  `mote-infra/persistence`; invocation contracts, resolution, and local/RPC
-  mechanics belong only to `mote-infra/invocation`.
+- Portable persistence and transaction mechanisms belong to
+  `mote-infra/persistence`. Cloudflare-only SQL and transactions stay in
+  `container/cloudflare/src/persistence.ts`; invocation contracts, resolution,
+  and local/RPC mechanics still belong only to `mote-infra/invocation`.
 - Do not invent cross-layer request DTOs, identity encodings, or Embodiment
   wire protocols outside `conformance/` and their owning component.
 - Preserve user changes and inspect the relevant Git diff before editing.

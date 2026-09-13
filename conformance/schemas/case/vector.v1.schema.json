@@ -13,10 +13,11 @@
     "protocol": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version"],
+      "required": ["name", "version", "profile"],
       "properties": {
         "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-        "version": {"type": "integer", "minimum": 1}
+        "version": {"type": "integer", "minimum": 1},
+        "profile": {"enum": ["kernel_llm", "execution_media"]}
       }
     },
     "input": {},

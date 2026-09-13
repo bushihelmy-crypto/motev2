@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from mote_kernel.execution.errors import SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.definition import GraphNode
 from mote_kernel.execution.graph.ports import (
     ActivationGate,
@@ -12,7 +13,6 @@ from mote_kernel.execution.graph.ports import (
     GraphOutputBindings,
     MaterializationPlan,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
@@ -86,6 +86,7 @@ class FrontierTransitionPlan(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...]
     direct_targets: FrozenMap[GraphNodeId, tuple[GraphNodeId, ...]]
     conditional_targets: FrozenMap[GraphNodeId, FrozenMap[GraphRouteId, GraphNodeId]]
+    route_options: FrozenMap[GraphNodeId, tuple[GraphRouteId | None, ...]]
     joins_by_source: FrozenMap[GraphNodeId, tuple[CompiledJoin, ...]]
     materializations: FrozenMap[GraphNodeId, MaterializationPlan[GraphValueT]]
     publications: FrozenMap[GraphNodeId, FrameDescriptor[GraphValueT]]
@@ -104,7 +105,10 @@ class CompiledGraph(Generic[GraphValueT]):
     graph_output_descriptor: FrameDescriptor[GraphValueT]
     transition: FrontierTransitionPlan[GraphValueT]
     resources: FrozenMap[ResourceId, ResourceDefinition]
-    resume_input: ResumeInputBinding[GraphValueT] | None
+    resume_input: FrameCodec[GraphValueT] | None
+    # Exact declared domain of completion labels reachable at this graph's
+    # successful frontiers. ``None`` is the ordinary no-route completion.
+    completion_routes: frozenset[GraphRouteId | None]
 
 
 def _compiled_graph_at_scope(

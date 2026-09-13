@@ -1,21 +1,24 @@
 """Single public graph composition and execution facade."""
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import ClassVar, Generic, Never, Self, TypeAlias, TypeVar, cast, overload
 from uuid import uuid4
 
+from mote_kernel.config import Config, ConfigContractError, require_config
 from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
+    GraphCommitError,
     GraphCommitKey,
     GraphCommitWriteSet,
     GraphTransition,
 )
 from mote_kernel.execution.engine.admission import admit_graph_input
 from mote_kernel.execution.engine.recovery import preflight_recovery
+from mote_kernel.execution.engine.snapshot_guard import require_scoped_snapshot_matches_graph
 from mote_kernel.execution.errors import (
     ExecutionError,
     ExecutionLimitError,
@@ -31,6 +34,7 @@ from mote_kernel.execution.family_driver import (
     fresh_root,
     project_graph_result,
 )
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END, START
 from mote_kernel.execution.graph.definition import GraphDefinition, NestedGraphNodeDefinition
@@ -64,8 +68,7 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
-from mote_kernel.execution.graph.topology import CompiledGraph
+from mote_kernel.execution.graph.topology import CompiledGraph, _compiled_graph_at_scope
 from mote_kernel.execution.graph.validation import require_graph_identity
 from mote_kernel.execution.graph.values import (
     FactoryValueT,
@@ -73,11 +76,24 @@ from mote_kernel.execution.graph.values import (
     _make_graph_values,
     _require_graph_values,
 )
+from mote_kernel.execution.graph_result import (
+    GraphResult,
+    _AbortedGraphResult,
+    _admit_continuation,
+    _AwaitingResumeGraphResult,
+    _CompiledFamilyIdentity,
+    _CompletedGraphResult,
+    _FailedGraphResult,
+    _GraphContinuation,
+    _PartialCommitError,
+)
 from mote_kernel.execution.identity import (
+    ScopeRunCoordinate,
     root_scope_run,
 )
 from mote_kernel.execution.invocation import (
     admit_state_owned_overrides,
+    child_run_reads,
     lineage_states,
     plan_fences,
     plan_resumes,
@@ -86,6 +102,7 @@ from mote_kernel.execution.invocation import (
 )
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import TypedNodeAssembly, make_node_invoker, make_typed_node_assembly
+from mote_kernel.execution.persistence import GraphCheckpoint, GraphRecovery, restore_checkpoint
 from mote_kernel.execution.request import (
     OverrideNodeInput,
     ResumeInterruptedNodeRequest,
@@ -93,31 +110,21 @@ from mote_kernel.execution.request import (
 )
 from mote_kernel.execution.resource import ResourceDefinition, ResourceId
 from mote_kernel.execution.result import (
-    GraphResult,
-    _AbortedGraphResult,
-    _AwaitingResumeGraphResult,
-    _CompletedGraphResult,
-    _FailedGraphResult,
     _GraphFailureResult,
     _GraphInterruptResult,
     _GraphSuccessResult,
-    _PartialCommitError,
 )
 from mote_kernel.execution.run_context import (
-    ChildStateBinding,
     ScopedFrameIndex,
-    _admit_continuation,
-    _CompiledFamilyIdentity,
-    _continuation_recovered,
-    _GraphContinuation,
+    ScopedRunEvidence,
 )
+from mote_kernel.session import AgentSession, AgentSessionActivation, AgentSessionCarrier, admit_session_carrier
 from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphDefinitionId,
     GraphDefinitionVersion,
     GraphInterruptId,
     GraphNodeId,
-    GraphResumeInputCodecId,
     GraphRouteId,
     GraphRunId,
     GraphRunState,
@@ -127,6 +134,8 @@ GraphValueT = TypeVar("GraphValueT")
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 ValueT = TypeVar("ValueT")
+SessionHookT = TypeVar("SessionHookT")
+SessionContextT = TypeVar("SessionContextT")
 
 
 class _MissingRunValues:
@@ -168,7 +177,7 @@ class _GraphBuilderState(Generic[GraphValueT]):
     entries: tuple[GraphNodeId, ...] = ()
     outputs: GraphOutputDeclarations[GraphValueT] | None = None
     resources: tuple[ResourceDefinition, ...] = ()
-    resume_input: ResumeInputBinding[GraphValueT] | None = None
+    resume_input: FrameCodec[GraphValueT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +196,7 @@ class Graph(Generic[GraphValueT]):
     InputBinding = TypedInputBinding
     OutputRef = NodeOutputRef
     SuccessOutcome = _GraphSuccessOutcome
+    SessionActivation = AgentSessionActivation
     FailureOutcome = _GraphFailureOutcome
     InterruptOutcome = _GraphInterruptOutcome
     Outcome = GraphOutcome
@@ -231,6 +241,19 @@ class Graph(Generic[GraphValueT]):
             raise GraphValidationError("a graph definition is immutable after its first successful compile")
         return self._builder_state
 
+    def recovery_child_reads(self, checkpoint: GraphCheckpoint[GraphValueT]) -> tuple[ScopeRunCoordinate, ...]:
+        """Project missing child lookups without fencing, decoding or executing."""
+
+        if type(checkpoint) is not GraphCheckpoint:
+            raise SnapshotMismatchError("recovery child lookup requires an exact typed checkpoint")
+        checkpoint = checkpoint.admit()
+        graph = self._compile().graph
+        lineage = lineage_states(checkpoint.root_state, checkpoint.child_runs)
+        for binding in lineage.bindings:
+            scoped_graph = _compiled_graph_at_scope(graph, binding.scope_run.scope)
+            require_scoped_snapshot_matches_graph(scoped_graph, binding.state, binding.scope_run)
+        return child_run_reads(graph, lineage, complete=False)
+
     def _commit_builder(
         self,
         previous: _GraphBuilderState[GraphValueT],
@@ -265,7 +288,12 @@ class Graph(Generic[GraphValueT]):
         output_name: str | None = None,
         /,
     ) -> NodeOutputRef[Never] | PredecessorOutputRef[Never] | PredecessorOutputRef[ValueT]:
-        """Reference either one fixed producer or the actual control predecessor."""
+        """Reference one fixed producer or the actual control predecessor.
+
+        A predecessor reference may be compiled with a graph-input case for
+        an explicit START activation; later activations still select the
+        committed routed predecessor publication.
+        """
 
         if isinstance(node_id_or_output_name, NodeOutputRef):
             if output_name is not None or node_id_or_output_name.descriptor is None:
@@ -354,8 +382,9 @@ class Graph(Generic[GraphValueT]):
         output: "Graph.Values[FactoryValueT]",
         *,
         route: str | None = None,
+        session: AgentSession[SessionHookT, SessionContextT] | None = None,
     ) -> "Graph.SuccessOutcome[FactoryValueT]":
-        return _success(output, route=route)
+        return _success(output, route=route, session=session)
 
     @staticmethod
     def failure(reason: str) -> "Graph.FailureOutcome":
@@ -377,6 +406,7 @@ class Graph(Generic[GraphValueT]):
         ],
         outputs: Mapping[str, type[GraphValueT]],
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> Self: ...
 
     @overload
@@ -391,6 +421,7 @@ class Graph(Generic[GraphValueT]):
         output_name: str,
         output_type: type[OutputT],
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> NodeOutputRef[OutputT]: ...
 
     @overload
@@ -425,9 +456,17 @@ class Graph(Generic[GraphValueT]):
         output_name: str | None = None,
         output_type: type[OutputT] | None = None,
         resources: tuple[str, ...] = (),
+        exported_routes: Collection[str] = (),
     ) -> Self | NodeOutputRef[OutputT]:
         state = self._require_mutable()
         canonical_id = GraphNodeId(canonical_port_name(node_id, kind="node"))
+        if isinstance(exported_routes, str):
+            raise GraphValidationError("exported routes must be a collection of route names")
+        canonical_exported_routes = frozenset(
+            GraphRouteId(canonical_port_name(route, kind="exported route")) for route in exported_routes
+        )
+        if len(canonical_exported_routes) != len(exported_routes):
+            raise GraphValidationError("a node cannot repeat one exported route")
         typed_fields = (
             input_type is not None,
             materialize is not None,
@@ -439,8 +478,16 @@ class Graph(Generic[GraphValueT]):
         typed = all(typed_fields)
         typed_assembly: TypedNodeAssembly[GraphValueT, OutputT] | None = None
         if isinstance(operation, Graph):
-            if typed or outputs is not None or resources or not isinstance(inputs, Mapping):
-                raise GraphValidationError("nested graph nodes do not declare parent outputs or resources")
+            if (
+                typed
+                or outputs is not None
+                or resources
+                or canonical_exported_routes
+                or not isinstance(inputs, Mapping)
+            ):
+                raise GraphValidationError(
+                    "nested graph nodes do not declare parent outputs, resources, or exported routes"
+                )
             bindings = normalize_input_bindings(inputs)
             candidate: NodeCandidate[GraphValueT] = _NestedNodeCandidate(
                 canonical_id,
@@ -464,6 +511,7 @@ class Graph(Generic[GraphValueT]):
                     cast(str, output_name),
                     cast(type[OutputT], output_type),
                     resource_ids,
+                    canonical_exported_routes,
                 )
                 candidate = typed_assembly.definition
             else:
@@ -477,6 +525,7 @@ class Graph(Generic[GraphValueT]):
                     bindings,
                     declarations,
                     resource_ids,
+                    canonical_exported_routes,
                 )
             known = {resource.resource_id for resource in state.resources}
             added = tuple(ResourceDefinition(resource_id) for resource_id in resource_ids if resource_id not in known)
@@ -582,12 +631,8 @@ class Graph(Generic[GraphValueT]):
         state = self._require_mutable()
         if state.resume_input is not None:
             raise GraphValidationError("resume input codec can be declared exactly once")
-        if not callable(encoder) or not callable(decoder):
-            raise GraphValidationError("resume input encoder and decoder must be callable")
-        canonical_id = GraphResumeInputCodecId(canonical_port_name(codec_id, kind="resume codec"))
-        if type(version) is not int or version < 1:
-            raise GraphValidationError("resume codec version must be an exact positive integer")
-        binding = ResumeInputBinding(canonical_id, version, encoder, decoder)
+        binding = FrameCodec(codec_id, version, encoder, decoder)
+        binding.validate()
         replacement = replace(state, resume_input=binding)
         self._commit_builder(state, replacement)
         return self
@@ -678,7 +723,20 @@ class Graph(Generic[GraphValueT]):
         /,
         *,
         run_id: str | None = None,
+        activation_config: Config | None = None,
+        session: AgentSessionCarrier | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
+        max_supersteps: int = 1_000,
+        max_parallel_tasks: int = 64,
+    ) -> "Graph.Result[GraphValueT]": ...
+
+    @overload
+    async def run(
+        self,
+        /,
+        *,
+        recovery: GraphRecovery[GraphValueT],
+        resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
     ) -> "Graph.Result[GraphValueT]": ...
@@ -691,6 +749,7 @@ class Graph(Generic[GraphValueT]):
         state: "Graph.State",
         continuation: "Graph.Continuation[GraphValueT]",
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
+        activation_config: Config | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -703,6 +762,7 @@ class Graph(Generic[GraphValueT]):
         *,
         state: "Graph.State",
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
+        activation_config: Config | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -714,8 +774,11 @@ class Graph(Generic[GraphValueT]):
         /,
         *,
         run_id: str | None = None,
+        activation_config: Config | None = None,
+        session: AgentSessionCarrier | None = None,
         state: "Graph.State | None" = None,
         continuation: "Graph.Continuation[GraphValueT] | None" = None,
+        recovery: GraphRecovery[GraphValueT] | None = None,
         resume: tuple["Graph.ResumeAction[GraphValueT]", ...] = (),
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
@@ -723,11 +786,31 @@ class Graph(Generic[GraphValueT]):
     ) -> "Graph.Result[GraphValueT]":
         limits = ExecutionLimits(max_supersteps, max_parallel_tasks)
         invocation: _GraphValues[GraphValueT] | GraphRunState
-        if isinstance(values, _GraphValues):
+        if recovery is not None:
+            if (
+                type(recovery) is not GraphRecovery
+                or values is not _MISSING_RUN_VALUES
+                or state is not None
+                or continuation is not None
+                or run_id is not None
+                or activation_config is not None
+                or session is not None
+                or commit is not None
+            ):
+                raise SnapshotMismatchError(
+                    "durable recovery cannot replace its input, state, identity, Config, Session or commit capability"
+                )
+            recovery = recovery.admit()
+            commit = recovery.commit
+            invocation = recovery.checkpoint.root_state
+            session = recovery.session
+        elif isinstance(values, _GraphValues):
             if state is not None or continuation is not None or resume:
                 raise SnapshotMismatchError("new graph run cannot carry state, continuation, or resume actions")
             invocation = _require_graph_values(values)
         elif values is _MISSING_RUN_VALUES and state is not None and run_id is None:
+            if activation_config is not None or session is not None:
+                raise SnapshotMismatchError("continued graph runs cannot replace their activation Config or Session")
             invocation = state
         else:
             raise SnapshotMismatchError("state runs require state, forbid run_id, and do not accept values")
@@ -737,25 +820,42 @@ class Graph(Generic[GraphValueT]):
         if isinstance(invocation, _GraphValues):
             effective_run_id = GraphRunId(str(uuid4()) if run_id is None else canonical_port_name(run_id, kind="run"))
             scope_run = root_scope_run(effective_run_id)
-            input_candidate = admit_graph_input(graph, invocation)
+            if activation_config is not None:
+                try:
+                    require_config(activation_config)
+                except ConfigContractError as error:
+                    raise SnapshotMismatchError("activation Config is malformed") from error
+            if session is not None:
+                try:
+                    session = admit_session_carrier(session)
+                except (AttributeError, TypeError, ValueError) as error:
+                    raise SnapshotMismatchError("activation Session is malformed") from error
+            input_candidate = admit_graph_input(graph, invocation, activation_config, session)
             root_admission = fresh_root(
                 graph,
                 scope_run,
                 input_candidate,
                 limits,
                 commit,
+                session,
             )
         else:
-            if continuation is None:
-                child_states: tuple[ChildStateBinding, ...] = ()
+            if recovery is not None:
+                child_runs = recovery.checkpoint.child_runs
+                frames = restore_checkpoint(graph, recovery)
+                recovered = True
+            elif continuation is None:
+                child_runs: tuple[ScopedRunEvidence, ...] = ()
                 frames: ScopedFrameIndex[GraphValueT] = ScopedFrameIndex()
                 recovered = True
             else:
-                snapshot = _admit_continuation(owner.family_identity, invocation, continuation)
-                child_states = snapshot.child_states
+                snapshot = _admit_continuation(owner.family_identity, invocation, continuation, commit)
+                child_runs = snapshot.child_runs
                 frames = snapshot.frames
-                recovered = _continuation_recovered(snapshot)
-            lineage = lineage_states(invocation, child_states)
+                recovered = snapshot.recovered
+                commit = snapshot.commit
+                session = snapshot.session
+            lineage = lineage_states(invocation, child_runs)
             validate_context(graph, lineage, frames, recovered=recovered)
             planned_lineage, fences = plan_fences(graph, lineage)
             planned_lineage, candidate_frames, planned_resumes, facts = plan_resumes(
@@ -763,8 +863,9 @@ class Graph(Generic[GraphValueT]):
                 planned_lineage,
                 frames,
                 resume,
+                session,
             )
-            admit_state_owned_overrides(graph, planned_lineage, candidate_frames)
+            admit_state_owned_overrides(graph, planned_lineage, candidate_frames, session)
             if recovered or resume:
                 preflight_recovery(
                     graph,
@@ -773,7 +874,7 @@ class Graph(Generic[GraphValueT]):
             root_admission = admit_continued_root(
                 graph,
                 invocation,
-                child_states,
+                child_runs,
                 frames,
                 limits,
                 commit,
@@ -781,8 +882,12 @@ class Graph(Generic[GraphValueT]):
                 planned_resumes,
                 owner.family_identity,
                 recovered=recovered,
+                session=session,
             )
-        (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))
+        try:
+            (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))
+        except GraphCommitError as error:
+            raise error.cause from None
 
         async def finish_root(abort_reason: GraphAbortReason | None) -> None:
             primary: BaseException | None = None
@@ -811,9 +916,14 @@ class Graph(Generic[GraphValueT]):
                     evidence_reader,
                     disposition,
                     recovered=recovered,
+                    commit=commit,
                 )
+            except GraphCommitError as error:
+                with suppress(BaseException):
+                    await finish_root(None)
+                raise error.cause from None
             except asyncio.CancelledError as error:
-                if root.consume_node_origin_cancellation(error) or root.consume_commit_origin_cancellation(error):
+                if root.consume_node_origin_cancellation(error):
                     with suppress(BaseException):
                         await finish_root(None)
                     raise

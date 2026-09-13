@@ -16,8 +16,6 @@ from mote_kernel.state.graph_state.identity import graph_interrupt_id
 from mote_kernel.state.graph_state.model import GraphRunState, GraphRunStatus
 from mote_kernel.state.graph_state.validation import (
     GraphStateTransitionError,
-    validate_graph_frontier,
-    validated_graph_run_state,
 )
 
 
@@ -54,8 +52,7 @@ def resume_graph_nodes(state: GraphRunState, command: ResumeGraphNodes) -> Graph
     if actions:
         raise GraphStateTransitionError("resume action references an unknown frontier node")
     frontier = GraphFrontierState(tuple(updated))
-    validate_graph_frontier(state, frontier)
-    return validated_graph_run_state(replace(state, frontier=frontier))
+    return replace(state, frontier=frontier)
 
 
 __all__: list[str] = []

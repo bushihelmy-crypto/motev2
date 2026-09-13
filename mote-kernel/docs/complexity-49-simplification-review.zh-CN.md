@@ -214,7 +214,7 @@ nominal record type
 
 ## 从 `Graph.run` 出发的完整调用链审查
 
-这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，#27/#28 也已在不混合 fresh/continued 语义的前提下收敛 owner construction、handoff 和 cleanup wiring。** 因此不能把 49 个热点或 37 个 `K` 项一概视为调用链问题。
+这一节审查的是“读者能否沿着一次真实运行走完所有分支”，而不是只看单个函数的指标。结论先说：**调用链的状态机和提交边界总体已经足够清楚；#20 已收拢 `Graph.run` 的上游编排，#27/#28 以及后续 G5 也已在不混合 fresh/continued 语义的前提下收敛 owner construction、handoff 和 cleanup wiring。** 因此不能把 49 个热点或 37 个 `K` 项一概视为调用链问题。
 
 ### 0. 覆盖口径：什么叫“全部遍历”
 
@@ -540,7 +540,8 @@ _GraphRun._start_child
   -> admit_child_graph_input
   -> child_position
   -> _make_child_constructor
-     -> StartGraphRun commit（child scope）
+     -> _start_fresh_owner
+        -> StartGraphRun commit（child scope）
      -> 构造 child _GraphRun
      -> install graph-input frame
      -> 返回 opaque child handle
@@ -563,7 +564,7 @@ admit_continued_root.admit_children
      -> 返回 opaque handle 并 handoff
 ```
 
-两条路径曾重复 owner wiring、scoped commit、evidence publisher、child handle 和失败清理；#27/#28 已让它们复用窄的 owner construction、handoff 与 cleanup 路径。fresh 仍是“先 `StartGraphRun` 再创建 owner”，continued 仍是“从已确认 state 重建并可能产生 partial commit”，`confirmed_prefix`、`transition_attempted`、`failed_scope` 的契约没有被塞进宽 context。两种 admission 语义保持相邻但独立，没有复制第二个 runner 或增加兼容 wrapper。
+两条路径曾重复 owner wiring、scoped commit、evidence publisher、child handle 和失败清理；#27/#28 先让它们复用窄的 owner construction、handoff 与 cleanup 路径，G5 再把 fresh root/child 共有的 `StartGraphRun -> frame staging -> confirm -> _GraphRun -> construction-failure abort` 收敛到唯一 `_start_fresh_owner`。fresh 仍是“先 `StartGraphRun` 再创建 owner”，continued 仍是“从已确认 state 重建并可能产生 partial commit”，`confirmed_prefix`、`transition_attempted`、`failed_scope` 的契约没有被塞进宽 context。两种 admission 语义保持相邻但独立，没有复制第二个 runner 或增加兼容 wrapper。
 
 child drive/handoff 本身目前足够清楚：
 
@@ -621,7 +622,7 @@ drive boundary
      └─ 总是 root.release
 ```
 
-这个出口顺序是可读的：结果只从冻结后的 evidence 投影，`finish_root` 先 abort 后 release，并保留首个 cleanup 错误。#20 已把 facade 的公共出口收拢；#27/#28 复用了 owner construction 和 cleanup 基础路径，同时让 `fresh_root`、continued admission 与 child constructor 显式保留各自的已确认 prefix、transition attempt 和 abort 权限。它们不是一条可由 `cleanup(ignore_errors=True)` 合并的政策，也不再列为待处理 B 项。
+这个出口顺序是可读的：结果只从冻结后的 evidence 投影，`finish_root` 先 abort 后 release，并保留首个 cleanup 错误。#20 已把 facade 的公共出口收拢；#27/#28 复用了 owner construction 和 cleanup 基础路径，G5 进一步由 `_start_fresh_owner` 统一 fresh root/child 的原子启动事务，同时让 `fresh_root`、continued admission 与 child constructor 显式保留各自的已确认 prefix、transition attempt 和 abort 权限。它们不是一条可由 `cleanup(ignore_errors=True)` 合并的政策，也不再列为待处理 B 项。
 
 ### 11. 调用链级结论矩阵
 
@@ -635,7 +636,7 @@ drive boundary
 | claim/session/scheduler/resource | 是 | ack/error-drain/FIFO 是必要协议，资源 claim 与 selector 的阶段边界也不合并 owner | #1/#2/#17/#24/#47 K |
 | settlement/reducer/state validation | 是 | 原子提交和 snapshot guard 是必要边界 | #43–#49 多数 K |
 | settlement -> routing -> next frontier | 是 | 两个 commit 屏障不可合并；routing owner 内三个连续阶段已足够清楚 | #15/#16 K |
-| fresh/continued root/child admission | 是 | continued owner 构造、admission、handoff 和 cleanup 已收敛，fresh/continued 语义仍分开 | #27/#28 已完成 |
+| fresh/continued root/child admission | 是 | fresh owner 启动事务由 `_start_fresh_owner` 唯一拥有；continued owner 构造、admission、handoff 和 cleanup 仍独立，fresh/continued 语义仍分开 | #27/#28、G5 已完成 |
 | child drive/terminal handoff | 是 | 类型检查和一次性 evidence 是必要不变量 | #23 K |
 | recovery proof | 是 | bounded worklist/fixed point 是算法本体，不建第二 runner | #4–#10 K |
 | result projection + final cleanup | 是 | facade 结果出口已收拢；owner admission 复用基础 construction/cleanup，同时保留不同 partial-commit 政策 | #20/#27/#28 已完成，#26 K |

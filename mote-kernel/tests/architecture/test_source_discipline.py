@@ -218,6 +218,7 @@ def test_node_scoped_effective_input_contract_remains_explicit() -> None:
         "frames",
         "child_projections",
         "limits",
+        "session",
     }
 
 

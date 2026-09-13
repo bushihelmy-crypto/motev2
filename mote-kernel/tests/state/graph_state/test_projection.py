@@ -3,12 +3,12 @@ from tests.execution.engine.factories import callable_node
 
 from mote_kernel.execution import Graph
 from mote_kernel.execution.errors import SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.constants import END
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.edge import DirectEdge
 from mote_kernel.execution.graph.ports import normalize_graph_output_declarations
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
@@ -44,9 +44,7 @@ def compiled(*, with_codec: bool = True):
             (),
             normalize_graph_output_declarations({}),
             resume_input=(
-                ResumeInputBinding(GraphResumeInputCodecId("input.v1"), 2, codec.encode, codec.decode)
-                if with_codec
-                else None
+                FrameCodec(GraphResumeInputCodecId("input.v1"), 2, codec.encode, codec.decode) if with_codec else None
             ),
         )
     ).compile()

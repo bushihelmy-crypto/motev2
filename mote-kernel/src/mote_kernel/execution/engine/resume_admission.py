@@ -2,9 +2,11 @@
 
 from typing import TypeVar
 
+from mote_kernel.config import Config
 from mote_kernel.execution.engine.resume_input import (
     _require_node_materialization,
     _resume_input_coordinate,
+    activation_config_for_cause,
     decode_resume_input,
     encode_resume_input,
     require_resume_input_binding,
@@ -22,6 +24,7 @@ from mote_kernel.execution.request import (
 )
 from mote_kernel.execution.result import PreparedResume
 from mote_kernel.execution.run_context import AdmittedResumeInput
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
     GraphNodeId,
@@ -41,9 +44,17 @@ def _admit_override_resume_input(
     graph: CompiledGraph[GraphValueT],
     node_id: GraphNodeId,
     override: OverrideNodeInput[GraphValueT],
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> tuple[OverrideGraphNodeInput, NodeInputFrame[GraphValueT]]:
     binding = encode_resume_input(graph, override.values)
-    frame = decode_resume_input(graph, node_id, bytes(binding.payload))
+    frame = decode_resume_input(
+        graph,
+        node_id,
+        bytes(binding.payload),
+        activation_config=activation_config,
+        session=session,
+    )
     return binding, frame
 
 
@@ -90,7 +101,15 @@ def prepare_resume(
             raise SnapshotMismatchError("interrupt resume ID does not match the current node interrupt")
         if any(isinstance(binding.source, CompiledPredecessorInput) for binding in plan.bindings.entries):
             raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
-        binding, frame = _admit_override_resume_input(graph, requested.node_id, requested.input)
+        historical_config = activation_config_for_cause(graph, request.scope_run, current, request.frames)
+        inherited_config = request.session.config if request.session is not None else historical_config
+        binding, frame = _admit_override_resume_input(
+            graph,
+            requested.node_id,
+            requested.input,
+            inherited_config,
+            request.session,
+        )
         actions.append(ResumeInterruptedNode(requested.node_id, requested.interrupt_id, binding))
         admitted_inputs.append(
             AdmittedResumeInput(

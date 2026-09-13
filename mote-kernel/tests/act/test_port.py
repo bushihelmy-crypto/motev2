@@ -1,10 +1,12 @@
 """Runtime shape and assembly checks for the Act capability protocols."""
 
+from collections.abc import Callable
 from typing import cast
 
 import pytest
 
 import mote_kernel.act as act_package
+import mote_kernel.act.port as act_port_module
 from mote_kernel.act.contract import (
     ActContractError,
     ActRequest,
@@ -23,11 +25,13 @@ from mote_kernel.act.contract import (
     ToolExecutionResult,
 )
 from mote_kernel.act.port import (
+    AuthorizeCodecCapture,
     AuthorizePort,
     ExecutePort,
     ResolvePort,
     SettlementPort,
     ToolExchangeWriter,
+    capture_authorize_port_binding,
     require_act_port_contracts,
 )
 from mote_kernel.execution import Graph
@@ -203,6 +207,95 @@ def test_act_port_contract_returns_the_frozen_resume_codec_binding() -> None:
     bundle = _CodecBundle("test.codec", 3)
 
     assert require_act_port_contracts(bundle, bundle, bundle, bundle, bundle) == ("test.codec", 3)
+    with pytest.raises(ActContractError, match="tuple"):
+        require_act_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_binding=cast(tuple[str, int], ("test.codec",)),
+        )
+    with pytest.raises(ActContractError, match="does not match the Port contract"):
+        require_act_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_binding=("other.codec", 3),
+        )
+
+
+def test_authorize_method_validation_rejects_an_absent_port() -> None:
+    private_validator_name = "_validate_authorize_methods"
+    validate = cast(
+        Callable[[AuthorizePort | None], None],
+        getattr(act_port_module, private_validator_name),
+    )
+
+    with pytest.raises(ActContractError, match="AuthorizePort"):
+        validate(None)
+
+
+def test_act_port_contract_reuses_and_validates_codec_capture_provenance() -> None:
+    bundle = _PortBundle()
+    capture = AuthorizeCodecCapture(bundle, ("test.codec", 1))
+
+    assert require_act_port_contracts(
+        bundle,
+        bundle,
+        bundle,
+        bundle,
+        bundle,
+        authorize_codec_capture=capture,
+        authorize_codec_binding=("test.codec", 1),
+    ) == ("test.codec", 1)
+    with pytest.raises(ActContractError, match="provenance"):
+        require_act_port_contracts(
+            bundle,
+            _PortBundle(),
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_capture=capture,
+        )
+    with pytest.raises(ActContractError, match="captured contract"):
+        require_act_port_contracts(
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_capture=capture,
+            authorize_codec_binding=("other.codec", 1),
+        )
+
+    incomplete = _Incomplete()
+    malformed_capture = AuthorizeCodecCapture(cast(AuthorizePort, incomplete), ("test.codec", 1))
+    with pytest.raises(ActContractError, match="requires"):
+        require_act_port_contracts(
+            bundle,
+            cast(AuthorizePort, incomplete),
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_capture=malformed_capture,
+        )
+
+    non_callable = _PortBundle()
+    non_callable.request_authorization = None  # type: ignore[method-assign]
+    with pytest.raises(ActContractError, match="requires"):
+        require_act_port_contracts(
+            bundle,
+            non_callable,
+            bundle,
+            bundle,
+            bundle,
+            authorize_codec_capture=AuthorizeCodecCapture(non_callable, ("test.codec", 1)),
+        )
+
+    assert capture_authorize_port_binding(bundle).binding == ("test.codec", 1)
 
 
 def test_act_port_contract_reads_each_resume_codec_coordinate_once() -> None:

@@ -1,0 +1,28 @@
+# Go build and test output
+bin/
+coverage.out
+*.test
+*.prof
+
+# Project-local caches and pinned quality-tool binaries
+.cache/
+.tools/
+
+# Local tool caches
+.gocache/
+.gomodcache/
+.golangci-cache/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Go workspace files are local-only; this project intentionally has one module.
+go.work
+go.work.sum

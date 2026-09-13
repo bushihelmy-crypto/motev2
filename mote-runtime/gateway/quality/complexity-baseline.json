@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "metrics": {
+    "production_files": 83,
+    "top_level_declarations": 159,
+    "function_definitions": 53,
+    "decision_points": 146,
+    "max_cyclomatic": 11,
+    "max_nesting_depth": 2,
+    "import_edges": 21,
+    "package_count": 35
+  }
+}

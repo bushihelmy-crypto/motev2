@@ -3,11 +3,12 @@
 from dataclasses import dataclass
 from typing import TypeVar
 
-from mote_kernel.execution.engine.routing import _graph_input_coordinate, _node_output_coordinate
+from mote_kernel.config import Config
+from mote_kernel.execution.engine.routing import source_availability_coordinate
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import GraphValueAdmissionError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.graph.node import CallableNodeDefinition
-from mote_kernel.execution.graph.ports import GraphInputPort, require_publication_selection
+from mote_kernel.execution.graph.ports import GraphInputPort
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.graph.values import (
     GraphInputFrame,
@@ -19,10 +20,12 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
     _make_graph_input_frame,
     _make_graph_output_view,
+    _require_graph_values,
 )
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.run_context import ScopedFrameIndex
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     AcquireResources,
     GraphNodeId,
@@ -38,8 +41,17 @@ GraphValueT = TypeVar("GraphValueT")
 def admit_graph_input(
     graph: CompiledGraph[GraphValueT],
     values: _GraphValues[GraphValueT],
+    activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> GraphInputFrame[GraphValueT]:
-    return _make_graph_input_frame(values, graph.graph_input_descriptor.declarations)
+    """Admit fresh input and install the optional Kernel activation Config."""
+
+    return _make_graph_input_frame(
+        _require_graph_values(values),
+        graph.graph_input_descriptor.declarations,
+        activation_config=activation_config,
+        session=session,
+    )
 
 
 def admit_child_graph_input(
@@ -54,31 +66,69 @@ def project_graph_outputs(
     scope_run: ScopeRunCoordinate,
     completion_superstep: int,
     frames: ScopedFrameIndex[GraphValueT],
+    *,
+    owner_session: AgentSessionCarrier | None = None,
 ) -> GraphOutputView[GraphValueT]:
     entries: list[NamedValue[GraphValueT]] = []
+    owner_bound = owner_session is not None
+    activation_config: Config | None = None if owner_session is None else owner_session.config
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
-        if isinstance(source, GraphInputPort):
-            graph_input_coordinate = _graph_input_coordinate(graph, scope_run)
-            frame = frames.lookup(graph_input_coordinate).frame
-            value = _frame_value(frame, source.name)
-        else:
-            selection = require_publication_selection(
-                binding.publication,
-                GraphValueAdmissionError("compiled graph output binding lacks its activation selection"),
-            )
-            publication_coordinate = _node_output_coordinate(
-                graph, scope_run, source, selection.resolve(completion_superstep)
-            )
-            try:
-                frame = frames.lookup(publication_coordinate).frame
-            except SnapshotMismatchError as error:
-                raise GraphValueAdmissionError(
-                    f"graph output source {source.node_id!r}.{source.output_name!r} is unavailable"
-                ) from error
-            value = _frame_value(frame, source.output_name)
+        coordinate = source_availability_coordinate(
+            graph,
+            scope_run,
+            source,
+            binding.publication,
+            completion_superstep,
+            GraphValueAdmissionError("compiled graph output binding lacks its activation selection"),
+        )
+        try:
+            frame = frames.lookup(coordinate).frame
+        except SnapshotMismatchError as error:
+            if isinstance(source, GraphInputPort):
+                raise
+            raise GraphValueAdmissionError(
+                f"graph output source {source.node_id!r}.{source.output_name!r} is unavailable"
+            ) from error
+        value = _frame_value(frame, source.name if isinstance(source, GraphInputPort) else source.output_name)
+        candidate_config = frame.activation_config
+        if not owner_bound and candidate_config is not None:
+            if activation_config is not None and activation_config != candidate_config:
+                raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
+            activation_config = candidate_config
         entries.append(NamedValue(binding.destination.boundary_name, value))
-    return _make_graph_output_view(tuple(entries), graph.graph_output_descriptor.declarations)
+    # A nested graph may intentionally expose no business outputs.  Its
+    # terminal publication still carries the activation metadata needed by
+    # the parent activation, so retain that existing frame-owned projection
+    # instead of manufacturing a second Config source.
+    if not owner_bound and activation_config is None:
+        terminal_frames = tuple(
+            record.frame
+            for record in frames.publications
+            if record.coordinate.activation.scope_run == scope_run
+            and record.coordinate.activation.superstep == completion_superstep
+        )
+        if completion_superstep == 0:
+            terminal_frames = (
+                *terminal_frames,
+                *(record.frame for record in frames.graph_inputs if record.coordinate.scope_run == scope_run),
+            )
+        terminal_frames = (
+            *terminal_frames,
+            *(record.frame for record in frames.child_boundaries if record.coordinate.child_scope_run == scope_run),
+        )
+        for frame in terminal_frames:
+            candidate_config = frame.activation_config
+            if candidate_config is None:
+                continue
+            if activation_config is not None and activation_config != candidate_config:
+                raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
+            activation_config = candidate_config
+    return _make_graph_output_view(
+        tuple(entries),
+        graph.graph_output_descriptor.declarations,
+        activation_config=activation_config,
+    )
 
 
 def initial_resource_snapshot(graph: CompiledGraph[GraphValueT]) -> ResourceSnapshot:

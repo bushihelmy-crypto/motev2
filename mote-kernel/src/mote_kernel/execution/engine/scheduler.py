@@ -49,23 +49,60 @@ def _project_outcome(
         _GraphInterruptOutcome,
     ):
         raise NodeExecutionContractError("graph node returned an unsupported outcome")
+    effective_input = executable.effective_input
     if isinstance(outcome, _GraphValues):
         output = outcome
         route = None
+        candidate_session = output.session
+        explicit_session = (
+            candidate_session
+            if candidate_session is not None and candidate_session != effective_input.session
+            else None
+        )
     elif isinstance(outcome, _GraphSuccessOutcome):
         output = outcome.output
         route = outcome.route
+        candidate_session = outcome.session
+        # The success envelope is the explicit typed successor boundary.  Do
+        # not infer omission from equality: a node may intentionally return
+        # an equal complete snapshot after another parallel scope advanced
+        # the family owner.
+        explicit_session = candidate_session
     elif isinstance(outcome, _GraphFailureOutcome):
         return TaskFailure(executable.task, outcome.failure)
     else:
         return TaskInterrupt(executable.task, outcome.request_payload)
-    frame = _make_node_output_frame(output, graph.transition.publications[executable.task.node_id].declarations)
+    # Carry the exact activation metadata alongside the published values.  A
+    # domain result may advertise a successor Config in its carrier; the
+    # value factory records that successor and the frame constructor rejects
+    # any disagreement with the incoming activation.  A Session supplied by
+    # ``Graph.success`` (or by a typed activation) is the only value that can
+    # advance the caller-owned snapshot.  Values that merely echo the input
+    # retain it as frame metadata but do not create a successor.
+    output_config = output.activation_config
+    if candidate_session is not None:
+        if output_config is not None and output_config != candidate_session.config:
+            raise NodeExecutionContractError("node output Config disagrees with its AgentSession")
+        if explicit_session is not None:
+            # A complete explicit successor owns all three Session fields;
+            # its Config is therefore the candidate activation Config.
+            output_config = candidate_session.config
+        elif output_config is None:
+            output_config = effective_input.activation_config
+    elif output_config is None:
+        output_config = effective_input.activation_config
+    frame = _make_node_output_frame(
+        output,
+        graph.transition.publications[executable.task.node_id].declarations,
+        output_config,
+    )
     routing = ContinueGraphRouting() if route is None else SelectGraphRoute(GraphRouteId(route))
     validate_routing_contribution(graph, executable.task.node_id, routing)
     return TaskSuccess(
         executable.task,
         frame,
         route,
+        explicit_session,
     )
 
 

@@ -1,3 +1,7 @@
 # Local invocation
 
-Reserved for concrete local invocation implementations behind the invocation contract. Local execution does not own caller semantics, Kernel state, or persistence transactions.
+Reserved for the concrete local transport/invocation implementation behind the
+invocation contract. It delivers Invocation's ingress to
+`mote-runtime/execution/local`; that package owns the semantic
+local-versus-remote decision. This directory does not own Kernel state or
+persistence transactions.

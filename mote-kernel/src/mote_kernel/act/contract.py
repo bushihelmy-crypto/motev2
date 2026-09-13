@@ -8,10 +8,11 @@ provider, protocol, or authorization owner.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from mote_kernel.act.identity import (
     ActHookStage,
+    ActNodeId,
     ActSlotId,
     ArgumentsDigest,
     CallerIdentityRef,
@@ -29,7 +30,7 @@ from mote_kernel.act.identity import (
     ToolPairingIdentity,
     ToolSelector,
 )
-from mote_kernel.hooks.contract import HookGraphValue, HookRequest, HookResult
+from mote_kernel.hooks.contract import HookGraphValue, HookResult
 
 _INTERRUPT_PAYLOAD_MAX_BYTES = 65_536
 _SCOPE_MAX_SEGMENTS = 16
@@ -63,9 +64,6 @@ class ActHookCommand(HookGraphValue):
     """Nominal base for the owner-provided shared-Hook command class."""
 
     __slots__ = ()
-
-
-HookCommandT = TypeVar("HookCommandT", bound=ActHookCommand)
 
 
 def _require_exact(value: ContractValueT, expected: type[ContractValueT], field: str, /) -> None:
@@ -357,36 +355,6 @@ class ActHookEnvelope(HookGraphValue):
 
 
 @dataclass(frozen=True, slots=True)
-class AuthorizeNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Authorize node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "authorize node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class ExecuteNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Execute node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "execute node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
-class SettleNodeInput(HookGraphValue, Generic[HookCommandT]):
-    """Typed materialization input for the Settle node."""
-
-    hook_result: HookResult[ActHookEnvelope, HookCommandT]
-
-    def __post_init__(self) -> None:
-        _require_exact(self.hook_result, HookResult, "settle node HookResult")
-
-
-@dataclass(frozen=True, slots=True)
 class AuthorizationInterruptView(HookGraphValue):
     scope: tuple[str, ...]
     node_id: str
@@ -395,7 +363,7 @@ class AuthorizationInterruptView(HookGraphValue):
 
     def __post_init__(self) -> None:
         _require_scope(self.scope)
-        if type(self.node_id) is not str or self.node_id != "authorize":
+        if type(self.node_id) is not str or self.node_id != str(ActNodeId.AUTHORIZE):
             raise ActContractError("authorization interrupt node_id must be authorize")
         if (
             type(self.interrupt_id) is not str
@@ -438,7 +406,6 @@ __all__ = [
     "ExecuteStageValue",
     "ExecutionStopped",
     "HookGraphValue",
-    "HookRequest",
     "HookResult",
     "HookStateProjection",
     "InitialAuthorization",

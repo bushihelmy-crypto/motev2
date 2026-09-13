@@ -17,6 +17,7 @@ from mote_kernel.execution.engine.planner import plan_tasks
 from mote_kernel.execution.engine.settlement import settle_result
 from mote_kernel.execution.engine.task import GraphTask, TaskId
 from mote_kernel.execution.errors import InvalidRoutingCommandError, ResultCollectionError, SnapshotMismatchError
+from mote_kernel.execution.graph.codec import FrameCodec
 from mote_kernel.execution.graph.compiler import GraphCompiler
 from mote_kernel.execution.graph.definition import GraphDefinition
 from mote_kernel.execution.graph.node import CallableNodeDefinition
@@ -25,7 +26,6 @@ from mote_kernel.execution.graph.ports import (
     normalize_input_bindings,
     normalize_output_declarations,
 )
-from mote_kernel.execution.graph.resume_input import ResumeInputBinding
 from mote_kernel.execution.graph.topology import CompiledGraph
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.node_adapter import make_node_invoker
@@ -95,7 +95,7 @@ def test_interrupt_projection_uses_current_generation() -> None:
             (),
             (),
             normalize_graph_output_declarations({}),
-            resume_input=ResumeInputBinding(GraphResumeInputCodecId("input"), 1, codec.encode, codec.decode),
+            resume_input=FrameCodec(GraphResumeInputCodecId("input"), 1, codec.encode, codec.decode),
         )
     ).compile()
     state = replace(
