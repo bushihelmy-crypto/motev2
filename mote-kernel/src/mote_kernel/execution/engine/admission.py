@@ -25,6 +25,7 @@ from mote_kernel.execution.graph.values import (
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.run_context import ScopedFrameIndex
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     AcquireResources,
     GraphNodeId,
@@ -41,6 +42,7 @@ def admit_graph_input(
     graph: CompiledGraph[GraphValueT],
     values: _GraphValues[GraphValueT],
     activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> GraphInputFrame[GraphValueT]:
     """Admit fresh input and install the optional Kernel activation Config."""
 
@@ -48,6 +50,7 @@ def admit_graph_input(
         _require_graph_values(values),
         graph.graph_input_descriptor.declarations,
         activation_config=activation_config,
+        session=session,
     )
 
 
@@ -63,9 +66,12 @@ def project_graph_outputs(
     scope_run: ScopeRunCoordinate,
     completion_superstep: int,
     frames: ScopedFrameIndex[GraphValueT],
+    *,
+    owner_session: AgentSessionCarrier | None = None,
 ) -> GraphOutputView[GraphValueT]:
     entries: list[NamedValue[GraphValueT]] = []
-    activation_config: Config | None = None
+    owner_bound = owner_session is not None
+    activation_config: Config | None = None if owner_session is None else owner_session.config
     for binding in graph.transition.graph_outputs.entries:
         source = binding.source
         coordinate = source_availability_coordinate(
@@ -86,7 +92,7 @@ def project_graph_outputs(
             ) from error
         value = _frame_value(frame, source.name if isinstance(source, GraphInputPort) else source.output_name)
         candidate_config = frame.activation_config
-        if candidate_config is not None:
+        if not owner_bound and candidate_config is not None:
             if activation_config is not None and activation_config != candidate_config:
                 raise GraphValueAdmissionError("graph output sources carry different activation Config snapshots")
             activation_config = candidate_config
@@ -95,7 +101,7 @@ def project_graph_outputs(
     # terminal publication still carries the activation metadata needed by
     # the parent activation, so retain that existing frame-owned projection
     # instead of manufacturing a second Config source.
-    if activation_config is None:
+    if not owner_bound and activation_config is None:
         terminal_frames = tuple(
             record.frame
             for record in frames.publications

@@ -70,7 +70,22 @@ def prepare_frontier(
     executables = tuple(
         ExecutableTask(
             task,
-            materialize_node_input(graph, request.state, request.scope_run, request.frames, task.node_id),
+            materialize_node_input(
+                graph,
+                request.state,
+                request.scope_run,
+                request.frames,
+                task.node_id,
+            )
+            if request.session is None
+            else materialize_node_input(
+                graph,
+                request.state,
+                request.scope_run,
+                request.frames,
+                task.node_id,
+                owner_session=request.session,
+            ),
         )
         for task in tasks
         if isinstance(graph.nodes[task.node_id], CallableNodeDefinition)

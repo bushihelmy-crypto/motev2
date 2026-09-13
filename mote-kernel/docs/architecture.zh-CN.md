@@ -80,6 +80,21 @@ root 和每个 child 各自使用已有 revision 与 `GraphCommitKey`；family �
 `GraphCheckpoint` 只是这些既有 state 和值证据的一致性读响应，不是第二种 runtime state。
 Config payload 与能力解析仍归 Config owner；state/frame 只保存精确快照引用，不序列化 capability。
 
+`AgentSession` 是 Runtime/Agent 调用方拥有的三字段快照（`hook_state`、`context`、`config`），不是
+`GraphRunState` 的别名。节点通过 `Graph.success(..., session=...)` 或 `Graph.SessionActivation` 显式
+提交完整 successor；`_GraphRun` 只在同一 transition receipt 确认后推进 owner Session。没有 successor
+的节点继承当前 owner snapshot，Kernel 不 merge 业务字段。一次 invocation/family 只有一个由 root、child 和
+sibling 共享的 `_FamilySessionOwner`；它把“读取当前值→准备 transition→durable commit/reconcile→推进 owner→
+安装 state/frame”放在同一串行边界内，因此陈旧的继承快照不能覆盖已经确认的 successor。多个完整 successor
+按实际 receipt 确认顺序生效，不做字段合并。嵌套 child 等待恢复时，父 root state 的 Config cursor 可以落后于
+child 已确认的 Session；family checkpoint 会约束该 cursor 必须属于某个已确认 scope，但不会再保存 child 自己的
+Session 镜像。
+`GraphRecovery` 要求 checkpoint 与 bound
+`DurableGraphCommit` 的 encoded Session 完全相等；存在 Session 时还用同一 codec 对 decoded snapshot 做
+canonical re-encode。恢复的历史 frame 只恢复业务值和历史 Config provenance，当前 owner Session 由执行请求
+注入节点输入，避免把旧 Config 与新 Session 伪造成冲突。`session.config` 引用的 immutable snapshot 必须
+先由 Config owner 保存；Agent 不代为 save。
+
 ## 后端无关的持久化边界
 
 `execution/persistence.py` 拥有持久值证据、durable commit 适配和 checkpoint materialization；这些类型均为
@@ -104,9 +119,10 @@ owner-internal 基础设施，不重新导出为平行公共入口，唯一执�
   （含缺席）和 payload bytes；publication 还绑定精确 settlement execution provenance。同一 commitment 同时进入
   权威 State 账本和持久记录；交换 payload 或重分配坐标不能靠只重建 frame 取得合法身份。非空 Frame Config 必须属于所属 state 的 Config definition/version，revision
   不得超前，同 revision 的 digest 必须相同；同一不可变 Config revision 不能提供两个解析结果，即使暂未被引用。
-  历史上合法的无 Config frame 保持无 Config，不能用当前 state 或可用 capability 补齐。Config 更新只由 Observe
-  消费并随其 settlement 提交持久化；恢复不增加第二个更新入口。这里的 Config snapshot cursor 与已删除的
-  Observe 调用方 cursor 无关。
+  历史上合法的无 Config frame 保持无 Config，不能用当前 state 或可用 capability 补齐。Graph 自己的 Config 更新
+  command 仍由 Observe 消费并随其 settlement 提交持久化；节点可以在显式返回的完整 `AgentSession` successor
+  中放入已解析的 Config，但 Kernel 不猜测或合并该字段。恢复不增加第二个更新入口。这里的 Config snapshot cursor
+  与已删除的 Observe 调用方 cursor 无关。
 - 全部生命周期（含 completed）保留 `GraphRunState.settled_publications`。每项唯一持有 activation reference、
   真实 settlement commit revision、execution token 和可选 durable value commitment。checkpoint publication 集必须
   与完整成功账本精确相等；中间 publication 缺失和从未结算的额外 publication 都拒绝，不另建 manifest 或终态
@@ -123,7 +139,10 @@ owner-internal 基础设施，不重新导出为平行公共入口，唯一执�
 
 `agent.py` 是唯一外部恢复装配入口。`Agent` 只持有 frozen capabilities，不保留运行 state、continuation、权限缓存或
 第二个 scheduler。`AgentStart` 只创建从未存在的 run；`AgentResume` 继续已有 run，或回放其终态业务结果。
-回答保留精确 interrupt 问题和 typed 业务值；结果只暴露输出、失败、待回答问题或 abort，不暴露恢复快照。
+回答保留精确 interrupt 问题和 typed 业务值；结果只暴露输出、失败、待回答问题或 abort，不暴露 Graph
+state 或 continuation 恢复快照。
+结果同时携带最后一份已确认的 `AgentSession`，供 Runtime 显式交给后续 run；不暴露 Graph state、continuation
+或持久化能力。
 
 每次调用只有一条完整链路：
 

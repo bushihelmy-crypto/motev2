@@ -58,7 +58,7 @@ async def test_start_and_cold_terminal_replay_use_only_the_store(
     assert isinstance(result, AgentCompleted)
     assert result.outputs["value"] == "input-first-second"
     assert result.outputs.activation_config is None
-    assert {field.name for field in fields(result)} == {"run_id", "outputs"}
+    assert {field.name for field in fields(result)} == {"run_id", "outputs", "session"}
     assert calls == ["first", "second"]
     stored = await store.view(AgentRunKey("agent", GraphRunId("run")))
     assert stored.checkpoint().root_state.status is GraphRunStatus.COMPLETED

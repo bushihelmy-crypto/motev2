@@ -14,11 +14,11 @@ async def test_typed_import_example_uses_only_agent_requests_and_business_result
     authority = MemoryAuthority()
     store = JournalPersistence[ImportJob](authority) if journal else SnapshotPersistence[ImportJob](authority)
     result = await demonstrate(store, authority, run_id="example", source="input.csv")
-    assert_type(result, AgentCompleted[ImportJob])
+    assert_type(result, AgentCompleted[ImportJob, str, str])
     assert result.outputs["job"] == ImportJob("input.csv", True, ImportStatus.LOADED)
     writes = len(store.commits)
     replay = await build_agent(store, authority).run(AgentResume[ImportJob]("example"))
-    assert_type(replay, AgentResult[ImportJob])
+    assert_type(replay, AgentResult[ImportJob, str, str])
     assert isinstance(replay, AgentCompleted)
     assert replay.outputs["job"] == result.outputs["job"]
     assert len(store.commits) == writes

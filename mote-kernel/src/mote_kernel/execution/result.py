@@ -12,6 +12,7 @@ from mote_kernel.execution.graph.values import (
     _public_values,
 )
 from mote_kernel.execution.run_context import AdmittedResumeInput, GraphPublicationEvidence
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     AdvanceGraphFrontier,
@@ -32,6 +33,10 @@ class TaskSuccess(Generic[GraphValueT]):
     task: GraphTask
     output: NodeOutputFrame[GraphValueT]
     route: str | None
+    # Output frames retain only business values and Config provenance.  This
+    # separate field is therefore the sole typed signal for an explicit
+    # Session successor; inherited input never enters it.
+    session: AgentSessionCarrier | None = None
 
 
 @dataclass(frozen=True, slots=True)

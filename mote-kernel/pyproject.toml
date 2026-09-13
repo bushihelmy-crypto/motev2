@@ -21,7 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["typing-extensions>=4.12"]
 
 [project.optional-dependencies]
 dev = [
@@ -227,55 +227,73 @@ quote-style = "double"
 # execution paths or forwarding abstractions. The deepest path grows through
 # Agent -> durable commit -> reducer confirmation while its total cognitive
 # cost decreases; zero-debt health and peak function complexity remain closed.
+# The 2026-09-11 AgentSession boundary adds one explicit caller-owned snapshot,
+# one codec-owned durable envelope, and their atomic Graph commit/checkpoint
+# fields. The duplicate admission branches are deliberate: runtime session
+# values and durable bytes have different exception and Config-cursor owners.
+# The 2026-09-11 follow-up review also removes the unreachable continuation
+# Session guard and keeps failure/abort successor propagation on the existing
+# commit path. The nested-child recovery closure then keeps a newer child
+# Session valid while its parent waits, binds checkpoint admission to any
+# confirmed family scope, and adds the deterministic recovery regression. The
+# values below are the exact post-review measurement, not spare budget for
+# unrelated growth.
+# The 2026-09-12 family-owner closure removes per-scope Session mirrors and
+# serializes Session selection, durable confirmation/reconcile, and owner
+# advancement behind one family lock. Its two transition factories and owner
+# type are required by that call chain. The final explicit-successor and
+# owner-Config provenance boundaries add one typed outcome edge and one
+# projection edge; the values below are the exact measured shape after those
+# boundaries, not spare budget.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 1156
-type_definitions = 721
-dataclass_types = 451
-dataclass_fields = 1148
-decision_points = 3725
-logical_clone_pairs = 62
-statement_clone_pairs = 117
-near_clone_pairs = 59
-record_shape_clone_pairs = 44
+top_level_definitions = 1173
+type_definitions = 729
+dataclass_types = 455
+dataclass_fields = 1180
+decision_points = 3861
+logical_clone_pairs = 66
+statement_clone_pairs = 118
+near_clone_pairs = 66
+record_shape_clone_pairs = 42
 thin_single_use_helpers = 0
 single_use_private_dataclasses = 22
 test_only_private_definitions = 0
-function_definitions = 1102
-method_definitions = 653
-nested_function_definitions = 16
-semantic_nodes = 75445
-cognitive_complexity = 4711
+function_definitions = 1139
+method_definitions = 679
+nested_function_definitions = 18
+semantic_nodes = 77985
+cognitive_complexity = 4905
 await_points = 167
-exception_handlers = 223
-attribute_writes = 105
+exception_handlers = 249
+attribute_writes = 109
 task_creations = 16
 max_cyclomatic_complexity = 48
 max_cognitive_complexity = 58
 max_nesting_depth = 6
-internal_call_edges = 1559
+internal_call_edges = 1611
 recursive_call_components = 5
 max_call_fan_out = 25
-max_call_chain_depth = 19
-max_call_chain_cognitive = 320
-cross_module_call_edges = 1522
-cross_module_call_pairs = 439
-max_runtime_module_fan_out = 29
-internal_import_edges = 708
+max_call_chain_depth = 17
+max_call_chain_cognitive = 326
+cross_module_call_edges = 1553
+cross_module_call_pairs = 449
+max_runtime_module_fan_out = 30
+internal_import_edges = 728
 import_cycle_components = 0
-max_module_fan_out = 30
-max_module_dependency_depth = 32
-ambiguous_internal_dispatches = 75
+max_module_fan_out = 31
+max_module_dependency_depth = 33
+ambiguous_internal_dispatches = 77
 transparent_private_definitions = 37
 thin_single_use_methods = 3
-low_usage_private_definitions = 222
-linear_private_call_chain_links = 41
+low_usage_private_definitions = 226
+linear_private_call_chain_links = 39
 production_unreferenced_definitions = 13
 low_cohesion_classes = 8
 max_methods_per_class = 33
-max_fields_per_class = 38
+max_fields_per_class = 39
 max_class_components = 18
-complexity_hotspots = 139
-stateful_async_hotspots = 10
+complexity_hotspots = 143
+stateful_async_hotspots = 11
 unused_private_definitions = 0
 unread_private_fields = 0
 unconsumed_internal_async_calls = 0

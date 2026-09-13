@@ -6,6 +6,7 @@ from typing import Generic, TypeAlias, TypeVar, final
 
 from mote_kernel.execution.errors import NodeExecutionContractError
 from mote_kernel.execution.graph.values import FactoryValueT, _GraphValues, _require_graph_values
+from mote_kernel.session import AgentSessionCarrier, admit_session_carrier
 
 GraphValueT = TypeVar("GraphValueT")
 
@@ -22,11 +23,17 @@ _OUTCOME_SEAL = _OutcomeSeal()
 class _GraphSuccessOutcome(Generic[GraphValueT]):
     output: _GraphValues[GraphValueT]
     route: str | None
+    session: AgentSessionCarrier | None = None
     _seal: InitVar[_OutcomeSeal]
 
     def __post_init__(self, _seal: _OutcomeSeal) -> None:
         if _seal is not _OUTCOME_SEAL:
             raise NodeExecutionContractError("success outcomes require the Graph.success() factory")
+        if self.session is not None:
+            try:
+                admit_session_carrier(self.session)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise NodeExecutionContractError("success outcome carries a malformed AgentSession") from error
 
 
 @final
@@ -58,6 +65,7 @@ def _success(
     output: _GraphValues[FactoryValueT],
     *,
     route: str | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> _GraphSuccessOutcome[FactoryValueT]:
     canonical_route = str(route) if isinstance(route, StrEnum) else route
     if canonical_route is not None and (
@@ -68,7 +76,17 @@ def _success(
         or "\r" in canonical_route
     ):
         raise NodeExecutionContractError("success route must be a non-empty trimmed string")
-    return _GraphSuccessOutcome(output=_require_graph_values(output), route=canonical_route, _seal=_OUTCOME_SEAL)
+    if session is not None:
+        try:
+            session = admit_session_carrier(session)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise NodeExecutionContractError("success outcome carries a malformed AgentSession") from error
+    return _GraphSuccessOutcome(
+        output=_require_graph_values(output),
+        route=canonical_route,
+        session=session,
+        _seal=_OUTCOME_SEAL,
+    )
 
 
 def _failure(reason: str) -> _GraphFailureOutcome:

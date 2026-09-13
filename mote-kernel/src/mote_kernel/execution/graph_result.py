@@ -8,6 +8,7 @@ from mote_kernel.execution.commit import GraphCommit
 from mote_kernel.execution.errors import ExecutionError, NodeExecutionContractError, SnapshotMismatchError
 from mote_kernel.execution.graph.values import _GraphValues
 from mote_kernel.execution.run_context import ScopedFrameIndex, ScopedRunEvidence
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import GraphInterruptId, GraphRunState
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
@@ -30,6 +31,7 @@ class ContinuationSnapshot(Generic[GraphValueT]):
     frames: ScopedFrameIndex[GraphValueT]
     recovered: bool
     commit: GraphCommit[GraphValueT] | None
+    session: AgentSessionCarrier | None
 
 
 class _ContinuationSeal:
@@ -71,6 +73,12 @@ class _GraphContinuation(Generic[GraphValueT]):
     def __reduce_ex__(self, _protocol: SupportsIndex) -> Never:
         raise SnapshotMismatchError("continuations do not provide a serialization contract")
 
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        """Return the last Session confirmed with this continuation."""
+
+        return self._snapshot.session
+
 
 def _admit_continuation(
     family_identity: _CompiledFamilyIdentity,
@@ -91,8 +99,9 @@ def _make_continuation(
     *,
     recovered: bool,
     commit: GraphCommit[GraphValueT] | None,
+    session: AgentSessionCarrier | None,
 ) -> _GraphContinuation[GraphValueT]:
-    snapshot = ContinuationSnapshot(family_identity, root_state, child_runs, frames, recovered, commit)
+    snapshot = ContinuationSnapshot(family_identity, root_state, child_runs, frames, recovered, commit, session)
     return _GraphContinuation(_snapshot=snapshot, _seal=_CONTINUATION_SEAL)
 
 
@@ -206,6 +215,10 @@ class _CompletedGraphResult(Generic[GraphValueT]):
         if _seal is not _RESULT_SEAL:
             raise NodeExecutionContractError("completed results require the graph family driver")
 
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        return self.continuation.session
+
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -218,6 +231,10 @@ class _AbortedGraphResult(Generic[GraphValueT]):
     def __post_init__(self, _seal: _ResultSeal) -> None:
         if _seal is not _RESULT_SEAL:
             raise NodeExecutionContractError("aborted results require the graph family driver")
+
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        return self.continuation.session
 
 
 @final
@@ -235,6 +252,10 @@ class _FailedGraphResult(Generic[GraphValueT]):
         if not self.failures:
             raise NodeExecutionContractError("failed results require at least one failure")
 
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        return self.continuation.session
+
 
 @final
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -249,6 +270,10 @@ class _AwaitingResumeGraphResult(Generic[GraphValueT]):
             raise NodeExecutionContractError("awaiting-resume results require the graph family driver")
         if not self.interrupts:
             raise NodeExecutionContractError("awaiting-resume results require at least one interrupt")
+
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        return self.continuation.session
 
 
 GraphResult: TypeAlias = (

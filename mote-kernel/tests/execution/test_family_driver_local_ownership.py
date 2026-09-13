@@ -15,7 +15,8 @@ from mote_kernel.execution.commit import (
     GraphCommit,
     GraphCommitError,
     GraphTransition,
-    commit_transition,
+    confirm_transition,
+    prepare_transition,
     scoped_commit,
 )
 from mote_kernel.execution.engine.admission import admit_graph_input
@@ -60,6 +61,7 @@ from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
     ScopedStateBinding,
 )
+from mote_kernel.session import AgentSession, AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ClaimGraphExecution,
@@ -82,6 +84,8 @@ from mote_kernel.state.graph_state import (
     SucceededGraphNodeOutcome,
     reduce_graph_run,
 )
+
+_start_fresh_owner = family_driver._start_fresh_owner  # pyright: ignore[reportPrivateUsage]
 
 _ChildTerminalView: TypeAlias = CompletedChild[str] | FailedChild | AbortedChild
 _ChildPhaseView: TypeAlias = ActiveChild | AwaitingResume | _ChildTerminalView
@@ -114,7 +118,7 @@ class _ChildCallView(Protocol):
 
 class _GraphRunView(Protocol):
     _children: list[_ChildCallView]
-    _session: GraphExecutionSession[str] | None
+    _execution_session: GraphExecutionSession[str] | None
     _frames: ScopedFrameIndex[str]
     _state: GraphRunState
     _child_constructor: _ChildConstructorView
@@ -250,6 +254,7 @@ class _FamilyDriverPrivateView(Protocol):
         limits: ExecutionLimits,
         commit: GraphCommit[str] | None,
         evidence_publisher: _EvidencePublisherView,
+        family_session: object,
     ) -> _ChildConstructorView:
         return cast(_FamilyDriverPrivateView, module)._make_child_constructor(
             owner_graph,
@@ -257,12 +262,13 @@ class _FamilyDriverPrivateView(Protocol):
             limits,
             commit,
             evidence_publisher,
+            family_session,
         )
 
 
 class _GraphRunPrivateView(Protocol):
     _children: list[_ChildCallView]
-    _session: GraphExecutionSession[str] | None
+    _execution_session: GraphExecutionSession[str] | None
     _frames: ScopedFrameIndex[str]
     _state: GraphRunState
     _child_constructor: _ChildConstructorView
@@ -280,11 +286,11 @@ class _GraphRunPrivateView(Protocol):
 
     @staticmethod
     def session(owner: object) -> GraphExecutionSession[str] | None:
-        return cast(_GraphRunPrivateView, owner)._session
+        return cast(_GraphRunPrivateView, owner)._execution_session
 
     @staticmethod
     def set_session(owner: object, session: GraphExecutionSession[str] | None) -> None:
-        cast(_GraphRunPrivateView, owner)._session = session
+        cast(_GraphRunPrivateView, owner)._execution_session = session
 
     @staticmethod
     def frames(owner: object) -> ScopedFrameIndex[str]:
@@ -528,6 +534,7 @@ def graph_owner(
 ) -> _GraphRunView:
     limits = ExecutionLimits()
     evidence_publisher = new_evidence_publisher() if publisher is None else publisher
+    family_session = family_driver._FamilySessionOwner(None)  # pyright: ignore[reportPrivateUsage]
     return _FamilyDriverPrivateView.graph_run(family_driver)(
         graph,
         scope_run,
@@ -542,9 +549,11 @@ def graph_owner(
             limits,
             commit,
             evidence_publisher,
+            family_session,
         ),
         position,
         evidence_publisher,
+        family_session,
     )
 
 
@@ -595,6 +604,56 @@ def nested_runtime() -> tuple[
     )
     activation = StableActivation(scope_run, parent.superstep, parent.node_id)
     return graph, state, owner, parent, child_scope, activation, child_state
+
+
+@pytest.mark.asyncio
+async def test_fresh_owner_uses_the_family_session_owner_for_start_metadata() -> None:
+    graph = compiled_graph("a")
+    input_session = AgentSession("input-hook", "input-context")
+    owner_session = AgentSession("owner-hook", "owner-context")
+    input_frame = admit_graph_input(graph, Graph.values(value="input"), session=input_session)
+
+    owner = await _start_fresh_owner(
+        graph,
+        root_scope_run(GraphRunId("run")),
+        input_frame,
+        ExecutionLimits(),
+        None,
+        parent=None,
+        position=(),
+        evidence_publisher=lambda _state, _frames: None,
+        family_session=family_driver._FamilySessionOwner(owner_session),  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert owner.session == owner_session
+    await owner.release()
+
+
+@pytest.mark.asyncio
+async def test_family_session_owner_rejects_a_transition_with_the_wrong_session() -> None:
+    graph = compiled_graph("a")
+    scope_run = root_scope_run(GraphRunId("run"))
+    frame = admit_graph_input(graph, Graph.values(value="input"))
+    transition = prepare_transition(
+        scope_run,
+        None,
+        project_start_graph_command(graph, scope_run.graph_run_id),
+        None,
+        graph=graph,
+        graph_input=frame,
+    )
+    owner = family_driver._FamilySessionOwner(AgentSession("owner-hook", "owner-context"))  # pyright: ignore[reportPrivateUsage]
+
+    def prepare(
+        _selected: AgentSessionCarrier | None,
+    ) -> tuple[GraphTransition[str], ScopedFrameIndex[str]]:
+        return transition, ScopedFrameIndex()
+
+    async def commit(candidate: GraphTransition[str], /) -> GraphRunState:
+        return candidate.candidate_state
+
+    with pytest.raises(SnapshotMismatchError, match="selected AgentSession"):
+        await owner.confirm(prepare, commit)  # pyright: ignore[reportPrivateUsage]
 
 
 def graph_output(graph: CompiledGraph[str], value: str) -> GraphOutputView[str]:
@@ -774,15 +833,15 @@ async def test_scoped_commit_rejects_a_transition_for_another_owner() -> None:
         transitions.append(transition)
         return transition.candidate_state
 
-    await commit_transition(
+    transition = prepare_transition(
         scope_run,
         None,
         project_start_graph_command(graph, scope_run.graph_run_id),
         None,
-        capture,
         graph=graph,
         graph_input=admit_graph_input(graph, Graph.values()),
     )
+    await confirm_transition(transition, capture)
     foreign = ScopeRunCoordinate((GraphNodeId("foreign"),), scope_run.graph_run_id)
 
     with pytest.raises(SnapshotMismatchError, match="different scoped graph run"):
@@ -800,15 +859,15 @@ async def test_resume_transition_rejects_an_unadmitted_successor_before_commit()
         return transition.candidate_state
 
     with pytest.raises(FrameInstallationInvariantError, match="admitted successor"):
-        await commit_transition(
+        transition = prepare_transition(
             scope_run,
             state,
             AbortGraphRun(state.revision, GraphAbortReason("abort")),
             None,
-            capture,
             graph=compiled_graph("a"),
             admitted_successor=state,
         )
+        await confirm_transition(transition, capture)
 
     assert commits == []
 
@@ -893,14 +952,14 @@ async def test_commit_boundary_rejects_a_forged_completion_that_discards_a_succe
         return transition.candidate_state
 
     with pytest.raises(SnapshotMismatchError, match="discarded a compiled successor"):
-        await commit_transition(
+        transition = prepare_transition(
             root_scope_run(settled.run_id),
             settled,
             CompleteGraphFrontier(settled.revision),
             None,
-            capture,
             graph=graph,
         )
+        await confirm_transition(transition, capture)
 
     assert commits == []
 

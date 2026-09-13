@@ -2,7 +2,7 @@
 
 Mote Kernel is a durable, state-machine-driven agent kernel. Graphs control execution; state machines control truth.
 
-The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution and state primitives remain internal development surfaces.
+The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution/state primitives remain internal development surfaces, while the caller-owned `mote_kernel.AgentSession` is the explicit runtime snapshot boundary.
 
 ```python
 from mote_kernel.execution import Graph
@@ -71,8 +71,19 @@ authority after all execution tasks have joined.
 - `AgentResume(run_id, answers=())` reads an existing run, including terminal replay. `AgentAnswer` pairs the exact
   returned interrupt question with typed business values. No state, continuation or per-call commit override is exposed.
 - `AgentConfig` optionally supplies the Config store/resolver and an exact initial key. Recovery resolves only the
-  historical snapshots referenced by state and frames; only Observe consumes and persists Config updates. This Config
-  snapshot cursor is unrelated to the removed caller-supplied Observe cursor.
+  historical snapshots referenced by state and frames. The existing Graph Config update command remains owned by
+  Observe and persists with its settlement; a node may still put a resolved Config in an explicitly returned complete
+  `AgentSession` successor, and the Kernel never infers or merges that field. This Config snapshot cursor is unrelated
+  to the removed caller-supplied Observe cursor.
+- `AgentSession(hook_state, context, config)` is the caller-owned cross-node/cross-run snapshot. A node that needs to
+  update it returns a complete successor with `Graph.success(..., session=...)` (typed nodes may return
+  `Graph.SessionActivation(value, session)`). Graph state and the full Session envelope share one atomic commit;
+  `AgentResult.session` is the last confirmed snapshot, and a later run reuses it only when the Runtime explicitly
+  passes it to `AgentStart`. Session Config is durable only as its existing Config cursor; the Config owner must save
+  the referenced immutable snapshot before first use. One Graph invocation/family has one serialized Session owner shared
+  by root and child scopes: a no-successor transition selects the owner value when it enters the commit boundary, while
+  an explicit complete successor wins in confirmed receipt order. Historical frames retain their own provenance and do
+  not overwrite the current owner Session during recovery.
 - Unknown Graph commits reconcile the same immutable request. Only proven `NotApplied` outcomes retry, within the
   explicit `max_commit_attempts` budget. Authority loss, conflict, mismatched receipts and unresolved outcomes stop
   execution without stale cleanup writes. Runtime, not Kernel, reconciles tool executions.

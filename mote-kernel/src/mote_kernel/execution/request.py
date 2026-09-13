@@ -8,6 +8,7 @@ from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.limits import ExecutionLimits
 from mote_kernel.execution.result import ChildProjection
 from mote_kernel.execution.run_context import ScopedFrameIndex
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import GraphInterruptId, GraphNodeId, GraphRunState
 
 GraphValueT = TypeVar("GraphValueT")
@@ -20,6 +21,11 @@ class StepRequest(Generic[GraphValueT]):
     frames: ScopedFrameIndex[GraphValueT]
     child_projections: tuple[ChildProjection[GraphValueT], ...]
     limits: ExecutionLimits
+    # The scoped owner carries the one current caller-owned Session.  It is
+    # execution metadata, not a second persisted state model; historical
+    # frames may therefore retain their own Config provenance without
+    # replacing this owner snapshot.
+    session: AgentSessionCarrier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +50,7 @@ class ResumeRequest(Generic[GraphValueT]):
     scope_run: ScopeRunCoordinate
     frames: ScopedFrameIndex[GraphValueT]
     actions: tuple[ResumeNodeRequest[GraphValueT], ...]
+    session: AgentSessionCarrier | None = None
 
 
 __all__: list[str] = []

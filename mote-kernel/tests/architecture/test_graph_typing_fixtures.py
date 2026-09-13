@@ -18,7 +18,7 @@ class NegativeTypingCase:
 CASES = (
     NegativeTypingCase(
         "agent_cross_request.py",
-        ("AgentStart[int]", 'parameter "request"', "reportArgumentType"),
+        ("AgentStart[int, Never, Never]", 'parameter "request"', "reportArgumentType"),
     ),
     NegativeTypingCase(
         "agent_cross_store.py",

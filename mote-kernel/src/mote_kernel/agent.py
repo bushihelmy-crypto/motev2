@@ -4,7 +4,9 @@ import asyncio
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Generic, TypeAlias, TypeVar, cast
+from typing import Generic, Never, TypeAlias, TypeVar, cast
+
+from typing_extensions import TypeVar as DefaultTypeVar
 
 from mote_kernel.config import (
     Config,
@@ -43,10 +45,19 @@ from mote_kernel.persistence import (
     PersistenceContractError,
     PersistencePort,
 )
+from mote_kernel.session import (
+    AgentSession,
+    AgentSessionCodec,
+    AgentSessionContractError,
+    EncodedAgentSession,
+    admit_session_carrier,
+)
 from mote_kernel.state.graph_state import GraphConfigCursor, GraphRunId
 from mote_kernel.state.graph_state.identity import is_canonical_identity
 
 GraphValueT = TypeVar("GraphValueT")
+AgentHookStateT = DefaultTypeVar("AgentHookStateT", default=Never)
+AgentContextT = DefaultTypeVar("AgentContextT", default=Never)
 
 
 class AgentContractError(ValueError):
@@ -64,9 +75,10 @@ def _admit_business_values(values: Graph.Values[GraphValueT]) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentStart(Generic[GraphValueT]):
+class AgentStart(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
     run_id: str
     values: Graph.Values[GraphValueT]
+    session: AgentSession[AgentHookStateT, AgentContextT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,45 +118,59 @@ class AgentResume(Generic[GraphValueT]):
             answer.admit()
 
 
-AgentRequest: TypeAlias = AgentStart[GraphValueT] | AgentResume[GraphValueT]
+AgentRequest: TypeAlias = AgentStart[GraphValueT, AgentHookStateT, AgentContextT] | AgentResume[GraphValueT]
 
 
 @dataclass(frozen=True, slots=True)
-class AgentCompleted(Generic[GraphValueT]):
+class AgentCompleted(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
     run_id: str
     outputs: Graph.Values[GraphValueT]
+    session: AgentSession[AgentHookStateT, AgentContextT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AgentFailed:
+class AgentFailed(Generic[AgentHookStateT, AgentContextT]):
     run_id: str
     failures: tuple[GraphFailureView, ...]
     interrupts: tuple[GraphInterruptView, ...]
+    session: AgentSession[AgentHookStateT, AgentContextT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AgentInterrupted:
+class AgentInterrupted(Generic[AgentHookStateT, AgentContextT]):
     run_id: str
     interrupts: tuple[GraphInterruptView, ...]
+    session: AgentSession[AgentHookStateT, AgentContextT] | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AgentAborted:
+class AgentAborted(Generic[AgentHookStateT, AgentContextT]):
     run_id: str
     abort: GraphAbortView
+    session: AgentSession[AgentHookStateT, AgentContextT] | None = None
 
 
-AgentResult: TypeAlias = AgentCompleted[GraphValueT] | AgentFailed | AgentInterrupted | AgentAborted
+AgentResult: TypeAlias = (
+    AgentCompleted[GraphValueT, AgentHookStateT, AgentContextT]
+    | AgentFailed[AgentHookStateT, AgentContextT]
+    | AgentInterrupted[AgentHookStateT, AgentContextT]
+    | AgentAborted[AgentHookStateT, AgentContextT]
+)
 
 
-def _project_result(run_id: str, result: Graph.Result[GraphValueT]) -> AgentResult[GraphValueT]:
+def _project_result(
+    run_id: str,
+    result: Graph.Result[GraphValueT],
+) -> AgentResult[GraphValueT, AgentHookStateT, AgentContextT]:
+    admitted = None if result.session is None else admit_session_carrier(result.session)
+    session = cast(AgentSession[AgentHookStateT, AgentContextT] | None, admitted)
     if isinstance(result, Graph.CompletedResult):
-        return AgentCompleted(run_id, Graph.values(**dict(result.outputs.items())))
+        return AgentCompleted(run_id, Graph.values(**dict(result.outputs.items())), session)
     if isinstance(result, Graph.FailedResult):
-        return AgentFailed(run_id, result.failures, result.interrupts)
+        return AgentFailed(run_id, result.failures, result.interrupts, session)
     if isinstance(result, Graph.AbortedResult):
-        return AgentAborted(run_id, result.abort)
-    return AgentInterrupted(run_id, result.interrupts)
+        return AgentAborted(run_id, result.abort, session)
+    return AgentInterrupted(run_id, result.interrupts, session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +233,7 @@ class _AuthorizedGraphWriter(Generic[GraphValueT]):
 
 
 @dataclass(frozen=True, slots=True)
-class Agent(Generic[GraphValueT]):
+class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
     """Run one explicitly identified task without retaining any runtime snapshot.
 
     Same-key concurrency is arbitrated by the required AuthorityPort, including
@@ -223,6 +249,7 @@ class Agent(Generic[GraphValueT]):
     config: AgentConfig | None = None
     max_commit_attempts: int = 3
     limits: ExecutionLimits = field(default_factory=ExecutionLimits)
+    session_codec: AgentSessionCodec[AgentHookStateT, AgentContextT] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if not is_canonical_identity(self.agent_id) or not callable(self.assemble):
@@ -246,6 +273,10 @@ class Agent(Generic[GraphValueT]):
             if type(self.config) is not AgentConfig:
                 raise AgentContractError("Agent Config capabilities must be assembled together")
             replace(self.config)
+        if self.session_codec is not None:
+            if type(self.session_codec) is not AgentSessionCodec:
+                raise AgentContractError("Agent session codec must be an exact typed codec")
+            replace(self.session_codec)
         if type(self.max_commit_attempts) is not int or self.max_commit_attempts < 1:
             raise AgentContractError("Agent commit attempts must be an exact positive integer")
         if type(self.limits) is not ExecutionLimits:
@@ -270,18 +301,40 @@ class Agent(Generic[GraphValueT]):
             configs[cursor] = await resolve_config(capabilities.resolver, snapshot)
         return configs.get(checkpoint.root_state.config_cursor), tuple(configs.values())
 
+    @staticmethod
+    def _session_config(
+        encoded: EncodedAgentSession,
+        current_config: Config | None,
+        configs: tuple[Config, ...],
+    ) -> Config | None:
+        """Resolve the Config named by the caller-owned Session envelope."""
+
+        for config in (current_config, *configs):
+            if config is not None and config.config_cursor == encoded.config_cursor:
+                return config
+        if encoded.config_cursor is None:
+            return None
+        raise ConfigContractError("persisted AgentSession requires its exact Config snapshot")
+
     async def _run_authorized(
         self,
-        request: AgentRequest[GraphValueT],
+        request: AgentRequest[GraphValueT, AgentHookStateT, AgentContextT],
         authority: ExecutionAuthority,
-    ) -> AgentResult[GraphValueT]:
+    ) -> AgentResult[GraphValueT, AgentHookStateT, AgentContextT]:
         loaded = await self.persistence.load(authority)
         configs: tuple[Config, ...] = ()
         current_config: Config | None = None
+        current_session: AgentSession[AgentHookStateT, AgentContextT] | None = None
+        encoded_session: EncodedAgentSession | None = None
         if type(loaded) is NeverCreated:
             if not isinstance(request, AgentStart):
                 raise AgentRunNotFoundError("cannot continue an Agent run that was never created")
-            if self.config is not None and self.config.initial is not None:
+            if request.session is not None:
+                current_session = request.session
+                current_config = current_session.config
+                if self.config is not None and self.config.initial is not None:
+                    raise AgentContractError("AgentStart session and Agent initial Config cannot both be supplied")
+            elif self.config is not None and self.config.initial is not None:
                 snapshot = await load_config_snapshot(self.config.store, self.config.initial)
                 current_config = await resolve_config(self.config.resolver, snapshot)
         elif type(loaded) is GraphCheckpoint:
@@ -294,14 +347,34 @@ class Agent(Generic[GraphValueT]):
             if isinstance(request, AgentStart):
                 raise PersistenceConflictError("cannot create an Agent run that already exists")
             current_config, configs = await self._recover_configs(loaded)
+            if loaded.agent_session is not None:
+                codec = self.session_codec
+                if codec is None:
+                    raise AgentContractError("persisted AgentSession requires its session codec")
+                session_config = self._session_config(loaded.agent_session, current_config, configs)
+                try:
+                    current_session = codec.decode(loaded.agent_session, session_config)
+                except AgentSessionContractError as error:
+                    raise PersistenceContractError("persisted AgentSession is malformed") from error
+                encoded_session = loaded.agent_session
         else:
             raise PersistenceContractError("load must return a checkpoint or explicit NeverCreated evidence")
         graph = self.assemble(current_config)
         if type(graph) is not Graph:
             raise AgentContractError("Agent assembly must return the Graph facade")
+        if current_session is not None and encoded_session is None:
+            codec = self.session_codec
+            if codec is None:
+                raise AgentContractError("AgentStart session requires its session codec")
+            try:
+                encoded_session = codec.encode(current_session)
+            except AgentSessionContractError as error:
+                raise AgentContractError("AgentSession could not be encoded") from error
         commit = DurableGraphCommit(
             self.codec,
             _AuthorizedGraphWriter(self.persistence, authority, self.max_commit_attempts),
+            encoded_session,
+            self.session_codec,
         )
         try:
             if isinstance(request, AgentResume):
@@ -322,7 +395,7 @@ class Agent(Generic[GraphValueT]):
                     for answer in request.answers
                 )
                 result = await graph.run(
-                    recovery=GraphRecovery(checkpoint, commit, configs),
+                    recovery=GraphRecovery(checkpoint, commit, configs, current_session),
                     resume=actions,
                     max_supersteps=self.limits.max_supersteps,
                     max_parallel_tasks=self.limits.max_parallel_tasks,
@@ -332,6 +405,7 @@ class Agent(Generic[GraphValueT]):
                     request.values,
                     run_id=request.run_id,
                     activation_config=current_config,
+                    session=current_session,
                     commit=commit,
                     max_supersteps=self.limits.max_supersteps,
                     max_parallel_tasks=self.limits.max_parallel_tasks,
@@ -342,13 +416,21 @@ class Agent(Generic[GraphValueT]):
             raise
         return _project_result(request.run_id, result)
 
-    async def run(self, request: AgentRequest[GraphValueT], /) -> AgentResult[GraphValueT]:
+    async def run(
+        self, request: AgentRequest[GraphValueT, AgentHookStateT, AgentContextT], /
+    ) -> AgentResult[GraphValueT, AgentHookStateT, AgentContextT]:
         if type(request) not in (AgentStart, AgentResume):
             raise AgentContractError("Agent.run requires a typed start or resume request")
         try:
             if isinstance(request, AgentStart):
                 _admit_business_values(request.values)
-                request = AgentStart(request.run_id, request.values)
+                session = request.session
+                if session is not None:
+                    try:
+                        session = AgentSession[AgentHookStateT, AgentContextT].admit(session)
+                    except AgentSessionContractError as error:
+                        raise AgentContractError("AgentStart session is malformed") from error
+                request = AgentStart(request.run_id, request.values, session)
             else:
                 request = AgentResume(request.run_id, request.answers)
         except AgentContractError:

@@ -11,8 +11,8 @@ from mote_kernel.execution.cancellation import wait_for_owner_task
 from mote_kernel.execution.commit import (
     GraphCommit,
     GraphCommitError,
+    GraphTransition,
     apply_commit_writes,
-    commit_transition,
     confirm_transition,
     prepare_transition,
     scoped_commit,
@@ -25,7 +25,7 @@ from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.errors import FrameInstallationInvariantError, ResultCollectionError, SnapshotMismatchError
 from mote_kernel.execution.executor import GraphExecutor
 from mote_kernel.execution.graph.topology import CompiledGraph
-from mote_kernel.execution.graph.values import GraphInputFrame, _public_values
+from mote_kernel.execution.graph.values import GraphInputFrame, _public_values, replace_graph_input_config
 from mote_kernel.execution.graph_result import (
     GraphAbortView,
     GraphFailureView,
@@ -68,6 +68,7 @@ from mote_kernel.execution.result import (
     MissingChild,
     ReadyToResolve,
     TaskResult,
+    TaskSuccess,
     WaitingForChildren,
 )
 from mote_kernel.execution.run_context import (
@@ -78,6 +79,7 @@ from mote_kernel.execution.run_context import (
     ScopedStateBinding,
     UncreatedGraphRun,
 )
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     FailedGraphNode,
@@ -105,6 +107,42 @@ _EvidenceReader: TypeAlias = Callable[
     tuple[tuple[ScopedRunEvidence, ...], ScopedFrameIndex[GraphValueT]],
 ]
 _EvidencePublisher: TypeAlias = Callable[[ScopedStateBinding, ScopedFrameIndex[GraphValueT]], None]
+
+
+@final
+class _FamilySessionOwner:
+    """The one live Session owner shared by every scope in an invocation."""
+
+    __slots__ = ("_current", "_lock")
+
+    def __init__(self, session: AgentSessionCarrier | None) -> None:
+        self._current = session
+        self._lock = asyncio.Lock()
+
+    @property
+    def current(self) -> AgentSessionCarrier | None:
+        return self._current
+
+    async def confirm(
+        self,
+        prepare: Callable[
+            [AgentSessionCarrier | None],
+            tuple[GraphTransition[GraphValueT], ScopedFrameIndex[GraphValueT]],
+        ],
+        commit: GraphCommit[GraphValueT],
+        *,
+        successor: AgentSessionCarrier | None = None,
+    ) -> tuple[GraphRunState, ScopedFrameIndex[GraphValueT]]:
+        """Serialize Session selection, durable confirmation, and advancement."""
+
+        async with self._lock:
+            selected = self._current if successor is None else successor
+            transition, frames = prepare(selected)
+            if transition.agent_session != selected:
+                raise SnapshotMismatchError("family transition did not use its selected AgentSession")
+            confirmed = await confirm_transition(transition, commit)
+            self._current = selected
+            return confirmed, frames
 
 
 @final
@@ -213,6 +251,7 @@ async def _start_fresh_owner(
     parent: GraphActivationIdentity | None,
     position: tuple[int, ...],
     evidence_publisher: _EvidencePublisher[GraphValueT],
+    family_session: _FamilySessionOwner,
 ) -> _GraphRun[GraphValueT]:
     """Admit and construct one new owner through the sole fresh-run transaction.
 
@@ -223,24 +262,36 @@ async def _start_fresh_owner(
     """
 
     owner_commit = scoped_commit(scope_run, commit)
-    command = project_start_graph_command(
-        graph,
-        scope_run.graph_run_id,
-        parent,
-        config_cursor=(
-            input_frame.activation_config.config_cursor if input_frame.activation_config is not None else None
-        ),
-    )
-    transition = prepare_transition(
-        scope_run,
-        None,
-        command,
-        None,
-        graph=graph,
-        graph_input=input_frame,
-    )
-    staged_frames = apply_commit_writes(ScopedFrameIndex(), transition.writes)
-    state = await confirm_transition(transition, owner_commit)
+
+    def prepare_start(
+        selected: AgentSessionCarrier | None,
+    ) -> tuple[GraphTransition[GraphValueT], ScopedFrameIndex[GraphValueT]]:
+        effective_input = replace_graph_input_config(
+            input_frame,
+            selected.config if selected is not None else input_frame.activation_config,
+        )
+        command = project_start_graph_command(
+            graph,
+            scope_run.graph_run_id,
+            parent,
+            config_cursor=(
+                effective_input.activation_config.config_cursor
+                if effective_input.activation_config is not None
+                else None
+            ),
+        )
+        transition = prepare_transition(
+            scope_run,
+            None,
+            command,
+            None,
+            graph=graph,
+            graph_input=effective_input,
+            agent_session=selected,
+        )
+        return transition, apply_commit_writes(ScopedFrameIndex(), transition.writes)
+
+    state, staged_frames = await family_session.confirm(prepare_start, owner_commit)
     try:
         return _GraphRun(
             graph,
@@ -249,22 +300,36 @@ async def _start_fresh_owner(
             staged_frames,
             limits,
             owner_commit,
-            _make_child_constructor(graph, scope_run, limits, commit, evidence_publisher),
+            _make_child_constructor(
+                graph,
+                scope_run,
+                limits,
+                commit,
+                evidence_publisher,
+                family_session,
+            ),
             position,
             evidence_publisher,
+            family_session,
         )
     except BaseException:
         reason = GraphAbortReason(
             "root graph owner construction failed" if parent is None else "nested graph owner construction failed"
         )
         cleanup_task = asyncio.create_task(
-            commit_transition(
-                scope_run,
-                state,
-                AbortGraphRun(state.revision, reason),
-                None,
+            family_session.confirm(
+                lambda selected: (
+                    prepare_transition(
+                        scope_run,
+                        state,
+                        AbortGraphRun(state.revision, reason),
+                        None,
+                        graph=graph,
+                        agent_session=selected,
+                    ),
+                    ScopedFrameIndex(),
+                ),
                 owner_commit,
-                graph=graph,
             )
         )
         try:
@@ -392,7 +457,9 @@ class _GraphRun(Generic[GraphValueT]):
         "_child_constructor",
         "_children",
         "_commit",
+        "_execution_session",
         "_executor",
+        "_family_session",
         "_frames",
         "_graph",
         "_limits",
@@ -401,7 +468,6 @@ class _GraphRun(Generic[GraphValueT]):
         "_publish_evidence",
         "_released",
         "_scope_run",
-        "_session",
         "_state",
     )
 
@@ -416,6 +482,7 @@ class _GraphRun(Generic[GraphValueT]):
         child_constructor: _ChildConstructor[GraphValueT],
         position: tuple[int, ...],
         evidence_publisher: _EvidencePublisher[GraphValueT],
+        family_session: _FamilySessionOwner,
     ) -> None:
         require_scoped_snapshot_matches_graph(graph, state, scope_run)
         # GraphRunState is the sole owner of parent lineage.  Validate its
@@ -426,6 +493,7 @@ class _GraphRun(Generic[GraphValueT]):
         self._scope_run = scope_run
         self._state = state
         self._frames = frames
+        self._family_session = family_session
         self._executor = GraphExecutor(graph)
         self._limits = limits
         self._commit = commit
@@ -433,7 +501,7 @@ class _GraphRun(Generic[GraphValueT]):
         self._position = position
         self._publish_evidence = evidence_publisher
         self._children: list[_ChildCall[GraphValueT]] = []
-        self._session: GraphExecutionSession[GraphValueT] | None = None
+        self._execution_session: GraphExecutionSession[GraphValueT] | None = None
         self._node_origin_cancellation: asyncio.CancelledError | None = None
         self._released = False
 
@@ -444,6 +512,12 @@ class _GraphRun(Generic[GraphValueT]):
     @property
     def frames(self) -> ScopedFrameIndex[GraphValueT]:
         return self._frames
+
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        """Project the one family Session owner for result handoff."""
+
+        return self._family_session.current
 
     def _child_call(self, parent: GraphActivationIdentity) -> _ChildCall[GraphValueT] | None:
         return next((call for call in self._children if call.parent == parent), None)
@@ -491,21 +565,35 @@ class _GraphRun(Generic[GraphValueT]):
         confirmed_frames: ScopedFrameIndex[GraphValueT] | None = None,
         handoff_evidence: bool = False,
     ) -> GraphRunState:
-        transition = prepare_transition(
-            self._scope_run,
-            self._state,
-            command,
-            result,
-            graph=self._graph,
-            admitted_successor=admitted_successor,
+        successor = result.session if isinstance(result, TaskSuccess) else None
+
+        def prepare_scoped(
+            selected: AgentSessionCarrier | None,
+        ) -> tuple[GraphTransition[GraphValueT], ScopedFrameIndex[GraphValueT]]:
+            transition = prepare_transition(
+                self._scope_run,
+                self._state,
+                command,
+                result,
+                graph=self._graph,
+                admitted_successor=admitted_successor,
+                agent_session=selected,
+            )
+            if confirmed_frames is not None and (transition.writes.graph_inputs or transition.writes.publications):
+                raise FrameInstallationInvariantError("a transition cannot stage frames and an admitted frame snapshot")
+            staged = (
+                apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
+            )
+            return transition, staged
+
+        commit_task = asyncio.create_task(
+            self._family_session.confirm(
+                prepare_scoped,
+                self._commit,
+                successor=successor,
+            )
         )
-        if confirmed_frames is not None and (transition.writes.graph_inputs or transition.writes.publications):
-            raise FrameInstallationInvariantError("a transition cannot stage frames and an admitted frame snapshot")
-        staged_frames = (
-            apply_commit_writes(self._frames, transition.writes) if confirmed_frames is None else confirmed_frames
-        )
-        commit_task = asyncio.create_task(confirm_transition(transition, self._commit))
-        confirmed, cancellation = await wait_for_owner_task(commit_task)
+        (confirmed, staged_frames), cancellation = await wait_for_owner_task(commit_task)
         self._state = confirmed
         self._frames = staged_frames
         if handoff_evidence and self._state.parent is not None:
@@ -556,6 +644,7 @@ class _GraphRun(Generic[GraphValueT]):
             self._scope_run,
             self._frames,
             parent.node_id,
+            owner_session=self._family_session.current,
         )
         child_input = admit_child_graph_input(child_graph, input_frame)
         position = self.child_position(parent)
@@ -621,14 +710,14 @@ class _GraphRun(Generic[GraphValueT]):
                 raise
             except BaseException as error:
                 errors.append(error)
-        session = self._session
+        session = self._execution_session
         if session is not None:
             try:
                 await session.aclose()
             except BaseException as error:
                 errors.append(error)
             finally:
-                self._session = None
+                self._execution_session = None
         if self._state.status is GraphRunStatus.RUNNING and self._state.execution is not None:
             await self._fence(self._state.execution.token)
         if errors:
@@ -779,7 +868,7 @@ class _GraphRun(Generic[GraphValueT]):
         except Exception:
             await self._fence(execution.token)
             raise
-        self._session = session
+        self._execution_session = session
         try:
             child_calls = tuple(
                 call
@@ -796,7 +885,7 @@ class _GraphRun(Generic[GraphValueT]):
             )
             await self._drive_workers(workers)
         finally:
-            self._session = None
+            self._execution_session = None
         if self._state.execution is not None:
             await self._fence(execution.token)
 
@@ -809,6 +898,7 @@ class _GraphRun(Generic[GraphValueT]):
                     self._frames,
                     self._child_projections(),
                     self._limits,
+                    self._family_session.current,
                 )
             )
             if isinstance(disposition, ReadyToResolve):
@@ -862,6 +952,7 @@ class _GraphRun(Generic[GraphValueT]):
 
     def terminal_projection(self, parent: GraphActivationIdentity) -> _ChildTerminal[GraphValueT]:
         if self._state.status is GraphRunStatus.COMPLETED:
+            current_session = self._family_session.current
             return CompletedChild(
                 parent,
                 project_graph_outputs(
@@ -869,6 +960,7 @@ class _GraphRun(Generic[GraphValueT]):
                     self._scope_run,
                     self._state.superstep,
                     self._frames,
+                    owner_session=current_session,
                 ),
                 None if self._state.completion_route is None else str(self._state.completion_route),
             )
@@ -904,9 +996,9 @@ class _GraphRun(Generic[GraphValueT]):
                 raise
             except BaseException as error:
                 errors.append(error)
-        if self._session is not None:
+        if self._execution_session is not None:
             try:
-                await self._session.aclose()
+                await self._execution_session.aclose()
             except BaseException as error:
                 errors.append(error)
         if self._state.status is GraphRunStatus.RUNNING:
@@ -927,12 +1019,12 @@ class _GraphRun(Generic[GraphValueT]):
                 await call.release()
             except BaseException as error:
                 errors.append(error)
-        if self._session is not None:
+        if self._execution_session is not None:
             try:
-                await self._session.aclose()
+                await self._execution_session.aclose()
             except BaseException as error:
                 errors.append(error)
-        self._session = None
+        self._execution_session = None
         if errors:
             raise errors[0]
         self._released = True
@@ -947,6 +1039,7 @@ def _make_child_constructor(
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
     evidence_publisher: _EvidencePublisher[GraphValueT],
+    family_session: _FamilySessionOwner,
 ) -> _ChildConstructor[GraphValueT]:
     async def construct(
         parent: GraphActivationIdentity,
@@ -969,6 +1062,7 @@ def _make_child_constructor(
             parent=parent,
             position=position,
             evidence_publisher=evidence_publisher,
+            family_session=family_session,
         )
         return _ChildCall(position, parent, ActiveChild(parent), child)
 
@@ -987,11 +1081,13 @@ async def admit_continued_root(
     family_identity: _CompiledFamilyIdentity,
     *,
     recovered: bool,
+    session: AgentSessionCarrier | None = None,
 ) -> OwnerHandoff[GraphValueT]:
     scope_run = root_scope_run(state.run_id)
     fences_by_scope = {candidate.scope_run: candidate for candidate in fences}
     resumes_by_scope = {candidate.scope_run: candidate for candidate in resumes}
     evidence_publisher, evidence_reader = _evidence_adapter(child_runs, frames)
+    family_session = _FamilySessionOwner(session)
     root_commit = scoped_commit(scope_run, commit)
     root: _GraphRun[GraphValueT] | None = None
     confirmed_prefix = False
@@ -1013,9 +1109,17 @@ async def admit_continued_root(
             owner_frames,
             limits,
             owner_commit,
-            _make_child_constructor(owner_graph, owner_scope_run, limits, commit, evidence_publisher),
+            _make_child_constructor(
+                owner_graph,
+                owner_scope_run,
+                limits,
+                commit,
+                evidence_publisher,
+                family_session,
+            ),
             position,
             evidence_publisher,
+            family_session,
         )
 
     async def cleanup_owner(
@@ -1031,13 +1135,19 @@ async def admit_continued_root(
             if not transition_attempted and not isinstance(failure, GraphCommitError):
                 if owner is None:
                     if owner_state.status is GraphRunStatus.RUNNING:
-                        await commit_transition(
-                            owner_scope_run,
-                            owner_state,
-                            AbortGraphRun(owner_state.revision, reason),
-                            None,
+                        await family_session.confirm(
+                            lambda selected: (
+                                prepare_transition(
+                                    owner_scope_run,
+                                    owner_state,
+                                    AbortGraphRun(owner_state.revision, reason),
+                                    None,
+                                    graph=owner_graph,
+                                    agent_session=selected,
+                                ),
+                                ScopedFrameIndex(),
+                            ),
                             owner_commit,
-                            graph=owner_graph,
                         )
                 else:
                     await owner.abort(reason)
@@ -1190,6 +1300,7 @@ async def admit_continued_root(
                 _merge_frames((root.frames, child_frames)),
                 recovered=recovered,
                 commit=commit,
+                session=family_session.current,
             )
             partial = _partial_commit_error(
                 root.state,
@@ -1217,8 +1328,10 @@ async def fresh_root(
     input_frame: GraphInputFrame[GraphValueT],
     limits: ExecutionLimits,
     commit: GraphCommit[GraphValueT] | None,
+    session: AgentSessionCarrier | None = None,
 ) -> OwnerHandoff[GraphValueT]:
     evidence_publisher, evidence_reader = _evidence_adapter((), ScopedFrameIndex())
+    family_session = _FamilySessionOwner(session)
     root = await _start_fresh_owner(
         graph,
         scope_run,
@@ -1228,6 +1341,7 @@ async def fresh_root(
         parent=None,
         position=(),
         evidence_publisher=evidence_publisher,
+        family_session=family_session,
     )
     return root, evidence_reader
 
@@ -1280,9 +1394,16 @@ def project_graph_result(
         frames,
         recovered=recovered,
         commit=commit,
+        session=root.session,
     )
     if isinstance(disposition, CompletedGraph):
-        view = project_graph_outputs(graph, root_scope_run(state.run_id), state.superstep, frames)
+        view = project_graph_outputs(
+            graph,
+            root_scope_run(state.run_id),
+            state.superstep,
+            frames,
+            owner_session=root.session,
+        )
         return _completed_result(state, continuation, _public_values(view))
     if isinstance(disposition, AbortedGraph):
         if state.abort is None:

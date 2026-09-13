@@ -118,6 +118,7 @@ from mote_kernel.execution.run_context import (
     ScopedFrameIndex,
     ScopedRunEvidence,
 )
+from mote_kernel.session import AgentSession, AgentSessionActivation, AgentSessionCarrier, admit_session_carrier
 from mote_kernel.state.graph_state import (
     GraphAbortReason,
     GraphDefinitionId,
@@ -133,6 +134,8 @@ GraphValueT = TypeVar("GraphValueT")
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
 ValueT = TypeVar("ValueT")
+SessionHookT = TypeVar("SessionHookT")
+SessionContextT = TypeVar("SessionContextT")
 
 
 class _MissingRunValues:
@@ -193,6 +196,7 @@ class Graph(Generic[GraphValueT]):
     InputBinding = TypedInputBinding
     OutputRef = NodeOutputRef
     SuccessOutcome = _GraphSuccessOutcome
+    SessionActivation = AgentSessionActivation
     FailureOutcome = _GraphFailureOutcome
     InterruptOutcome = _GraphInterruptOutcome
     Outcome = GraphOutcome
@@ -378,8 +382,9 @@ class Graph(Generic[GraphValueT]):
         output: "Graph.Values[FactoryValueT]",
         *,
         route: str | None = None,
+        session: AgentSession[SessionHookT, SessionContextT] | None = None,
     ) -> "Graph.SuccessOutcome[FactoryValueT]":
-        return _success(output, route=route)
+        return _success(output, route=route, session=session)
 
     @staticmethod
     def failure(reason: str) -> "Graph.FailureOutcome":
@@ -699,6 +704,7 @@ class Graph(Generic[GraphValueT]):
         *,
         run_id: str | None = None,
         activation_config: Config | None = None,
+        session: AgentSessionCarrier | None = None,
         commit: "Graph.Commit[GraphValueT] | None" = None,
         max_supersteps: int = 1_000,
         max_parallel_tasks: int = 64,
@@ -749,6 +755,7 @@ class Graph(Generic[GraphValueT]):
         *,
         run_id: str | None = None,
         activation_config: Config | None = None,
+        session: AgentSessionCarrier | None = None,
         state: "Graph.State | None" = None,
         continuation: "Graph.Continuation[GraphValueT] | None" = None,
         recovery: GraphRecovery[GraphValueT] | None = None,
@@ -767,21 +774,23 @@ class Graph(Generic[GraphValueT]):
                 or continuation is not None
                 or run_id is not None
                 or activation_config is not None
+                or session is not None
                 or commit is not None
             ):
                 raise SnapshotMismatchError(
-                    "durable recovery cannot replace its input, state, identity, Config or commit capability"
+                    "durable recovery cannot replace its input, state, identity, Config, Session or commit capability"
                 )
             recovery = recovery.admit()
             commit = recovery.commit
             invocation = recovery.checkpoint.root_state
+            session = recovery.session
         elif isinstance(values, _GraphValues):
             if state is not None or continuation is not None or resume:
                 raise SnapshotMismatchError("new graph run cannot carry state, continuation, or resume actions")
             invocation = _require_graph_values(values)
         elif values is _MISSING_RUN_VALUES and state is not None and run_id is None:
-            if activation_config is not None:
-                raise SnapshotMismatchError("continued graph runs cannot replace their activation Config")
+            if activation_config is not None or session is not None:
+                raise SnapshotMismatchError("continued graph runs cannot replace their activation Config or Session")
             invocation = state
         else:
             raise SnapshotMismatchError("state runs require state, forbid run_id, and do not accept values")
@@ -796,13 +805,19 @@ class Graph(Generic[GraphValueT]):
                     require_config(activation_config)
                 except ConfigContractError as error:
                     raise SnapshotMismatchError("activation Config is malformed") from error
-            input_candidate = admit_graph_input(graph, invocation, activation_config)
+            if session is not None:
+                try:
+                    session = admit_session_carrier(session)
+                except (AttributeError, TypeError, ValueError) as error:
+                    raise SnapshotMismatchError("activation Session is malformed") from error
+            input_candidate = admit_graph_input(graph, invocation, activation_config, session)
             root_admission = fresh_root(
                 graph,
                 scope_run,
                 input_candidate,
                 limits,
                 commit,
+                session,
             )
         else:
             if recovery is not None:
@@ -819,6 +834,7 @@ class Graph(Generic[GraphValueT]):
                 frames = snapshot.frames
                 recovered = snapshot.recovered
                 commit = snapshot.commit
+                session = snapshot.session
             lineage = lineage_states(invocation, child_runs)
             validate_context(graph, lineage, frames, recovered=recovered)
             planned_lineage, fences = plan_fences(graph, lineage)
@@ -827,8 +843,9 @@ class Graph(Generic[GraphValueT]):
                 planned_lineage,
                 frames,
                 resume,
+                session,
             )
-            admit_state_owned_overrides(graph, planned_lineage, candidate_frames)
+            admit_state_owned_overrides(graph, planned_lineage, candidate_frames, session)
             if recovered or resume:
                 preflight_recovery(
                     graph,
@@ -845,6 +862,7 @@ class Graph(Generic[GraphValueT]):
                 planned_resumes,
                 owner.family_identity,
                 recovered=recovered,
+                session=session,
             )
         try:
             (root, evidence_reader), setup_cancellation = await wait_for_owner_task(asyncio.create_task(root_admission))

@@ -301,15 +301,15 @@ def test_config_cursor_transition_is_monotonic_and_digest_stable() -> None:
         with_digest.transition_to(GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 3, "v3"))
 
 
-def test_settlement_admits_one_successor_config_cursor_and_rejects_other_outcomes() -> None:
+def test_settlement_admits_one_successor_config_cursor_for_every_outcome() -> None:
     cursor = GraphConfigCursor(GraphDefinitionId("graph"), GraphDefinitionVersion(1), 2, "v2")
     leased = claim(running(A, B))
     first = settle(leased, SucceededGraphNodeOutcome(A, ContinueGraphRouting()), cursor)
     second = settle(first, SucceededGraphNodeOutcome(B, ContinueGraphRouting()), cursor)
     assert first.config_cursor == second.config_cursor == cursor
 
-    with pytest.raises(GraphStateTransitionError, match="only a successful"):
-        settle(claim(running(A)), FailedGraphNodeOutcome(A, GraphFailure("failed")), cursor)
+    failed = settle(claim(running(A)), FailedGraphNodeOutcome(A, GraphFailure("failed")), cursor)
+    assert failed.config_cursor == cursor
     with pytest.raises(GraphStateTransitionError, match="Config cursor is malformed"):
         settle(
             claim(running(A)),

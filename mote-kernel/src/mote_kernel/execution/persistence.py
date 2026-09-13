@@ -45,6 +45,15 @@ from mote_kernel.execution.run_context import (
     UncreatedGraphRun,
     require_publication_confirmation,
 )
+from mote_kernel.session import (
+    AgentSessionCarrier,
+    AgentSessionCodecCarrier,
+    AgentSessionContractError,
+    EncodedAgentSession,
+    admit_session_carrier,
+    admit_session_codec_carrier,
+    encode_session_carrier,
+)
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
     GraphConfigCursor,
@@ -365,6 +374,7 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
     expected_revision: int | None
     candidate_state: GraphRunState
     writes: GraphPersistenceWriteSet[GraphValueT]
+    agent_session: EncodedAgentSession | None = None
 
     def __post_init__(self) -> None:
         if self.expected_revision is not None and (
@@ -379,6 +389,12 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
         if type(self.writes) is not GraphPersistenceWriteSet:
             raise SnapshotMismatchError("persistent commit requires an exact complete write set")
         writes = self.writes.admit()
+        agent_session = self.agent_session
+        if agent_session is not None:
+            try:
+                agent_session = EncodedAgentSession.admit(agent_session)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise SnapshotMismatchError("persistent commit AgentSession is malformed") from error
         key = writes.commit_key
         if key != GraphCommitKey(self.candidate_state.run_id, self.candidate_state.revision):
             raise SnapshotMismatchError("persistent write set is not bound to its candidate state")
@@ -389,6 +405,16 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
             item.evidence is None for item in self.candidate_state.settled_publications
         ):
             raise SnapshotMismatchError("durable candidate state is missing value evidence commitments")
+        # A running parent may be committing ordinary work while a nested child
+        # has already confirmed a newer Session.  The family checkpoint binds
+        # that envelope to one of the confirmed scoped states; only the initial
+        # graph commit can require equality with its own candidate state here.
+        if self.candidate_state.revision == 0 and agent_session is not None:
+            candidate_cursor = (
+                self.candidate_state.config_cursor if self.candidate_state.config_digest is not None else None
+            )
+            if agent_session.config_cursor != candidate_cursor:
+                raise SnapshotMismatchError("persistent commit AgentSession does not match candidate state Config")
         if self.candidate_state.revision == 0:
             if len(writes.graph_inputs) != 1:
                 raise SnapshotMismatchError("durable StartGraphRun requires exactly one graph input")
@@ -425,7 +451,13 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
         if type(self) is not GraphPersistenceCommit:
             raise SnapshotMismatchError("persistence must return an exact commit request")
         try:
-            return GraphPersistenceCommit(self.scope, self.expected_revision, self.candidate_state, self.writes)
+            return GraphPersistenceCommit(
+                self.scope,
+                self.expected_revision,
+                self.candidate_state,
+                self.writes,
+                self.agent_session,
+            )
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("persistent commit request is malformed") from error
 
@@ -442,6 +474,8 @@ def _encode_frame(
     frame: GraphInputFrame[GraphValueT] | NodeOutputFrame[GraphValueT],
     codec: FrameCodec[GraphValueT],
 ) -> EncodedFrame:
+    # Session is execution metadata and has its own atomic envelope; it must
+    # never enter the ordinary graph-value codec payload.
     values = _make_graph_values(**{entry.name: entry.value for entry in frame.entries})
     payload = codec.encode(values)
     decoded = codec.decode(payload)
@@ -466,11 +500,23 @@ class DurableGraphCommit(Generic[GraphValueT]):
 
     codec: FrameCodec[GraphValueT]
     writer: GraphPersistenceWriter[GraphValueT]
+    agent_session: EncodedAgentSession | None = None
+    session_codec: AgentSessionCodecCarrier | None = None
 
     def __post_init__(self) -> None:
         if type(self.codec) is not FrameCodec or not callable(self.writer):
             raise GraphValidationError("durable graph commit requires a typed codec and writer")
         self.codec.validate()
+        if self.agent_session is not None:
+            try:
+                EncodedAgentSession.admit(self.agent_session)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise GraphValidationError("durable graph commit AgentSession is malformed") from error
+        if self.session_codec is not None:
+            try:
+                admit_session_codec_carrier(self.session_codec)
+            except AgentSessionContractError as error:
+                raise GraphValidationError("durable graph commit session codec is malformed") from error
 
     def admit(self) -> "DurableGraphCommit[GraphValueT]":
         if type(self) is not DurableGraphCommit:
@@ -479,6 +525,10 @@ class DurableGraphCommit(Generic[GraphValueT]):
             if type(self.codec) is not FrameCodec or not callable(self.writer):
                 raise GraphValidationError("durable graph commit requires a typed codec and writer")
             self.codec.validate()
+            if self.agent_session is not None:
+                EncodedAgentSession.admit(self.agent_session)
+            if self.session_codec is not None:
+                admit_session_codec_carrier(self.session_codec)
         except (AttributeError, TypeError, ValueError) as error:
             raise GraphValidationError("durable graph commit capability is malformed") from error
         return self
@@ -507,6 +557,17 @@ class DurableGraphCommit(Generic[GraphValueT]):
             graph_input=graph_inputs[0].evidence if graph_inputs else None,
             publication=publications[0].evidence if publications else None,
         )
+        session = transition.agent_session
+        if session is None:
+            encoded_session = self.agent_session
+        else:
+            codec_carrier = self.session_codec
+            if codec_carrier is None:
+                raise SnapshotMismatchError("a Session successor requires its session codec")
+            try:
+                encoded_session = encode_session_carrier(codec_carrier, session)
+            except AgentSessionContractError as error:
+                raise SnapshotMismatchError("AgentSession successor could not be encoded") from error
         request = GraphPersistenceCommit(
             tuple(GraphNodeId(segment) for segment in transition.scope),
             transition.previous_state.revision if transition.previous_state is not None else None,
@@ -516,6 +577,7 @@ class DurableGraphCommit(Generic[GraphValueT]):
                 graph_inputs,
                 publications,
             ),
+            encoded_session,
         )
         baseline = deepcopy(request.admit())
         confirmed = await self.writer(request)
@@ -534,6 +596,7 @@ class GraphCheckpoint(Generic[GraphValueT]):
     child_runs: tuple[ScopedRunEvidence, ...]
     graph_inputs: tuple[PersistedGraphInput[GraphValueT], ...]
     publications: tuple[PersistedPublication[GraphValueT], ...]
+    agent_session: EncodedAgentSession | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -571,6 +634,18 @@ class GraphCheckpoint(Generic[GraphValueT]):
             type(item) is not PersistedPublication for item in self.publications
         ):
             raise SnapshotMismatchError("checkpoint publications must be typed immutable records")
+        agent_session = self.agent_session
+        if agent_session is not None:
+            try:
+                agent_session = EncodedAgentSession.admit(agent_session)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise SnapshotMismatchError("checkpoint AgentSession is malformed") from error
+            family_cursors = {
+                self.root_state.config_cursor,
+                *(item.state.config_cursor for item in self.child_runs if isinstance(item, ScopedStateBinding)),
+            }
+            if agent_session.config_cursor is not None and agent_session.config_cursor not in family_cursors:
+                raise SnapshotMismatchError("checkpoint AgentSession Config is not bound to the graph family")
         graph_inputs = tuple(item.admit() for item in self.graph_inputs)
         publications = tuple(item.admit() for item in self.publications)
         if graph_inputs != tuple(sorted(graph_inputs, key=lambda item: item.coordinate)):
@@ -591,6 +666,7 @@ class GraphCheckpoint(Generic[GraphValueT]):
                 self.child_runs,
                 self.graph_inputs,
                 self.publications,
+                self.agent_session,
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("checkpoint is malformed") from error
@@ -609,6 +685,8 @@ class GraphCheckpoint(Generic[GraphValueT]):
             for item in (*self.graph_inputs, *self.publications)
             if item.frame.config_cursor is not None
         )
+        if self.agent_session is not None and self.agent_session.config_cursor is not None:
+            cursors.add(self.agent_session.config_cursor)
         return tuple(sorted(cursors))
 
     def admit_child_reads(
@@ -625,12 +703,14 @@ class GraphCheckpoint(Generic[GraphValueT]):
             previous_states,
             current.graph_inputs,
             current.publications,
+            current.agent_session,
         )
         loaded_family = GraphCheckpoint(
             loaded.root_state,
             loaded_states,
             loaded.graph_inputs,
             loaded.publications,
+            loaded.agent_session,
         )
         if previous_family != loaded_family:
             raise SnapshotMismatchError("family facts changed during an authority-constrained child reread")
@@ -650,14 +730,38 @@ class GraphRecovery(Generic[GraphValueT]):
     checkpoint: GraphCheckpoint[GraphValueT]
     commit: DurableGraphCommit[GraphValueT]
     configs: tuple[Config, ...] = ()
+    session: AgentSessionCarrier | None = None
 
     def __post_init__(self) -> None:
         if type(self.checkpoint) is not GraphCheckpoint:
             raise SnapshotMismatchError("durable recovery requires an exact typed checkpoint")
         if type(self.commit) is not DurableGraphCommit:
             raise GraphValidationError("durable recovery requires its durable commit capability")
-        self.checkpoint.admit()
-        self.commit.admit()
+        checkpoint = self.checkpoint.admit()
+        commit = self.commit.admit()
+        if checkpoint.agent_session != commit.agent_session:
+            raise SnapshotMismatchError("durable recovery checkpoint and commit must bind the same AgentSession")
+        session = self.session
+        if session is not None:
+            try:
+                session = admit_session_carrier(session)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise SnapshotMismatchError("durable recovery Session is malformed") from error
+        if (checkpoint.agent_session is None) != (session is None):
+            raise SnapshotMismatchError("durable recovery requires a decoded Session for its envelope")
+        if session is not None:
+            envelope = checkpoint.agent_session
+            if envelope is None or session.config_cursor != envelope.config_cursor:
+                raise SnapshotMismatchError("durable recovery Session does not match its envelope Config cursor")
+            codec = commit.session_codec
+            if codec is None:
+                raise SnapshotMismatchError("durable recovery Session requires its codec")
+            try:
+                encoded = encode_session_carrier(codec, session)
+            except AgentSessionContractError as error:
+                raise SnapshotMismatchError("durable recovery Session could not be canonically encoded") from error
+            if encoded != envelope:
+                raise SnapshotMismatchError("durable recovery Session does not match its durable envelope")
         if type(self.configs) is not tuple:
             raise SnapshotMismatchError("recovery Config capabilities must be an immutable tuple")
 
@@ -665,7 +769,7 @@ class GraphRecovery(Generic[GraphValueT]):
         if type(self) is not GraphRecovery:
             raise SnapshotMismatchError("durable recovery requires an exact typed capability")
         try:
-            return GraphRecovery(self.checkpoint, self.commit, self.configs)
+            return GraphRecovery(self.checkpoint, self.commit, self.configs, self.session)
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("durable recovery capability is malformed") from error
 
@@ -752,7 +856,11 @@ def restore_checkpoint(
             coordinate = graph_input.coordinate
             scoped_graph = _compiled_graph_at_scope(graph, coordinate.scope_run.scope)
             values, config = _decode_frame(graph_input.frame, recovery.commit.codec, configs)
-            frame = _make_graph_input_frame(values, scoped_graph.graph_input_descriptor.declarations, config)
+            frame = _make_graph_input_frame(
+                values,
+                scoped_graph.graph_input_descriptor.declarations,
+                config,
+            )
             frames = frames.add_graph_input(AdmittedGraphInput(coordinate, frame))
         for publication in checkpoint.publications:
             publication_coordinate = publication.coordinate
@@ -784,7 +892,13 @@ def restore_checkpoint(
             frames = frames.add_child_boundary(
                 ConfirmedChildBoundary(
                     boundary,
-                    project_graph_outputs(scoped_graph, binding.scope_run, binding.state.superstep, frames),
+                    project_graph_outputs(
+                        scoped_graph,
+                        binding.scope_run,
+                        binding.state.superstep,
+                        frames,
+                        owner_session=recovery.session,
+                    ),
                 )
             )
         validate_context(graph, lineage, frames, recovered=False)

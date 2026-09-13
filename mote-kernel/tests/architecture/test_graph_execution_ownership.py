@@ -139,11 +139,18 @@ def test_graph_state_and_execution_contracts_have_single_owners() -> None:
                 "GraphCommitError",
                 "prepare_transition",
                 "confirm_transition",
-                "commit_transition",
                 "apply_commit_writes",
             }
         ),
         "execution/graph/codec.py": frozenset({"FrameCodec"}),
+        "session.py": frozenset(
+            {
+                "AgentSession",
+                "AgentSessionCodec",
+                "AgentSessionContractError",
+                "EncodedAgentSession",
+            }
+        ),
         "execution/engine/resume_input.py": frozenset(
             {
                 "require_resume_input_binding",
@@ -245,6 +252,7 @@ def test_static_execution_and_resource_types_reuse_state_owned_identities() -> N
     assert _class_fields("execution/graph/outcome.py", "_GraphSuccessOutcome") == {
         "output": "_GraphValues[GraphValueT]",
         "route": "str | None",
+        "session": "AgentSessionCarrier | None",
         "_seal": "InitVar[_OutcomeSeal]",
     }
 
@@ -262,6 +270,7 @@ def test_production_continuation_has_no_hidden_mutation_path() -> None:
         "frames": "ScopedFrameIndex[GraphValueT]",
         "recovered": "bool",
         "commit": "GraphCommit[GraphValueT] | None",
+        "session": "AgentSessionCarrier | None",
     }
 
 
@@ -317,6 +326,8 @@ def test_frame_codecs_are_invoked_only_by_the_codec_owner() -> None:
     assert sorted(invocation_owners) == [
         ("execution/graph/codec.py", "decoder"),
         ("execution/graph/codec.py", "encoder"),
+        ("session.py", "decoder"),
+        ("session.py", "encoder"),
     ]
 
 
@@ -634,6 +645,7 @@ def test_agent_is_immutable_wiring_not_another_runtime_state_or_runner() -> None
         "persistence",
         "authority",
         "config",
+        "session_codec",
         "max_commit_attempts",
         "limits",
     }

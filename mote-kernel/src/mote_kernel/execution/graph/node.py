@@ -23,6 +23,7 @@ from mote_kernel.execution.graph.values import (
     _GraphValues,
 )
 from mote_kernel.execution.resource import ResourceId
+from mote_kernel.session import AgentSessionActivation, AgentSessionCarrier
 from mote_kernel.state.graph_state import GraphNodeId
 
 GraphValueT = TypeVar("GraphValueT")
@@ -57,6 +58,7 @@ class NodeOperation(Protocol[InputT_contra, OutputT_co]):
     ) -> Awaitable[
         OutputT_co
         | ConfigActivation[OutputT_co]
+        | AgentSessionActivation[OutputT_co]
         | _GraphSuccessOutcome[OutputT_co]
         | _GraphFailureOutcome
         | _GraphInterruptOutcome
@@ -113,6 +115,12 @@ class NodeInputs(Generic[GraphValueT]):
         """
 
         return self._frame.activation_config
+
+    @property
+    def session(self) -> AgentSessionCarrier | None:
+        """Return the immutable AgentSession for this activation, if present."""
+
+        return self._frame.session
 
 
 def _make_node_inputs(

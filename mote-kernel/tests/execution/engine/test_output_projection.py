@@ -22,6 +22,7 @@ from mote_kernel.execution.run_context import (
     PublicationAvailabilityCoordinate,
     ScopedFrameIndex,
 )
+from mote_kernel.session import AgentSession
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ContinueGraphRouting,
@@ -201,6 +202,39 @@ def test_empty_output_projection_rejects_conflicting_fallback_configs() -> None:
 
     with pytest.raises(GraphValueAdmissionError, match="different activation Config snapshots"):
         project_graph_outputs(compiled, scope_run, 0, frames)
+
+
+def test_output_projection_accepts_the_family_owner_session_for_empty_outputs() -> None:
+    compiled = GraphCompiler(
+        graph(
+            nodes=(node("source"),),
+            outputs=normalize_graph_output_declarations({}),
+        )
+    ).compile()
+
+    historical_config = activation_config(1)
+    frames = ScopedFrameIndex().add_child_boundary(
+        ConfirmedChildBoundary(
+            ChildBoundaryAvailabilityCoordinate(
+                root_scope_run(GraphRunId("run")),
+                compiled.graph_output_descriptor.identity,
+            ),
+            _make_graph_output_view(
+                (),
+                compiled.graph_output_descriptor.declarations,
+                activation_config=historical_config,
+            ),
+        )
+    )
+    projected = project_graph_outputs(
+        compiled,
+        root_scope_run(GraphRunId("run")),
+        0,
+        frames,
+        owner_session=AgentSession("hook", "context"),
+    )
+
+    assert projected.activation_config is None
 
 
 def test_graph_output_availability_reports_a_missing_admitted_graph_input() -> None:

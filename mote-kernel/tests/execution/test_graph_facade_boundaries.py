@@ -8,6 +8,7 @@ from mote_kernel.config import Config
 from mote_kernel.execution import Graph
 from mote_kernel.execution.graph.node import NodeCallable
 from mote_kernel.execution.graph.ports import GraphInputRef, NodeOutputRef
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import GraphRunState, StartGraphRun
 
 
@@ -221,6 +222,16 @@ async def test_resume_dispatch_rejects_non_tuple_noncanonical_and_unknown_scope(
             Graph.values(),
             scope=cast(tuple[str, ...], ["nested"]),
         )
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_a_malformed_activation_session_before_graph_admission() -> None:
+    graph = Graph[str]("facade.malformed-session")
+    graph.add_node("empty", empty, inputs={}, outputs={})
+    graph.set_outputs({})
+
+    with pytest.raises(Graph.SnapshotMismatchError, match="activation Session is malformed"):
+        await graph.run(Graph.values(), session=cast(AgentSessionCarrier, object()))
 
 
 @pytest.mark.asyncio

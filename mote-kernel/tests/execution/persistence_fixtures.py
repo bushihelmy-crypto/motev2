@@ -135,6 +135,7 @@ class MemoryPersistence(Generic[GraphValueT]):
             ),
             tuple(sorted(inputs, key=lambda record: record.coordinate)),
             tuple(sorted(publications, key=lambda record: record.coordinate)),
+            self.requests[-1].agent_session if self.requests else None,
         )
 
     def reopen(self) -> None:

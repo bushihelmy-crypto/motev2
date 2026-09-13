@@ -457,8 +457,6 @@ def settle_graph_node(state: GraphRunState, command: SettleGraphNode) -> GraphRu
 
     next_config_cursor = state.config_cursor
     if command.config_cursor is not None:
-        if not isinstance(outcome, SucceededGraphNodeOutcome):
-            raise GraphStateTransitionError("only a successful node settlement can carry a Config cursor")
         try:
             next_config_cursor = next_config_cursor.transition_to(command.config_cursor)
         except TypeError as error:

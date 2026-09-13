@@ -450,6 +450,9 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
    `GraphPersistenceCommit(scope, expected_revision, candidate_state, writes)`；**没有 reducer command**，后端不执行图规则。
 3. root、child、普通 transition 都先准备不可变 frame 安装结果，再 await commit。只有 receipt 重新准入且与整个请求
    精确相等，才更新运行中的 state/frame。比较 durable bytes/facts，不调用业务对象 equality。
+   Session 选择也在同一 family 串行边界内完成：root/child/sibling 共享一个 family Session owner；无 successor
+   的 transition 在提交前选取 owner 当前值，显式完整 successor 在其 receipt 确认后推进 owner。历史 frame 不
+   保存 Session 镜像。
 4. `GraphRecovery(checkpoint, commit, configs)` 强制绑定 durable commit；读取和后续提交只用 `commit.codec`，
    `run(recovery=...)` 拒绝另传 commit。二轮将跨调用绑定收敛到 `graph_result.py`：所有 continuation 和 partial handoff
    保存原 commit，省略或传 `None` 都继承，显式异对象在执行前拒绝；不按 concrete durable 类型分支。

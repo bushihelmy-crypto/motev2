@@ -84,8 +84,27 @@ These are owner-internal contracts; `Graph` remains the only execution facade.
   Present frame Config must belong to the owning state's Config definition/version, cannot be newer than that state's
   Config revision, and must match its digest at the same revision. One immutable Config revision cannot resolve twice.
   Legitimately Config-free historical frames stay Config-free: available capabilities and newer state never fill them
-  implicitly. Config updates are consumed only by Observe and persist with its settlement; recovery adds no update path.
-  This Config snapshot cursor is unrelated to the removed caller-supplied Observe cursor.
+  implicitly. The existing Graph Config update command remains owned by Observe and persists with its settlement;
+  a node may still place a resolved Config in an explicitly returned complete `AgentSession` successor, while the
+  Kernel never infers or merges that field. A nested child may confirm a newer Session before it pauses; the parent
+  root state can then retain its older Config cursor until the child settles, while the family checkpoint requires the
+  Session cursor to be represented by one confirmed scoped state. Recovery adds no separate update path. This Config snapshot cursor is
+  unrelated to the removed caller-supplied Observe cursor.
+- `AgentSession` is the caller-owned three-field snapshot (`hook_state`, `context`, `config`), not an alias for
+  `GraphRunState`. A node explicitly returns a complete successor through `Graph.success(..., session=...)` or the
+  typed `Graph.SessionActivation`; `_GraphRun` advances its owner only after the same transition receipt is confirmed.
+  A node without a successor inherits the current owner snapshot, and the kernel never merges business fields. One
+  invocation/family has one `_FamilySessionOwner` shared by root, child, and sibling scopes. It serializes selecting the
+  current value, preparing the transition, durable commit/reconcile, owner advancement, and state/frame installation;
+  a stale inherited snapshot therefore cannot overwrite a confirmed successor. Explicit complete successors win in
+  actual confirmation order. A nested child may pause after its successor is confirmed; it does not keep a second
+  Session mirror or rewrite the parent's GraphRunState outside the normal transition path.
+  The Config owner must save any immutable snapshot referenced by `session.config` before first use; Agent does not
+  save Config snapshots.
+  `GraphRecovery` requires the checkpoint and bound `DurableGraphCommit` to carry exactly equal encoded Session
+  envelopes; when present, the decoded snapshot is canonical re-encoded through the same codec. Historical frames
+  retain only business values and their historical Config provenance; the current owner Session is injected into node
+  materialization rather than written back into old frames.
 - Every lifecycle, including completion, retains `GraphRunState.settled_publications`. Each entry owns its activation
   reference, real settlement commit revision, execution token and optional durable value commitment. Checkpoint
   publications must exactly equal that complete success ledger: neither omitted intermediate outputs nor invented
@@ -105,7 +124,9 @@ process-local and non-serializable. Neither is a replacement for a complete chec
 `agent.py` is the sole external recovery composition root. `Agent` holds frozen capabilities, not runtime state,
 continuations, an authority cache or a second scheduler. `AgentStart` creates only a never-created run;
 `AgentResume` continues an existing run or replays its terminal business result. Answers retain the exact interrupt
-question and typed business values. Results expose outputs, failures, interrupts or an abort, never recovery snapshots.
+question and typed business values. Results expose outputs, failures, interrupts or an abort, plus the last confirmed
+`AgentSession` for the Runtime to explicitly hand to a later run; Graph state, continuations, and persistence
+capabilities remain internal.
 
 One invocation follows this chain:
 

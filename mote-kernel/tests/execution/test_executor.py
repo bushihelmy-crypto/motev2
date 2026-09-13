@@ -4,14 +4,15 @@ from dataclasses import dataclass, replace
 from typing import TypeAlias, TypeVar, cast
 
 import pytest
-from tests.execution.engine.factories import join_progress
+from tests.execution.engine.factories import activation_config, join_progress
 
 import mote_kernel.execution.engine.admission as admission_module
 import mote_kernel.execution.engine.frontier as frontier_module
+import mote_kernel.execution.engine.scheduler as scheduler_module
 import mote_kernel.execution.engine.superstep as superstep_module
 from mote_kernel.execution import Graph
 from mote_kernel.execution.engine.admission import TaskAdmission, admit_graph_input
-from mote_kernel.execution.engine.frontier import FrontierPreparation
+from mote_kernel.execution.engine.frontier import FrontierPreparation, prepare_frontier
 from mote_kernel.execution.engine.superstep import ExecutableFrontier
 from mote_kernel.execution.engine.task import GraphTask
 from mote_kernel.execution.errors import (
@@ -41,6 +42,7 @@ from mote_kernel.execution.graph.values import (
     NodeInputFrame,
     _frame_value,
     _make_graph_output_view,
+    _make_single_graph_value,
 )
 from mote_kernel.execution.graph_run import project_start_graph_command
 from mote_kernel.execution.identity import (
@@ -72,6 +74,7 @@ from mote_kernel.execution.run_context import (
     GraphInputAvailabilityCoordinate,
     ScopedFrameIndex,
 )
+from mote_kernel.session import AgentSession
 from mote_kernel.state.graph_state import (
     AbortGraphRun,
     ActivationReference,
@@ -100,6 +103,8 @@ from mote_kernel.state.graph_state import (
     child_graph_run_id,
     reduce_graph_run,
 )
+
+_project_outcome = scheduler_module._project_outcome  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.asyncio
 
@@ -770,6 +775,47 @@ async def test_node_contract_error_is_not_forged_into_settlement() -> None:
 
     assert isinstance(claimed.frontier.nodes[0].settlement, PendingGraphNode)
     assert claimed.execution is not None
+
+
+async def test_scheduler_projects_session_metadata_and_rejects_config_disagreement() -> None:
+    graph = graph_with_nodes(node("a"), entries=("a",))
+    config = activation_config(31)
+    initial = AgentSession("hook", "context", config)
+    request = replace(string_request(graph, started(graph), "input"), session=initial)
+    executable = prepare_frontier(graph, request).executables[0]
+
+    echoed = _project_outcome(
+        graph,
+        executable,
+        Graph.success(Graph.values(value="echo"), session=initial),
+    )
+    assert isinstance(echoed, TaskSuccess)
+
+    carried = _project_outcome(
+        graph,
+        executable,
+        _make_single_graph_value("value", "carried", session=initial),
+    )
+    assert isinstance(carried, TaskSuccess)
+    assert carried.output.activation_config is config
+    assert carried.session is None
+
+    configured = _project_outcome(
+        graph,
+        executable,
+        Graph.success(_make_single_graph_value("value", "configured", config), session=initial),
+    )
+    assert isinstance(configured, TaskSuccess)
+
+    with pytest.raises(NodeExecutionContractError, match="disagrees with its AgentSession"):
+        _project_outcome(
+            graph,
+            executable,
+            Graph.success(
+                _make_single_graph_value("value", "conflict", config),
+                session=AgentSession("other-hook", "other-context", activation_config(32)),
+            ),
+        )
 
 
 async def test_prepare_reports_terminal_and_settled_dispositions_without_claiming() -> None:

@@ -59,11 +59,14 @@ def project_failure_settlement(
     state: GraphRunState,
     node_id: GraphNodeId,
     failure: str,
+    *,
+    config_cursor: GraphConfigCursor | None = None,
 ) -> SettleGraphNode:
     return SettleGraphNode(
         state.revision,
         require_settlement_execution_token(state),
         FailedGraphNodeOutcome(node_id, GraphFailure(failure)),
+        config_cursor,
     )
 
 
@@ -124,7 +127,11 @@ def settle_result(
             else None,
         )
     if isinstance(result, TaskFailure):
-        return project_failure_settlement(state, task.node_id, result.failure)
+        return project_failure_settlement(
+            state,
+            task.node_id,
+            result.failure,
+        )
     return project_interrupt_settlement(graph, state, task.node_id, result.request_payload)
 
 

@@ -62,6 +62,7 @@ from mote_kernel.execution.run_context import (
     UncreatedGraphRun,
     require_publication_confirmation,
 )
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     FenceGraphExecution,
     GraphActivationIdentity,
@@ -230,6 +231,7 @@ def plan_resumes(
     lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
     resume: tuple[ResumeNodeRequest[GraphValueT], ...],
+    session: AgentSessionCarrier | None = None,
 ) -> tuple[
     _PlannedLineage,
     ScopedFrameIndex[GraphValueT],
@@ -262,7 +264,10 @@ def plan_resumes(
         scope_run = _resolve_scope_run(graph, planned_lineage, scope)
         binding = planned_lineage.binding_at(scope_run)
         scoped_graph = _compiled_graph_at_scope(graph, scope_run.scope)
-        prepared = prepare_resume(scoped_graph, ResumeRequest(binding.state, scope_run, candidate_frames, actions))
+        prepared = prepare_resume(
+            scoped_graph,
+            ResumeRequest(binding.state, scope_run, candidate_frames, actions, session),
+        )
         candidate = reduce_graph_run(binding.state, prepared.command)
         action_facts = tuple(
             AdmittedResumeFact(
@@ -310,6 +315,7 @@ def admit_state_owned_overrides(
     graph: CompiledGraph[GraphValueT],
     lineage: _PlannedLineage,
     frames: ScopedFrameIndex[GraphValueT],
+    session: AgentSessionCarrier | None = None,
 ) -> None:
     for binding in lineage.bindings:
         if binding.state.status is not GraphRunStatus.RUNNING:
@@ -326,6 +332,7 @@ def admit_state_owned_overrides(
                     binding.scope_run,
                     frames,
                     node.node_id,
+                    owner_session=session,
                 )
 
 

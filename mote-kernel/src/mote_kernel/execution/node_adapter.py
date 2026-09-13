@@ -18,6 +18,7 @@ from mote_kernel.execution.graph.outcome import (
     _GraphFailureOutcome,
     _GraphInterruptOutcome,
     _GraphSuccessOutcome,
+    _success,
 )
 from mote_kernel.execution.graph.ports import (
     GraphInputRef,
@@ -40,6 +41,7 @@ from mote_kernel.execution.graph.values import (
     admit_exact,
 )
 from mote_kernel.execution.resource import ResourceId
+from mote_kernel.session import AgentSessionActivation
 from mote_kernel.state.graph_state import GraphNodeId
 
 GraphValueT = TypeVar("GraphValueT")
@@ -64,7 +66,7 @@ class _ValuesNodeInvoker(Generic[GraphValueT]):
         frame: NodeInputFrame[GraphValueT],
         /,
     ) -> _GraphValues[GraphValueT] | GraphOutcome[GraphValueT]:
-        return await self.operation(_public_values(frame))
+        return await self.operation(_public_values(frame, session=frame.session))
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,13 @@ class _TypedNodeInvoker(Generic[GraphValueT, InputT, OutputT]):
         result = await self.operation(typed_input)
         if type(result) in (_GraphSuccessOutcome, _GraphFailureOutcome, _GraphInterruptOutcome):
             return cast(GraphOutcome[GraphValueT], result)
-        if type(result) is ConfigActivation:
+        output_session = None
+        if type(result) is AgentSessionActivation:
+            activation = cast(AgentSessionActivation[OutputT], result)
+            candidate = activation.value
+            output_config = activation.session.config
+            output_session = activation.session
+        elif type(result) is ConfigActivation:
             activation = cast(ConfigActivation[OutputT], result)
             candidate = activation.value
             output_config = activation.activation_config
@@ -107,14 +115,18 @@ class _TypedNodeInvoker(Generic[GraphValueT, InputT, OutputT]):
         # next activation without putting that Config in a business DTO.
         if output_config is None:
             output_config = inputs.activation_config
-        return cast(
+        output = cast(
             _GraphValues[GraphValueT],
             _make_single_graph_value(
                 self.output.name,
                 admitted,
                 output_config,
+                None if output_session is None else output_session,
             ),
         )
+        if output_session is not None:
+            return _success(output, session=output_session)
+        return output
 
 
 def make_node_invoker(operation: NodeCallable[GraphValueT]) -> NodeInvoker[GraphValueT]:

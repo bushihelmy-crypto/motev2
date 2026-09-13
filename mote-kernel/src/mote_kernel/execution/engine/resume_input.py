@@ -38,6 +38,7 @@ from mote_kernel.execution.run_context import (
     ScopedFrameAvailability,
     ScopedFrameIndex,
 )
+from mote_kernel.session import AgentSessionCarrier
 from mote_kernel.state.graph_state import (
     GraphActivationCause,
     GraphActivationIdentity,
@@ -100,6 +101,7 @@ def decode_resume_input(
     payload: bytes,
     *,
     activation_config: Config | None = None,
+    session: AgentSessionCarrier | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     binding = graph.resume_input
     if binding is None:
@@ -114,6 +116,7 @@ def decode_resume_input(
         tuple(NamedValue(name, value) for name, value in candidate.items()),
         plan.descriptor.declarations,
         activation_config=inherited,
+        session=session,
     )
 
 
@@ -139,14 +142,12 @@ def _select_activation_config(
     return selected
 
 
-def activation_config_for_cause(
+def _cause_coordinates(
     graph: CompiledGraph[GraphValueT],
     scope_run: ScopeRunCoordinate,
     node: GraphFrontierNode,
-    frames: ScopedFrameIndex[GraphValueT],
-) -> Config | None:
-    """Project the one Config carried by a pending activation's cause."""
-
+) -> tuple[GraphInputAvailabilityCoordinate[GraphValueT] | PublicationAvailabilityCoordinate[GraphValueT], ...]:
+    """Project the frame coordinates carried by a pending activation cause."""
     cause = node.cause
     if type(cause) is StartActivationCause:
         coordinates: tuple[
@@ -163,6 +164,18 @@ def activation_config_for_cause(
             raise SnapshotMismatchError("pending activation cause references an unknown publication") from error
     else:
         raise SnapshotMismatchError("pending activation has an unsupported cause")
+    return coordinates
+
+
+def activation_config_for_cause(
+    graph: CompiledGraph[GraphValueT],
+    scope_run: ScopeRunCoordinate,
+    node: GraphFrontierNode,
+    frames: ScopedFrameIndex[GraphValueT],
+) -> Config | None:
+    """Project the one Config carried by a pending activation's cause."""
+
+    coordinates = _cause_coordinates(graph, scope_run, node)
 
     candidates: list[Config | None] = []
     for coordinate in coordinates:
@@ -176,6 +189,35 @@ def activation_config_for_cause(
     return _select_activation_config(
         tuple(candidates),
         conflict_message="node inputs combine different activation Config snapshots",
+    )
+
+
+def _materialization_config(
+    candidates: tuple[Config | None, ...],
+    owner_session: AgentSessionCarrier | None,
+) -> Config | None:
+    """Keep historical Config provenance separate from the current owner.
+
+    A recovered frame can legitimately carry an earlier Config revision.  Once
+    a caller-owned Session is available, its Config is the metadata for the
+    node being materialized; the historical candidates are still individually
+    admitted, but must not compete with that current owner snapshot.
+    """
+
+    if owner_session is None:
+        return _select_activation_config(
+            candidates,
+            conflict_message="node inputs combine different activation Config snapshots",
+        )
+    for candidate in candidates:
+        if candidate is not None:
+            _select_activation_config(
+                (candidate,),
+                conflict_message="historical node input Config is malformed",
+            )
+    return _select_activation_config(
+        (owner_session.config,),
+        conflict_message="owner AgentSession Config is malformed",
     )
 
 
@@ -259,6 +301,8 @@ def materialize_node_input(
     scope_run: ScopeRunCoordinate,
     frames: ScopedFrameIndex[GraphValueT],
     node_id: GraphNodeId,
+    *,
+    owner_session: AgentSessionCarrier | None = None,
 ) -> NodeInputFrame[GraphValueT]:
     require_resume_input_binding(graph, state)
     if state.run_id != scope_run.graph_run_id:
@@ -278,11 +322,13 @@ def materialize_node_input(
         if has_predecessor:
             raise SnapshotMismatchError("predecessor-bound activation cannot use an input override")
         inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+        effective_config = _materialization_config((inherited_config,), owner_session)
         return decode_resume_input(
             graph,
             node_id,
             bytes(effective_input.payload),
-            activation_config=inherited_config,
+            activation_config=effective_config,
+            session=owner_session,
         )
     resume_coordinate = _resume_input_coordinate(activation, plan)
     if not has_predecessor:
@@ -292,13 +338,15 @@ def materialize_node_input(
             cached = None
         if cached is not None:
             inherited_config = activation_config_for_cause(graph, scope_run, node, frames)
+            effective_config = _materialization_config(
+                (inherited_config, cached.activation_config),
+                owner_session,
+            )
             return _make_node_input_frame(
                 cached.entries,
                 plan.descriptor.declarations,
-                activation_config=_select_activation_config(
-                    (inherited_config, cached.activation_config),
-                    conflict_message="node inputs combine different activation Config snapshots",
-                ),
+                activation_config=effective_config,
+                session=owner_session,
             )
     resolved_bindings: list[
         tuple[
@@ -340,10 +388,8 @@ def materialize_node_input(
     return _make_node_input_frame(
         tuple(entries),
         plan.descriptor.declarations,
-        activation_config=_select_activation_config(
-            (inherited_config, *source_configs),
-            conflict_message="node inputs combine different activation Config snapshots",
-        ),
+        activation_config=_materialization_config((inherited_config, *source_configs), owner_session),
+        session=owner_session,
     )
 
 

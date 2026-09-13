@@ -32,6 +32,7 @@ from mote_kernel.execution.run_context import (
     GraphPublicationEvidence,
     ScopedFrameIndex,
 )
+from mote_kernel.session import AgentSessionCarrier, AgentSessionContractError, admit_session_carrier
 from mote_kernel.state.graph_state import (
     GraphActivationIdentity,
     GraphEvidenceCommitment,
@@ -129,6 +130,7 @@ class GraphTransition(Generic[GraphValueT]):
     command: GraphRunCommand
     candidate_state: GraphRunState
     writes: GraphCommitWriteSet[GraphValueT]
+    agent_session: AgentSessionCarrier | None = None
     _seal: InitVar[_TransitionSeal]
 
     def __post_init__(self, _seal: _TransitionSeal) -> None:
@@ -136,6 +138,11 @@ class GraphTransition(Generic[GraphValueT]):
             raise SnapshotMismatchError("graph transitions can only be produced by the execution commit owner")
         if type(self.writes) is not GraphCommitWriteSet:
             raise SnapshotMismatchError("graph transition has an invalid commit write set")
+        if self.agent_session is not None:
+            try:
+                admit_session_carrier(self.agent_session)
+            except AgentSessionContractError as error:
+                raise SnapshotMismatchError("graph transition AgentSession is malformed") from error
         if (
             self.writes.commit_key.run_id != self.candidate_state.run_id
             or self.writes.commit_key.revision != self.candidate_state.revision
@@ -202,12 +209,22 @@ def prepare_transition(
     graph: CompiledGraph[GraphValueT],
     admitted_successor: GraphRunState | None = None,
     graph_input: GraphInputFrame[GraphValueT] | None = None,
+    agent_session: AgentSessionCarrier | None = None,
 ) -> GraphTransition[GraphValueT]:
     """Build one sealed transition and its complete immutable write set."""
 
     candidate = reduce_graph_run(previous_state, command)
     if admission_error := transition_admission_error(graph, previous_state, command, candidate):
         raise SnapshotMismatchError(admission_error)
+    if agent_session is not None:
+        try:
+            admitted_session = admit_session_carrier(agent_session)
+            if isinstance(command, StartGraphRun):
+                candidate_cursor = candidate.config_cursor if candidate.config_digest is not None else None
+                if admitted_session.config_cursor != candidate_cursor:
+                    raise SnapshotMismatchError("Graph candidate Config does not match its AgentSession")
+        except AgentSessionContractError as error:
+            raise SnapshotMismatchError("Graph transition AgentSession is malformed") from error
     if admitted_successor is not None and candidate != admitted_successor:
         raise FrameInstallationInvariantError("owner resume candidate does not match its admitted successor")
     if isinstance(command, StartGraphRun):
@@ -259,6 +276,7 @@ def prepare_transition(
         command=command,
         candidate_state=candidate,
         writes=writes,
+        agent_session=agent_session,
         _seal=_TRANSITION_SEAL,
     )
 
@@ -298,6 +316,7 @@ def bind_transition_evidence(
         command=command,
         candidate_state=candidate,
         writes=transition.writes,
+        agent_session=transition.agent_session,
         _seal=_TRANSITION_SEAL,
     )
 
@@ -318,31 +337,6 @@ async def confirm_transition(
             raise SnapshotMismatchError("commit must return the exact authoritative reducer successor") from error
     except (Exception, asyncio.CancelledError) as error:
         raise GraphCommitError(error) from error
-
-
-async def commit_transition(
-    scope_run: ScopeRunCoordinate,
-    previous_state: GraphRunState | None,
-    command: GraphRunCommand,
-    result: TaskResult[GraphValueT] | None,
-    commit: GraphCommit[GraphValueT],
-    *,
-    graph: CompiledGraph[GraphValueT],
-    admitted_successor: GraphRunState | None = None,
-    graph_input: GraphInputFrame[GraphValueT] | None = None,
-) -> GraphRunState:
-    """Reduce, expose, and confirm one authoritative state transition."""
-
-    transition = prepare_transition(
-        scope_run,
-        previous_state,
-        command,
-        result,
-        graph=graph,
-        admitted_successor=admitted_successor,
-        graph_input=graph_input,
-    )
-    return await confirm_transition(transition, commit)
 
 
 def scoped_commit(

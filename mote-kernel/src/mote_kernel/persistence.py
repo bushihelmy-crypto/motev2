@@ -153,9 +153,10 @@ class PersistencePort(Protocol[GraphValueT]):
     existing fact. Adapters need not interpret Graph topology to answer these reads.
 
     Commit validates authority, scoped revision/absence and complete request
-    identity atomically with state, frames and receipt. An identical key/content
-    is an exact replay; different content is a conflict. Uncertain writes return
-    CommitUnknown, not a transport exception purporting to prove non-application.
+    identity atomically with state, frames, the optional AgentSession snapshot,
+    and receipt. An identical key/content is an exact replay; different content
+    is a conflict. Uncertain writes return CommitUnknown, not a transport
+    exception purporting to prove non-application.
     Reconcile checks the same immutable request, not just its candidate state.
     """
 

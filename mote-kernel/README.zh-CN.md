@@ -2,7 +2,7 @@
 
 Mote Kernel 是一个以状态机为核心、支持持久恢复的 Agent Kernel。图控制执行，状态机控制事实。
 
-项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面；executor、session、request/result、拓扑和状态 command 均为内部基础设施，不作为并列公共入口。
+项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面；execution session、request/result、拓扑和状态 command 均为内部基础设施，不作为并列公共入口；调用方拥有的 `mote_kernel.AgentSession` 是显式的运行快照边界。
 
 ```python
 from mote_kernel.execution import Graph
@@ -63,7 +63,17 @@ descriptor、birth commit、codec、payload、Config cursor（含缺席）以及
 - `AgentResume(run_id, answers=())` 读取并继续已有 run，也用于终态回放。`AgentAnswer` 将返回的精确 interrupt
   问题与 typed 业务回答配对；调用者不接触 state、continuation 或逐次替换 commit 的入口。
 - 可选 `AgentConfig` 提供 Config store/resolver 及精确初始 key；恢复只解析 state/frame 引用的历史快照。
-  Config 更新仍只由 Observe 消费并持久化；这里的 Config snapshot cursor 与已删除的 Observe 调用方 cursor 无关。
+  Graph 自己的 Config 更新 command 仍由 Observe 消费并随 settlement 持久化；节点仍可以在显式返回的完整
+  `AgentSession` successor 中放入已解析的 Config，Kernel 不猜测也不合并这个字段。这里的 Config snapshot cursor
+  与已删除的 Observe 调用方 cursor 无关。
+- `AgentSession(hook_state, context, config)` 是调用方拥有的跨节点/跨 run 快照。节点需要更新时，必须通过
+  `Graph.success(..., session=...)` 返回完整 successor；typed 节点也可返回
+  `Graph.SessionActivation(value, session)`。Graph state 与完整 Session envelope 使用同一个原子 commit；
+  `AgentResult.session` 是最后一份已确认快照，只有 Runtime 显式传给下一次 `AgentStart` 才会复用。Session
+  的 Config 持久化只保存既有 cursor；引用的 immutable snapshot 必须先由 Config owner 保存。一次 Graph
+  invocation/family 只有一份由 root 与 child 共享的串行 Session owner：无 successor 的 transition 在进入提交边界
+  时读取 owner 当前值，显式完整 successor 按确认 receipt 顺序生效。恢复时历史 frame 保留自己的 provenance，
+  不覆盖当前 owner Session。
 - 未知 Graph 提交仅对账同一不可变请求；只有已证明 `NotApplied` 才在显式 `max_commit_attempts` 上限内重发。
   权限失效、冲突、错误 receipt 或结果仍未知直接停止，不基于旧内存写 cleanup。工具执行对账属于 Runtime。
 
