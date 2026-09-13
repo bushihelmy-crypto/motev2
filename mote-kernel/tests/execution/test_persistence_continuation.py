@@ -309,7 +309,6 @@ async def test_aborted_recovery_keeps_its_commit_binding_without_a_new_write() -
             waiting.state.revision,
             aborted,
             GraphPersistenceWriteSet(Graph.CommitKey(aborted.run_id, aborted.revision), (), ()),
-            expected_config_cursor=waiting.state.config_cursor,
         )
     )
     terminal = await graph.run(recovery=GraphRecovery(store.checkpoint(), commit))

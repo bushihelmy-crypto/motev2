@@ -21,13 +21,11 @@ from mote_kernel.execution.graph.ports import FrameDescriptorIdentity
 from mote_kernel.execution.identity import ScopeRunCoordinate, StableActivation
 from mote_kernel.execution.persistence import (
     DurableGraphCommit,
-    EncodedAgentSession,
     EncodedFrame,
     GraphCheckpoint,
     GraphPersistenceCommit,
     GraphPersistenceWriteSet,
     GraphRecovery,
-    GraphSessionReceipt,
     PersistedGraphInput,
     PersistedPublication,
 )
@@ -101,10 +99,6 @@ class UnsupportedCheckpoint(GraphCheckpoint[str]):
 
 
 class UnsupportedRecovery(GraphRecovery[str]):
-    pass
-
-
-class UnsupportedSessionReceipt(GraphSessionReceipt):
     pass
 
 
@@ -393,85 +387,6 @@ def test_persistence_constructors_reject_untyped_nested_records() -> None:
             running_state(),
             cast(GraphPersistenceWriteSet[str], None),
         )
-
-
-def test_session_receipt_admission_owns_scope_commit_and_evidence() -> None:
-    key = GraphCommitKey(GraphRunId("run"), 0)
-    session = EncodedAgentSession("test.session", 1, b"payload")
-    receipt = GraphSessionReceipt.for_commit((), key, session)
-    assert receipt.admit() == receipt
-    assert receipt.evidence != GraphSessionReceipt.for_commit((GraphNodeId("child"),), key, session).evidence
-    assert (
-        receipt.evidence != GraphSessionReceipt.for_commit((), GraphCommitKey(GraphRunId("run"), 1), session).evidence
-    )
-
-    with pytest.raises(Graph.SnapshotMismatchError, match="typed immutable tuple"):
-        GraphSessionReceipt(cast(tuple[GraphNodeId, ...], []), key, receipt.evidence)
-    with pytest.raises(Graph.SnapshotMismatchError, match="malformed"):
-        GraphSessionReceipt((), key, cast(GraphEvidenceCommitment, object()))
-    with pytest.raises(Graph.SnapshotMismatchError, match="valid encoded Session"):
-        GraphSessionReceipt.for_commit((), key, cast(EncodedAgentSession, object()))
-    unsupported = cast(GraphSessionReceipt, object.__new__(UnsupportedSessionReceipt))
-    with pytest.raises(Graph.SnapshotMismatchError, match="exact typed record"):
-        unsupported.admit()
-
-
-@pytest.mark.asyncio
-async def test_session_receipt_is_an_atomic_part_of_commit_and_checkpoint_admission() -> None:
-    store = MemoryPersistence[str]()
-    await linear_graph([]).run(
-        Graph.values(value="input"), run_id="run", commit=DurableGraphCommit(STRING_CODEC, store)
-    )
-    request = store.requests[0]
-    session = EncodedAgentSession("test.session", 1, b"payload")
-    receipt = GraphSessionReceipt.for_commit(request.scope, request.writes.commit_key, session)
-    bound = replace(request, agent_session=session, session_receipt=receipt)
-    assert bound.admit() == bound
-
-    with pytest.raises(Graph.SnapshotMismatchError, match="Session receipt is malformed"):
-        replace(bound, session_receipt=cast(GraphSessionReceipt, object()))
-    with pytest.raises(Graph.SnapshotMismatchError, match="present together"):
-        replace(bound, session_receipt=None)
-    with pytest.raises(Graph.SnapshotMismatchError, match="present together"):
-        replace(bound, agent_session=None)
-    with pytest.raises(Graph.SnapshotMismatchError, match="exact commit"):
-        replace(
-            bound,
-            session_receipt=GraphSessionReceipt.for_commit(
-                request.scope,
-                GraphCommitKey(request.writes.commit_key.run_id, 1),
-                session,
-            ),
-        )
-
-    checkpoint = GraphCheckpoint[str](running_state(), (), (), ())
-    key = GraphCommitKey(GraphRunId("run"), 0)
-    checkpoint = replace(
-        checkpoint, agent_session=session, session_receipt=GraphSessionReceipt.for_commit((), key, session)
-    )
-    assert checkpoint.admit() == checkpoint
-    with pytest.raises(Graph.SnapshotMismatchError, match="Session receipt is malformed"):
-        replace(checkpoint, session_receipt=cast(GraphSessionReceipt, object()))
-    with pytest.raises(Graph.SnapshotMismatchError, match="present together"):
-        replace(checkpoint, session_receipt=None)
-    with pytest.raises(Graph.SnapshotMismatchError, match="present together"):
-        replace(checkpoint, agent_session=None)
-    with pytest.raises(Graph.SnapshotMismatchError, match="does not match its AgentSession"):
-        replace(
-            checkpoint,
-            session_receipt=GraphSessionReceipt.for_commit(
-                (),
-                key,
-                EncodedAgentSession("test.session", 1, b"other"),
-            ),
-        )
-    relabeled = GraphSessionReceipt(
-        (),
-        key,
-        GraphSessionReceipt.for_commit((GraphNodeId("child"),), key, session).evidence,
-    )
-    with pytest.raises(Graph.SnapshotMismatchError, match="does not match its AgentSession"):
-        replace(checkpoint, session_receipt=relabeled)
 
 
 @pytest.mark.asyncio

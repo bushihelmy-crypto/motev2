@@ -298,25 +298,3 @@ confirmation 顺序最后确认的一份生效。`CommitApplied`、`CommitUnknow
 
 本节记录需求方已确认的设计和当前实现，不预先替独立 reviewer 给出最终 `PASS`；门禁结果只用于证明无回归，不能替代
 owner 唯一性和完整调用链的人工判断。
-
-## 12. 2026-09-13 P1 durable-boundary 收口
-
-本轮只收口两个分布式提交边界，不增加 hostile-network/authenticity 层，也不改变 Graph/State owner：
-
-- `GraphSessionReceipt` 是 Session 与 scoped `GraphCommitKey` 的唯一 durable provenance。`GraphPersistenceCommit` 要求
-  encoded Session 与 receipt 成对出现；receipt evidence 的 canonical commitment 同时覆盖 scope、run/revision、
-  codec/config cursor 与 payload，不能通过重标记字段复用。`GraphCheckpoint` 还要求 receipt
-  指向实际包含的 scoped state 和相同 revision。child 已确认新 Session、parent 暂存旧 state 的语义仍通过 scoped
-  receipt 保留。
-- 有活动 Session 的 scoped Graph Config transition 必须由同一 transition 携带完整 Session successor，且 successor
-  cursor 与 candidate state 一致；durable request 同时携带前一 scoped Config cursor，只有真实 cursor successor 才触发
-  该检查；只返回 `ConfigActivation`/普通值而不带 successor 会在 durable commit 前失败。无
-  Session 的 family 不改变原有路径，显式清除 Session Config 的既有语义保留。
-
-新增回归覆盖：旧 Session + 新 Graph checkpoint、Session/receipt 缺失或错绑、malformed receipt、decoded Session
-payload 不一致、Config transition 缺 successor、显式 successor 原子提交，以及直接持久化请求的 Config/Session
-不一致。所有测试复用现有 `GraphTransition → DurableGraphCommit → PersistencePort` 链，没有兼容 alias、wrapper 或
-第二执行路径。
-
-本节的门禁数字须以当前工作树最后一次 `make check` 为准；文档不以测试全绿替代对 receipt provenance 和完整调用链
-的人工复核。

@@ -1,8 +1,8 @@
 # AgentSession 持久化需求
 
-状态：已实现；当前分支正在进行 P1 durable-boundary 复审
+状态：已实现；Kernel 与仓库级门禁通过，待 code review
 
-最后更新：2026-09-13
+最后更新：2026-09-11
 
 ## 1. 背景
 
@@ -63,11 +63,8 @@ owner，多个 successor 按 durable receipt 的确认顺序生效。
 当前实现把 `AgentSession` 的 hook/context 交给调用方注入的
 `AgentSessionCodec` 编成不透明 payload；Config 只写入 `GraphConfigCursor`。编码后的
 `EncodedAgentSession` 作为 `GraphPersistenceCommit.agent_session` 的一部分，与
-`GraphRunState` 使用同一个 commit receipt。`GraphSessionReceipt` 同时记录 scoped
-`GraphCommitKey(run_id, revision)`，并把 scope、commit key、codec/config cursor 与 Session payload 纳入 evidence；因此 checkpoint 不能只凭“某个
-family state 出现过相同 Config cursor”接受 Session。receipt 指向的 scoped state 必须
-实际包含在同一个 checkpoint 中，且 revision 完全相等。恢复时先按 checkpoint 的
-Config cursor 解析 Config，再由同一个 codec 还原 hook/context。
+`GraphRunState` 使用同一个 commit receipt。恢复时先按 checkpoint 的 Config cursor
+解析 Config，再由同一个 codec 还原 hook/context。
 
 `AgentSession.config` 所引用的 immutable Config snapshot 必须由 Config owner 在首次 `AgentStart` 或节点产生
 Config successor 之前保存到 `ConfigSnapshotStore`；Kernel/Agent 不代为保存，也不把 Graph commit 成功视为该
@@ -88,12 +85,7 @@ snapshot 已存在。缺少快照时，恢复按既有 Config store 契约失败
   `ConfigActivation` 让 Kernel 猜测 hook/context；
 - Graph 在同一个原子 commit 中提交 Graph state 和 Session。family owner 在同一串行边界内完成 Session 选择、
   commit/reconcile、owner 替换和 state/frame 安装；只有 receipt 精确确认后，`AgentResult.session` 才投影这份最后
-  确认的快照。checkpoint 读取也必须保留这份 receipt，不能把较新的 Graph state 与较旧 Session 拼接；嵌套 child
-  已确认的新 Session、parent 暂存旧 state 的合法交错仍由 receipt 的 scoped identity 表达；
-- 只要一个有 Session 的 scoped transition 推进 Graph Config cursor，就必须在同一 transition 返回完整的
-  `AgentSession` successor，且 successor cursor 与 candidate state 对齐。durable request 还保留前一 scoped Config
-  cursor，以区分真实 successor 和同一历史 digest 的继续传播；单独返回 `ConfigActivation` 或普通值而不带 successor
-  会在 commit 前拒绝；没有 Session 的 family 继续保持既有行为。
+  确认的快照；
 - 持久化层只负责接收已形成的完整 session，并把它和 Graph 状态放入同一提交边界。
 
 `AgentStart.session` 是一次新 run 的 session 输入；已确认的 session 通过
@@ -158,12 +150,9 @@ run2 使用 session-2
 
 1. 节点成功提交时，GraphRunState 和完整 AgentSession 使用同一 commit identity 原子落盘；
 2. 任一方提交失败或提交结果未知未被确认时，内存快照不提前推进；
-3. 恢复加载的 Graph 状态和 AgentSession 带有匹配的 `GraphSessionReceipt`；receipt 指向 checkpoint 中实际存在的
-   scoped state/revision，不能用旧 Session 覆盖新 Graph state；
+3. 恢复加载的 Graph 状态和 AgentSession 来自同一已确认边界；
 4. 连续 run 使用 Runtime 交接的上一份完整 session；
 5. 同一 Graph 的并发 run 不共享隐式 session；
-6. 有 Session 的 Config transition 必须携带 cursor 一致的完整 successor；不能先提交不一致的 Graph/Session，之后再由
-   checkpoint 发现；
-7. 不存在 delta merge、旧兼容路径、ReActChain 或第二套状态 owner。
-8. 并行 root/child transition 在 snapshot、journal、明确失败和 Unknown/reconcile 间隙下，都恢复 family
+6. 不存在 delta merge、旧兼容路径、ReActChain 或第二套状态 owner。
+7. 并行 root/child transition 在 snapshot、journal、明确失败和 Unknown/reconcile 间隙下，都恢复 family
    owner 最后一份已确认 Session；陈旧 inherited Session 不得覆盖显式 successor。

@@ -98,14 +98,6 @@ _PublicationCommitmentMetadata = tuple[
     _ConfigCommitmentParts,
     GraphRouteId | None,
 ]
-_SessionCommitmentMetadata = tuple[
-    tuple[GraphNodeId, ...],
-    GraphRunId,
-    int,
-    str,
-    int,
-    _ConfigCommitmentParts,
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,32 +147,13 @@ def _config_parts(cursor: GraphConfigCursor | None) -> _ConfigCommitmentParts:
 
 def _commitment(
     domain: bytes,
-    metadata: _GraphInputCommitmentMetadata | _PublicationCommitmentMetadata | _SessionCommitmentMetadata,
+    metadata: _GraphInputCommitmentMetadata | _PublicationCommitmentMetadata,
     payload: bytes,
 ) -> GraphEvidenceCommitment:
     encoded = json.dumps(metadata, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     digest = sha256(domain + b"\x00" + encoded + b"\x00")
     digest.update(payload)
     return GraphEvidenceCommitment(digest.digest())
-
-
-def _session_commitment(
-    scope: tuple[GraphNodeId, ...],
-    commit_key: GraphCommitKey,
-    session: EncodedAgentSession,
-) -> GraphEvidenceCommitment:
-    return _commitment(
-        b"mote.graph-session-evidence.v1",
-        (
-            scope,
-            commit_key.run_id,
-            commit_key.revision,
-            session.codec_id,
-            session.codec_version,
-            _config_parts(session.config_cursor),
-        ),
-        session.payload,
-    )
 
 
 def _graph_input_commitment(
@@ -285,94 +258,6 @@ def _admit_commit_key(key: GraphCommitKey) -> GraphCommitKey:
         return GraphCommitKey(key.run_id, key.revision)
     except (AttributeError, TypeError, ValueError) as error:
         raise SnapshotMismatchError("persistent evidence commit key is malformed") from error
-
-
-@dataclass(frozen=True, slots=True)
-class GraphSessionReceipt:
-    """Evidence that one encoded Session was committed with one scoped state."""
-
-    scope: tuple[GraphNodeId, ...]
-    commit_key: GraphCommitKey
-    evidence: GraphEvidenceCommitment
-
-    def __post_init__(self) -> None:
-        if type(self.scope) is not tuple:
-            raise SnapshotMismatchError("Session receipt scope must be a typed immutable tuple")
-        try:
-            key = _admit_commit_key(self.commit_key)
-            ScopeRunCoordinate(tuple(self.scope), key.run_id)
-            GraphEvidenceCommitment.admit(self.evidence)
-        except (AttributeError, SnapshotMismatchError, TypeError, ValueError) as error:
-            raise SnapshotMismatchError("Session receipt is malformed") from error
-
-    @classmethod
-    def for_commit(
-        cls,
-        scope: tuple[GraphNodeId, ...],
-        commit_key: GraphCommitKey,
-        session: EncodedAgentSession,
-    ) -> "GraphSessionReceipt":
-        try:
-            session = EncodedAgentSession.admit(session)
-        except (AttributeError, TypeError, ValueError) as error:
-            raise SnapshotMismatchError("Session receipt requires a valid encoded Session") from error
-        return cls(scope, commit_key, _session_commitment(scope, commit_key, session))
-
-    def admit(self) -> "GraphSessionReceipt":
-        if type(self) is not GraphSessionReceipt:
-            raise SnapshotMismatchError("Session receipt must be an exact typed record")
-        return GraphSessionReceipt(self.scope, self.commit_key, self.evidence)
-
-
-def _validate_persistent_config_session(
-    candidate_state: GraphRunState,
-    expected_config_cursor: GraphConfigCursor | None,
-    agent_session: EncodedAgentSession | None,
-) -> None:
-    """Admit the one predecessor Config fact and its Session successor rule."""
-
-    candidate_cursor = candidate_state.config_cursor
-    if expected_config_cursor is not None:
-        try:
-            expected_config_cursor = GraphConfigCursor.admit(expected_config_cursor)
-        except (TypeError, ValueError) as error:
-            raise SnapshotMismatchError("persistent commit predecessor Config cursor is malformed") from error
-    if candidate_state.revision == 0:
-        if expected_config_cursor is not None:
-            raise SnapshotMismatchError("durable StartGraphRun cannot carry a predecessor Config cursor")
-        if agent_session is not None:
-            active_cursor = candidate_cursor if candidate_state.config_digest is not None else None
-            if agent_session.config_cursor != active_cursor:
-                raise SnapshotMismatchError("persistent commit AgentSession does not match candidate state Config")
-        return
-    if expected_config_cursor is None:
-        raise SnapshotMismatchError("persistent commit requires its predecessor Config cursor")
-    try:
-        transitioned_cursor = expected_config_cursor.transition_to(candidate_cursor)
-    except (AttributeError, TypeError, ValueError) as error:
-        raise SnapshotMismatchError("persistent commit Config cursor does not name its predecessor") from error
-    historical_digest_fill = (
-        expected_config_cursor.definition_id == candidate_cursor.definition_id
-        and expected_config_cursor.definition_version == candidate_cursor.definition_version
-        and expected_config_cursor.revision == candidate_cursor.revision
-        and expected_config_cursor.digest is None
-        and candidate_cursor.digest is not None
-    )
-    if transitioned_cursor != candidate_cursor and not historical_digest_fill:
-        raise SnapshotMismatchError("persistent commit Config cursor does not name its predecessor")
-    if agent_session is None or candidate_cursor == expected_config_cursor or historical_digest_fill:
-        return
-    session_cursor = agent_session.config_cursor
-    if session_cursor == candidate_cursor:
-        return
-    if (
-        session_cursor is not None
-        and session_cursor.definition_id == candidate_cursor.definition_id
-        and session_cursor.definition_version == candidate_cursor.definition_version
-        and session_cursor.revision > candidate_cursor.revision
-    ):
-        return
-    raise SnapshotMismatchError("persistent commit AgentSession must carry the candidate Config successor")
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,8 +429,6 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
     candidate_state: GraphRunState
     writes: GraphPersistenceWriteSet[GraphValueT]
     agent_session: EncodedAgentSession | None = None
-    session_receipt: GraphSessionReceipt | None = None
-    expected_config_cursor: GraphConfigCursor | None = None
 
     def __post_init__(self) -> None:
         if self.expected_revision is not None and (
@@ -566,34 +449,26 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
                 agent_session = EncodedAgentSession.admit(agent_session)
             except (AttributeError, TypeError, ValueError) as error:
                 raise SnapshotMismatchError("persistent commit AgentSession is malformed") from error
-        session_receipt = self.session_receipt
-        if session_receipt is not None:
-            try:
-                session_receipt = session_receipt.admit()
-            except (AttributeError, SnapshotMismatchError, TypeError, ValueError) as error:
-                raise SnapshotMismatchError("persistent commit Session receipt is malformed") from error
         key = writes.commit_key
         if key != GraphCommitKey(self.candidate_state.run_id, self.candidate_state.revision):
             raise SnapshotMismatchError("persistent write set is not bound to its candidate state")
         expected = None if self.candidate_state.revision == 0 else self.candidate_state.revision - 1
         if self.expected_revision != expected:
             raise SnapshotMismatchError("persistent commit CAS revision does not name its predecessor")
-        _validate_persistent_config_session(
-            self.candidate_state,
-            self.expected_config_cursor,
-            agent_session,
-        )
         if self.candidate_state.graph_input_evidence is None or any(
             item.evidence is None for item in self.candidate_state.settled_publications
         ):
             raise SnapshotMismatchError("durable candidate state is missing value evidence commitments")
-        if agent_session is None or session_receipt is None:
-            if agent_session is not session_receipt:
-                raise SnapshotMismatchError("persistent commit Session and receipt must be present together")
-        else:
-            expected_receipt = GraphSessionReceipt.for_commit(self.scope, key, agent_session)
-            if session_receipt != expected_receipt:
-                raise SnapshotMismatchError("persistent commit Session receipt is not bound to this exact commit")
+        # A running parent may be committing ordinary work while a nested child
+        # has already confirmed a newer Session.  The family checkpoint binds
+        # that envelope to one of the confirmed scoped states; only the initial
+        # graph commit can require equality with its own candidate state here.
+        if self.candidate_state.revision == 0 and agent_session is not None:
+            candidate_cursor = (
+                self.candidate_state.config_cursor if self.candidate_state.config_digest is not None else None
+            )
+            if agent_session.config_cursor != candidate_cursor:
+                raise SnapshotMismatchError("persistent commit AgentSession does not match candidate state Config")
         if self.candidate_state.revision == 0:
             if len(writes.graph_inputs) != 1:
                 raise SnapshotMismatchError("durable StartGraphRun requires exactly one graph input")
@@ -637,8 +512,6 @@ class GraphPersistenceCommit(Generic[GraphValueT]):
                 self.candidate_state,
                 self.writes,
                 self.agent_session,
-                self.session_receipt,
-                self.expected_config_cursor,
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("persistent commit request is malformed") from error
@@ -751,14 +624,8 @@ class DurableGraphCommit(Generic[GraphValueT]):
                 encoded_session = encode_session_carrier(codec_carrier, session)
             except AgentSessionContractError as error:
                 raise SnapshotMismatchError("AgentSession successor could not be encoded") from error
-        scope = tuple(GraphNodeId(segment) for segment in transition.scope)
-        session_receipt = (
-            None
-            if encoded_session is None
-            else GraphSessionReceipt.for_commit(scope, writes.commit_key, encoded_session)
-        )
         request = GraphPersistenceCommit(
-            scope,
+            tuple(GraphNodeId(segment) for segment in transition.scope),
             transition.previous_state.revision if transition.previous_state is not None else None,
             bound.candidate_state,
             GraphPersistenceWriteSet(
@@ -767,8 +634,6 @@ class DurableGraphCommit(Generic[GraphValueT]):
                 publications,
             ),
             encoded_session,
-            session_receipt,
-            transition.previous_state.config_cursor if transition.previous_state is not None else None,
         )
         baseline = deepcopy(request.admit())
         confirmed = await self.writer(request)
@@ -788,7 +653,6 @@ class GraphCheckpoint(Generic[GraphValueT]):
     graph_inputs: tuple[PersistedGraphInput[GraphValueT], ...]
     publications: tuple[PersistedPublication[GraphValueT], ...]
     agent_session: EncodedAgentSession | None = None
-    session_receipt: GraphSessionReceipt | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -838,31 +702,6 @@ class GraphCheckpoint(Generic[GraphValueT]):
             }
             if agent_session.config_cursor is not None and agent_session.config_cursor not in family_cursors:
                 raise SnapshotMismatchError("checkpoint AgentSession Config is not bound to the graph family")
-        session_receipt = self.session_receipt
-        if session_receipt is not None:
-            try:
-                session_receipt = session_receipt.admit()
-            except (AttributeError, SnapshotMismatchError, TypeError, ValueError) as error:
-                raise SnapshotMismatchError("checkpoint Session receipt is malformed") from error
-        if agent_session is None or session_receipt is None:
-            if agent_session is not session_receipt:
-                raise SnapshotMismatchError("checkpoint Session and receipt must be present together")
-        else:
-            expected_receipt = GraphSessionReceipt.for_commit(
-                session_receipt.scope,
-                session_receipt.commit_key,
-                agent_session,
-            )
-            if session_receipt != expected_receipt:
-                raise SnapshotMismatchError("checkpoint Session receipt does not match its AgentSession")
-            family_states = {
-                ScopeRunCoordinate((), self.root_state.run_id): self.root_state,
-                **{item.scope_run: item.state for item in admitted_children if isinstance(item, ScopedStateBinding)},
-            }
-            receipt_scope = ScopeRunCoordinate(tuple(session_receipt.scope), session_receipt.commit_key.run_id)
-            source_state = family_states.get(receipt_scope)
-            if source_state is None or source_state.revision != session_receipt.commit_key.revision:
-                raise SnapshotMismatchError("checkpoint Session receipt is not bound to an included family commit")
         graph_inputs = tuple(item.admit() for item in self.graph_inputs)
         publications = tuple(item.admit() for item in self.publications)
         if graph_inputs != tuple(sorted(graph_inputs, key=lambda item: item.coordinate)):
@@ -884,7 +723,6 @@ class GraphCheckpoint(Generic[GraphValueT]):
                 self.graph_inputs,
                 self.publications,
                 self.agent_session,
-                self.session_receipt,
             )
         except (AttributeError, TypeError, ValueError) as error:
             raise SnapshotMismatchError("checkpoint is malformed") from error
@@ -922,7 +760,6 @@ class GraphCheckpoint(Generic[GraphValueT]):
             current.graph_inputs,
             current.publications,
             current.agent_session,
-            current.session_receipt,
         )
         loaded_family = GraphCheckpoint(
             loaded.root_state,
@@ -930,7 +767,6 @@ class GraphCheckpoint(Generic[GraphValueT]):
             loaded.graph_inputs,
             loaded.publications,
             loaded.agent_session,
-            loaded.session_receipt,
         )
         if previous_family != loaded_family:
             raise SnapshotMismatchError("family facts changed during an authority-constrained child reread")
