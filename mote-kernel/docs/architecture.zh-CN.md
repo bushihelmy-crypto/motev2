@@ -139,6 +139,8 @@ owner-internal 基础设施，不重新导出为平行公共入口，唯一执�
 
 `agent.py` 是唯一外部恢复装配入口。`Agent` 只持有 frozen capabilities，不保留运行 state、continuation、权限缓存或
 第二个 scheduler。`AgentStart` 只创建从未存在的 run；`AgentResume` 继续已有 run，或回放其终态业务结果。
+省略 `run_id` 时先解析 Agent 作用域内的 durable latest head，显式 ID 仍按历史 key 精确读取。`AgentLatestHead`
+只是索引；`(agent_id, run_id)` family 将 Graph state、值 evidence 和编码后的 AgentSession 一起拥有。
 回答保留精确 interrupt 问题和 typed 业务值；结果只暴露输出、失败、待回答问题或 abort，不暴露 Graph
 state 或 continuation 恢复快照。
 结果同时携带最后一份已确认的 `AgentSession`，供 Runtime 显式交给后续 run；不暴露 Graph state、continuation
@@ -146,8 +148,10 @@ state 或 continuation 恢复快照。
 
 每次调用只有一条完整链路：
 
-1. 经 `AuthorityPort` 为 `AgentRunKey(agent_id, run_id)` 获取排他的 `ExecutionAuthority`。
-2. `PersistencePort.load` 返回完整一致的 family 或明确的 `NeverCreated`。不可用、tombstone、记录丢失与身份冲突
+1. 需要时先解析 latest head，再经 `AuthorityPort` 为解析出的 `AgentRunKey(agent_id, run_id)` 获取排他的
+   `ExecutionAuthority`；显式 ID 完全绕过 latest 查询。
+2. `PersistencePort.load` 返回完整一致的 family 或明确的 `NeverCreated`。latest 恢复会携带不可变 head generation
+   作为读取栅栏。不可用、tombstone、记录丢失与身份冲突
    均不能转换成新建运行。
 3. 精确解析 checkpoint 全部 Config 引用后装配 Graph。可选 `AgentConfig.initial` 仅决定新 run 的初始快照；
    Agent 不保存 Config、不拿 latest 替换历史，Observe 仍是唯一更新消费方。

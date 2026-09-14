@@ -36,7 +36,8 @@ implementation: 28999d2 (family Session owner closure; isolated worktree)
 - Kernel 不从 Graph output 猜测或合并 `hook_state`、`context`、`config`。
 - 同一 run 内，节点只能通过 `Graph.success(..., session=...)` 或 typed
   `Graph.SessionActivation(value, session)` 显式产生完整 Session successor；Kernel 不 merge 三个业务字段。
-- `AgentResume` 不接受外部 Session 覆盖，只恢复 checkpoint 中已确认的 Session。
+- `AgentResume` 不接受外部 Session 覆盖，只恢复 checkpoint 中已确认的 Session；省略 `run_id` 时先解析
+  durable latest head，再以同一个 `(agent_id, run_id)` family 读取 state 与 Session。
 - 跨 run 只有 Runtime 显式把上一次确认的 `AgentResult.session` 传给下一次 `AgentStart` 才会复用。
 - 一次 run 内没有隐式的跨 run 全局缓存，也没有第二条执行路径或 `ReActChain`。
 
@@ -84,13 +85,13 @@ review 时确认：
 | --- | --- | --- | --- |
 | A1 | `AgentStart` 不带 Session | 保持既有无 Session 行为，不改变 Graph 执行路径 | 既有 Agent 测试全绿 |
 | A2 | `AgentStart(..., session)` | Session 先 admission，再参与本次 Graph 的每个 durable commit；节点 successor 只在确认后推进，结果携带最后一份已确认 Session；嵌套 child 的 completed/failed/aborted/awaiting-resume 也沿同一边界交接 | `test_agent_session_is_written_with_each_graph_commit_and_returned`、`test_node_session_successor_is_committed_and_reused_after_recovery`、`test_parallel_child_successor_cannot_be_overwritten_by_parent_inherited_session`、`test_parallel_explicit_successors_follow_durable_confirmation_order`、`test_nested_child_completion_preserves_its_last_session_successor`、`test_nested_child_failure_preserves_its_last_session_successor`、`test_nested_child_abort_preserves_its_last_session_successor`、`test_nested_child_interrupt_returns_its_last_session_successor` |
-| A3 | 同一 run `AgentResume` | 不允许外部替换 Session；从 checkpoint 恢复 hook/context，并解析同一 Config cursor | `test_agent_session_is_recovered_from_the_same_graph_checkpoint` |
+| A3 | 同一 run `AgentResume`（显式或 latest） | 不允许外部替换 Session；从同一 checkpoint 恢复 hook/context，并解析同一 Config cursor；latest head 变化时 fail closed | `test_agent_session_is_recovered_from_the_same_graph_checkpoint`、`tests/agent/test_latest_recovery.py` |
 | A4 | run1 → run2 | Runtime 显式传 `run1_result.session` 后，run2 才复用；不传就不共享 | `test_runtime_can_reuse_the_confirmed_session_for_a_later_run` |
 | A5 | Config 存在 | durable envelope 只有 cursor；恢复得到新的已解析 Config；普通 scoped commit 的 cursor 与其 Session 一致，嵌套等待恢复时 Session cursor 必须属于 family 的某个已确认 state | `test_session_persists_only_the_config_cursor_and_resolves_capabilities_on_resume`、`test_nested_child_interrupt_returns_its_last_session_successor` |
 | A6 | commit/reconcile 未确认 | 不提前推进 durable/内存事实；reconcile 针对完全相同的 Graph+Session 请求，并保持 family owner 的串行顺序 | `test_parallel_child_successor_cannot_be_overwritten_by_parent_inherited_session`（含 Unknown 参数）、既有 commit unknown/reconcile 测试及 `GraphPersistenceCommit` admission |
 | A7 | forged/malformed Session | 在 authority、Graph 执行或持久化写入前失败；不允许子类/伪造对象绕过 exact admission | `test_session.py` 的 admission/error tests |
 | A8 | codec 非确定或 cursor 不匹配 | 首次 durable write 前或恢复时拒绝，不静默接受另一份 Session 或 Config | `test_agent_rejects_a_non_decodable_session_before_the_first_durable_write`、codec round-trip、commit/checkpoint binding tests |
-| A9 | 并发不同 run | 不因共用 Agent/Graph 实例而共享 Session；每个 run 只使用自己的显式输入 | 既有并发 Agent/Graph 测试 + 静态检查 Agent 无 runtime cache |
+| A9 | 并发不同 run | 不因共用 Agent/Graph 实例而共享 Session；每个 run 只使用自己的 durable family/latest head | 既有并发 Agent/Graph 测试 + 静态检查 Agent 无 runtime cache |
 | A10 | Observe cursor | cursor 仍由 Observe queue provider 保管，Session/Agent/Graph 不接管 | Observe cursor 测试和 `rg` owner 检查 |
 
 ## 5. 明确不属于本批的内容
@@ -140,7 +141,7 @@ pre-commit run --all-files
 ```text
 [ ] 设计 owner 唯一，Session 恰好三个字段
 [ ] Graph 状态与 Session 使用同一 commit/reconcile 边界
-[ ] AgentResume 只恢复 checkpoint Session，跨 run 只接受显式交接
+[ ] AgentResume 只恢复同一 checkpoint Session；省略 ID 使用 latest head，跨 run 仍只接受显式交接
 [ ] Config 只按 cursor durable 化，未序列化运行能力
 [ ] codec/admission/error/recovery 边界完整
 [ ] 无 cursor/ReActChain/隐式缓存/delta/legacy 双路径

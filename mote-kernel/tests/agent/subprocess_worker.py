@@ -1,16 +1,18 @@
 """Harness-owned process faults over one backend-neutral Agent path."""
 
 import asyncio
+import json
 import os
 import pickle
 import signal
 import sys
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from tests.agent.persistence_fixtures import JournalPersistence, MemoryAuthority
+from tests.agent.persistence_fixtures import JournalPersistence, MemoryAuthority, ProcessCommitRecord
 from tests.execution.persistence_fixtures import STRING_CODEC, MemoryPersistence
 
 from mote_kernel.agent import (
@@ -39,6 +41,7 @@ from mote_kernel.execution.persistence import GraphCheckpoint, GraphPersistenceC
 from mote_kernel.invocation import InvocationTypeContract, invoke_typed
 from mote_kernel.loop.config import ReActRuntimeConfig
 from mote_kernel.persistence import (
+    AgentLatestHead,
     AgentRunKey,
     AuthorityLostError,
     CommitOutcome,
@@ -46,6 +49,7 @@ from mote_kernel.persistence import (
     NeverCreated,
     PersistenceContractError,
 )
+from mote_kernel.session import AgentSession, AgentSessionCodec
 from mote_kernel.state.graph_state import GraphDefinitionId, GraphDefinitionVersion, GraphNodeId
 
 PROCESS_CRASH_EXIT = 23
@@ -63,6 +67,14 @@ class Scenario(StrEnum):
     INTERRUPT_FAMILY = "interrupt-family"
     STALE_AUTHORITY = "stale-authority"
     RUNTIME_BOUNDARY = "runtime-boundary"
+    FAMILY_ISOLATION = "family-isolation"
+
+
+class RequestMode(StrEnum):
+    DEFAULT = "default"
+    START = "start"
+    RESUME_LATEST = "resume-latest"
+    RESUME_EXACT = "resume-exact"
 
 
 class Phase(StrEnum):
@@ -114,6 +126,22 @@ def _config_snapshot(revision: int) -> ConfigSnapshot:
     return ConfigSnapshot.capture(key, f'{{"revision":{revision}}}'.encode())
 
 
+def _process_session_codec() -> AgentSessionCodec[str, str]:
+    def encode(hook_state: str, context: str) -> bytes:
+        return json.dumps((hook_state, context), separators=(",", ":")).encode()
+
+    def decode(payload: bytes) -> tuple[str, str]:
+        decoded: object = json.loads(payload)
+        if type(decoded) is not list:
+            raise ValueError("process session payload must be a JSON list")
+        values = cast(list[object], decoded)
+        if len(values) != 2 or any(type(value) is not str for value in values):
+            raise ValueError("process session payload must contain two strings")
+        return cast(str, values[0]), cast(str, values[1])
+
+    return AgentSessionCodec("process-session", 1, encode, decode)
+
+
 class ProcessAuthority(MemoryAuthority):
     def __init__(self, directory: Path, phase: Phase) -> None:
         super().__init__()
@@ -155,30 +183,71 @@ class ProcessPersistence(JournalPersistence[str]):
         self.crash_boundary = crash_boundary
         self.target_matches = 0
 
+    def _journal_records(self) -> tuple[ProcessCommitRecord[str], ...]:
+        if not self.path.exists():
+            return ()
+        try:
+            decoded: object = pickle.loads(self.path.read_bytes())
+        except (
+            AttributeError,
+            EOFError,
+            ImportError,
+            IndexError,
+            pickle.UnpicklingError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise PersistenceContractError("the process test journal is malformed") from error
+        if type(decoded) is not tuple:
+            raise PersistenceContractError("the process test journal must contain exact keyed Graph commit records")
+        records = cast(tuple[object, ...], decoded)
+        if any(type(item) is not ProcessCommitRecord for item in records):
+            raise PersistenceContractError("the process test journal must contain exact keyed Graph commit records")
+        try:
+            admitted: list[ProcessCommitRecord[str]] = []
+            for item in records:
+                record = cast(ProcessCommitRecord[str], item)
+                admitted.append(ProcessCommitRecord(AgentRunKey.admit(record.key), record.request.admit()))
+            keyed = tuple(admitted)
+            family_keys = {record.key for record in keyed}
+            root_keys = {
+                record.key
+                for record in keyed
+                if not record.request.scope and record.request.candidate_state.revision == 0
+            }
+            if family_keys != root_keys:
+                raise PersistenceContractError("the process test journal contains an unrooted Agent family")
+            return keyed
+        except PersistenceContractError:
+            raise
+        except (AttributeError, Graph.SnapshotMismatchError, TypeError, ValueError) as error:
+            raise PersistenceContractError(
+                "the process test journal contains a malformed keyed Graph commit"
+            ) from error
+
+    async def load_latest(self, agent_id: str, /) -> AgentLatestHead | NeverCreated:
+        if type(agent_id) is not str or not agent_id or agent_id != agent_id.strip():
+            raise PersistenceContractError("latest lookup requires a canonical Agent identity")
+        records = self._journal_records()
+        roots = tuple(
+            record
+            for record in records
+            if record.key.agent_id == agent_id
+            and not record.request.scope
+            and record.request.candidate_state.revision == 0
+        )
+        if not roots:
+            return NeverCreated()
+        head = AgentLatestHead(
+            roots[-1].key,
+            len(roots),
+        )
+        self.heads[agent_id] = head
+        return deepcopy(head)
+
     async def view(self, key: AgentRunKey) -> MemoryPersistence[str]:
-        if self.path.exists():
-            try:
-                decoded: object = pickle.loads(self.path.read_bytes())
-            except (
-                AttributeError,
-                EOFError,
-                ImportError,
-                IndexError,
-                pickle.UnpicklingError,
-                TypeError,
-                ValueError,
-            ) as error:
-                raise PersistenceContractError("the process test journal is malformed") from error
-            if type(decoded) is not tuple:
-                raise PersistenceContractError("the process test journal must contain exact Graph commits")
-            decoded_records = cast(tuple[object, ...], decoded)
-            if any(type(item) is not GraphPersistenceCommit for item in decoded_records):
-                raise PersistenceContractError("the process test journal must contain exact Graph commits")
-            requests = cast(tuple[GraphPersistenceCommit[str], ...], decoded_records)
-            try:
-                self.journals[key] = tuple(request.admit() for request in requests)
-            except (AttributeError, Graph.SnapshotMismatchError, TypeError, ValueError) as error:
-                raise PersistenceContractError("the process test journal contains a malformed Graph commit") from error
+        records = self._journal_records()
+        self.journals[key] = tuple(record.request for record in records if record.key == key)
         return await super().view(key)
 
     async def load(
@@ -187,9 +256,10 @@ class ProcessPersistence(JournalPersistence[str]):
         /,
         *,
         children: tuple[ScopeRunCoordinate, ...] = (),
+        expected_latest: AgentLatestHead | None = None,
     ) -> GraphCheckpoint[str] | NeverCreated:
         _append_record(self.directory, "persistence.log", "load", self.phase, len(children))
-        return await super().load(authority, children=children)
+        return await super().load(authority, children=children, expected_latest=expected_latest)
 
     async def commit(
         self,
@@ -254,9 +324,19 @@ class ProcessPersistence(JournalPersistence[str]):
         )
         if crash and self.crash_boundary is CrashBoundary.BEFORE_WRITE:
             os._exit(PROCESS_CRASH_EXIT)
+        records = self._journal_records()
+        existing = tuple(
+            record
+            for record in records
+            if record.key == authority.run
+            and record.request.scope == request.scope
+            and record.request.writes.commit_key == request.writes.commit_key
+        )
         confirmed = await super().apply(authority, request)
+        if existing:
+            return confirmed
         pending = self.path.with_name(f"{self.path.name}.{os.getpid()}.pending")
-        pending.write_bytes(pickle.dumps(self.journals[authority.run]))
+        pending.write_bytes(pickle.dumps((*records, ProcessCommitRecord(authority.run, confirmed))))
         pending.replace(self.path)
         if crash:
             os._exit(PROCESS_CRASH_EXIT)
@@ -591,6 +671,8 @@ def _assemble_graph(
         return _interrupt_family_graph(directory, phase)
     if scenario is Scenario.STALE_AUTHORITY:
         return _authority_graph(directory, phase)
+    if scenario is Scenario.FAMILY_ISOLATION:
+        return _linear_graph(directory, phase)
     return _runtime_boundary_graph(directory, phase)
 
 
@@ -610,6 +692,10 @@ async def main(
     phase: Phase,
     crash_boundary: CrashBoundary,
     directory: Path,
+    agent_id: str | None = None,
+    request_mode: RequestMode = RequestMode.DEFAULT,
+    requested_run_id: str | None = None,
+    input_value: str | None = None,
 ) -> None:
     authority = ProcessAuthority(directory, phase)
     persistence = ProcessPersistence(authority, directory, scenario, phase, crash_boundary)
@@ -618,24 +704,42 @@ async def main(
     def assemble(_config: Config | None) -> Graph[str]:
         return _assemble_graph(scenario, phase, directory, catalog)
 
-    agent = Agent(
-        f"process-{scenario}",
+    effective_agent_id = f"process-{scenario}" if agent_id is None else agent_id
+    session_codec = _process_session_codec() if scenario is Scenario.FAMILY_ISOLATION else None
+    agent = Agent[str, str, str](
+        effective_agent_id,
         assemble,
         STRING_CODEC,
         persistence,
         authority,
         config=AgentConfig(catalog, catalog, _config_snapshot(1).key) if catalog is not None else None,
+        session_codec=session_codec,
     )
-    if scenario is Scenario.INTERRUPT_FAMILY and phase in (Phase.PARTIAL, Phase.RECOVER):
+    request: AgentRequest[str, str, str]
+    if request_mode is RequestMode.START:
+        if requested_run_id is None or input_value is None:
+            raise ValueError("a start process request requires a run ID and input value")
+        session = (
+            AgentSession(f"{input_value}-hook", f"{input_value}-context")
+            if scenario is Scenario.FAMILY_ISOLATION
+            else None
+        )
+        request = AgentStart(requested_run_id, Graph.values(value=input_value), session)
+    elif request_mode is RequestMode.RESUME_LATEST:
+        request = AgentResume()
+    elif request_mode is RequestMode.RESUME_EXACT:
+        if requested_run_id is None:
+            raise ValueError("an exact process resume requires a run ID")
+        request = AgentResume(requested_run_id)
+    elif scenario is Scenario.INTERRUPT_FAMILY and phase in (Phase.PARTIAL, Phase.RECOVER):
         interrupts = _load_interrupts(directory)
         selected = (
             next(interrupt for interrupt in interrupts if interrupt.scope == (GraphNodeId("left"),))
             if phase is Phase.PARTIAL
             else next(interrupt for interrupt in interrupts if interrupt.scope == (GraphNodeId("right"),))
         )
-        request: AgentRequest[str] = AgentResume(
-            "run",
-            (AgentAnswer(selected, Graph.values(value=selected.scope[0])),),
+        request = AgentResume(
+            answers=(AgentAnswer(selected, Graph.values(value=selected.scope[0])),),
         )
     elif phase in (Phase.CAPTURE, Phase.STALE):
         if scenario is Scenario.LOOP_JOIN:
@@ -646,7 +750,7 @@ async def main(
             value = "input"
         request = AgentStart("run", Graph.values(value=value))
     else:
-        request = AgentResume[str]("run")
+        request = AgentResume()
     try:
         result = await agent.run(request)
     except AuthorityLostError:
@@ -666,15 +770,43 @@ async def main(
         if scenario is Scenario.INTERRUPT_FAMILY
         else result.outputs["value"]
     )
-    (directory / "result").write_text(output)
+    if scenario is Scenario.FAMILY_ISOLATION:
+        if result.session is None:
+            raise AssertionError("the family process scenario must preserve its AgentSession")
+        (directory / "result").write_text(
+            "|".join((result.run_id, output, result.session.hook_state, result.session.context))
+        )
+    else:
+        (directory / "result").write_text(output)
 
 
 if __name__ == "__main__":
+    arguments = sys.argv[1:]
+    scenario = Scenario(arguments[0])
+    phase = Phase(arguments[1])
+    boundary = CrashBoundary(arguments[2])
+    directory = Path(arguments[3])
+    if len(arguments) == 4:
+        agent_id = None
+        request_mode = RequestMode.DEFAULT
+        requested_run_id = None
+        input_value = None
+    else:
+        if len(arguments) < 6:
+            raise ValueError("custom process requests require an Agent identity and request mode")
+        agent_id = arguments[4]
+        request_mode = RequestMode(arguments[5])
+        requested_run_id = arguments[6] if len(arguments) >= 7 else None
+        input_value = arguments[7] if len(arguments) >= 8 else None
     asyncio.run(
         main(
-            Scenario(sys.argv[1]),
-            Phase(sys.argv[2]),
-            CrashBoundary(sys.argv[3]),
-            Path(sys.argv[4]),
+            scenario,
+            phase,
+            boundary,
+            directory,
+            agent_id,
+            request_mode,
+            requested_run_id,
+            input_value,
         )
     )

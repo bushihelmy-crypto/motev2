@@ -135,6 +135,10 @@ run2 使用 session-2
 同一个 Agent 的后续 run 只有在 Runtime 传入上一已确认快照时才继续使用该状态。Graph 或 Hook
 不得因为对象实例相同而私自复用上一 run 的 session。
 
+`AgentResume()` 的省略 ID 只是在 durable latest head 上选择一个已有 run；它从该 run 的同一
+`GraphCheckpoint` 同时恢复 state 与 Session，不会跨 run 拼接 Session。首期 `AgentStart` 仍要求显式
+`run_id`，新 run 是否继承 Session 仍由 Runtime 显式传入。
+
 ## 8. 非目标
 
 - 不实现 `AgentSessionDelta`、patch merge、delta replay 或第二套 session reducer；

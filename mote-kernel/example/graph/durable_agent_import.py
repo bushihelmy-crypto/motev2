@@ -59,7 +59,7 @@ async def demonstrate(
         raise AssertionError("the import must wait for approval")
     approved = ImportJob(source, True, ImportStatus.PARSED)
     result = await build_agent(persistence, authority).run(
-        AgentResume(run_id, (AgentAnswer(waiting.interrupts[0], Graph.values(job=approved)),))
+        AgentResume(answers=(AgentAnswer(waiting.interrupts[0], Graph.values(job=approved)),))
     )
     if not isinstance(result, AgentCompleted):
         raise AssertionError("the approved import must complete")

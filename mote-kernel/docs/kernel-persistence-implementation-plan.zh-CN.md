@@ -606,21 +606,24 @@ P3 是组合证明，不是把 P1/P2 的基本分支测试和覆盖率推迟到�
 3. 增加两种测试适配器及确定性失败注入，覆盖 CAS、失效权限、三态对账、历史 Config、父子负证据、
    interrupt、终态、并发和各 await 边界的取消；新增行为当阶段达到全部覆盖门禁。
 4. 同步迁移示例和中英文入口说明，完成 `make check` 与根 pre-commit，记录实际调用链、实测及限制。
-   P3 的独立进程组合故障验收不冒充已完成；P2 完成后停止等待 code review。
+   latest head 的首期实现与验收另见 `agent-latest-recovery-implementation-plan.zh-CN.md`；真实后端的
+   head/family 同事务实现仍由各 Persistence adapter 负责。
 
 #### 已落实的 owner 与调用链
 
 - `agent.py` 的 frozen `Agent` 只保存装配能力；`AgentStart` 明确 create-only，`AgentResume` 明确 existing-only。
   `AgentAnswer` 保留精确 interrupt 问题与 typed 回答；completed/failed/interrupted/aborted 只投影业务结果。
   completed output 不携带 activation Config，任何结果或异常都不提供 Agent state/continuation 接口。
-- 根级 `persistence.py` 定义 `AgentRunKey`、opaque `ExecutionAuthority`、`AuthorityPort`、泛型
-  `PersistencePort`、明确不存在证据和提交三态；不定义 wire、数据库、Container、调度或第二份 State。
-  每次读取、写入和对账都携带本次 grant；同 key 的并发准入完全由外部 Port 排他仲裁。
+- 根级 `persistence.py` 定义 `AgentRunKey`、`AgentLatestHead`、opaque `ExecutionAuthority`、`AuthorityPort`、
+  泛型 `PersistencePort`、明确不存在证据和提交三态；不定义 wire、数据库、Container、调度或第二份 State。
+  每次 family 读取、写入和对账都携带本次 grant；latest metadata 只返回 key/generation，具体 head/family
+  原子性由外部 Port 仲裁和持久化。
 - `AgentConfig` 只组合既有 snapshot store/resolver 与可选的精确初始 key。创建只读取该 key；恢复按 checkpoint
   引用逐个读取精确 revision/digest 并解析能力。Agent 不消费更新、不保存 Config，不对合法的无 Config 历史补值。
 - `GraphCheckpoint.config_cursors` 只投影原有 state/frame 中的引用；`Graph.recovery_child_reads` 通过同一个
   compiler/lineage owner 推导负读取坐标。二次 load 后由 `GraphCheckpoint.admit_child_reads` 检查已有事实完全一致、
-  负证据精确覆盖查询；没有后端 topology 副本、latest 查询或“没读到就是没创建”的回退。
+  负证据精确覆盖查询；latest head 只选择 `(agent_id, run_id)`，不替代 checkpoint，也不把“没读到就是没创建”
+  当作回退。
 - `_AuthorizedGraphWriter` 将同一请求交给 Port；Unknown 只对账原对象一次，NotApplied 才能在显式有限次数内重发。
   `DurableGraphCommit` 继续独占编码及 exact receipt 准入，Agent 不重复 reduce、编码或校验 candidate 的另一套规则。
 - `confirm_transition` 用 typed `GraphCommitError` 区分提交来源失败。family owner 收敛全部 worker 后按该来源决定
@@ -695,10 +698,11 @@ Config digest、非 Start graph-input write 及 settlement 二次排序等已被
 | 边界 | 本阶段证明 |
 | --- | --- |
 | 创建/继续身份 | 新建冲突、继续不存在、tombstone、不可用、不同 Agent/run 命名空间、终态只读回放 |
+| latest 恢复 | `AgentResume(None)` 解析 durable head、generation fence、显式历史绕过 latest、无 head/移动 head fail closed |
 | 权限 | 同 key 并发拒绝、同实例/新实例、异 key 独立、错 key/损坏 grant、逐次提交失权、释放不覆盖主错误 |
 | 完整提交 | linear graph 的 revision 0–6 全部覆盖：NotApplied、Unknown→Applied、Unknown→NotApplied、最终 Unknown 的已写/未写、失权 |
 | 幂等与失败 | 同 key 同完整内容重放、不同内容冲突、错误 receipt、非法 outcome、有限重试耗尽、原请求对象不变、节点不因重试重跑 |
-| Config | 初始精确 key、恢复全部历史 cursor、digest/definition/revision 错误、缺能力/缺快照、无 latest 回退、Agent 从不 save |
+| Config | 初始精确 key、恢复全部历史 cursor、digest/definition/revision 错误、缺能力/缺快照、latest 不替代 Config、Agent 从不 save |
 | Child | Start 未提交的负证据、深层 child、已结算记录丢失、两次读取 state/value 分裂、错误/重复/缺失负证据、非法 checkpoint variant |
 | Interrupt | 精确问题身份、答案重放/错误 scope、部分 child resume 已提交后从新权威读取继续，不使用旧 continuation |
 | 取消与清理 | acquire/load/Config/reconcile/release、caller/node/commit 来源、反复取消、join 后释放、构造/handoff/fence/abort 的失败传播 |

@@ -32,6 +32,7 @@ from mote_kernel.execution.persistence import (
     GraphRecovery,
 )
 from mote_kernel.persistence import (
+    AgentLatestHead,
     AgentRunKey,
     AuthorityPort,
     CommitApplied,
@@ -65,7 +66,7 @@ class AgentContractError(ValueError):
 
 
 class AgentRunNotFoundError(LookupError):
-    """An explicit continuation request names a run that was never created."""
+    """A continuation request names no durably created Agent run."""
 
 
 def _admit_business_values(values: Graph.Values[GraphValueT]) -> None:
@@ -83,6 +84,8 @@ class AgentStart(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
 
 @dataclass(frozen=True, slots=True)
 class AgentAnswer(Generic[GraphValueT]):
+    """A typed business answer bound to one exact Graph interrupt."""
+
     interrupt: GraphInterruptView
     values: Graph.Values[GraphValueT]
 
@@ -108,10 +111,12 @@ class AgentAnswer(Generic[GraphValueT]):
 
 @dataclass(frozen=True, slots=True)
 class AgentResume(Generic[GraphValueT]):
-    run_id: str
+    run_id: str | None = None
     answers: tuple[AgentAnswer[GraphValueT], ...] = ()
 
     def __post_init__(self) -> None:
+        if self.run_id is not None and (type(self.run_id) is not str or not is_canonical_identity(self.run_id)):
+            raise AgentContractError("Agent resume run identity must be canonical or omitted")
         if type(self.answers) is not tuple or any(type(answer) is not AgentAnswer for answer in self.answers):
             raise AgentContractError("Agent answers must be an immutable typed tuple")
         for answer in self.answers:
@@ -159,18 +164,18 @@ AgentResult: TypeAlias = (
 
 
 def _project_result(
-    run_id: str,
+    actual_run_id: str,
     result: Graph.Result[GraphValueT],
 ) -> AgentResult[GraphValueT, AgentHookStateT, AgentContextT]:
     admitted = None if result.session is None else admit_session_carrier(result.session)
     session = cast(AgentSession[AgentHookStateT, AgentContextT] | None, admitted)
     if isinstance(result, Graph.CompletedResult):
-        return AgentCompleted(run_id, Graph.values(**dict(result.outputs.items())), session)
+        return AgentCompleted(actual_run_id, Graph.values(**dict(result.outputs.items())), session)
     if isinstance(result, Graph.FailedResult):
-        return AgentFailed(run_id, result.failures, result.interrupts, session)
+        return AgentFailed(actual_run_id, result.failures, result.interrupts, session)
     if isinstance(result, Graph.AbortedResult):
-        return AgentAborted(run_id, result.abort, session)
-    return AgentInterrupted(run_id, result.interrupts, session)
+        return AgentAborted(actual_run_id, result.abort, session)
+    return AgentInterrupted(actual_run_id, result.interrupts, session)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,11 +263,18 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
             raise AgentContractError("Agent requires a typed frame codec")
         self.codec.validate()
         try:
-            persistence_operations = (self.persistence.load, self.persistence.commit, self.persistence.reconcile)
+            persistence_operations = (
+                self.persistence.load_latest,
+                self.persistence.load,
+                self.persistence.commit,
+                self.persistence.reconcile,
+            )
         except AttributeError as error:
-            raise AgentContractError("Agent requires load, commit and reconcile persistence capabilities") from error
+            raise AgentContractError(
+                "Agent requires load_latest, load, commit and reconcile persistence capabilities"
+            ) from error
         if not all(callable(operation) for operation in persistence_operations):
-            raise AgentContractError("Agent requires load, commit and reconcile persistence capabilities")
+            raise AgentContractError("Agent requires load_latest, load, commit and reconcile persistence capabilities")
         try:
             authority_operations = (self.authority.acquire, self.authority.release)
         except AttributeError as error:
@@ -301,6 +313,17 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
             configs[cursor] = await resolve_config(capabilities.resolver, snapshot)
         return configs.get(checkpoint.root_state.config_cursor), tuple(configs.values())
 
+    async def _load_latest_head(self) -> AgentLatestHead:
+        """Resolve and admit the Agent-scoped latest index exactly once."""
+
+        loaded = await self.persistence.load_latest(self.agent_id)
+        if type(loaded) is NeverCreated:
+            raise AgentRunNotFoundError("this Agent has no latest run")
+        head = AgentLatestHead.admit(cast(AgentLatestHead, loaded))
+        if head.key.agent_id != self.agent_id:
+            raise PersistenceContractError("latest head belongs to a different Agent namespace")
+        return head
+
     @staticmethod
     def _session_config(
         encoded: EncodedAgentSession,
@@ -320,13 +343,17 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
         self,
         request: AgentRequest[GraphValueT, AgentHookStateT, AgentContextT],
         authority: ExecutionAuthority,
+        *,
+        expected_latest: AgentLatestHead | None = None,
     ) -> AgentResult[GraphValueT, AgentHookStateT, AgentContextT]:
-        loaded = await self.persistence.load(authority)
+        loaded = await self.persistence.load(authority, expected_latest=expected_latest)
         configs: tuple[Config, ...] = ()
         current_config: Config | None = None
         current_session: AgentSession[AgentHookStateT, AgentContextT] | None = None
         encoded_session: EncodedAgentSession | None = None
         if type(loaded) is NeverCreated:
+            if expected_latest is not None:
+                raise PersistenceContractError("latest head names a missing durable family")
             if not isinstance(request, AgentStart):
                 raise AgentRunNotFoundError("cannot continue an Agent run that was never created")
             if request.session is not None:
@@ -381,7 +408,11 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
                 checkpoint = cast(GraphCheckpoint[GraphValueT], loaded)
                 children = graph.recovery_child_reads(checkpoint)
                 if children:
-                    reread = await self.persistence.load(authority, children=children)
+                    reread = await self.persistence.load(
+                        authority,
+                        children=children,
+                        expected_latest=expected_latest,
+                    )
                     if type(reread) is not GraphCheckpoint:
                         raise Graph.SnapshotMismatchError("child reread lost the authoritative family")
                     checkpoint = checkpoint.admit_child_reads(reread.admit(), children)
@@ -414,7 +445,7 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
             if isinstance(error, Graph.PartialCommitError):
                 raise cast(Graph.PartialCommitError[GraphValueT], error).cause from None
             raise
-        return _project_result(request.run_id, result)
+        return _project_result(str(authority.run.run_id), result)
 
     async def run(
         self, request: AgentRequest[GraphValueT, AgentHookStateT, AgentContextT], /
@@ -437,7 +468,15 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
             raise
         except (AttributeError, TypeError, ValueError) as error:
             raise AgentContractError("Agent.run received a malformed request") from error
-        key = AgentRunKey(self.agent_id, GraphRunId(request.run_id))
+        expected_latest: AgentLatestHead | None = None
+        if isinstance(request, AgentResume) and request.run_id is None:
+            expected_latest = await self._load_latest_head()
+            key = expected_latest.key
+        else:
+            run_id = request.run_id
+            if not isinstance(run_id, str):
+                raise PersistenceContractError("Agent run identity must be canonical")
+            key = AgentRunKey(self.agent_id, GraphRunId(run_id))
         authority, acquisition_cancellation = await wait_for_owner_task(
             asyncio.create_task(self.authority.acquire(key))
         )
@@ -449,7 +488,7 @@ class Agent(Generic[GraphValueT, AgentHookStateT, AgentContextT]):
                 raise PersistenceContractError("acquired authority belongs to a different Agent run")
             if acquisition_cancellation is not None:
                 raise acquisition_cancellation
-            return await self._run_authorized(request, authority)
+            return await self._run_authorized(request, authority, expected_latest=expected_latest)
         except BaseException as error:
             primary = error
             raise

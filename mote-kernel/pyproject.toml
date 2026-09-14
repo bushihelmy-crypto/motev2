@@ -270,37 +270,44 @@ quote-style = "double"
 # layer, a second execution path, or a commitment domain version.  The private
 # settlement lookup and completed-state proof are substantive provenance
 # checks, and their measured shape is ratcheted here after review.
+# The 2026-09-14 Agent latest-head recovery path adds one typed index record,
+# an exact generation fence, and the explicit/latest routing boundary.  The
+# extra measured owner cost is retained here; state, Session, and Graph
+# execution remain on their existing single paths.  On 2026-09-15 the
+# recovery path's pure forwarding load helper was removed; the direct Port
+# calls are the owner boundary, so the resulting lower structural counts are
+# intentionally ratcheted below.
 [tool.mote_kernel.complexity_ratchet]
-top_level_definitions = 1168
-type_definitions = 734
-dataclass_types = 457
-dataclass_fields = 1184
-decision_points = 3986
-logical_clone_pairs = 66
+top_level_definitions = 1170
+type_definitions = 736
+dataclass_types = 458
+dataclass_fields = 1186
+decision_points = 4000
+logical_clone_pairs = 67
 statement_clone_pairs = 124
 near_clone_pairs = 65
 record_shape_clone_pairs = 42
 thin_single_use_helpers = 0
 single_use_private_dataclasses = 23
 test_only_private_definitions = 0
-function_definitions = 1161
-method_definitions = 712
+function_definitions = 1164
+method_definitions = 715
 nested_function_definitions = 17
-semantic_nodes = 80764
-cognitive_complexity = 5117
-await_points = 167
-exception_handlers = 249
+semantic_nodes = 80990
+cognitive_complexity = 5133
+await_points = 169
+exception_handlers = 250
 attribute_writes = 136
 task_creations = 16
 max_cyclomatic_complexity = 49
 max_cognitive_complexity = 60
 max_nesting_depth = 6
-internal_call_edges = 1658
+internal_call_edges = 1664
 recursive_call_components = 5
 max_call_fan_out = 24
 max_call_chain_depth = 17
 max_call_chain_cognitive = 324
-cross_module_call_edges = 1565
+cross_module_call_edges = 1569
 cross_module_call_pairs = 452
 max_runtime_module_fan_out = 30
 internal_import_edges = 732
@@ -310,9 +317,9 @@ max_module_dependency_depth = 33
 ambiguous_internal_dispatches = 94
 transparent_private_definitions = 38
 thin_single_use_methods = 4
-low_usage_private_definitions = 239
+low_usage_private_definitions = 240
 linear_private_call_chain_links = 40
-production_unreferenced_definitions = 13
+production_unreferenced_definitions = 14
 low_cohesion_classes = 9
 max_methods_per_class = 33
 max_fields_per_class = 39

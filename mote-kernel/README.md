@@ -68,8 +68,11 @@ exclusive authority, reads the store, assembles and admits the Graph, runs it, p
 authority after all execution tasks have joined.
 
 - `AgentStart(run_id, values)` creates only a never-created run; an existing run is a conflict.
-- `AgentResume(run_id, answers=())` reads an existing run, including terminal replay. `AgentAnswer` pairs the exact
-  returned interrupt question with typed business values. No state, continuation or per-call commit override is exposed.
+- `AgentResume(run_id=None, answers=())` resumes the Agent's durable latest run when `run_id` is omitted; passing a
+  string selects that exact historical run (including terminal replay). `AgentAnswer` pairs the exact returned
+  interrupt question with typed business values. No state, continuation or per-call commit override is exposed.
+- Latest selection is only an `AgentLatestHead` index. The `(agent_id, run_id)` family owns the Graph state, value
+  evidence, Config cursors, and Session together; the persistence adapter fences the family read with that head.
 - `AgentConfig` optionally supplies the Config store/resolver and an exact initial key. Recovery resolves only the
   historical snapshots referenced by state and frames. The existing Graph Config update command remains owned by
   Observe and persists with its settlement; a node may still put a resolved Config in an explicitly returned complete
