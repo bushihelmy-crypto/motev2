@@ -2,7 +2,7 @@
 
 Mote Kernel 是一个以状态机为核心、支持持久恢复的 Agent Kernel。图控制执行，状态机控制事实。
 
-项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面；execution session、request/result、拓扑和状态 command 均为内部基础设施，不作为并列公共入口；调用方拥有的 `mote_kernel.AgentSession` 是显式的运行快照边界。
+项目目前处于初始架构与实现阶段。`mote_kernel.execution.Graph` 是唯一公开的图构建与执行门面，`mote_kernel.Agent` 是包级唯一的 Agent 门面；execution/state 原语仍是内部基础设施，不作为并列公共入口。调用方拥有的 `AgentSession` 边界定义在 `mote_kernel.session`。
 
 ```python
 from mote_kernel.execution import Graph
