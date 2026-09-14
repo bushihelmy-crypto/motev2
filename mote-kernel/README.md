@@ -2,7 +2,7 @@
 
 Mote Kernel is a durable, state-machine-driven agent kernel. Graphs control execution; state machines control truth.
 
-The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade; execution/state primitives remain internal development surfaces, while the caller-owned `mote_kernel.AgentSession` is the explicit runtime snapshot boundary.
+The project is in its initial architecture and implementation phase. `mote_kernel.execution.Graph` is the sole public graph composition and execution facade, and `mote_kernel.Agent` is the sole package-level Agent facade; execution/state primitives remain internal development surfaces. The caller-owned `AgentSession` boundary is defined in `mote_kernel.session`.
 
 ```python
 from mote_kernel.execution import Graph
