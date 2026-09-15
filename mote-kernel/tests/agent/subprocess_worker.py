@@ -184,6 +184,7 @@ class ProcessPersistence(JournalPersistence[str]):
         self.target_matches = 0
 
     def _journal_records(self) -> tuple[ProcessCommitRecord[str], ...]:
+        self.journals = {}
         if not self.path.exists():
             self.root_head_receipts = {}
             self.heads = {}
@@ -218,20 +219,14 @@ class ProcessPersistence(JournalPersistence[str]):
                 )
             keyed = tuple(admitted)
             root_head_receipts: dict[AgentRunKey, AgentLatestHead] = {}
-            heads: dict[str, AgentLatestHead] = {}
             for record in keyed:
                 root_head = record.root_head
                 if root_head is None:
                     continue
-                previous = root_head_receipts.get(record.key)
-                if previous is not None and previous != root_head:
-                    raise PersistenceContractError("the process journal changes a root latest-head receipt")
+                if record.key in root_head_receipts:
+                    raise PersistenceContractError("the process journal contains duplicate root receipts")
                 root_head_receipts[record.key] = root_head
-                current = heads.get(record.key.agent_id)
-                if current is None or root_head.generation > current.generation:
-                    heads[record.key.agent_id] = root_head
-                elif root_head.generation == current.generation and current != root_head:
-                    raise PersistenceContractError("the process journal contains conflicting latest heads")
+            heads = self._rebuild_latest_heads(root_head_receipts)
             family_keys = {record.key for record in keyed}
             root_keys = {
                 record.key
@@ -253,20 +248,10 @@ class ProcessPersistence(JournalPersistence[str]):
     async def load_latest(self, agent_id: str, /) -> AgentLatestHead | NeverCreated:
         if type(agent_id) is not str or not agent_id or agent_id != agent_id.strip():
             raise PersistenceContractError("latest lookup requires a canonical Agent identity")
-        records = self._journal_records()
-        roots = tuple(
-            record
-            for record in records
-            if record.key.agent_id == agent_id
-            and not record.request.scope
-            and record.request.candidate_state.revision == 0
-        )
-        if not roots:
+        self._journal_records()
+        head = self.heads.get(agent_id)
+        if head is None:
             return NeverCreated()
-        head = roots[-1].root_head
-        if head is None or head.key != roots[-1].key:
-            raise PersistenceContractError("the process journal is missing the latest-head receipt")
-        self.heads[agent_id] = head
         return deepcopy(head)
 
     async def view(self, key: AgentRunKey) -> MemoryPersistence[str]:

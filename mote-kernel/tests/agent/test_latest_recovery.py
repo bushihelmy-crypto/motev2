@@ -507,6 +507,43 @@ async def test_historical_root_reconcile_survives_a_later_latest_head(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["rollback", "generation-gap", "unreceipted-head"])
+async def test_root_reconcile_rejects_an_invalid_current_latest_chain(
+    agent: Agent[str],
+    store: SnapshotPersistence[str],
+    authority: MemoryAuthority,
+    corruption: str,
+) -> None:
+    await agent.run(AgentStart("old", Graph.values(value="old")))
+    old_key = AgentRunKey("agent", GraphRunId("old"))
+    old_root = next(
+        request for grant, request in store.commits if grant.run == old_key and request.candidate_state.revision == 0
+    )
+    old_head = store.root_head_receipts[old_key]
+
+    await agent.run(AgentStart("new", Graph.values(value="new")))
+    new_key = AgentRunKey("agent", GraphRunId("new"))
+    new_head = store.heads["agent"]
+    if corruption == "rollback":
+        store.heads["agent"] = old_head
+    elif corruption == "generation-gap":
+        gap = AgentLatestHead(new_key, new_head.generation + 2)
+        store.root_head_receipts[new_key] = gap
+        store.heads["agent"] = gap
+    else:
+        detached = AgentLatestHead(AgentRunKey("agent", GraphRunId("detached")), new_head.generation + 1)
+        store.heads["agent"] = detached
+
+    grant = await authority.acquire(old_key)
+    try:
+        outcome = await store.reconcile(grant, old_root)
+    finally:
+        await authority.release(grant)
+
+    assert isinstance(outcome, CommitUnknown)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_unknown_after_durable_root_write_remains_unresolved(
     agent: Agent[str],
     store: SnapshotPersistence[str],

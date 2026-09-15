@@ -133,7 +133,7 @@ class SnapshotPersistence(Generic[GraphValueT]):
         self.commits: list[tuple[ExecutionAuthority, GraphPersistenceCommit[GraphValueT]]] = []
         self.reconciles: list[tuple[ExecutionAuthority, GraphPersistenceCommit[GraphValueT]]] = []
         self.heads: dict[str, AgentLatestHead] = {}
-        # Historical transaction receipts; ``heads`` remains the sole current index.
+        # Historical transaction receipts and the current index are distinct durable facts.
         self.root_head_receipts: dict[AgentRunKey, AgentLatestHead] = {}
         self.latest_loads: list[str] = []
         self.on_load: LoadHook[GraphValueT] | None = None
@@ -169,6 +169,45 @@ class SnapshotPersistence(Generic[GraphValueT]):
         if current != expected:
             raise LatestHeadMovedError("latest head moved during recovery")
 
+    @staticmethod
+    def _rebuild_latest_heads(
+        receipts: dict[AgentRunKey, AgentLatestHead],
+    ) -> dict[str, AgentLatestHead]:
+        """Build the only current latest index from durable root receipts.
+
+        A generation is a position in one Agent's root-commit chain.  The
+        chain must therefore have one receipt per generation, start at one,
+        and contain no gaps.  Physical journal order is deliberately ignored;
+        the generation chain, not append order, owns latest selection.
+        """
+
+        by_agent: dict[str, dict[int, AgentLatestHead]] = {}
+        for raw_key, raw_receipt in receipts.items():
+            key = AgentRunKey.admit(raw_key)
+            receipt = AgentLatestHead.admit(raw_receipt)
+            if receipt.key != key:
+                raise PersistenceContractError("latest-head receipt does not match its Agent run")
+            generations = by_agent.setdefault(receipt.key.agent_id, {})
+            if receipt.generation in generations:
+                raise PersistenceContractError("latest-head generations must be unique per Agent")
+            generations[receipt.generation] = receipt
+
+        latest: dict[str, AgentLatestHead] = {}
+        for agent_id, generations in by_agent.items():
+            ordered = sorted(generations)
+            if ordered != list(range(1, len(ordered) + 1)):
+                raise PersistenceContractError("latest-head generations must be contiguous from one")
+            latest[agent_id] = generations[ordered[-1]]
+        return latest
+
+    def _validated_latest_heads(self) -> dict[str, AgentLatestHead]:
+        """Validate the receipt chain and the mutable current index together."""
+
+        latest = self._rebuild_latest_heads(self.root_head_receipts)
+        if latest != self.heads:
+            raise PersistenceContractError("latest-head index is inconsistent with root receipts")
+        return latest
+
     def _advance_latest(self, authority: ExecutionAuthority, request: GraphPersistenceCommit[GraphValueT]) -> None:
         if (
             request.scope
@@ -176,14 +215,16 @@ class SnapshotPersistence(Generic[GraphValueT]):
             or request.candidate_state.run_id != authority.run.run_id
         ):
             return
-        current = self.heads.get(authority.run.agent_id)
+        current_heads = self._validated_latest_heads()
+        current = current_heads.get(authority.run.agent_id)
         if current is not None and current.key == authority.run:
-            self.root_head_receipts.setdefault(authority.run, current)
             return
         generation = 1 if current is None else current.generation + 1
         head = AgentLatestHead(authority.run, generation)
-        self.heads[authority.run.agent_id] = head
-        self.root_head_receipts[authority.run] = head
+        candidate_receipts = {**self.root_head_receipts, authority.run: head}
+        candidate_heads = self._rebuild_latest_heads(candidate_receipts)
+        self.root_head_receipts = candidate_receipts
+        self.heads = candidate_heads
 
     def _root_head_is_confirmed(
         self,
@@ -195,18 +236,13 @@ class SnapshotPersistence(Generic[GraphValueT]):
         if request.scope or request.candidate_state.revision != 0:
             return True
         receipt = self.root_head_receipts.get(authority.run)
-        latest = self.heads.get(authority.run.agent_id)
-        if receipt is None or latest is None:
+        if receipt is None:
             return False
-        if latest == receipt:
-            return True
-        if latest.generation <= receipt.generation:
+        try:
+            latest = self._validated_latest_heads().get(authority.run.agent_id)
+        except PersistenceContractError:
             return False
-        return any(
-            candidate == latest
-            for candidate in self.root_head_receipts.values()
-            if candidate.key.agent_id == authority.run.agent_id
-        )
+        return latest is not None
 
     async def apply(
         self,

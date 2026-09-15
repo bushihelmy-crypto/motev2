@@ -332,6 +332,11 @@ head。后端不支持同事务时，adapter 必须提供等价的 durable trans
 推进到另一个 key。Adapter 必须保留原 root 与其 head upsert 的 durable receipt，并同时确认当前
 head 链没有缺失或损坏；这样既能确认历史 A 已成功，也不会把丢失的 head 误报为成功。
 
+本批测试适配器对这条链采用唯一重建规则：每个 Agent 的 root receipt generation 必须从 `1`
+开始连续递增且不重复，当前 latest 只能取该链的末端。journal 的物理追加顺序不是判定依据；
+历史 receipt 与当前 head 分开校验；回退、缺口或无回执的当前 head 保持 `CommitUnknown`，
+重复 receipt 或损坏 journal 则在读取边界报告 `PersistenceContractError`。
+
 ### 6.4 Head 与 checkpoint 的一致读取
 
 本批已扩展 `PersistencePort`：
@@ -650,8 +655,10 @@ latest”和“创建新 run”，因为两者对 `values`、幂等、错误和�
 | `test_latest_resume_replays_failed_and_aborted_terminal_results_without_an_id` | 省略 ID 的 Failed/Aborted 终态只读回放且保留实际结果 ID |
 | `test_root_reconcile_requires_latest_head_confirmation` | root family receipt 存在但 latest head 无法证明时保持 `CommitUnknown`，不制造假 `AgentCompleted` |
 | `test_historical_root_reconcile_survives_a_later_latest_head` | A 的 root/head 已确认后，即使 B 成为 latest，A 的延迟对账仍返回 `CommitApplied`，且 latest 保持 B |
+| `test_root_reconcile_rejects_an_invalid_current_latest_chain` | 回退 head、generation 缺口或无回执 head 都不能把历史 root 误报为 `CommitApplied` |
 | `test_answer_from_an_old_run_cannot_be_applied_to_a_new_latest_run` | 两个 run 使用同一 interrupt Graph；旧 run 的 answer 因 run-scoped interrupt identity 被拒绝 |
 | `test_process_journal_isolates_agents_runs_and_sessions_across_processes`、`test_process_journal_keeps_multiple_families_in_one_persistence_instance` | 进程 journal 精确隔离 Agent/run/Session，不覆盖历史 family |
+| `test_process_journal_latest_uses_the_generation_chain_not_append_order` | journal 乱序时仍由唯一、连续的 generation 链决定 latest，不由最后一条记录决定 |
 
 ### 13.2 既有回归必须保持
 

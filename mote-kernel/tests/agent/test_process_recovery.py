@@ -535,6 +535,43 @@ def test_process_journal_isolates_agents_runs_and_sessions_across_processes(tmp_
     }
 
 
+def test_process_journal_latest_uses_the_generation_chain_not_append_order(tmp_path: Path) -> None:
+    scenario = Scenario.FAMILY_ISOLATION
+    for run_id, value in (("run-old", "old"), ("run-new", "new")):
+        started = _run(
+            scenario,
+            Phase.CAPTURE,
+            CrashBoundary.NONE,
+            tmp_path,
+            agent_id="x",
+            request_mode=RequestMode.START,
+            run_id=run_id,
+            value=value,
+        )
+        _assert_completed_process(started)
+
+    decoded: object = pickle.loads((tmp_path / "commits.pickle").read_bytes())
+    assert type(decoded) is tuple
+    decoded_records = cast(tuple[object, ...], decoded)
+    assert all(type(item) is ProcessCommitRecord for item in decoded_records)
+    records = cast(tuple[ProcessCommitRecord[str], ...], decoded_records)
+    old_records = tuple(record for record in records if record.key.run_id == "run-old")
+    new_records = tuple(record for record in records if record.key.run_id == "run-new")
+    assert old_records and new_records
+    (tmp_path / "commits.pickle").write_bytes(pickle.dumps((*new_records, *old_records)))
+
+    latest = _run(
+        scenario,
+        Phase.RECOVER,
+        CrashBoundary.NONE,
+        tmp_path,
+        agent_id="x",
+        request_mode=RequestMode.RESUME_LATEST,
+    )
+    _assert_completed_process(latest)
+    assert (tmp_path / "result").read_text() == "run-new|new-first-second|new-hook|new-context"
+
+
 @pytest.mark.asyncio
 async def test_process_journal_keeps_multiple_families_in_one_persistence_instance(tmp_path: Path) -> None:
     phase = Phase.CAPTURE
