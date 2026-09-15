@@ -29,6 +29,7 @@ from mote_kernel.execution.persistence import GraphPersistenceCommit
 from mote_kernel.persistence import (
     AgentLatestHead,
     AgentRunKey,
+    CommitApplied,
     CommitAttemptsExhaustedError,
     CommitNotApplied,
     CommitOutcome,
@@ -461,6 +462,48 @@ async def test_root_family_and_latest_head_reconcile_as_one_applied_fact(
     assert isinstance(replay, AgentCompleted)
     assert replay.run_id == "new"
     assert len(store.commits) == writes
+
+
+@pytest.mark.asyncio
+async def test_historical_root_reconcile_survives_a_later_latest_head(
+    agent: Agent[str],
+    store: SnapshotPersistence[str],
+    authority: MemoryAuthority,
+) -> None:
+    await agent.run(AgentStart("old", Graph.values(value="old")))
+    old_key = AgentRunKey("agent", GraphRunId("old"))
+    old_root = next(
+        request for grant, request in store.commits if grant.run == old_key and request.candidate_state.revision == 0
+    )
+
+    async def lose_ack(
+        _authority: ExecutionAuthority,
+        _request: GraphPersistenceCommit[str],
+    ) -> CommitOutcome[str]:
+        return CommitUnknown()
+
+    old_grant = await authority.acquire(old_key)
+    store.on_commit = lose_ack
+    try:
+        outcome = await store.commit(old_grant, old_root)
+    finally:
+        store.on_commit = None
+        await authority.release(old_grant)
+    assert isinstance(outcome, CommitUnknown)
+
+    await agent.run(AgentStart("new", Graph.values(value="new")))
+    new_head = store.heads["agent"]
+    assert new_head.key == AgentRunKey("agent", GraphRunId("new"))
+
+    old_grant = await authority.acquire(old_key)
+    try:
+        reconciled = await store.reconcile(old_grant, old_root)
+    finally:
+        await authority.release(old_grant)
+
+    assert isinstance(reconciled, CommitApplied)
+    assert reconciled.confirmed == old_root
+    assert store.heads["agent"] == new_head
 
 
 @pytest.mark.asyncio

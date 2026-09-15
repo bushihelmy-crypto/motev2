@@ -185,6 +185,8 @@ class ProcessPersistence(JournalPersistence[str]):
 
     def _journal_records(self) -> tuple[ProcessCommitRecord[str], ...]:
         if not self.path.exists():
+            self.root_head_receipts = {}
+            self.heads = {}
             return ()
         try:
             decoded: object = pickle.loads(self.path.read_bytes())
@@ -207,8 +209,29 @@ class ProcessPersistence(JournalPersistence[str]):
             admitted: list[ProcessCommitRecord[str]] = []
             for item in records:
                 record = cast(ProcessCommitRecord[str], item)
-                admitted.append(ProcessCommitRecord(AgentRunKey.admit(record.key), record.request.admit()))
+                admitted.append(
+                    ProcessCommitRecord(
+                        AgentRunKey.admit(record.key),
+                        record.request.admit(),
+                        record.root_head,
+                    )
+                )
             keyed = tuple(admitted)
+            root_head_receipts: dict[AgentRunKey, AgentLatestHead] = {}
+            heads: dict[str, AgentLatestHead] = {}
+            for record in keyed:
+                root_head = record.root_head
+                if root_head is None:
+                    continue
+                previous = root_head_receipts.get(record.key)
+                if previous is not None and previous != root_head:
+                    raise PersistenceContractError("the process journal changes a root latest-head receipt")
+                root_head_receipts[record.key] = root_head
+                current = heads.get(record.key.agent_id)
+                if current is None or root_head.generation > current.generation:
+                    heads[record.key.agent_id] = root_head
+                elif root_head.generation == current.generation and current != root_head:
+                    raise PersistenceContractError("the process journal contains conflicting latest heads")
             family_keys = {record.key for record in keyed}
             root_keys = {
                 record.key
@@ -217,6 +240,8 @@ class ProcessPersistence(JournalPersistence[str]):
             }
             if family_keys != root_keys:
                 raise PersistenceContractError("the process test journal contains an unrooted Agent family")
+            self.root_head_receipts = root_head_receipts
+            self.heads = heads
             return keyed
         except PersistenceContractError:
             raise
@@ -238,10 +263,9 @@ class ProcessPersistence(JournalPersistence[str]):
         )
         if not roots:
             return NeverCreated()
-        head = AgentLatestHead(
-            roots[-1].key,
-            len(roots),
-        )
+        head = roots[-1].root_head
+        if head is None or head.key != roots[-1].key:
+            raise PersistenceContractError("the process journal is missing the latest-head receipt")
         self.heads[agent_id] = head
         return deepcopy(head)
 
@@ -336,7 +360,12 @@ class ProcessPersistence(JournalPersistence[str]):
         if existing:
             return confirmed
         pending = self.path.with_name(f"{self.path.name}.{os.getpid()}.pending")
-        pending.write_bytes(pickle.dumps((*records, ProcessCommitRecord(authority.run, confirmed))))
+        root_head = (
+            self.root_head_receipts.get(authority.run)
+            if not request.scope and request.candidate_state.revision == 0
+            else None
+        )
+        pending.write_bytes(pickle.dumps((*records, ProcessCommitRecord(authority.run, confirmed, root_head))))
         pending.replace(self.path)
         if crash:
             os._exit(PROCESS_CRASH_EXIT)

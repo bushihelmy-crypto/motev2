@@ -516,6 +516,15 @@ def test_process_journal_isolates_agents_runs_and_sessions_across_processes(tmp_
     decoded: object = pickle.loads((tmp_path / "commits.pickle").read_bytes())
     assert type(decoded) is tuple
     records = cast(tuple[ProcessCommitRecord[str], ...], decoded)
+    roots = tuple(
+        record for record in records if not record.request.scope and record.request.candidate_state.revision == 0
+    )
+    assert all(record.root_head is not None and record.root_head.key == record.key for record in roots)
+    assert {(record.key.agent_id, record.root_head.generation) for record in roots if record.root_head is not None} == {
+        ("x", 1),
+        ("x", 2),
+        ("y", 1),
+    }
     assert {record.key.agent_id for record in records} == {"x", "y"}
     assert {record.key.run_id for record in records if record.key.agent_id == "x" and not record.request.scope} == {
         "run-old",

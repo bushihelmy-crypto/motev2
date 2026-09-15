@@ -328,6 +328,10 @@ head。后端不支持同事务时，adapter 必须提供等价的 durable trans
 - `CommitUnknown` 的 reconcile 必须核对原 request、family receipt 和 head 结果，确认完整成功后
   才返回 `CommitApplied`。
 
+对账不能把“当前 head 仍指向该 run”当成历史成功的唯一证据：后续合法的 root run 可以把 latest
+推进到另一个 key。Adapter 必须保留原 root 与其 head upsert 的 durable receipt，并同时确认当前
+head 链没有缺失或损坏；这样既能确认历史 A 已成功，也不会把丢失的 head 误报为成功。
+
 ### 6.4 Head 与 checkpoint 的一致读取
 
 本批已扩展 `PersistencePort`：
@@ -645,6 +649,7 @@ latest”和“创建新 run”，因为两者对 `values`、幂等、错误和�
 | `test_latest_heads_are_isolated_by_agent_namespace` | 不同 agent_id 不能互读 head/family |
 | `test_latest_resume_replays_failed_and_aborted_terminal_results_without_an_id` | 省略 ID 的 Failed/Aborted 终态只读回放且保留实际结果 ID |
 | `test_root_reconcile_requires_latest_head_confirmation` | root family receipt 存在但 latest head 无法证明时保持 `CommitUnknown`，不制造假 `AgentCompleted` |
+| `test_historical_root_reconcile_survives_a_later_latest_head` | A 的 root/head 已确认后，即使 B 成为 latest，A 的延迟对账仍返回 `CommitApplied`，且 latest 保持 B |
 | `test_answer_from_an_old_run_cannot_be_applied_to_a_new_latest_run` | 两个 run 使用同一 interrupt Graph；旧 run 的 answer 因 run-scoped interrupt identity 被拒绝 |
 | `test_process_journal_isolates_agents_runs_and_sessions_across_processes`、`test_process_journal_keeps_multiple_families_in_one_persistence_instance` | 进程 journal 精确隔离 Agent/run/Session，不覆盖历史 family |
 

@@ -36,6 +36,7 @@ class ProcessCommitRecord(Generic[GraphValueT]):
 
     key: AgentRunKey
     request: GraphPersistenceCommit[GraphValueT]
+    root_head: AgentLatestHead | None = None
 
     def __post_init__(self) -> None:
         AgentRunKey.admit(self.key)
@@ -44,6 +45,15 @@ class ProcessCommitRecord(Generic[GraphValueT]):
         self.request.admit()
         if not self.request.scope and self.request.candidate_state.run_id != self.key.run_id:
             raise PersistenceContractError("root journal commit does not match its Agent run key")
+        is_root = not self.request.scope and self.request.candidate_state.revision == 0
+        if is_root:
+            if type(self.root_head) is not AgentLatestHead:
+                raise PersistenceContractError("root journal commit requires its latest-head receipt")
+            head = AgentLatestHead.admit(self.root_head)
+            if head.key != self.key:
+                raise PersistenceContractError("root journal head receipt does not match its Agent run key")
+        elif self.root_head is not None:
+            raise PersistenceContractError("only a root journal commit may contain a latest-head receipt")
 
 
 CommitHook: TypeAlias = Callable[
@@ -123,6 +133,8 @@ class SnapshotPersistence(Generic[GraphValueT]):
         self.commits: list[tuple[ExecutionAuthority, GraphPersistenceCommit[GraphValueT]]] = []
         self.reconciles: list[tuple[ExecutionAuthority, GraphPersistenceCommit[GraphValueT]]] = []
         self.heads: dict[str, AgentLatestHead] = {}
+        # Historical transaction receipts; ``heads`` remains the sole current index.
+        self.root_head_receipts: dict[AgentRunKey, AgentLatestHead] = {}
         self.latest_loads: list[str] = []
         self.on_load: LoadHook[GraphValueT] | None = None
         self.on_load_latest: LatestLoadHook | None = None
@@ -166,9 +178,12 @@ class SnapshotPersistence(Generic[GraphValueT]):
             return
         current = self.heads.get(authority.run.agent_id)
         if current is not None and current.key == authority.run:
+            self.root_head_receipts.setdefault(authority.run, current)
             return
         generation = 1 if current is None else current.generation + 1
-        self.heads[authority.run.agent_id] = AgentLatestHead(authority.run, generation)
+        head = AgentLatestHead(authority.run, generation)
+        self.heads[authority.run.agent_id] = head
+        self.root_head_receipts[authority.run] = head
 
     def _root_head_is_confirmed(
         self,
@@ -179,8 +194,19 @@ class SnapshotPersistence(Generic[GraphValueT]):
 
         if request.scope or request.candidate_state.revision != 0:
             return True
+        receipt = self.root_head_receipts.get(authority.run)
         latest = self.heads.get(authority.run.agent_id)
-        return latest is not None and latest.key == authority.run
+        if receipt is None or latest is None:
+            return False
+        if latest == receipt:
+            return True
+        if latest.generation <= receipt.generation:
+            return False
+        return any(
+            candidate == latest
+            for candidate in self.root_head_receipts.values()
+            if candidate.key.agent_id == authority.run.agent_id
+        )
 
     async def apply(
         self,
@@ -267,10 +293,11 @@ class SnapshotPersistence(Generic[GraphValueT]):
                 if receipt != request:
                     raise PersistenceConflictError("a commit key already names different content")
                 # A root receipt is not enough evidence for ``CommitApplied``.
-                # The latest index update is part of the same durable fact.  If
-                # this adapter cannot still prove that update, preserve the
-                # uncertainty instead of manufacturing a successful result
-                # that an immediate latest resume could not observe.
+                # The root-head receipt must exist, and the current head must
+                # still be a valid point on that Agent's monotonic head chain.
+                # A later root may legitimately move the current head away
+                # from this historical run; that does not undo the earlier
+                # durable fact.
                 if not self._root_head_is_confirmed(authority, request):
                     return CommitUnknown()
                 return CommitApplied(deepcopy(receipt))
