@@ -18,6 +18,7 @@ from mote_kernel.persistence import (
     CommitApplied,
     CommitNotApplied,
     CommitOutcome,
+    CommitUnknown,
     ExecutionAuthority,
     LatestHeadMovedError,
     NeverCreated,
@@ -169,6 +170,18 @@ class SnapshotPersistence(Generic[GraphValueT]):
         generation = 1 if current is None else current.generation + 1
         self.heads[authority.run.agent_id] = AgentLatestHead(authority.run, generation)
 
+    def _root_head_is_confirmed(
+        self,
+        authority: ExecutionAuthority,
+        request: GraphPersistenceCommit[GraphValueT],
+    ) -> bool:
+        """Return whether this adapter can prove the root/head commit pair."""
+
+        if request.scope or request.candidate_state.revision != 0:
+            return True
+        latest = self.heads.get(authority.run.agent_id)
+        return latest is not None and latest.key == authority.run
+
     async def apply(
         self,
         authority: ExecutionAuthority,
@@ -230,7 +243,10 @@ class SnapshotPersistence(Generic[GraphValueT]):
             response = await self.on_commit(authority, request)
             if response is not None:
                 return response
-        return CommitApplied(await self.apply(authority, request))
+        confirmed = await self.apply(authority, request)
+        if not self._root_head_is_confirmed(authority, request):
+            return CommitUnknown()
+        return CommitApplied(confirmed)
 
     async def reconcile(
         self,
@@ -250,6 +266,13 @@ class SnapshotPersistence(Generic[GraphValueT]):
             if (receipt.scope, receipt.writes.commit_key) == (request.scope, request.writes.commit_key):
                 if receipt != request:
                     raise PersistenceConflictError("a commit key already names different content")
+                # A root receipt is not enough evidence for ``CommitApplied``.
+                # The latest index update is part of the same durable fact.  If
+                # this adapter cannot still prove that update, preserve the
+                # uncertainty instead of manufacturing a successful result
+                # that an immediate latest resume could not observe.
+                if not self._root_head_is_confirmed(authority, request):
+                    return CommitUnknown()
                 return CommitApplied(deepcopy(receipt))
         return CommitNotApplied()
 

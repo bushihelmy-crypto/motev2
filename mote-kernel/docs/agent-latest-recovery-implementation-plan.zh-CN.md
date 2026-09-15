@@ -537,9 +537,9 @@ latest head 选中的是 `AgentRunKey`，不是 Config。恢复流程仍为：
 
 - 扩展 `tests/agent/persistence_fixtures.py`：维护 heads、generation、原子 commit **契约模拟**、head
   fault injection；snapshot/journal 两种表示使用相同契约。它们只验证 Kernel 边界，不证明生产原子事务。
-- `tests/agent/subprocess_worker.py` 从原子替换的 commit/receipt journal 中按 root revision-0 创建证据
-  推导测试进程间的 latest head，并由恢复进程通过 `AgentResume()` 重新解析；这仍是单 family、顺序进程
-  测试适配器，不是生产数据库事务实现。
+- `tests/agent/subprocess_worker.py` 从原子替换的 keyed commit/receipt journal 中按 root revision-0 创建证据
+  推导各 Agent namespace 的 latest head，并由恢复进程通过 `AgentResume()` 重新解析；它覆盖多 Agent、多
+  run 和跨进程 Session 的顺序场景，但仍是测试适配器，不是生产数据库事务实现。
 - 增加独立进程测试：写入 root state（以及同一 commit 中存在的 Session envelope）后在 acknowledgement
   前退出，重新进程调用 `AgentResume()`；确认测试 journal 的 keyed family 不会指向半份 checkpoint。
 - 覆盖不同 run、nested child、parallel family、Config revision、取消和 Unknown 的组合。
@@ -634,7 +634,7 @@ latest”和“创建新 run”，因为两者对 `values`、幂等、错误和�
 | 测试 | 断言 |
 | --- | --- |
 | `test_resume_without_run_id_recovers_latest_state_and_session` | `AgentResume()`/`AgentResume(None)` 只读 head，恢复同一 checkpoint 的 state/session，结果返回实际 run ID |
-| `test_explicit_historical_resume_bypasses_latest_and_does_not_retrograde_head` | 显式旧 key 不调用 latest，且恢复旧 Session、不倒退 head |
+| `test_explicit_historical_resume_bypasses_latest_and_does_not_retrograde_head` | 显式旧 key 不调用 latest；旧 run 真实继续并提交后，latest 不倒退且省略 ID 仍恢复新 run |
 | `test_latest_resume_can_answer_the_latest_interrupt_without_an_id` | 省略 ID 的 interrupt 恢复与回答仍绑定解析出的 exact run |
 | `test_missing_latest_is_not_treated_as_a_start` | 无 head 抛 not-found，无 commit/node 调用 |
 | `test_latest_head_move_between_lookup_and_family_load_fails_closed`、`test_latest_head_race_after_lookup_before_acquire_fails_closed` | generation/key 不一致时不执行 Graph、不混合答案 |
@@ -644,6 +644,8 @@ latest”和“创建新 run”，因为两者对 `values`、幂等、错误和�
 | `test_latest_resume_uses_the_checkpoint_config_cursor_not_config_latest` | Session 只解析 checkpoint cursor，不读 latest Config |
 | `test_latest_heads_are_isolated_by_agent_namespace` | 不同 agent_id 不能互读 head/family |
 | `test_latest_resume_replays_failed_and_aborted_terminal_results_without_an_id` | 省略 ID 的 Failed/Aborted 终态只读回放且保留实际结果 ID |
+| `test_root_reconcile_requires_latest_head_confirmation` | root family receipt 存在但 latest head 无法证明时保持 `CommitUnknown`，不制造假 `AgentCompleted` |
+| `test_answer_from_an_old_run_cannot_be_applied_to_a_new_latest_run` | 两个 run 使用同一 interrupt Graph；旧 run 的 answer 因 run-scoped interrupt identity 被拒绝 |
 | `test_process_journal_isolates_agents_runs_and_sessions_across_processes`、`test_process_journal_keeps_multiple_families_in_one_persistence_instance` | 进程 journal 精确隔离 Agent/run/Session，不覆盖历史 family |
 
 ### 13.2 既有回归必须保持

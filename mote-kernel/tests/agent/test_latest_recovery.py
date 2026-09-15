@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 from tests.agent.config_fixtures import ConfigCatalog
 from tests.agent.persistence_fixtures import AsyncGate, MemoryAuthority, SnapshotPersistence
-from tests.execution.persistence_fixtures import STRING_CODEC, interrupt_graph, linear_graph, nested_graph
+from tests.execution.persistence_fixtures import STRING_CODEC, interrupt_graph, nested_graph
 from tests.execution.test_persistence_config import config_at
 
 from mote_kernel.agent import (
@@ -109,22 +109,38 @@ async def test_resume_without_run_id_recovers_latest_state_and_session(
 async def test_explicit_historical_resume_bypasses_latest_and_does_not_retrograde_head(
     agent: Agent[str],
     store: SnapshotPersistence[str],
+    calls: list[str],
 ) -> None:
-    configured = _session_agent(agent, store)
-    old_session = AgentSession("old-hook", "old-context")
-    latest_session = AgentSession("latest-hook", "latest-context")
-    await configured.run(AgentStart("old", Graph.values(value="old"), old_session))
-    await configured.run(AgentStart("latest", Graph.values(value="latest"), latest_session))
-    head = store.heads["agent"]
+    def assemble(_config: Config | None) -> Graph[str]:
+        return interrupt_graph(calls)
 
-    recovered = await configured.run(AgentResume("old"))
+    configured = replace(agent, assemble=assemble)
+    waiting = await configured.run(AgentStart("old", Graph.values(value="question")))
+    assert isinstance(waiting, AgentInterrupted)
+    latest_result = await configured.run(AgentStart("latest", Graph.values(value="latest")))
+    assert isinstance(latest_result, AgentCompleted)
+    head = store.heads["agent"]
+    writes = len(store.commits)
+
+    recovered = await configured.run(
+        AgentResume(
+            "old",
+            (AgentAnswer(waiting.interrupts[0], Graph.values(value="answer")),),
+        )
+    )
 
     assert isinstance(recovered, AgentCompleted)
     assert recovered.run_id == "old"
-    assert recovered.session == old_session
+    assert recovered.outputs["value"] == "answer"
+    assert len(store.commits) > writes
     assert store.latest_loads == []
     assert store.load_fences[-1] is None
     assert store.heads["agent"] == head
+
+    latest_replay = await configured.run(AgentResume())
+    assert isinstance(latest_replay, AgentCompleted)
+    assert latest_replay.run_id == "latest"
+    assert latest_replay.outputs["value"] == "latest"
 
 
 @pytest.mark.asyncio
@@ -168,11 +184,9 @@ async def test_answer_from_an_old_run_cannot_be_applied_to_a_new_latest_run(
     assert isinstance(waiting, AgentInterrupted)
     answer = AgentAnswer(waiting.interrupts[0], Graph.values(value="answer"))
 
-    def linear_assemble(_config: Config | None) -> Graph[str]:
-        return linear_graph(calls)
-
-    fresh_agent = replace(agent, assemble=linear_assemble)
-    await fresh_agent.run(AgentStart("new", Graph.values(value="new")))
+    latest_waiting = await interrupted_agent.run(AgentStart("new", Graph.values(value="question")))
+    assert isinstance(latest_waiting, AgentInterrupted)
+    assert latest_waiting.interrupts[0].interrupt_id != waiting.interrupts[0].interrupt_id
     writes = len(store.commits)
     calls_before = tuple(calls)
 
@@ -181,6 +195,29 @@ async def test_answer_from_an_old_run_cannot_be_applied_to_a_new_latest_run(
 
     assert len(store.commits) == writes
     assert tuple(calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_root_reconcile_requires_latest_head_confirmation(
+    agent: Agent[str],
+    store: SnapshotPersistence[str],
+) -> None:
+    async def write_family_then_lose_latest(
+        authority: ExecutionAuthority,
+        request: GraphPersistenceCommit[str],
+    ) -> CommitOutcome[str]:
+        await store.apply(authority, request)
+        store.heads.pop(authority.run.agent_id, None)
+        return CommitUnknown()
+
+    store.on_commit = write_family_then_lose_latest
+    with pytest.raises(CommitUnresolvedError):
+        await agent.run(AgentStart("run", Graph.values(value="input")))
+
+    family = await store.view(AgentRunKey("agent", GraphRunId("run")))
+    assert family.requests
+    assert store.heads == {}
+    assert len(store.reconciles) == 1
 
 
 @pytest.mark.asyncio
