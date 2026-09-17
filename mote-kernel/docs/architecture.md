@@ -123,15 +123,19 @@ process-local and non-serializable. Neither is a replacement for a complete chec
 
 `agent.py` is the sole external recovery composition root. `Agent` holds frozen capabilities, not runtime state,
 continuations, an authority cache or a second scheduler. `AgentStart` creates only a never-created run;
-`AgentResume` continues an existing run or replays its terminal business result. Answers retain the exact interrupt
-question and typed business values. Results expose outputs, failures, interrupts or an abort, plus the last confirmed
-`AgentSession` for the Runtime to explicitly hand to a later run; Graph state, continuations, and persistence
-capabilities remain internal.
+`AgentResume` continues an existing run or replays its terminal business result. Omitting its `run_id` resolves the
+Agent-scoped durable latest head, while an explicit ID remains an exact historical lookup. `AgentLatestHead` is only
+an index: the `(agent_id, run_id)` family owns Graph state, value evidence and the encoded AgentSession together.
+Answers retain the exact interrupt question and typed business values. Results expose outputs, failures, interrupts or
+an abort, plus the last confirmed `AgentSession` for the Runtime to explicitly hand to a later run; Graph state,
+continuations, and persistence capabilities remain internal.
 
 One invocation follows this chain:
 
-1. Acquire exclusive `ExecutionAuthority` for `AgentRunKey(agent_id, run_id)` through `AuthorityPort`.
-2. `PersistencePort.load` returns a complete consistent family or explicit `NeverCreated` evidence. Unavailability,
+1. Resolve the latest head when needed, then acquire exclusive `ExecutionAuthority` for the resolved
+   `AgentRunKey(agent_id, run_id)` through `AuthorityPort`. Explicit IDs bypass latest lookup.
+2. `PersistencePort.load` returns a complete consistent family or explicit `NeverCreated` evidence. A latest resume
+   passes its immutable head generation as a read fence. Unavailability,
    tombstones, missing records and identity conflicts cannot become a fresh run.
 3. Resolve every Config cursor referenced by the checkpoint, then assemble the Graph. Optional `AgentConfig.initial`
    selects only the exact initial snapshot for a new run. Agent never saves Config or substitutes latest history;

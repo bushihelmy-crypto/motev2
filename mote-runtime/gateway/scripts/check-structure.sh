@@ -10,10 +10,20 @@ required_dirs=(
 	internal/application
 	internal/admission
 	internal/architecture
-	internal/plan
 	internal/model
 	internal/protocol
+	internal/protocol/anthropic/messages
+	internal/protocol/bedrock/converse
+	internal/protocol/gemini/generatecontent
+	internal/protocol/openai/chatcompletions
+	internal/protocol/openai/realtime
+	internal/protocol/openai/responses
 	internal/service
+	internal/service/azure
+	internal/service/bedrock
+	internal/service/generic
+	internal/service/huggingface
+	internal/service/vertex
 	internal/cache
 	internal/cache/prompt
 	internal/cache/result
@@ -23,9 +33,11 @@ required_dirs=(
 	internal/telemetry
 	internal/testkit
 	internal/upstream
-	protocols
-	connectors
-	upstream
+	internal/upstream/eventstream
+	internal/upstream/httpclient
+	internal/upstream/pool
+	internal/upstream/sse
+	internal/upstream/websocket
 	ports
 	integration
 )
@@ -132,9 +144,27 @@ test "${modules[0]}" = "$src_dir/go.mod" || {
 	exit 1
 }
 
-if find "$root_dir" -type d -name .git -print -quit | grep -q .; then
-	echo 'nested Git repository found under gateway' >&2
-	exit 1
-fi
+# A managed workspace may mount an empty `.git` marker at the package root.
+# Reject only an actual nested repository (one that contains Git metadata), so
+# the check still catches a committed sub-repository without rejecting that
+# harmless mount point.
+while IFS= read -r nested_git; do
+	if find "$nested_git" -mindepth 1 -print -quit | grep -q .; then
+		echo "nested Git repository found under gateway: ${nested_git#"$root_dir/"}" >&2
+		exit 1
+	fi
+done < <(find "$root_dir" -mindepth 2 -type d -name .git -print)
+
+# Concrete implementations live below their owner packages. Empty legacy
+# roots and removed neutral/plan/registry owners must not reappear.
+for forbidden in \
+	"$src_dir/protocols" "$src_dir/connectors" "$src_dir/upstream" \
+	"$src_dir/internal/capability" "$src_dir/internal/plan" \
+	"$src_dir/internal/protocol/registry.go" "$src_dir/internal/service/registry.go"; do
+	test ! -e "$forbidden" || {
+		echo "removed gateway owner still exists: ${forbidden#"$root_dir/"}" >&2
+		exit 1
+	}
+done
 
 echo 'gateway scaffold structure: OK'

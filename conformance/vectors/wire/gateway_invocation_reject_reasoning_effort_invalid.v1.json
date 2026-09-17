@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.reasoning.effort_invalid",
+  "description": "Unknown reasoning effort values fail closed.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm", "schema_version": 1, "operation_id": "reject-reasoning-effort-1", "base_model": "model.reasoning",
+    "operation": "generate", "mode": "unary",
+    "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}], "reasoning": {"thinking": "adaptive", "effort": "extreme"}},
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

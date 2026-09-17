@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.reasoning.empty",
+  "description": "Present reasoning fields cannot collapse to the same value as omission.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm", "schema_version": 1, "operation_id": "reject-reasoning-empty-1", "base_model": "model.reasoning",
+    "operation": "generate", "mode": "unary",
+    "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}], "reasoning": {"thinking": ""}},
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

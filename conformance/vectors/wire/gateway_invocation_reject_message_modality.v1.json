@@ -1,0 +1,36 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.message_modality",
+  "description": "Actual message content modalities are checked even though the generate output modality remains text.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "reject-message-modality-1",
+    "base_model": "model.text",
+    "operation": "generate",
+    "mode": "unary",
+    "input": {
+      "kind": "generate",
+      "messages": [{
+        "role": "user",
+        "content": [{
+          "type": "image",
+          "artifact": {
+            "artifact_id": "artifact-1",
+            "revision": 1,
+            "representation": "original",
+            "kind": "image",
+            "mime_type": "image/png",
+            "content_ref": "content-1",
+            "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "size": 1
+          }
+        }]
+      }]
+    },
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "UNSUPPORTED_CAPABILITY"}
+}

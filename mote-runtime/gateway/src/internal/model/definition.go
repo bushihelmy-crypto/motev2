@@ -3,7 +3,6 @@ package model
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
 )
@@ -39,15 +38,6 @@ func (limits TokenLimits) validationError() string {
 	return ""
 }
 
-// TokenLimitsOverride patches known token limits. A nil pointer inherits the
-// catalog value; a pointer to zero explicitly changes the value to unknown.
-type TokenLimitsOverride struct {
-	ContextWindowTokens *int64
-	MaxInputTokens      *int64
-	MinOutputTokens     *int64
-	MaxOutputTokens     *int64
-}
-
 // Config is the common model configuration envelope. It deliberately contains
 // no family grouping: Router owns every grouping used to select a model.
 type Config struct {
@@ -57,46 +47,63 @@ type Config struct {
 	Capability  CapabilityConfig `json:"capability"`
 }
 
-// Override is the single model configuration patch delivered by Kernel.
-// Scalar pointers inherit when absent. A nil Capability inherits the built-in
-// capability; a non-nil value replaces it completely. For a custom model
-// absent from the built-in catalog, Capability must define the model.
-type Override struct {
-	BaseModel   string
-	Lifecycle   *Lifecycle
-	TokenLimits TokenLimitsOverride
-	Capability  *CapabilityConfig
-}
-
 // Definition is the immutable model description consumed by admission and a
-// call plan. It contains no service, protocol, endpoint, credential, routing,
+// admitted request. It contains no service, protocol, endpoint, credential, routing,
 // family, or pricing state.
 type Definition struct {
 	config Config
 }
 
-// ConfigError reports malformed catalog defaults or validated Kernel
-// overrides. Field identifies the rejected model-owned configuration path.
+// Operation returns the catalog operation for this model. Every catalog
+// definition has exactly one operation; a request may omit the operation and
+// let admission use this value as its default.
+func (definition Definition) Operation() api.Operation {
+	return definition.config.Capability.Operation
+}
+
+// ResolveOperation applies the request-level operation default. An empty
+// request value means that the caller omitted the field. A non-empty value
+// must match the operation declared by this model; Gateway never changes the
+// selected model to satisfy a different operation.
+func (definition Definition) ResolveOperation(requested *api.Operation) (api.Operation, error) {
+	if requested == nil {
+		return definition.Operation(), nil
+	}
+	if *requested == "" {
+		return "", &OperationMismatchError{
+			BaseModel: definition.BaseModel(),
+			Requested: "",
+			Available: definition.Operation(),
+		}
+	}
+	if *requested != definition.Operation() {
+		return "", &OperationMismatchError{
+			BaseModel: definition.BaseModel(),
+			Requested: *requested,
+			Available: definition.Operation(),
+		}
+	}
+	return *requested, nil
+}
+
+// ConfigError reports malformed model source data. Field identifies the
+// rejected model-owned configuration path.
 type ConfigError struct {
 	BaseModel string
 	Field     string
 	Reason    string
 }
 
-// ValidateBaseModel enforces the catalog identity vocabulary. A BaseModel is
-// an exact, bare model name; provider/service namespaces and surrounding
-// whitespace belong to source records or invocation routing, never here.
-func ValidateBaseModel(value string) error {
-	if value == "" {
-		return fmt.Errorf("must not be empty")
-	}
-	if strings.TrimSpace(value) != value {
-		return fmt.Errorf("must not contain surrounding whitespace")
-	}
-	if strings.Contains(value, "/") {
-		return fmt.Errorf("must be a bare model name without '/'")
-	}
-	return nil
+// OperationMismatchError reports a request operation that does not match the
+// operation declared by the selected model.
+type OperationMismatchError struct {
+	BaseModel string
+	Requested api.Operation
+	Available api.Operation
+}
+
+func (err *OperationMismatchError) Error() string {
+	return fmt.Sprintf("model %q supports operation %q, not requested %q", err.BaseModel, err.Available, err.Requested)
 }
 
 func (err *ConfigError) Error() string {
@@ -128,7 +135,7 @@ func (definition Definition) Capability(operation api.Operation) (Capability, bo
 }
 
 func normalizeConfig(config Config) (Config, error) {
-	if reason := ValidateBaseModel(config.BaseModel); reason != nil {
+	if reason := api.ValidateBaseModel(config.BaseModel); reason != nil {
 		return Config{}, configError(config.BaseModel, "base_model", reason.Error())
 	}
 	if config.Lifecycle != LifecycleActive && config.Lifecycle != LifecycleDeprecated && config.Lifecycle != LifecycleRetired {
@@ -173,6 +180,7 @@ func normalizeCapabilityConfig(baseModel string, config CapabilityConfig) (Capab
 		OutputModalities: config.OutputModalities,
 		HasGeneration:    config.Generation != nil,
 		HasEmbedding:     config.Embedding != nil,
+		HasReasoning:     config.Reasoning != nil,
 	}, shapePolicy); err != nil {
 		return CapabilityConfig{}, configError(baseModel, "capability", err.Error())
 	}
@@ -187,6 +195,11 @@ func normalizeCapabilityConfig(baseModel string, config CapabilityConfig) (Capab
 		return CapabilityConfig{}, configError(baseModel, "capability.embedding."+field, reason)
 	}
 	config.Embedding = embedding
+	reasoning, field, reason := normalizeReasoningPolicy(config.Reasoning)
+	if reason != "" {
+		return CapabilityConfig{}, configError(baseModel, "capability.reasoning."+field, reason)
+	}
+	config.Reasoning = reasoning
 	return config, nil
 }
 
@@ -211,29 +224,6 @@ func normalizeSet[T ~string](values []T, valid func(T) bool) ([]T, error) {
 		}
 	}
 	return normalized, nil
-}
-
-func applyOverride(base Config, override Override) (Config, error) {
-	result := base
-	if override.Lifecycle != nil {
-		result.Lifecycle = *override.Lifecycle
-	}
-	if override.TokenLimits.ContextWindowTokens != nil {
-		result.TokenLimits.ContextWindowTokens = *override.TokenLimits.ContextWindowTokens
-	}
-	if override.TokenLimits.MaxInputTokens != nil {
-		result.TokenLimits.MaxInputTokens = *override.TokenLimits.MaxInputTokens
-	}
-	if override.TokenLimits.MinOutputTokens != nil {
-		result.TokenLimits.MinOutputTokens = *override.TokenLimits.MinOutputTokens
-	}
-	if override.TokenLimits.MaxOutputTokens != nil {
-		result.TokenLimits.MaxOutputTokens = *override.TokenLimits.MaxOutputTokens
-	}
-	if override.Capability != nil {
-		result.Capability = *override.Capability
-	}
-	return normalizeConfig(result)
 }
 
 func configError(baseModel, field, reason string) error {

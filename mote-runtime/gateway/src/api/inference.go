@@ -15,6 +15,7 @@ type LLMInput struct {
 	Tools          []ToolDefinition     `json:"tools,omitempty"`
 	ToolChoice     *ToolChoice          `json:"tool_choice,omitempty"`
 	ResponseFormat *ResponseFormat      `json:"response_format,omitempty"`
+	Reasoning      *ReasoningConfig     `json:"reasoning,omitempty"`
 	Parameters     GenerationParameters `json:"parameters,omitempty"`
 }
 
@@ -22,16 +23,22 @@ type LLMInput struct {
 // already selected by Router; service, protocol, and credentials are bound by
 // Gateway configuration and never appear here.
 type LLMRequest struct {
-	Kind          RequestKind  `json:"kind"`
-	SchemaVersion int          `json:"schema_version"`
-	OperationID   string       `json:"operation_id"`
-	BaseModel     string       `json:"base_model"`
-	Operation     Operation    `json:"operation"`
-	Modality      Modality     `json:"modality"`
-	Mode          DeliveryMode `json:"mode"`
-	Input         LLMInput     `json:"input"`
-	Features      []Feature    `json:"features"`
-	Trace         TraceContext `json:"trace,omitempty"`
+	Kind          RequestKind `json:"kind"`
+	SchemaVersion int         `json:"schema_version"`
+	OperationID   string      `json:"operation_id"`
+	BaseModel     string      `json:"base_model"`
+	// Operation is optional on the wire. Admission fills it from the selected
+	// model's catalog operation when omitted, then validates the normalized
+	// request against the model and profile.
+	Operation *Operation `json:"operation,omitempty"`
+	// Modality is normalized by admission from Operation and is not an inbound
+	// wire field. It remains on the typed request for downstream observation and
+	// adapter use after admission.
+	Modality Modality     `json:"-"`
+	Mode     DeliveryMode `json:"mode"`
+	Input    LLMInput     `json:"input"`
+	Features []Feature    `json:"features,omitempty"`
+	Trace    TraceContext `json:"trace,omitempty"`
 }
 
 // LLMOutput is the finalized model answer consumed by Kernel. Tool calls are

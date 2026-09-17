@@ -31,16 +31,21 @@ type MediaInput struct {
 // MediaRequest is the service- and protocol-neutral Execution → Gateway request for a
 // media operation. It is not an alias of LLMRequest.
 type MediaRequest struct {
-	Kind          RequestKind  `json:"kind"`
-	SchemaVersion int          `json:"schema_version"`
-	OperationID   string       `json:"operation_id"`
-	BaseModel     string       `json:"base_model"`
-	Operation     Operation    `json:"operation"`
-	Modality      Modality     `json:"modality"`
-	Mode          DeliveryMode `json:"mode"`
-	Input         MediaInput   `json:"input"`
-	Features      []Feature    `json:"features"`
-	Trace         TraceContext `json:"trace,omitempty"`
+	Kind          RequestKind `json:"kind"`
+	SchemaVersion int         `json:"schema_version"`
+	OperationID   string      `json:"operation_id"`
+	BaseModel     string      `json:"base_model"`
+	// Operation is optional on the wire. Admission fills it from the selected
+	// model's catalog operation when omitted, then validates the normalized
+	// request against the model and profile.
+	Operation *Operation `json:"operation,omitempty"`
+	// Modality is normalized by admission from Operation and is not an inbound
+	// wire field.
+	Modality Modality     `json:"-"`
+	Mode     DeliveryMode `json:"mode"`
+	Input    MediaInput   `json:"input"`
+	Features []Feature    `json:"features,omitempty"`
+	Trace    TraceContext `json:"trace,omitempty"`
 }
 
 // MediaOutput is a finalized media result. Bytes are represented by artifact

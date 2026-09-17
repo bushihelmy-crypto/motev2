@@ -29,6 +29,10 @@ class PersistenceConflictError(RuntimeError):
     """The absent/revision/content precondition does not hold."""
 
 
+class LatestHeadMovedError(PersistenceConflictError):
+    """The latest index changed after a caller resolved its read fence."""
+
+
 class PersistenceTombstoneError(RuntimeError):
     """A deliberately removed run must not be recreated as never-created."""
 
@@ -66,6 +70,36 @@ class AgentRunKey:
             return cls(run.agent_id, run.run_id)
         except (AttributeError, TypeError, ValueError) as error:
             raise PersistenceContractError("Agent run key is malformed") from error
+
+
+@dataclass(frozen=True, slots=True)
+class AgentLatestHead:
+    """The durable latest-run index for one Agent namespace.
+
+    A head is deliberately only an index. Graph state, value evidence,
+    Config provenance, and the AgentSession envelope remain owned by the
+    ``AgentRunKey`` family named by ``key``. ``generation`` fences a latest
+    lookup against an A→B→A move while the invocation is being admitted.
+    """
+
+    key: AgentRunKey
+    generation: int
+
+    def __post_init__(self) -> None:
+        if type(self.key) is not AgentRunKey:
+            raise PersistenceContractError("latest head requires an exact Agent run key")
+        if type(self.generation) is not int or self.generation < 1:
+            raise PersistenceContractError("latest head generation must be a positive integer")
+        AgentRunKey.admit(self.key)
+
+    @classmethod
+    def admit(cls, head: "AgentLatestHead", /) -> "AgentLatestHead":
+        if type(head) is not cls:
+            raise PersistenceContractError("persistence returned an unsupported latest head")
+        try:
+            return cls(AgentRunKey.admit(head.key), head.generation)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise PersistenceContractError("persistence returned a malformed latest head") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,11 +188,23 @@ class PersistencePort(Protocol[GraphValueT]):
 
     Commit validates authority, scoped revision/absence and complete request
     identity atomically with state, frames, the optional AgentSession snapshot,
-    and receipt. An identical key/content is an exact replay; different content
-    is a conflict. Uncertain writes return CommitUnknown, not a transport
-    exception purporting to prove non-application.
-    Reconcile checks the same immutable request, not just its candidate state.
+    and receipt. A root revision-0 commit must upsert the latest head in that
+    same durable transaction (or an equivalent reconciled boundary). An
+    identical key/content is an exact replay; different content is a conflict.
+    Uncertain writes return CommitUnknown, not a transport exception purporting
+    to prove non-application.
+    Reconcile checks the same immutable request, not just its candidate state;
+    for a root request it may return ``CommitApplied`` only after proving the
+    family receipt and its latest-head update as one durable fact.
+
+    ``load_latest`` is an Agent-scoped, linear-consistent metadata read. It
+    returns only the exact family key and a generation fence; callers must
+    acquire authority for that key and then pass the returned head to
+    ``load``. It must never synthesize a head from a stale cache or from an
+    ordering of user-supplied run IDs.
     """
+
+    async def load_latest(self, agent_id: str, /) -> AgentLatestHead | NeverCreated: ...
 
     async def load(
         self,
@@ -166,6 +212,7 @@ class PersistencePort(Protocol[GraphValueT]):
         /,
         *,
         children: tuple[ScopeRunCoordinate, ...] = (),
+        expected_latest: AgentLatestHead | None = None,
     ) -> GraphCheckpoint[GraphValueT] | NeverCreated: ...
 
     async def commit(
@@ -184,6 +231,7 @@ class PersistencePort(Protocol[GraphValueT]):
 
 
 __all__ = [
+    "AgentLatestHead",
     "AgentRunKey",
     "AuthorityBusyError",
     "AuthorityLostError",
@@ -195,6 +243,7 @@ __all__ = [
     "CommitUnknown",
     "CommitUnresolvedError",
     "ExecutionAuthority",
+    "LatestHeadMovedError",
     "NeverCreated",
     "PersistenceConflictError",
     "PersistenceContractError",

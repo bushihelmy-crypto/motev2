@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import signal
@@ -10,17 +11,25 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from tests.agent.persistence_fixtures import ProcessCommitRecord
 from tests.agent.subprocess_worker import (
     PROCESS_CRASH_EXIT,
     RUNTIME_CRASH_EXIT,
     CrashBoundary,
     Phase,
+    ProcessAuthority,
+    ProcessPersistence,
+    RequestMode,
     Scenario,
 )
+from tests.execution.persistence_fixtures import STRING_CODEC, linear_graph
 
+from mote_kernel.agent import Agent, AgentCompleted, AgentResume, AgentStart
+from mote_kernel.execution import Graph
 from mote_kernel.execution.graph_result import GraphInterruptView
 from mote_kernel.execution.persistence import GraphPersistenceCommit
 from mote_kernel.persistence import NeverCreated
+from mote_kernel.session import AgentSession, AgentSessionCodec
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +96,22 @@ PROCESS_CASES = (
 )
 
 
+def _session_codec() -> AgentSessionCodec[str, str]:
+    def encode(hook_state: str, context: str) -> bytes:
+        return json.dumps((hook_state, context), separators=(",", ":")).encode()
+
+    def decode(payload: bytes) -> tuple[str, str]:
+        decoded: object = json.loads(payload)
+        if type(decoded) is not list:
+            raise ValueError("process session payload must be a JSON list")
+        values = cast(list[object], decoded)
+        if len(values) != 2 or any(type(value) is not str for value in values):
+            raise ValueError("process session payload must contain two strings")
+        return cast(str, values[0]), cast(str, values[1])
+
+    return AgentSessionCodec("process-session", 1, encode, decode)
+
+
 def _root() -> Path:
     return Path(__file__).parents[2]
 
@@ -100,8 +125,13 @@ def _command(
     phase: Phase,
     boundary: CrashBoundary,
     directory: Path,
+    *,
+    agent_id: str | None = None,
+    request_mode: RequestMode = RequestMode.DEFAULT,
+    run_id: str | None = None,
+    value: str | None = None,
 ) -> list[str]:
-    return [
+    command = [
         sys.executable,
         "-m",
         "tests.agent.subprocess_worker",
@@ -110,6 +140,19 @@ def _command(
         boundary,
         str(directory),
     ]
+    if request_mode is not RequestMode.DEFAULT:
+        if agent_id is None:
+            raise ValueError("custom process requests require an Agent identity")
+        command.extend((agent_id, request_mode))
+        if request_mode in (RequestMode.START, RequestMode.RESUME_EXACT):
+            if run_id is None:
+                raise ValueError("this process request requires a run ID")
+            command.append(run_id)
+        if request_mode is RequestMode.START:
+            if value is None:
+                raise ValueError("a process start requires an input value")
+            command.append(value)
+    return command
 
 
 def _run(
@@ -117,9 +160,23 @@ def _run(
     phase: Phase,
     boundary: CrashBoundary,
     directory: Path,
+    *,
+    agent_id: str | None = None,
+    request_mode: RequestMode = RequestMode.DEFAULT,
+    run_id: str | None = None,
+    value: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        _command(scenario, phase, boundary, directory),
+        _command(
+            scenario,
+            phase,
+            boundary,
+            directory,
+            agent_id=agent_id,
+            request_mode=request_mode,
+            run_id=run_id,
+            value=value,
+        ),
         cwd=_root(),
         env=_environment(),
         capture_output=True,
@@ -133,8 +190,9 @@ def _commits(directory: Path) -> tuple[GraphPersistenceCommit[str], ...]:
     decoded: object = pickle.loads((directory / "commits.pickle").read_bytes())
     assert type(decoded) is tuple
     decoded_records = cast(tuple[object, ...], decoded)
-    assert all(type(item) is GraphPersistenceCommit for item in decoded_records)
-    return cast(tuple[GraphPersistenceCommit[str], ...], decoded_records)
+    assert all(type(item) is ProcessCommitRecord for item in decoded_records)
+    records = cast(tuple[ProcessCommitRecord[str], ...], decoded_records)
+    return tuple(record.request for record in records)
 
 
 def _calls(directory: Path) -> tuple[CallRecord, ...]:
@@ -309,7 +367,7 @@ def test_nested_interrupts_are_consumed_once_across_new_agent_processes(tmp_path
     ("corruption", "message"),
     (
         (b"not a pickle", "the process test journal is malformed"),
-        (pickle.dumps((NeverCreated(),)), "the process test journal must contain exact Graph commits"),
+        (pickle.dumps((NeverCreated(),)), "the process test journal must contain exact keyed Graph commit records"),
     ),
     ids=("invalid-serialization", "wrong-record"),
 )
@@ -398,3 +456,146 @@ def test_runtime_crash_remains_outside_kernel_commit_accounting(tmp_path: Path) 
     _assert_completed_process(replay)
     assert (tmp_path / "runtime.log").read_text().splitlines() == runtime_after
     assert (tmp_path / "commits.pickle").read_bytes() == journal
+
+
+def test_process_journal_isolates_agents_runs_and_sessions_across_processes(tmp_path: Path) -> None:
+    scenario = Scenario.FAMILY_ISOLATION
+
+    for agent_id, run_id, value in (
+        ("x", "run-old", "x-old"),
+        ("x", "run-new", "x-new"),
+        ("y", "run-a", "y-only"),
+    ):
+        started = _run(
+            scenario,
+            Phase.CAPTURE,
+            CrashBoundary.NONE,
+            tmp_path,
+            agent_id=agent_id,
+            request_mode=RequestMode.START,
+            run_id=run_id,
+            value=value,
+        )
+        _assert_completed_process(started)
+        assert (tmp_path / "result").read_text() == f"{run_id}|{value}-first-second|{value}-hook|{value}-context"
+
+    latest_x = _run(
+        scenario,
+        Phase.RECOVER,
+        CrashBoundary.NONE,
+        tmp_path,
+        agent_id="x",
+        request_mode=RequestMode.RESUME_LATEST,
+    )
+    _assert_completed_process(latest_x)
+    assert (tmp_path / "result").read_text() == "run-new|x-new-first-second|x-new-hook|x-new-context"
+
+    latest_y = _run(
+        scenario,
+        Phase.RECOVER,
+        CrashBoundary.NONE,
+        tmp_path,
+        agent_id="y",
+        request_mode=RequestMode.RESUME_LATEST,
+    )
+    _assert_completed_process(latest_y)
+    assert (tmp_path / "result").read_text() == "run-a|y-only-first-second|y-only-hook|y-only-context"
+
+    historical_x = _run(
+        scenario,
+        Phase.REPLAY,
+        CrashBoundary.NONE,
+        tmp_path,
+        agent_id="x",
+        request_mode=RequestMode.RESUME_EXACT,
+        run_id="run-old",
+    )
+    _assert_completed_process(historical_x)
+    assert (tmp_path / "result").read_text() == "run-old|x-old-first-second|x-old-hook|x-old-context"
+
+    decoded: object = pickle.loads((tmp_path / "commits.pickle").read_bytes())
+    assert type(decoded) is tuple
+    records = cast(tuple[ProcessCommitRecord[str], ...], decoded)
+    roots = tuple(
+        record for record in records if not record.request.scope and record.request.candidate_state.revision == 0
+    )
+    assert all(record.root_head is not None and record.root_head.key == record.key for record in roots)
+    assert {(record.key.agent_id, record.root_head.generation) for record in roots if record.root_head is not None} == {
+        ("x", 1),
+        ("x", 2),
+        ("y", 1),
+    }
+    assert {record.key.agent_id for record in records} == {"x", "y"}
+    assert {record.key.run_id for record in records if record.key.agent_id == "x" and not record.request.scope} == {
+        "run-old",
+        "run-new",
+    }
+    assert {record.key.run_id for record in records if record.key.agent_id == "y" and not record.request.scope} == {
+        "run-a",
+    }
+
+
+def test_process_journal_latest_uses_the_generation_chain_not_append_order(tmp_path: Path) -> None:
+    scenario = Scenario.FAMILY_ISOLATION
+    for run_id, value in (("run-old", "old"), ("run-new", "new")):
+        started = _run(
+            scenario,
+            Phase.CAPTURE,
+            CrashBoundary.NONE,
+            tmp_path,
+            agent_id="x",
+            request_mode=RequestMode.START,
+            run_id=run_id,
+            value=value,
+        )
+        _assert_completed_process(started)
+
+    decoded: object = pickle.loads((tmp_path / "commits.pickle").read_bytes())
+    assert type(decoded) is tuple
+    decoded_records = cast(tuple[object, ...], decoded)
+    assert all(type(item) is ProcessCommitRecord for item in decoded_records)
+    records = cast(tuple[ProcessCommitRecord[str], ...], decoded_records)
+    old_records = tuple(record for record in records if record.key.run_id == "run-old")
+    new_records = tuple(record for record in records if record.key.run_id == "run-new")
+    assert old_records and new_records
+    (tmp_path / "commits.pickle").write_bytes(pickle.dumps((*new_records, *old_records)))
+
+    latest = _run(
+        scenario,
+        Phase.RECOVER,
+        CrashBoundary.NONE,
+        tmp_path,
+        agent_id="x",
+        request_mode=RequestMode.RESUME_LATEST,
+    )
+    _assert_completed_process(latest)
+    assert (tmp_path / "result").read_text() == "run-new|new-first-second|new-hook|new-context"
+
+
+@pytest.mark.asyncio
+async def test_process_journal_keeps_multiple_families_in_one_persistence_instance(tmp_path: Path) -> None:
+    phase = Phase.CAPTURE
+    authority = ProcessAuthority(tmp_path, phase)
+    persistence = ProcessPersistence(authority, tmp_path, Scenario.FAMILY_ISOLATION, phase, CrashBoundary.NONE)
+    calls: list[str] = []
+    agent = Agent[str, str, str](
+        "x",
+        lambda _config: linear_graph(calls),
+        STRING_CODEC,
+        persistence,
+        authority,
+        session_codec=_session_codec(),
+    )
+
+    await agent.run(AgentStart("old", Graph.values(value="old"), AgentSession("old-hook", "old-context")))
+    await agent.run(AgentStart("new", Graph.values(value="new"), AgentSession("new-hook", "new-context")))
+
+    latest = await agent.run(AgentResume())
+    historical = await agent.run(AgentResume("old"))
+
+    assert isinstance(latest, AgentCompleted)
+    assert isinstance(historical, AgentCompleted)
+    assert latest.run_id == "new"
+    assert historical.run_id == "old"
+    assert latest.session == AgentSession("new-hook", "new-context")
+    assert historical.session == AgentSession("old-hook", "old-context")

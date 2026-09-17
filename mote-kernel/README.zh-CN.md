@@ -60,8 +60,11 @@ descriptor、birth commit、codec、payload、Config cursor（含缺席）以及
 权威读取、Graph 装配/准入、执行、业务结果投影、权限释放的顺序完成；执行任务全部收敛后才释放权限。
 
 - `AgentStart(run_id, values)` 只创建从未存在的 run；已有 run 必须报冲突。
-- `AgentResume(run_id, answers=())` 读取并继续已有 run，也用于终态回放。`AgentAnswer` 将返回的精确 interrupt
-  问题与 typed 业务回答配对；调用者不接触 state、continuation 或逐次替换 commit 的入口。
+- `AgentResume(run_id=None, answers=())` 省略 `run_id` 时恢复该 Agent 的 durable latest run；传入字符串则按
+  exact key 恢复指定历史 run（也支持终态回放）。`AgentAnswer` 将返回的精确 interrupt 问题与 typed 业务回答
+  配对；调用者不接触 state、continuation 或逐次替换 commit 的入口。
+- latest 只是 `AgentLatestHead` 索引；`(agent_id, run_id)` family 将 Graph state、值 evidence、Config cursor
+  和 Session 一起保存，Persistence adapter 用 head generation 对 family 读取加栅栏。
 - 可选 `AgentConfig` 提供 Config store/resolver 及精确初始 key；恢复只解析 state/frame 引用的历史快照。
   Graph 自己的 Config 更新 command 仍由 Observe 消费并随 settlement 持久化；节点仍可以在显式返回的完整
   `AgentSession` successor 中放入已解析的 Config，Kernel 不猜测也不合并这个字段。这里的 Config snapshot cursor

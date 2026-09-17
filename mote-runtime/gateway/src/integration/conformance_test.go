@@ -2,10 +2,10 @@
 
 package integration
 
-// This runner is deliberately small and dependency-free. The JSON Schemas in
-// conformance/ are the source of truth; the runner adds the cross-document
-// invariants that JSON Schema cannot express (profile/operation alignment,
-// request/response correlation, and terminal-only stream semantics).
+// This runner keeps policy in the authoritative JSON Schemas in conformance/;
+// it adds only the cross-document invariants that JSON Schema cannot express
+// (profile/operation alignment, request/response correlation, and terminal-only
+// stream semantics).
 
 import (
 	"bytes"
@@ -15,18 +15,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/admission"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/model"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/testkit"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/ports"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 const (
 	gatewayInvocationProtocol = "gateway_invocation"
-	gatewayInvocationVersion  = 2
-	gatewayInvocationSchema   = "gateway_invocation.v2.schema.json"
+	gatewayInvocationVersion  = 1
+	gatewayInvocationSchema   = "gateway_invocation.v1.schema.json"
 )
 
 type conformanceManifest struct {
@@ -71,13 +77,28 @@ type admissionFailure struct {
 	cause error
 }
 
+type protocolSchemas struct {
+	manifest *jsonschema.Schema
+	vector   *jsonschema.Schema
+	request  *jsonschema.Schema
+	response *jsonschema.Schema
+}
+
 func (e *admissionFailure) Error() string { return e.cause.Error() }
 func (e *admissionFailure) Unwrap() error { return e.cause }
 
 func TestGatewayConformanceVectors(t *testing.T) {
 	root := conformanceRoot(t)
-	assertProtocolSchema(t, root)
-	manifest := readJSONFile[conformanceManifest](t, filepath.Join(root, "manifest.json"))
+	schemas := assertProtocolSchema(t, root)
+	validator := fixtureValidator(t)
+	manifestData, err := os.ReadFile(filepath.Join(root, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read conformance manifest: %v", err)
+	}
+	if err := validateSchema(schemas.manifest, manifestData); err != nil {
+		t.Fatalf("manifest does not satisfy its authoritative schema: %v", err)
+	}
+	manifest := readJSON[conformanceManifest](t, manifestData, "manifest.json")
 	if manifest.ManifestVersion != 1 {
 		t.Fatalf("unsupported conformance manifest version: %d", manifest.ManifestVersion)
 	}
@@ -93,7 +114,14 @@ func TestGatewayConformanceVectors(t *testing.T) {
 	caseIDs := make(map[string]struct{}, len(paths))
 	for _, relative := range paths {
 		casePath := safeCasePath(t, root, relative)
-		vector := readJSONFile[vectorCase](t, casePath)
+		vectorData, err := os.ReadFile(casePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", relative, err)
+		}
+		if err := validateSchema(schemas.vector, vectorData); err != nil {
+			t.Fatalf("%s does not satisfy its authoritative case schema: %v", relative, err)
+		}
+		vector := readJSON[vectorCase](t, vectorData, relative)
 		if vector.CaseVersion != 1 {
 			t.Fatalf("%s: unsupported case version %d", relative, vector.CaseVersion)
 		}
@@ -114,9 +142,12 @@ func TestGatewayConformanceVectors(t *testing.T) {
 		expect := readJSON[vectorExpectation](t, vector.Expect, relative+" expect")
 		switch expect.Outcome {
 		case "accept":
-			request, err := admitProfileRequest(vector.Protocol.Profile, vector.Input)
+			request, err := admitProfileRequest(schemas.request, validator, vector.Protocol.Profile, vector.Input)
 			if err != nil {
 				t.Fatalf("%s: accepted request is not admissible: %v", relative, err)
+			}
+			if err := validateSchema(schemas.response, expect.Value); err != nil {
+				t.Fatalf("%s: accepted response does not satisfy the authoritative schema: %v", relative, err)
 			}
 			response, err := admitProfileResponse(vector.Protocol.Profile, request, expect.Value)
 			if err != nil {
@@ -130,7 +161,7 @@ func TestGatewayConformanceVectors(t *testing.T) {
 			if expect.ErrorCode == "" {
 				t.Fatalf("%s: rejection must carry an error code", relative)
 			}
-			_, err := admitProfileRequest(vector.Protocol.Profile, vector.Input)
+			_, err := admitProfileRequest(schemas.request, validator, vector.Protocol.Profile, vector.Input)
 			if err == nil {
 				t.Fatalf("%s: rejection vector was admitted", relative)
 			}
@@ -143,14 +174,127 @@ func TestGatewayConformanceVectors(t *testing.T) {
 	}
 }
 
-func assertProtocolSchema(t *testing.T, root string) {
+func TestAuthoritativeSchemaRejectsAliasesAndNestedShapeViolations(t *testing.T) {
+	root := conformanceRoot(t)
+	schemas := assertProtocolSchema(t, root)
+	valid := readJSONFile[vectorCase](t, filepath.Join(root, "vectors", "wire", "gateway_invocation_unary_text.v1.json"))
+	var object map[string]any
+	if err := json.Unmarshal(valid.Input, &object); err != nil {
+		t.Fatalf("decode fixture input: %v", err)
+	}
+	cases := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "case-variant-operation", mutate: func(value map[string]any) {
+			value["Operation"] = value["operation"]
+			delete(value, "operation")
+		}},
+		{name: "null-features", mutate: func(value map[string]any) {
+			value["features"] = nil
+		}},
+		{name: "null-reasoning", mutate: func(value map[string]any) {
+			input := value["input"].(map[string]any)
+			input["reasoning"] = nil
+		}},
+		{name: "case-variant-reasoning", mutate: func(value map[string]any) {
+			input := value["input"].(map[string]any)
+			input["REASONING"] = map[string]any{"thinking": "adaptive"}
+		}},
+		{name: "empty-operation", mutate: func(value map[string]any) {
+			value["operation"] = ""
+		}},
+		{name: "empty-message", mutate: func(value map[string]any) {
+			input := value["input"].(map[string]any)
+			input["messages"] = []any{map[string]any{}}
+		}},
+		{name: "invalid-operation-id", mutate: func(value map[string]any) {
+			value["operation_id"] = "!"
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidate := cloneObject(object)
+			testCase.mutate(candidate)
+			data, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatalf("marshal candidate: %v", err)
+			}
+			if err := validateSchema(schemas.request, data); err == nil {
+				t.Fatalf("authoritative schema accepted %s", testCase.name)
+			}
+		})
+	}
+}
+
+func TestAuthoritativeResponseSchemaRejectsNonCanonicalRuntimeIdentities(t *testing.T) {
+	root := conformanceRoot(t)
+	schemas := assertProtocolSchema(t, root)
+	vector := readJSONFile[vectorCase](t, filepath.Join(root, "vectors", "wire", "gateway_invocation_unary_text.v1.json"))
+	expect := readJSON[vectorExpectation](t, vector.Expect, "unary text expectation")
+	var response map[string]any
+	if err := json.Unmarshal(expect.Value, &response); err != nil {
+		t.Fatalf("decode fixture response: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "protocol", mutate: func(value map[string]any) {
+			observation := value["observation"].(map[string]any)
+			model := observation["model"].(map[string]any)
+			model["protocol_id"] = "Protocol/Bad"
+		}},
+		{name: "service", mutate: func(value map[string]any) {
+			observation := value["observation"].(map[string]any)
+			model := observation["model"].(map[string]any)
+			model["service_kind"] = "Service/Bad"
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidate := cloneObject(response)
+			testCase.mutate(candidate)
+			data, err := json.Marshal(candidate)
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			if err := validateSchema(schemas.response, data); err == nil {
+				t.Fatalf("response schema accepted non-canonical %s identity", testCase.name)
+			}
+		})
+	}
+}
+
+func cloneObject(value map[string]any) map[string]any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		panic(err)
+	}
+	return cloned
+}
+
+func assertProtocolSchema(t *testing.T, root string) protocolSchemas {
 	t.Helper()
-	document := readJSONFile[map[string]json.RawMessage](t, filepath.Join(root, "schemas", "protocol", gatewayInvocationSchema))
+	manifest, err := compileSchema(filepath.Join(root, "schemas", "case", "manifest.v1.schema.json"))
+	if err != nil {
+		t.Fatalf("compile authoritative manifest schema: %v", err)
+	}
+	vector, err := compileSchema(filepath.Join(root, "schemas", "case", "vector.v1.schema.json"))
+	if err != nil {
+		t.Fatalf("compile authoritative vector schema: %v", err)
+	}
+	schemaPath := filepath.Join(root, "schemas", "protocol", gatewayInvocationSchema)
+	document := readJSONFile[map[string]json.RawMessage](t, schemaPath)
 	var dialect, schemaID string
 	if err := json.Unmarshal(document["$schema"], &dialect); err != nil || dialect != "https://json-schema.org/draft/2020-12/schema" {
 		t.Fatalf("unexpected Gateway protocol schema dialect: %q (%v)", dialect, err)
 	}
-	if err := json.Unmarshal(document["$id"], &schemaID); err != nil || schemaID != "https://mote.dev/conformance/protocol/gateway_invocation.v2.schema.json" {
+	if err := json.Unmarshal(document["$id"], &schemaID); err != nil || schemaID != "https://mote.dev/conformance/protocol/gateway_invocation.v1.schema.json" {
 		t.Fatalf("unexpected Gateway protocol schema id: %q (%v)", schemaID, err)
 	}
 	var definitions map[string]json.RawMessage
@@ -162,126 +306,131 @@ func assertProtocolSchema(t *testing.T, root string) {
 			t.Fatalf("Gateway protocol schema must expose %q", name)
 		}
 	}
+	compiler := jsonschema.NewCompiler()
+	request, err := compiler.Compile(schemaPath)
+	if err != nil {
+		t.Fatalf("compile authoritative Gateway request schema: %v", err)
+	}
+	response, err := compiler.Compile(schemaPath + "#/$defs/response")
+	if err != nil {
+		t.Fatalf("compile authoritative Gateway response schema: %v", err)
+	}
+	return protocolSchemas{manifest: manifest, vector: vector, request: request, response: response}
 }
 
-func admitProfileRequest(profile string, data []byte) (any, error) {
+func compileSchema(path string) (*jsonschema.Schema, error) {
+	compiler := jsonschema.NewCompiler()
+	return compiler.Compile(path)
+}
+
+func fixtureValidator(t *testing.T) admission.Validator {
+	t.Helper()
+	reasoningDefault := api.ThinkingAdaptive
+	reasoningEffort := api.ReasoningEffortMedium
+	reasoning := &ports.ModelReasoning{
+		ThinkingModes: []ports.ModelThinkingMode{
+			{Thinking: api.ThinkingDisabled},
+			{Thinking: api.ThinkingEnabled, Efforts: []api.ReasoningEffort{api.ReasoningEffortLow, api.ReasoningEffortMedium, api.ReasoningEffortHigh}},
+			{Thinking: api.ThinkingAdaptive, Efforts: []api.ReasoningEffort{api.ReasoningEffortLow, api.ReasoningEffortMedium, api.ReasoningEffortHigh}, DefaultEffort: &reasoningEffort},
+		},
+		DefaultThinking: &reasoningDefault,
+	}
+	records := []ports.ModelRecord{
+		fixtureModel("chatgpt-4o", api.OperationGenerate, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityText}, []api.Feature{api.FeatureToolCalls}, nil),
+		fixtureModel("model.text", api.OperationGenerate, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityText}, nil, nil),
+		fixtureModel("model.reasoning", api.OperationGenerate, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityText}, nil, reasoning),
+		fixtureModel("model.tools", api.OperationGenerate, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityText}, []api.Feature{api.FeatureToolCalls}, nil),
+		fixtureModel("model.realtime", api.OperationRealtime, []api.Modality{api.ModalityAudio, api.ModalityText}, []api.Modality{api.ModalityText, api.ModalityAudio}, nil, nil),
+		fixtureModel("model.image", api.OperationImageGeneration, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityImage}, nil, nil),
+		fixtureModel("model.audio", api.OperationAudioGeneration, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityAudio}, nil, nil),
+		fixtureModel("model.music", api.OperationMusicGeneration, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityMusic}, nil, nil),
+		fixtureModel("model.video", api.OperationVideoGeneration, []api.Modality{api.ModalityText}, []api.Modality{api.ModalityVideo}, nil, nil),
+		fixtureModel("model.transcribe", api.OperationAudioTranscription, []api.Modality{api.ModalityAudio}, []api.Modality{api.ModalityText}, nil, nil),
+	}
+	catalog, err := model.NewCatalogFromRecords(records)
+	if err != nil {
+		t.Fatalf("construct conformance fixture catalog: %v", err)
+	}
+	validator := admission.New(admission.Config{
+		Catalog:  catalog,
+		Protocol: testkit.ProtocolCapabilities(),
+		Service: testkit.ServiceCapabilities(
+			"chatgpt-4o", "model.text", "model.reasoning", "model.tools", "model.realtime",
+			"model.image", "model.audio", "model.music", "model.video", "model.transcribe",
+		),
+	})
+	return validator
+}
+
+func fixtureModel(baseModel string, operation api.Operation, inputs, outputs []api.Modality, features []api.Feature, reasoning *ports.ModelReasoning) ports.ModelRecord {
+	return ports.ModelRecord{BaseModel: baseModel, Lifecycle: ports.ModelLifecycleActive, Capability: ports.ModelCapability{
+		Operation:        operation,
+		InputModalities:  inputs,
+		OutputModalities: outputs,
+		Features:         features,
+		Reasoning:        reasoning,
+	}}
+}
+
+func admitProfileRequest(schema *jsonschema.Schema, validator admission.Validator, profile string, data []byte) (any, error) {
+	if err := validateSchema(schema, data); err != nil {
+		return nil, invalid("request does not satisfy the authoritative schema: %v", err)
+	}
 	switch profile {
 	case string(api.ProfileKernelLLM):
-		request, err := admitLLMRequest(data)
-		return request, err
+		decoded, err := decodeLLMFrame(data)
+		if err != nil {
+			return api.LLMRequest{}, invalid("decode LLM request: %v", err)
+		}
+		admitted, err := validator.AdmitLLMFrame(decoded)
+		if err != nil {
+			return api.LLMRequest{}, err
+		}
+		return admitted.Request(), nil
 	case string(api.ProfileExecutionMedia):
-		request, err := admitMediaRequest(data)
-		return request, err
+		decoded, err := decodeMediaFrame(data)
+		if err != nil {
+			return api.MediaRequest{}, invalid("decode media request: %v", err)
+		}
+		admitted, err := validator.AdmitMediaFrame(decoded)
+		if err != nil {
+			return api.MediaRequest{}, err
+		}
+		return admitted.Request(), nil
 	default:
 		return nil, invalid("unknown profile %q", profile)
 	}
 }
 
-func admitLLMRequest(data []byte) (api.LLMRequest, error) {
+func decodeLLMFrame(data []byte) (api.LLMRequestFrame, error) {
 	var request api.LLMRequest
 	if err := decodeStrict(data, &request); err != nil {
-		return request, invalid("decode LLM request: %v", err)
+		return api.LLMRequestFrame{}, err
 	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "base_model", "operation", "modality", "mode", "input", "features"); err != nil {
-		return request, invalid("LLM request: %v", err)
-	}
-	if request.Kind != api.RequestKindLLM {
-		return request, invalid("LLM request kind must be %q", api.RequestKindLLM)
-	}
-	if request.SchemaVersion != gatewayInvocationVersion {
-		return request, invalid("unsupported schema_version %d", request.SchemaVersion)
-	}
-	if request.Operation == api.OperationGenerate {
-		if request.Modality != api.ModalityText || (request.Mode != api.ModeUnary && request.Mode != api.ModeServerStream) {
-			return request, invalid("generate requires text modality and unary/server_stream mode")
-		}
-		if request.Input.Kind != "generate" || len(request.Input.Messages) == 0 {
-			return request, invalid("generate input requires kind=generate and messages")
-		}
-	} else if request.Operation == api.OperationRealtime {
-		if request.Modality != api.ModalityAudio || request.Mode != api.ModeDuplex || request.Input.Kind != "realtime" {
-			return request, invalid("realtime requires audio modality, duplex mode, and kind=realtime")
-		}
-	} else {
-		return request, invalid("operation %q is outside kernel_llm profile", request.Operation)
-	}
-	if err := validateRequestIdentity(request.OperationID, request.BaseModel); err != nil {
-		return request, invalid("LLM request: %v", err)
-	}
-	if err := validateFeatures(request.Features, true); err != nil {
-		return request, invalid("LLM request: %v", err)
-	}
-	return request, nil
+	return api.LLMRequestFrame{Request: request}, nil
 }
 
-func admitMediaRequest(data []byte) (api.MediaRequest, error) {
+func decodeMediaFrame(data []byte) (api.MediaRequestFrame, error) {
 	var request api.MediaRequest
 	if err := decodeStrict(data, &request); err != nil {
-		return request, invalid("decode media request: %v", err)
+		return api.MediaRequestFrame{}, err
 	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "base_model", "operation", "modality", "mode", "input", "features"); err != nil {
-		return request, invalid("media request: %v", err)
-	}
-	if request.Kind != api.RequestKindMedia {
-		return request, invalid("media request kind must be %q", api.RequestKindMedia)
-	}
-	if request.SchemaVersion != gatewayInvocationVersion {
-		return request, invalid("unsupported schema_version %d", request.SchemaVersion)
-	}
-	if err := validateRequestIdentity(request.OperationID, request.BaseModel); err != nil {
-		return request, invalid("media request: %v", err)
-	}
-	if request.Mode != api.ModeUnary && request.Mode != api.ModeServerStream && request.Mode != api.ModeAsync {
-		return request, invalid("media profile does not support mode %q", request.Mode)
-	}
-	wantModality, wantKind := mediaOperationShape(request.Operation)
-	if wantModality == "" || request.Modality != wantModality || request.Input.Kind != wantKind {
-		return request, invalid("operation/modality/input kind combination is invalid")
-	}
-	if err := validateMediaInput(request); err != nil {
-		return request, invalid("media request: %v", err)
-	}
-	if err := validateFeatures(request.Features, false); err != nil {
-		return request, invalid("media request: %v", err)
-	}
-	return request, nil
+	return api.MediaRequestFrame{Request: request}, nil
 }
 
-func validateMediaInput(request api.MediaRequest) error {
-	switch request.Operation {
-	case api.OperationImageGeneration, api.OperationMusicGeneration, api.OperationVideoGeneration:
-		if strings.TrimSpace(request.Input.Prompt) == "" {
-			return errors.New("prompt is required")
-		}
-	case api.OperationAudioGeneration:
-		if strings.TrimSpace(request.Input.Text) == "" || strings.TrimSpace(request.Input.Voice) == "" {
-			return errors.New("text and voice are required")
-		}
-	case api.OperationAudioTranscription:
-		if request.Input.Media == nil {
-			return errors.New("media artifact is required")
-		}
-	default:
-		return fmt.Errorf("operation %q is outside execution_media profile", request.Operation)
+func operationOf(operation *api.Operation) api.Operation {
+	if operation == nil {
+		return ""
 	}
-	return nil
+	return *operation
 }
 
-func mediaOperationShape(operation api.Operation) (api.Modality, string) {
-	switch operation {
-	case api.OperationImageGeneration:
-		return api.ModalityImage, "image_generation"
-	case api.OperationAudioGeneration:
-		return api.ModalityAudio, "audio_generation"
-	case api.OperationMusicGeneration:
-		return api.ModalityMusic, "music_generation"
-	case api.OperationVideoGeneration:
-		return api.ModalityVideo, "video_generation"
-	case api.OperationAudioTranscription:
-		return api.ModalityAudio, "audio_transcription"
-	default:
-		return "", ""
+func validateSchema(schema *jsonschema.Schema, data []byte) error {
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return err
 	}
+	return schema.Validate(instance)
 }
 
 func admitProfileResponse(profile string, request any, data []byte) (any, error) {
@@ -307,9 +456,6 @@ func admitLLMResponse(request api.LLMRequest, data []byte) (api.LLMResponse, err
 	var response api.LLMResponse
 	if err := decodeStrict(data, &response); err != nil {
 		return response, invalid("decode LLM response: %v", err)
-	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "mode", "terminal", "observation", "receipt"); err != nil {
-		return response, invalid("LLM response: %v", err)
 	}
 	if response.Kind != api.ResponseKindLLM || response.SchemaVersion != gatewayInvocationVersion || response.OperationID != request.OperationID || response.Mode != request.Mode {
 		return response, invalid("LLM response envelope does not correlate with request")
@@ -338,9 +484,6 @@ func admitMediaResponse(request api.MediaRequest, data []byte) (api.MediaRespons
 	if err := decodeStrict(data, &response); err != nil {
 		return response, invalid("decode media response: %v", err)
 	}
-	if err := requireObjectKeys(data, "kind", "schema_version", "operation_id", "mode", "terminal", "observation", "receipt"); err != nil {
-		return response, invalid("media response: %v", err)
-	}
 	if response.Kind != api.ResponseKindMedia || response.SchemaVersion != gatewayInvocationVersion || response.OperationID != request.OperationID || response.Mode != request.Mode {
 		return response, invalid("media response envelope does not correlate with request")
 	}
@@ -349,11 +492,10 @@ func admitMediaResponse(request api.MediaRequest, data []byte) (api.MediaRespons
 		if response.Terminal.Result == nil {
 			return response, invalid("successful media response requires a result")
 		}
-		want, _ := mediaOperationShape(request.Operation)
-		if response.Terminal.Result.Kind == api.ResultKind("") || (request.Operation != api.OperationAudioTranscription && response.Terminal.Result.Kind != api.ResultKind(want)) {
+		if response.Terminal.Result.Kind == api.ResultKind("") || (operationOf(request.Operation) != api.OperationAudioTranscription && response.Terminal.Result.Kind != api.ResultKind(request.Modality)) {
 			return response, invalid("media result kind does not match operation")
 		}
-		if request.Operation == api.OperationAudioTranscription && response.Terminal.Result.Kind != api.ResultAudioTranscription {
+		if operationOf(request.Operation) == api.OperationAudioTranscription && response.Terminal.Result.Kind != api.ResultAudioTranscription {
 			return response, invalid("transcription requires a transcript result")
 		}
 	case api.OutcomeSubmitted:
@@ -376,7 +518,7 @@ func admitMediaResponse(request api.MediaRequest, data []byte) (api.MediaRespons
 
 func validateLLMObservation(request api.LLMRequest, response api.LLMResponse) error {
 	o := response.Observation
-	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
+	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != operationOf(request.Operation) || o.Modality != request.Modality || o.Mode != request.Mode || o.Model.RequestedBaseModel != request.BaseModel || (o.Model.ResolvedBaseModel != "" && o.Model.ResolvedBaseModel != request.BaseModel) || !equalLLMInput(o.Input, request.Input) {
 		return invalid("LLM observation does not correlate with request")
 	}
 	if response.Receipt.OperationID != request.OperationID || response.Receipt.ReceiptID == "" || response.Receipt.Revision < 1 {
@@ -387,13 +529,26 @@ func validateLLMObservation(request api.LLMRequest, response api.LLMResponse) er
 
 func validateMediaObservation(request api.MediaRequest, response api.MediaResponse) error {
 	o := response.Observation
-	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != request.Operation || o.Modality != request.Modality || o.Mode != request.Mode || o.Input.Kind != request.Input.Kind {
+	if o.SchemaVersion != gatewayInvocationVersion || o.OperationID != request.OperationID || o.Operation != operationOf(request.Operation) || o.Modality != request.Modality || o.Mode != request.Mode || o.Model.RequestedBaseModel != request.BaseModel || (o.Model.ResolvedBaseModel != "" && o.Model.ResolvedBaseModel != request.BaseModel) || !reflect.DeepEqual(o.Input, request.Input) {
 		return invalid("media observation does not correlate with request")
 	}
 	if response.Receipt.OperationID != request.OperationID || response.Receipt.ReceiptID == "" || response.Receipt.Revision < 1 {
 		return invalid("media receipt is incomplete or mismatched")
 	}
 	return validateTiming(request.Mode, o.Timing)
+}
+
+func equalLLMInput(left, right api.LLMInput) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	var leftValue, rightValue any
+	if json.Unmarshal(leftJSON, &leftValue) != nil || json.Unmarshal(rightJSON, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 
 func validateTiming(mode api.DeliveryMode, timing api.StreamSummary) error {
@@ -413,33 +568,6 @@ func validateTiming(mode api.DeliveryMode, timing api.StreamSummary) error {
 	return nil
 }
 
-func validateRequestIdentity(operationID, baseModel string) error {
-	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(baseModel) == "" {
-		return errors.New("operation_id and base_model are required")
-	}
-	return nil
-}
-
-func validateFeatures(features []api.Feature, llm bool) error {
-	seen := make(map[api.Feature]struct{}, len(features))
-	for _, feature := range features {
-		if _, ok := seen[feature]; ok {
-			return fmt.Errorf("duplicate feature %q", feature)
-		}
-		seen[feature] = struct{}{}
-		if llm {
-			switch feature {
-			case api.FeatureToolCalls, api.FeatureStructured, api.FeaturePromptCache, api.FeatureUsage:
-			default:
-				return fmt.Errorf("feature %q is not supported by kernel_llm", feature)
-			}
-		} else if feature != api.FeaturePromptCache && feature != api.FeatureUsage {
-			return fmt.Errorf("feature %q is not supported by execution_media", feature)
-		}
-	}
-	return nil
-}
-
 func invalid(format string, args ...any) error {
 	return &admissionFailure{code: "INVALID_REQUEST", cause: fmt.Errorf(format, args...)}
 }
@@ -449,20 +577,7 @@ func rejectionCode(err error) string {
 	if errors.As(err, &failure) {
 		return failure.code
 	}
-	return "INVALID_REQUEST"
-}
-
-func requireObjectKeys(data []byte, keys ...string) error {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(data, &object); err != nil {
-		return err
-	}
-	for _, key := range keys {
-		if _, ok := object[key]; !ok {
-			return fmt.Errorf("%s is required", key)
-		}
-	}
-	return nil
+	return string(admission.Code(err))
 }
 
 func containsForbiddenProjection(data []byte) bool {

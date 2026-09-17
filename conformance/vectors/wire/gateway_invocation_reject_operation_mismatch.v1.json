@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.operation.mismatch",
+  "description": "An explicit operation must match the one operation declared by the exact selected model.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm", "schema_version": 1, "operation_id": "reject-operation-mismatch-1", "base_model": "model.text",
+    "operation": "realtime", "mode": "duplex",
+    "input": {"kind": "realtime", "instructions": "Hello."},
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

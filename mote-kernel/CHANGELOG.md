@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **Breaking:** `PersistencePort` now supplies an Agent-scoped `load_latest()` lookup and an
+  `expected_latest` generation fence on family reads. `AgentResume(run_id=None)` resolves that durable head while an
+  explicit `run_id` remains an exact historical key; Graph state, value evidence, Config provenance, and AgentSession
+  still recover from one `(agent_id, run_id)` checkpoint.
+- The latest-head change is delivered as a Kernel contract with deterministic snapshot/journal test adapters; no
+  production database adapter, schema migration, or distributed linearizable-durable guarantee is included yet.
 - **Breaking:** Think now resolves its model through a required typed `RouterPort` stage immediately before inference;
   the former assembly-time `model_binding` argument is removed.
 - **Breaking:** Logging and Observability now expose only two-stage diagnostic decorators:

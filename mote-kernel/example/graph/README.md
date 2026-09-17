@@ -251,14 +251,18 @@ first integration. `versioned_deployment` shows the explicit version boundary fo
 
 `durable_agent_import.build_agent(persistence, authority)` reuses the business DTO, Graph topology and versioned codec
 from `checkpointed_import`. Its `demonstrate(...)` function starts an explicitly identified run, receives an interrupt,
-then answers through a fresh Agent instance. Only business results cross the caller boundary; no state or continuation
-is carried into the resume call. Supply real `PersistencePort[ImportJob]` and `AuthorityPort` capabilities at the
-composition root. This module intentionally has no standalone fake-backend entry point.
+then answers through a fresh Agent instance. A normal continuation can use `AgentResume()` (the durable latest run), or
+pass the returned `run_id` for an exact historical replay; answers may be supplied with either form. Only business
+results cross the caller boundary; no state or continuation is carried into the resume call. Supply real
+`PersistencePort[ImportJob]` and `AuthorityPort` capabilities at the composition root. This module intentionally has no
+standalone fake-backend entry point.
 
 `durable_agent_import.build_agent(persistence, authority)` 复用 `checkpointed_import` 的业务 DTO、Graph 拓扑与版本化
-codec。`demonstrate(...)` 显式创建 run、收到 interrupt 后，以新 Agent 实例读取存储并回答。外部只传业务结果和精确
-问题，不向 resume 传 state 或 continuation。装配方必须提供 `PersistencePort[ImportJob]` 和 `AuthorityPort`；
-示例不添加一个伪后端让模块看起来可以独立运行，也不选择数据库、传输或 Container。
+codec。`demonstrate(...)` 显式创建 run、收到 interrupt 后，以新 Agent 实例读取存储并回答。普通继续可调用
+`AgentResume()` 自动恢复 durable latest run；也可传入结果中的 `run_id` 做历史 key 的精确回放，回答在两种形式下
+都可随请求传递。外部只传业务结果和精确问题，不向 resume 传 state 或 continuation。装配方必须提供
+`PersistencePort[ImportJob]` 和 `AuthorityPort`；示例不添加一个伪后端让模块看起来可以独立运行，也不选择数据库、
+传输或 Container。
 
 `tests/agent/test_example.py` verifies both snapshot and receipt-journal adapters against this exact example.
 `tests/agent/test_process_recovery.py` separately proves a real process exit after persisting a publication but before

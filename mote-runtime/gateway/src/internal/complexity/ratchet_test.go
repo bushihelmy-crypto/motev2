@@ -21,10 +21,10 @@ import (
 var measuredRoots = map[string]bool{
 	".":   true,
 	"api": true, "internal/application": true, "internal/admission": true,
-	"internal/plan": true, "internal/model": true, "internal/protocol": true,
+	"internal/model": true, "internal/protocol": true,
 	"internal/service": true, "internal/cache": true, "internal/usage": true,
 	"internal/receipt": true, "internal/telemetry": true, "internal/upstream": true,
-	"protocols": true, "connectors": true, "upstream": true, "ports": true,
+	"ports": true,
 }
 
 type metrics struct {
@@ -96,6 +96,9 @@ func measure(t *testing.T) metrics {
 			}
 			result.FunctionDefinitions++
 			decisions, nesting := functionMetrics(function.Body)
+			if decisions+1 >= 12 {
+				t.Logf("complexity %s: %d", function.Name.Name, decisions+1)
+			}
 			result.DecisionPoints += decisions
 			if decisions+1 > result.MaxCyclomatic {
 				result.MaxCyclomatic = decisions + 1

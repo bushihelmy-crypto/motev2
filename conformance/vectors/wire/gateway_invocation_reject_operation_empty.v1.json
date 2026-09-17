@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.operation.empty",
+  "description": "An explicit empty operation is not equivalent to omitting the operation field.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm", "schema_version": 1, "operation_id": "reject-operation-empty-1", "base_model": "model.text",
+    "operation": "", "mode": "unary",
+    "input": {"kind": "generate", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello."}]}]},
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "INVALID_REQUEST"}
+}

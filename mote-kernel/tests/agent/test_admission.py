@@ -21,6 +21,7 @@ from mote_kernel.execution.graph_result import GraphInterruptView
 from mote_kernel.execution.identity import ScopeRunCoordinate
 from mote_kernel.execution.persistence import DurableGraphCommit, GraphCheckpoint, GraphPersistenceCommit
 from mote_kernel.persistence import (
+    AgentLatestHead,
     AgentRunKey,
     AuthorityLostError,
     CommitApplied,
@@ -36,6 +37,7 @@ from mote_kernel.state.graph_state import GraphInterruptId, GraphRunId
 
 
 class NoncallablePersistence:
+    load_latest = None
     load = None
     commit = None
     reconcile = None
@@ -234,9 +236,14 @@ async def test_load_does_not_guess_absence_from_an_untyped_response(
     response: object,
 ) -> None:
     async def malformed(
-        _authority: ExecutionAuthority, /, *, children: tuple[ScopeRunCoordinate, ...] = ()
+        _authority: ExecutionAuthority,
+        /,
+        *,
+        children: tuple[ScopeRunCoordinate, ...] = (),
+        expected_latest: AgentLatestHead | None = None,
     ) -> GraphCheckpoint[str] | NeverCreated:
         assert children == ()
+        assert expected_latest is None
         return cast(GraphCheckpoint[str] | NeverCreated, response)
 
     monkeypatch.setattr(store, "load", malformed)

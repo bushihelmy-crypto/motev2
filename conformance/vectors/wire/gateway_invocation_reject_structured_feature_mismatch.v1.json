@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reject.structured_feature_mismatch",
+  "description": "A json_schema response format requires structured output support from the selected model.",
+  "protocol": {"name": "gateway_invocation", "version": 1, "profile": "kernel_llm"},
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "reject-structured-feature-1",
+    "base_model": "model.text",
+    "operation": "generate",
+    "mode": "unary",
+    "input": {
+      "kind": "generate",
+      "messages": [{"role": "user", "content": [{"type": "text", "text": "Return JSON."}]}],
+      "response_format": {"type": "json_schema", "schema": {"type": "object"}}
+    },
+    "features": []
+  },
+  "expect": {"outcome": "reject", "error_code": "UNSUPPORTED_CAPABILITY"}
+}
