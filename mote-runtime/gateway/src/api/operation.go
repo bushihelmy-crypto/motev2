@@ -17,6 +17,27 @@ const (
 	OperationRealtime           Operation = "realtime"
 )
 
+// PrimaryModality returns the canonical top-level modality for an operation.
+// Callers do not send this value; admission derives it from the selected
+// operation. Nested input content can still contribute additional input
+// modalities during admission.
+func (value Operation) PrimaryModality() (Modality, bool) {
+	switch value {
+	case OperationGenerate:
+		return ModalityText, true
+	case OperationRealtime, OperationAudioGeneration, OperationAudioTranscription:
+		return ModalityAudio, true
+	case OperationImageGeneration:
+		return ModalityImage, true
+	case OperationMusicGeneration:
+		return ModalityMusic, true
+	case OperationVideoGeneration:
+		return ModalityVideo, true
+	default:
+		return "", false
+	}
+}
+
 // Profile identifies the caller-owned contract at the Gateway boundary. A
 // profile is intentionally narrower than Gateway's internal capability
 // catalog: Kernel uses kernel_llm, while Execution uses execution_media for
@@ -44,9 +65,10 @@ const (
 	ResponseKindMedia ResponseKind = "media_response"
 )
 
-// Modality is the primary model input/output modality.  Music remains
-// distinct from generic audio so a connector cannot silently collapse the two
-// capabilities.
+// Modality identifies a model input or output medium. A request's top-level
+// modality is its primary operation/result medium; nested typed content still
+// contributes its actual input modalities during admission. Music remains
+// distinct from generic audio so a connector cannot silently collapse it.
 type Modality string
 
 const (

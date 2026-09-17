@@ -1,0 +1,101 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.default-operation.text",
+  "description": "A request may omit operation; Gateway derives generate from the selected catalog model.",
+  "protocol": {
+    "name": "gateway_invocation",
+    "version": 1,
+    "profile": "kernel_llm"
+  },
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "op-default-text-1",
+    "base_model": "chatgpt-4o",
+    "mode": "unary",
+    "input": {
+      "kind": "generate",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Say hello."
+            }
+          ]
+        }
+      ]
+    },
+    "features": []
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "llm_response",
+      "schema_version": 1,
+      "operation_id": "op-default-text-1",
+      "mode": "unary",
+      "terminal": {
+        "outcome": "succeeded",
+        "result": {
+          "kind": "generate",
+          "text": "Hello."
+        }
+      },
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "op-default-text-1",
+        "operation": "generate",
+        "modality": "text",
+        "mode": "unary",
+        "correlation": {
+          "trace_id": "trace-default-text-1",
+          "generation_id": "generation-default-text-1",
+          "model_call_id": "call-default-text-1"
+        },
+        "model": {
+          "requested_base_model": "chatgpt-4o",
+          "service_kind": "fixture",
+          "protocol_id": "openai.chat_completions.v1"
+        },
+        "input": {
+          "kind": "generate",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Say hello."
+                }
+              ]
+            }
+          ]
+        },
+        "finish": {
+          "reasons": ["stop"]
+        },
+        "usage": {
+          "availability": "unavailable"
+        },
+        "timing": {
+          "latency_ms": 1,
+          "streamed": false,
+          "chunk_count": 0
+        },
+        "cache": {
+          "prompt": {"state": "not_requested"},
+          "result": {"state": "not_requested"}
+        },
+        "attempts": []
+      },
+      "receipt": {
+        "receipt_id": "receipt-default-text-1",
+        "operation_id": "op-default-text-1",
+        "revision": 1
+      }
+    }
+  }
+}

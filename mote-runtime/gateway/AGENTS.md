@@ -11,14 +11,15 @@
   calls, argument deltas, and tool-result messages belong at the model boundary;
   MCP discovery, tool registration, tool execution, and agent loops do not.
 - `mote-infra/invocation` owns inbound invocation contracts and transports.
-  `src/upstream` owns only outbound model-network mechanics.
+  `src/internal/upstream` owns only outbound model-network mechanics.
 - Persistence is supplied through a narrow port. Gateway does not create a
   database, migration system, billing ledger, or user-governance store.
 
 ## Architecture
 
 - Keep model, protocol, and service as independent dimensions. Combine them
-  once in an immutable call plan after deterministic admission.
+  once in an immutable admitted request after deterministic admission; do not
+  introduce a separate plan owner or lifecycle.
 - `src/api` is the only service- and protocol-neutral DTO boundary. Do not duplicate the
   same request/result/event shape in protocol or connector packages.
 - Protocol adapters encode/decode wire values. Service connectors resolve

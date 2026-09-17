@@ -1,33 +1,159 @@
 package model
 
 import (
-	"bytes"
-	"compress/gzip"
-	_ "embed"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
+	"sync"
+
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/ports"
 )
 
-//go:embed catalog_data.json.gz
-var catalogData []byte
-
-// CatalogSchemaVersion identifies the embedded model-definition document.
-// The document is a static seed owned by Gateway; it has no upstream-source
-// provenance or importer-specific fields.
-const CatalogSchemaVersion = 3
-
-// CatalogDocument is the typed durable model-catalog artifact.
-type CatalogDocument struct {
-	SchemaVersion int      `json:"schema_version"`
-	Models        []Config `json:"models"`
-}
-
 // Catalog is an immutable exact-BaseModel registry. Construction resolves each
-// Kernel override once; lookup never aliases, routes, discovers, refreshes, or
+// complete source record once; lookup never aliases, routes, discovers, or
 // falls back to another model.
 type Catalog struct {
 	definitions map[string]Definition
+}
+
+// CatalogReader is the immutable read surface admission uses. A plain
+// Catalog implements it for tests and fixed composition; CatalogStore
+// implements it for production refreshes without introducing a second
+// admission path.
+type CatalogReader interface {
+	Current() Catalog
+}
+
+// Ready reports whether the catalog was constructed successfully. A zero or
+// empty Catalog is deliberately not a permissive catalog: composition roots
+// must inject a real immutable registry before admission can run.
+func (catalog Catalog) Ready() bool { return len(catalog.definitions) > 0 }
+
+// Current lets a fixed catalog satisfy CatalogReader without copying or
+// mutating its definitions.
+func (catalog Catalog) Current() Catalog { return catalog }
+
+// NewCatalogFromRecords validates a complete durable catalog in one pass and
+// returns an immutable in-memory value. No partial result is exposed when one
+// record is invalid.
+func NewCatalogFromRecords(records []ports.ModelRecord) (Catalog, error) {
+	if len(records) == 0 {
+		return Catalog{}, &CatalogDataError{Reason: "model source returned no records"}
+	}
+	defaults := make([]Config, len(records))
+	for index, record := range records {
+		defaults[index] = configFromRecord(record)
+	}
+	return newCatalog(defaults)
+}
+
+func configFromRecord(record ports.ModelRecord) Config {
+	return Config{
+		BaseModel: record.BaseModel,
+		Lifecycle: Lifecycle(record.Lifecycle),
+		TokenLimits: TokenLimits{
+			ContextWindowTokens: record.TokenLimits.ContextWindowTokens,
+			MaxInputTokens:      record.TokenLimits.MaxInputTokens,
+			MinOutputTokens:     record.TokenLimits.MinOutputTokens,
+			MaxOutputTokens:     record.TokenLimits.MaxOutputTokens,
+		},
+		Capability: capabilityFromRecord(record.Capability),
+	}
+}
+
+func capabilityFromRecord(record ports.ModelCapability) CapabilityConfig {
+	result := CapabilityConfig{
+		Operation:        record.Operation,
+		InputModalities:  append([]api.Modality(nil), record.InputModalities...),
+		OutputModalities: append([]api.Modality(nil), record.OutputModalities...),
+		Features:         append([]api.Feature(nil), record.Features...),
+	}
+	if record.Generation != nil {
+		generation := &GenerationPolicy{}
+		if value := record.Generation.Temperature; value != nil {
+			generation.Temperature = &NumericParameter[float64]{Minimum: clonePointer(value.Minimum), Maximum: clonePointer(value.Maximum), Default: clonePointer(value.Default)}
+		}
+		if value := record.Generation.TopP; value != nil {
+			generation.TopP = &NumericParameter[float64]{Minimum: clonePointer(value.Minimum), Maximum: clonePointer(value.Maximum), Default: clonePointer(value.Default)}
+		}
+		if record.Generation.MaxOutputTokens != nil {
+			generation.MaxOutputTokens = &OutputTokenParameter{}
+		}
+		if value := record.Generation.Stop; value != nil {
+			generation.Stop = &StopParameter{Default: append([]string(nil), value.Default...)}
+		}
+		if value := record.Generation.Seed; value != nil {
+			generation.Seed = &NumericParameter[int64]{Minimum: clonePointer(value.Minimum), Maximum: clonePointer(value.Maximum), Default: clonePointer(value.Default)}
+		}
+		result.Generation = generation
+	}
+	if record.Embedding != nil {
+		embedding := &EmbeddingPolicy{FixedDimensions: clonePointer(record.Embedding.FixedDimensions)}
+		if value := record.Embedding.Dimensions; value != nil {
+			embedding.Dimensions = &NumericParameter[int64]{Minimum: clonePointer(value.Minimum), Maximum: clonePointer(value.Maximum), Default: clonePointer(value.Default)}
+		}
+		result.Embedding = embedding
+	}
+	if record.Reasoning != nil {
+		reasoning := &ReasoningPolicy{DefaultThinking: clonePointer(record.Reasoning.DefaultThinking), ThinkingModes: make([]ThinkingModePolicy, len(record.Reasoning.ThinkingModes))}
+		for index, mode := range record.Reasoning.ThinkingModes {
+			reasoning.ThinkingModes[index] = ThinkingModePolicy{Thinking: mode.Thinking, Efforts: append([]api.ReasoningEffort(nil), mode.Efforts...), DefaultEffort: clonePointer(mode.DefaultEffort)}
+		}
+		result.Reasoning = reasoning
+	}
+	return result
+}
+
+// CatalogStore owns the current immutable Catalog and its serialized refresh
+// boundary. A failed read or validation leaves the previous catalog untouched.
+type CatalogStore struct {
+	source  ports.ModelCatalogSource
+	refresh sync.Mutex
+	current sync.RWMutex
+	catalog Catalog
+}
+
+// NewCatalogStore loads the complete source before returning. A store without
+// an initial valid catalog cannot be used for admission.
+func NewCatalogStore(ctx context.Context, source ports.ModelCatalogSource) (*CatalogStore, error) {
+	store := &CatalogStore{source: source}
+	if err := store.Refresh(ctx); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// Current returns the latest complete immutable catalog.
+func (store *CatalogStore) Current() Catalog {
+	if store == nil {
+		return Catalog{}
+	}
+	store.current.RLock()
+	defer store.current.RUnlock()
+	return store.catalog
+}
+
+// Refresh reads and validates a complete catalog, then swaps it atomically.
+// Calls are serialized so a later refresh cannot be overwritten by an earlier
+// in-flight load.
+func (store *CatalogStore) Refresh(ctx context.Context) error {
+	if store == nil || store.source == nil {
+		return fmt.Errorf("model catalog source is required")
+	}
+	store.refresh.Lock()
+	defer store.refresh.Unlock()
+	records, err := store.source.LoadModelCatalog(ctx)
+	if err != nil {
+		return fmt.Errorf("load model catalog: %w", err)
+	}
+	next, err := NewCatalogFromRecords(records)
+	if err != nil {
+		return fmt.Errorf("validate model catalog: %w", err)
+	}
+	store.current.Lock()
+	store.catalog = next
+	store.current.Unlock()
+	return nil
 }
 
 // ModelNotFoundError reports that Router selected an exact BaseModel absent
@@ -40,31 +166,19 @@ func (err *ModelNotFoundError) Error() string {
 	return fmt.Sprintf("model %q is not present in the catalog", err.BaseModel)
 }
 
-// CatalogDataError reports an invalid embedded catalog document rather than
-// hiding a release artifact failure as an individual model configuration error.
+// CatalogDataError reports invalid complete source data rather than exposing a
+// partially validated model catalog.
 type CatalogDataError struct {
 	Reason string
 }
 
 func (err *CatalogDataError) Error() string {
-	return "invalid embedded model catalog: " + err.Reason
+	return "invalid model catalog: " + err.Reason
 }
 
-// NewCatalog loads Gateway's embedded model seed and applies each Kernel
-// override exactly once. An override for an unknown BaseModel defines a custom
-// model through the same validation path and must provide its complete
-// capability.
-func NewCatalog(overrides []Override) (Catalog, error) {
-	defaults, err := loadCatalogDefaults(catalogData)
-	if err != nil {
-		return Catalog{}, err
-	}
-	return newCatalog(defaults, overrides)
-}
-
-func newCatalog(defaults []Config, overrides []Override) (Catalog, error) {
-	definitions := make(map[string]Definition, len(defaults)+len(overrides))
-	for _, candidate := range defaults {
+func newCatalog(configs []Config) (Catalog, error) {
+	definitions := make(map[string]Definition, len(configs))
+	for _, candidate := range configs {
 		normalized, err := normalizeConfig(candidate)
 		if err != nil {
 			return Catalog{}, err
@@ -74,72 +188,7 @@ func newCatalog(defaults []Config, overrides []Override) (Catalog, error) {
 		}
 		definitions[normalized.BaseModel] = Definition{config: normalized}
 	}
-
-	seen := make(map[string]struct{}, len(overrides))
-	for _, override := range overrides {
-		if override.BaseModel == "" {
-			return Catalog{}, configError(override.BaseModel, "override.base_model", "must not be empty")
-		}
-		if _, exists := seen[override.BaseModel]; exists {
-			return Catalog{}, configError(override.BaseModel, "override.base_model", "duplicates another override")
-		}
-		seen[override.BaseModel] = struct{}{}
-
-		base, exists := definitions[override.BaseModel]
-		if !exists {
-			base = Definition{config: Config{BaseModel: override.BaseModel, Lifecycle: LifecycleActive}}
-		}
-		patched, err := applyOverride(base.config, override)
-		if err != nil {
-			return Catalog{}, err
-		}
-		definitions[override.BaseModel] = Definition{config: patched}
-	}
-
 	return Catalog{definitions: definitions}, nil
-}
-
-func loadCatalogDefaults(data []byte) ([]Config, error) {
-	decoded, err := decodeCatalogData(data)
-	if err != nil {
-		return nil, &CatalogDataError{Reason: err.Error()}
-	}
-	decoder := json.NewDecoder(bytes.NewReader(decoded))
-	decoder.DisallowUnknownFields()
-	var document CatalogDocument
-	if err := decoder.Decode(&document); err != nil {
-		return nil, &CatalogDataError{Reason: err.Error()}
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, &CatalogDataError{Reason: "must contain exactly one JSON document"}
-	}
-	if document.SchemaVersion != CatalogSchemaVersion {
-		return nil, &CatalogDataError{Reason: fmt.Sprintf("unsupported schema version %d", document.SchemaVersion)}
-	}
-	if len(document.Models) == 0 {
-		return nil, &CatalogDataError{Reason: "models must not be empty"}
-	}
-	return document.Models, nil
-}
-
-func decodeCatalogData(data []byte) ([]byte, error) {
-	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
-		return data, nil
-	}
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("decode gzip artifact: %w", err)
-	}
-	decoded, readErr := io.ReadAll(reader)
-	closeErr := reader.Close()
-	if readErr != nil {
-		return nil, fmt.Errorf("read gzip artifact: %w", readErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close gzip artifact: %w", closeErr)
-	}
-	return decoded, nil
 }
 
 // Lookup returns the exact BaseModel definition or a typed error. It never tries a

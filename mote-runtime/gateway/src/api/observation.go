@@ -11,7 +11,7 @@ type TraceContext struct {
 }
 
 // ModelObservation contains the separate model, service, and protocol facts
-// frozen into the call plan. Resource values are opaque fingerprints, never
+// frozen into the admitted request. Resource values are opaque fingerprints, never
 // addresses or secrets.
 type ModelObservation struct {
 	RequestedBaseModel  string `json:"requested_base_model"`

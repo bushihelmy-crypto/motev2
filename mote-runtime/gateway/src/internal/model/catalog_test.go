@@ -11,46 +11,33 @@ import (
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
 )
 
-func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
-	defaults := []Config{testModelConfig("default-model"), testModelConfig("overridden-model")}
-	overrideLifecycle := LifecycleDeprecated
-	overrideContext := int64(4096)
-	overrideInput := int64(3500)
-	overrideMinimum := int64(2)
-	overrideMaximum := int64(1024)
-	overrides := []Override{{
-		BaseModel: "overridden-model",
-		Lifecycle: &overrideLifecycle,
-		TokenLimits: TokenLimitsOverride{
-			ContextWindowTokens: &overrideContext,
-			MaxInputTokens:      &overrideInput,
-			MinOutputTokens:     &overrideMinimum,
-			MaxOutputTokens:     &overrideMaximum,
-		},
-		Capability: &CapabilityConfig{
-			Operation:        api.OperationGenerate,
-			InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
-			OutputModalities: []api.Modality{api.ModalityText},
-			Generation: &GenerationPolicy{
-				MaxOutputTokens: &OutputTokenParameter{},
-			},
-		},
-	}}
+func TestCatalogFreezesCompleteSourceConfigs(t *testing.T) {
+	configured := testModelConfig("configured-model")
+	configured.Lifecycle = LifecycleDeprecated
+	configured.TokenLimits = TokenLimits{
+		ContextWindowTokens: 4096,
+		MaxInputTokens:      3500,
+		MinOutputTokens:     2,
+		MaxOutputTokens:     1024,
+	}
+	configured.Capability = CapabilityConfig{
+		Operation:        api.OperationGenerate,
+		InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
+		OutputModalities: []api.Modality{api.ModalityText},
+		Generation:       &GenerationPolicy{MaxOutputTokens: &OutputTokenParameter{}},
+	}
+	configs := []Config{testModelConfig("default-model"), configured}
 
-	catalog, err := newCatalog(defaults, overrides)
+	catalog, err := newCatalog(configs)
 	if err != nil {
 		t.Fatalf("construct catalog: %v", err)
 	}
 
-	// Constructor inputs cease to be state once effective definitions exist.
-	defaults[0].Capability.InputModalities[0] = api.ModalityAudio
-	overrideLifecycle = LifecycleRetired
-	overrideContext = 1
-	overrideInput = 1
-	overrideMinimum = 1
-	overrideMaximum = 1
-	overrides[0].Capability.InputModalities[0] = api.ModalityAudio
-	overrides[0].Capability.Generation.MaxOutputTokens = nil
+	configs[0].Capability.InputModalities[0] = api.ModalityAudio
+	configs[1].Lifecycle = LifecycleRetired
+	configs[1].TokenLimits.MaxOutputTokens = 1
+	configs[1].Capability.InputModalities[0] = api.ModalityAudio
+	configs[1].Capability.Generation.MaxOutputTokens = nil
 
 	inherited, err := catalog.Lookup("default-model")
 	if err != nil {
@@ -61,38 +48,65 @@ func TestCatalogFreezesDefaultsAndKernelOverrides(t *testing.T) {
 		t.Fatal("default model did not retain its frozen capability")
 	}
 
-	definition, err := catalog.Lookup("overridden-model")
+	definition, err := catalog.Lookup("configured-model")
 	if err != nil {
-		t.Fatalf("lookup overridden model: %v", err)
+		t.Fatalf("lookup configured model: %v", err)
 	}
-	if definition.BaseModel() != "overridden-model" || definition.Lifecycle() != LifecycleDeprecated {
-		t.Fatalf("Kernel scalar override was not applied: base_model=%q lifecycle=%q", definition.BaseModel(), definition.Lifecycle())
+	if definition.BaseModel() != "configured-model" || definition.Lifecycle() != LifecycleDeprecated {
+		t.Fatalf("source model envelope was not retained: base_model=%q lifecycle=%q", definition.BaseModel(), definition.Lifecycle())
 	}
 	limits := definition.TokenLimits()
 	if limits.ContextWindowTokens != 4096 || limits.MaxInputTokens != 3500 || limits.MinOutputTokens != 2 || limits.MaxOutputTokens != 1024 {
-		t.Fatalf("Kernel token override was not applied: %+v", limits)
+		t.Fatalf("source token limits were not retained: %+v", limits)
 	}
 	capability, ok := definition.Capability(api.OperationGenerate)
 	if !ok || !capability.SupportsInputModality(api.ModalityText) || !capability.SupportsInputModality(api.ModalityImage) {
-		t.Fatal("Kernel operation replacement was not applied")
+		t.Fatal("source capability was not retained")
 	}
 	if capability.SupportsFeature(api.FeatureUsage) {
-		t.Fatal("a non-nil Kernel capability must replace, not patch, the catalog capability")
+		t.Fatal("service-owned feature leaked into the model capability")
 	}
 	parameters := capability.ResolveGenerationParameters(api.GenerationParameters{})
 	if parameters.MaxOutputTokens == nil || *parameters.MaxOutputTokens != 1024 {
 		t.Fatalf("central output-token policy was not clamped to the override limit: %+v", parameters)
 	}
 
-	_, err = catalog.Lookup("overridden-model ")
+	_, err = catalog.Lookup("configured-model ")
 	var notFound *ModelNotFoundError
-	if !errors.As(err, &notFound) || notFound.BaseModel != "overridden-model " {
+	if !errors.As(err, &notFound) || notFound.BaseModel != "configured-model " {
 		t.Fatalf("lookup must use the exact BaseModel without aliases: %T %v", err, err)
 	}
 }
 
+func TestDefinitionResolvesOmittedOperationAndRejectsExplicitMismatch(t *testing.T) {
+	catalog, err := newCatalog([]Config{testModelConfig("model-a")})
+	if err != nil {
+		t.Fatalf("construct catalog: %v", err)
+	}
+	definition, err := catalog.Lookup("model-a")
+	if err != nil {
+		t.Fatalf("lookup definition: %v", err)
+	}
+
+	defaulted, err := definition.ResolveOperation(nil)
+	if err != nil || defaulted != api.OperationGenerate {
+		t.Fatalf("omitted operation did not use the model default: %q %v", defaulted, err)
+	}
+	explicitOperation := api.OperationGenerate
+	explicit, err := definition.ResolveOperation(&explicitOperation)
+	if err != nil || explicit != api.OperationGenerate {
+		t.Fatalf("matching operation was rejected: %q %v", explicit, err)
+	}
+	mismatchedOperation := api.OperationEmbedding
+	_, err = definition.ResolveOperation(&mismatchedOperation)
+	var mismatch *OperationMismatchError
+	if !errors.As(err, &mismatch) || mismatch.BaseModel != "model-a" || mismatch.Available != api.OperationGenerate || mismatch.Requested != api.OperationEmbedding {
+		t.Fatalf("operation mismatch was not typed: %T %v", err, err)
+	}
+}
+
 func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T) {
-	catalog, err := newCatalog([]Config{testModelConfig("model-a")}, nil)
+	catalog, err := newCatalog([]Config{testModelConfig("model-a")})
 	if err != nil {
 		t.Fatalf("construct catalog: %v", err)
 	}
@@ -136,12 +150,12 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 	allSupported := testModelConfig("all-supported")
 	allSupported.Capability.Generation = &GenerationPolicy{
 		Temperature:     &NumericParameter[float64]{Minimum: pointer(0.0), Maximum: pointer(2.0)},
-		TopP:            &NumericParameter[float64]{Minimum: pointer(0.0), Maximum: pointer(1.0)},
+		TopP:            &NumericParameter[float64]{Minimum: pointer(0.000001), Maximum: pointer(1.0)},
 		MaxOutputTokens: &OutputTokenParameter{},
 		Stop:            &StopParameter{},
 		Seed:            &NumericParameter[int64]{Minimum: pointer(int64(0)), Maximum: pointer(int64(100))},
 	}
-	allCatalog, err := newCatalog([]Config{allSupported}, nil)
+	allCatalog, err := newCatalog([]Config{allSupported})
 	if err != nil {
 		t.Fatalf("construct all-parameter catalog: %v", err)
 	}
@@ -161,6 +175,140 @@ func TestCapabilityResolvesDefaultsRequestsFilteringAndKnownBounds(t *testing.T)
 	}
 }
 
+func TestCapabilityResolvesReasoningModesAndEfforts(t *testing.T) {
+	config := reasoningModelConfig("reasoning-model")
+	catalog, err := newCatalog([]Config{config})
+	if err != nil {
+		t.Fatalf("construct reasoning catalog: %v", err)
+	}
+	definition, _ := catalog.Lookup("reasoning-model")
+	capability, ok := definition.Capability(api.OperationGenerate)
+	if !ok {
+		t.Fatal("reasoning model capability was not retained")
+	}
+
+	defaults, err := capability.ResolveReasoning(nil)
+	if err != nil || defaults == nil || defaults.Thinking != api.ThinkingAdaptive || defaults.Effort != api.ReasoningEffortMedium {
+		t.Fatalf("catalog reasoning defaults were not applied: %+v %v", defaults, err)
+	}
+	explicit, err := capability.ResolveReasoning(&api.ReasoningConfig{
+		Thinking: api.ThinkingAdaptive,
+		Effort:   api.ReasoningEffortHigh,
+	})
+	if err != nil || explicit == nil || explicit.Thinking != api.ThinkingAdaptive || explicit.Effort != api.ReasoningEffortHigh {
+		t.Fatalf("explicit adaptive effort was not retained: %+v %v", explicit, err)
+	}
+	disabled, err := capability.ResolveReasoning(&api.ReasoningConfig{Thinking: api.ThinkingDisabled})
+	if err != nil || disabled == nil || disabled.Thinking != api.ThinkingDisabled || disabled.Effort != "" {
+		t.Fatalf("disabled thinking was not resolved: %+v %v", disabled, err)
+	}
+
+	_, err = capability.ResolveReasoning(&api.ReasoningConfig{
+		Thinking: api.ThinkingDisabled,
+		Effort:   api.ReasoningEffortHigh,
+	})
+	var requestError *ReasoningRequestError
+	if !errors.As(err, &requestError) {
+		t.Fatalf("disabled plus effort did not produce a typed request error: %T %v", err, err)
+	}
+	_, err = capability.ResolveReasoning(&api.ReasoningConfig{
+		Thinking: api.ThinkingAdaptive,
+		Effort:   api.ReasoningEffortMax,
+	})
+	var unsupported *ReasoningUnsupportedError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("unsupported effort did not produce a typed capability error: %T %v", err, err)
+	}
+
+	withoutThinking, err := capability.ResolveReasoning(&api.ReasoningConfig{Effort: api.ReasoningEffortLow})
+	if err != nil || withoutThinking == nil || withoutThinking.Thinking != api.ThinkingAdaptive || withoutThinking.Effort != api.ReasoningEffortLow {
+		t.Fatalf("effort-only request did not use the catalog default mode: %+v %v", withoutThinking, err)
+	}
+}
+
+func TestCapabilityInfersTheOnlyThinkingModeForEffortOnlyRequest(t *testing.T) {
+	config := testModelConfig("single-mode-reasoning")
+	config.Capability.Reasoning = &ReasoningPolicy{
+		ThinkingModes: []ThinkingModePolicy{{
+			Thinking: api.ThinkingAdaptive,
+			Efforts:  []api.ReasoningEffort{api.ReasoningEffortLow},
+		}},
+	}
+	catalog, err := newCatalog([]Config{config})
+	if err != nil {
+		t.Fatalf("construct catalog: %v", err)
+	}
+	definition, _ := catalog.Lookup(config.BaseModel)
+	capability, _ := definition.Capability(api.OperationGenerate)
+	resolved, err := capability.ResolveReasoning(&api.ReasoningConfig{Effort: api.ReasoningEffortLow})
+	if err != nil || resolved == nil || resolved.Thinking != api.ThinkingAdaptive || resolved.Effort != api.ReasoningEffortLow {
+		t.Fatalf("unique thinking mode was not inferred: %+v %v", resolved, err)
+	}
+}
+
+func TestCapabilityRejectsAmbiguousEffortOnlyRequestAsInvalid(t *testing.T) {
+	config := testModelConfig("ambiguous-reasoning")
+	config.Capability.Reasoning = &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{
+		{Thinking: api.ThinkingEnabled, Efforts: []api.ReasoningEffort{api.ReasoningEffortLow}},
+		{Thinking: api.ThinkingAdaptive, Efforts: []api.ReasoningEffort{api.ReasoningEffortLow}},
+	}}
+	catalog, err := newCatalog([]Config{config})
+	if err != nil {
+		t.Fatalf("construct catalog: %v", err)
+	}
+	definition, _ := catalog.Lookup(config.BaseModel)
+	capability, _ := definition.Capability(api.OperationGenerate)
+	_, err = capability.ResolveReasoning(&api.ReasoningConfig{Effort: api.ReasoningEffortLow})
+	var requestError *ReasoningRequestError
+	if !errors.As(err, &requestError) {
+		t.Fatalf("ambiguous effort-only request returned the wrong error: %T %v", err, err)
+	}
+}
+
+func TestCapabilityRejectsExplicitReasoningWhenUndeclared(t *testing.T) {
+	catalog, err := newCatalog([]Config{testModelConfig("ordinary-model")})
+	if err != nil {
+		t.Fatalf("construct catalog: %v", err)
+	}
+	definition, _ := catalog.Lookup("ordinary-model")
+	capability, _ := definition.Capability(api.OperationGenerate)
+	if resolved, resolveErr := capability.ResolveReasoning(nil); resolveErr != nil || resolved != nil {
+		t.Fatalf("omitted reasoning changed an ordinary model: %+v %v", resolved, resolveErr)
+	}
+	_, err = capability.ResolveReasoning(&api.ReasoningConfig{Thinking: api.ThinkingEnabled})
+	var unsupported *ReasoningUnsupportedError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("undeclared reasoning was not rejected with a typed error: %T %v", err, err)
+	}
+}
+
+func TestReasoningPolicyIsFrozenAndProviderFieldsStayOut(t *testing.T) {
+	config := reasoningModelConfig("frozen-reasoning")
+	defaultThinking := *config.Capability.Reasoning.DefaultThinking
+	defaultEffort := *config.Capability.Reasoning.ThinkingModes[2].DefaultEffort
+	catalog, err := newCatalog([]Config{config})
+	if err != nil {
+		t.Fatalf("construct reasoning catalog: %v", err)
+	}
+	config.Capability.Reasoning.DefaultThinking = pointer(api.ThinkingDisabled)
+	config.Capability.Reasoning.ThinkingModes[2].Efforts[0] = api.ReasoningEffortMax
+	config.Capability.Reasoning.ThinkingModes[2].DefaultEffort = pointer(api.ReasoningEffortLow)
+	definition, _ := catalog.Lookup("frozen-reasoning")
+	capability, _ := definition.Capability(api.OperationGenerate)
+	resolved, err := capability.ResolveReasoning(nil)
+	if err != nil || resolved == nil || resolved.Thinking != defaultThinking || resolved.Effort != defaultEffort {
+		t.Fatalf("reasoning policy retained caller mutation: %+v %v", resolved, err)
+	}
+
+	for _, data := range []string{
+		`{"schema_version":3,"models":[{"base_model":"m","lifecycle":"active","capability":{"operation":"generate","input_modalities":["text"],"output_modalities":["text"],"reasoning":{"thinking_modes":[{"thinking":"enabled","budget_tokens":1}]}}}]}`,
+	} {
+		if _, err := loadCatalogTestData([]byte(data)); err == nil {
+			t.Fatal("provider-specific reasoning field was accepted by the catalog decoder")
+		}
+	}
+}
+
 func TestCapabilityClampsOnlyKnownNumericBoundaries(t *testing.T) {
 	config := testModelConfig("bounded-model")
 	config.Capability.Generation = &GenerationPolicy{
@@ -169,7 +317,7 @@ func TestCapabilityClampsOnlyKnownNumericBoundaries(t *testing.T) {
 		MaxOutputTokens: &OutputTokenParameter{},
 		Seed:            &NumericParameter[int64]{Minimum: pointer(int64(0))},
 	}
-	catalog, err := newCatalog([]Config{config}, nil)
+	catalog, err := newCatalog([]Config{config})
 	if err != nil {
 		t.Fatalf("construct catalog: %v", err)
 	}
@@ -192,7 +340,7 @@ func TestCapabilityClampsOnlyKnownNumericBoundaries(t *testing.T) {
 		Temperature:     &NumericParameter[float64]{},
 		MaxOutputTokens: &OutputTokenParameter{},
 	}
-	unknownCatalog, err := newCatalog([]Config{unknownBounds}, nil)
+	unknownCatalog, err := newCatalog([]Config{unknownBounds})
 	if err != nil {
 		t.Fatalf("known support with unknown bounds must be valid: %v", err)
 	}
@@ -216,7 +364,7 @@ func TestEmbeddingCapabilityIsTypedAndIndependentFromGeneration(t *testing.T) {
 			Minimum: pointer(int64(64)), Maximum: pointer(int64(3072)), Default: pointer(int64(1536)),
 		},
 	})
-	catalog, err := newCatalog([]Config{fixed, adjustable}, nil)
+	catalog, err := newCatalog([]Config{fixed, adjustable})
 	if err != nil {
 		t.Fatalf("construct embedding catalog: %v", err)
 	}
@@ -256,48 +404,31 @@ func TestEmbeddingCapabilityIsTypedAndIndependentFromGeneration(t *testing.T) {
 	}
 }
 
-func TestKernelCanOverrideBuiltinsAndDefineCustomModelsThroughOnePath(t *testing.T) {
-	customInput := int64(4096)
-	catalog, err := newCatalog([]Config{testModelConfig("built-in")}, []Override{
-		{
-			BaseModel: "built-in",
-			Capability: &CapabilityConfig{
-				Operation:        api.OperationEmbedding,
-				InputModalities:  []api.Modality{api.ModalityText},
-				OutputModalities: []api.Modality{api.ModalityEmbedding},
-				Embedding:        &EmbeddingPolicy{},
-			},
-		},
-		{
-			BaseModel:   "custom-embedding",
-			TokenLimits: TokenLimitsOverride{MaxInputTokens: &customInput},
-			Capability: &CapabilityConfig{
-				Operation:        api.OperationEmbedding,
-				InputModalities:  []api.Modality{api.ModalityText, api.ModalityImage},
-				OutputModalities: []api.Modality{api.ModalityEmbedding},
-				Embedding:        &EmbeddingPolicy{FixedDimensions: pointer(int64(1024))},
-			},
-		},
-	})
+func TestCompleteSourceDefinesEveryModelThroughOnePath(t *testing.T) {
+	configured := embeddingModelConfig("configured-embedding", &EmbeddingPolicy{})
+	custom := embeddingModelConfig("custom-embedding", &EmbeddingPolicy{FixedDimensions: pointer(int64(1024))})
+	custom.TokenLimits.MaxInputTokens = 4096
+	custom.Capability.InputModalities = []api.Modality{api.ModalityText, api.ModalityImage}
+	catalog, err := newCatalog([]Config{configured, custom})
 	if err != nil {
-		t.Fatalf("construct catalog with Kernel models: %v", err)
+		t.Fatalf("construct complete source catalog: %v", err)
 	}
-	builtIn, _ := catalog.Lookup("built-in")
-	if _, ok := builtIn.Capability(api.OperationGenerate); ok {
-		t.Fatal("built-in operation replacement left a second capability truth")
+	configuredDefinition, _ := catalog.Lookup("configured-embedding")
+	if _, ok := configuredDefinition.Capability(api.OperationEmbedding); !ok {
+		t.Fatal("configured source model was not retained")
 	}
-	custom, err := catalog.Lookup("custom-embedding")
-	if err != nil || custom.TokenLimits().MaxInputTokens != 4096 || custom.Lifecycle() != LifecycleActive {
-		t.Fatalf("custom Kernel model was not admitted: %+v %v", custom, err)
+	customDefinition, err := catalog.Lookup("custom-embedding")
+	if err != nil || customDefinition.TokenLimits().MaxInputTokens != 4096 || customDefinition.Lifecycle() != LifecycleActive {
+		t.Fatalf("custom source model was not admitted: %+v %v", customDefinition, err)
 	}
-	capability, ok := custom.Capability(api.OperationEmbedding)
+	capability, ok := customDefinition.Capability(api.OperationEmbedding)
 	if !ok || !capability.SupportsInputModality(api.ModalityImage) {
-		t.Fatal("custom Kernel model capability was not retained")
+		t.Fatal("custom source model capability was not retained")
 	}
 }
 
 func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *testing.T) {
-	catalog, err := NewCatalog(nil)
+	catalog, err := newSeedCatalog()
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
@@ -350,7 +481,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 		assertOperation(t, catalog, validEmbedding, api.OperationEmbedding)
 	}
 
-	decodedCatalog, err := decodeCatalogData(catalogData)
+	decodedCatalog, err := decodeCatalogTestData(catalogTestData)
 	if err != nil {
 		t.Fatalf("decode embedded catalog artifact: %v", err)
 	}
@@ -364,17 +495,17 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 		}
 	}
 
-	if len(catalogData) == 0 {
-		t.Fatal("embedded catalog is empty")
+	if len(catalogTestData) == 0 {
+		t.Fatal("catalog test data is empty")
 	}
-	var document CatalogDocument
+	var document catalogTestDocument
 	decoder := json.NewDecoder(bytes.NewReader(decodedCatalog))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&document); err != nil {
 		t.Fatalf("decode embedded catalog: %v", err)
 	}
-	if document.SchemaVersion != CatalogSchemaVersion || len(document.Models) == 0 {
-		t.Fatalf("embedded catalog has an invalid static shape: schema=%d models=%d", document.SchemaVersion, len(document.Models))
+	if document.SchemaVersion != catalogTestSchemaVersion || len(document.Models) == 0 {
+		t.Fatalf("catalog test data has an invalid static shape: schema=%d models=%d", document.SchemaVersion, len(document.Models))
 	}
 	if bytes.Contains(decodedCatalog, []byte(`"sources"`)) {
 		t.Fatal("embedded catalog must not retain upstream source metadata")
@@ -382,7 +513,7 @@ func TestBuiltInCatalogCoversReferenceModelsWithoutAliasesOrServiceState(t *test
 }
 
 func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
-	catalog, err := NewCatalog(nil)
+	catalog, err := newSeedCatalog()
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
@@ -426,45 +557,52 @@ func TestBuiltInEmbeddingModelsHaveIndependentCapabilities(t *testing.T) {
 	}
 }
 
-func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
+func TestCatalogRejectsInvalidSourceConfigs(t *testing.T) {
 	tests := []struct {
-		name      string
-		defaults  []Config
-		overrides []Override
-		field     string
+		name    string
+		configs []Config
+		field   string
 	}{
-		{name: "empty BaseModel", defaults: []Config{testModelConfig("")}, field: "base_model"},
-		{name: "empty lifecycle", defaults: []Config{withEmptyLifecycle(testModelConfig("model-a"))}, field: "lifecycle"},
-		{name: "duplicate model", defaults: []Config{testModelConfig("model-a"), testModelConfig("model-a")}, field: "base_model"},
-		{name: "negative token limit", defaults: []Config{withNegativeLimit(testModelConfig("model-a"))}, field: "token_limits"},
-		{name: "reversed output-token bounds", defaults: []Config{withReversedOutputLimits(testModelConfig("model-a"))}, field: "token_limits"},
-		{name: "limit exceeds context", defaults: []Config{withLimitAboveContext(testModelConfig("model-a"))}, field: "token_limits"},
-		{name: "invalid operation", defaults: []Config{withInvalidOperation(testModelConfig("model-a"))}, field: "capability.operation"},
-		{name: "invalid input modality", defaults: []Config{withInvalidInputModality(testModelConfig("model-a"))}, field: "capability.input_modalities"},
-		{name: "invalid output modality", defaults: []Config{withInvalidOutputModality(testModelConfig("model-a"))}, field: "capability.output_modalities"},
-		{name: "empty modalities", defaults: []Config{withEmptyInputModalities(testModelConfig("model-a"))}, field: "capability"},
-		{name: "duplicate feature", defaults: []Config{withDuplicateFeature(testModelConfig("model-a"))}, field: "capability.features"},
-		{name: "service-owned feature", defaults: []Config{withUsageFeature(testModelConfig("model-a"))}, field: "capability.features"},
-		{name: "reversed numeric bounds", defaults: []Config{withReversedNumericBounds(testModelConfig("model-a"))}, field: "capability.generation.temperature.bounds"},
-		{name: "invalid numeric default", defaults: []Config{withInvalidNumericDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.default"},
-		{name: "non-finite numeric value", defaults: []Config{withNonFiniteDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.value"},
-		{name: "rerank generation policy", defaults: []Config{withRerankOperation(testModelConfig("model-a"))}, field: "capability"},
-		{name: "embedding generation policy", defaults: []Config{withEmbeddingGenerationPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
-		{name: "embedding missing policy", defaults: []Config{withMissingEmbeddingPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
-		{name: "embedding wrong output", defaults: []Config{withWrongEmbeddingOutput(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
-		{name: "non-embedding embedding policy", defaults: []Config{withEmbeddingPolicyOnGenerate(testModelConfig("model-a"))}, field: "capability"},
-		{name: "conflicting dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(128)), Dimensions: &NumericParameter[int64]{}})}, field: "capability.embedding.dimensions"},
-		{name: "invalid fixed dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(0))})}, field: "capability.embedding.fixed_dimensions"},
-		{name: "invalid adjustable dimensions", defaults: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{Dimensions: &NumericParameter[int64]{Minimum: pointer(int64(0))}})}, field: "capability.embedding.dimensions.minimum"},
-		{name: "empty override BaseModel", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: ""}}, field: "override.base_model"},
-		{name: "incomplete custom model", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "missing"}}, field: "capability.operation"},
-		{name: "duplicate override", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a"}, {BaseModel: "model-a"}}, field: "override.base_model"},
-		{name: "empty capability replacement", defaults: []Config{testModelConfig("model-a")}, overrides: []Override{{BaseModel: "model-a", Capability: &CapabilityConfig{}}}, field: "capability.operation"},
+		{name: "empty BaseModel", configs: []Config{testModelConfig("")}, field: "base_model"},
+		{name: "empty lifecycle", configs: []Config{withEmptyLifecycle(testModelConfig("model-a"))}, field: "lifecycle"},
+		{name: "duplicate model", configs: []Config{testModelConfig("model-a"), testModelConfig("model-a")}, field: "base_model"},
+		{name: "negative token limit", configs: []Config{withNegativeLimit(testModelConfig("model-a"))}, field: "token_limits"},
+		{name: "reversed output-token bounds", configs: []Config{withReversedOutputLimits(testModelConfig("model-a"))}, field: "token_limits"},
+		{name: "limit exceeds context", configs: []Config{withLimitAboveContext(testModelConfig("model-a"))}, field: "token_limits"},
+		{name: "invalid operation", configs: []Config{withInvalidOperation(testModelConfig("model-a"))}, field: "capability.operation"},
+		{name: "invalid input modality", configs: []Config{withInvalidInputModality(testModelConfig("model-a"))}, field: "capability.input_modalities"},
+		{name: "invalid output modality", configs: []Config{withInvalidOutputModality(testModelConfig("model-a"))}, field: "capability.output_modalities"},
+		{name: "empty modalities", configs: []Config{withEmptyInputModalities(testModelConfig("model-a"))}, field: "capability"},
+		{name: "duplicate feature", configs: []Config{withDuplicateFeature(testModelConfig("model-a"))}, field: "capability.features"},
+		{name: "service-owned feature", configs: []Config{withUsageFeature(testModelConfig("model-a"))}, field: "capability.features"},
+		{name: "reversed numeric bounds", configs: []Config{withReversedNumericBounds(testModelConfig("model-a"))}, field: "capability.generation.temperature.bounds"},
+		{name: "invalid numeric default", configs: []Config{withInvalidNumericDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.default"},
+		{name: "non-finite numeric value", configs: []Config{withNonFiniteDefault(testModelConfig("model-a"))}, field: "capability.generation.temperature.default"},
+		{name: "temperature clamp outside public domain", configs: []Config{withTemperatureMaximum(testModelConfig("model-a"), 3)}, field: "capability.generation.temperature.maximum"},
+		{name: "top-p clamp outside public domain", configs: []Config{withTopPMinimum(testModelConfig("model-a"), 0)}, field: "capability.generation.top_p.minimum"},
+		{name: "empty stop default", configs: []Config{withStopDefault(testModelConfig("model-a"), []string{""})}, field: "capability.generation.stop.default"},
+		{name: "too many stop defaults", configs: []Config{withStopDefault(testModelConfig("model-a"), make([]string, 17))}, field: "capability.generation.stop.default"},
+		{name: "long stop default", configs: []Config{withStopDefault(testModelConfig("model-a"), []string{strings.Repeat("界", 257)})}, field: "capability.generation.stop.default"},
+		{name: "rerank generation policy", configs: []Config{withRerankOperation(testModelConfig("model-a"))}, field: "capability"},
+		{name: "embedding generation policy", configs: []Config{withEmbeddingGenerationPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "embedding missing policy", configs: []Config{withMissingEmbeddingPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "embedding wrong output", configs: []Config{withWrongEmbeddingOutput(embeddingModelConfig("model-a", &EmbeddingPolicy{}))}, field: "capability"},
+		{name: "non-embedding embedding policy", configs: []Config{withEmbeddingPolicyOnGenerate(testModelConfig("model-a"))}, field: "capability"},
+		{name: "empty reasoning modes", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{})}, field: "capability.reasoning.thinking_modes"},
+		{name: "invalid reasoning mode", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: "unknown"}}})}, field: "capability.reasoning.thinking_modes[0].thinking"},
+		{name: "duplicate reasoning mode", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: api.ThinkingEnabled}, {Thinking: api.ThinkingEnabled}}})}, field: "capability.reasoning.thinking_modes"},
+		{name: "disabled reasoning effort", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: api.ThinkingDisabled, Efforts: []api.ReasoningEffort{api.ReasoningEffortHigh}}}})}, field: "capability.reasoning.thinking_modes[0].efforts"},
+		{name: "reasoning default not declared", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: api.ThinkingEnabled}}, DefaultThinking: pointer(api.ThinkingAdaptive)})}, field: "capability.reasoning.default_thinking"},
+		{name: "reasoning effort default not declared", configs: []Config{withReasoningPolicy(testModelConfig("model-a"), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: api.ThinkingEnabled, Efforts: []api.ReasoningEffort{api.ReasoningEffortLow}, DefaultEffort: pointer(api.ReasoningEffortHigh)}}})}, field: "capability.reasoning.thinking_modes[0].default_effort"},
+		{name: "reasoning on embedding", configs: []Config{withReasoningPolicy(embeddingModelConfig("model-a", &EmbeddingPolicy{}), &ReasoningPolicy{ThinkingModes: []ThinkingModePolicy{{Thinking: api.ThinkingDisabled}}})}, field: "capability"},
+		{name: "conflicting dimensions", configs: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(128)), Dimensions: &NumericParameter[int64]{}})}, field: "capability.embedding.dimensions"},
+		{name: "invalid fixed dimensions", configs: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{FixedDimensions: pointer(int64(0))})}, field: "capability.embedding.fixed_dimensions"},
+		{name: "invalid adjustable dimensions", configs: []Config{embeddingModelConfig("model-a", &EmbeddingPolicy{Dimensions: &NumericParameter[int64]{Minimum: pointer(int64(0))}})}, field: "capability.embedding.dimensions.minimum"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newCatalog(test.defaults, test.overrides)
+			_, err := newCatalog(test.configs)
 			var configErrorValue *ConfigError
 			if !errors.As(err, &configErrorValue) || configErrorValue.Field != test.field {
 				t.Fatalf("expected config error for %q, got %T %v", test.field, err, err)
@@ -473,32 +611,9 @@ func TestCatalogRejectsInvalidDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestValidateBaseModelVocabulary(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		value string
-		valid bool
-	}{
-		{name: "empty", value: "", valid: false},
-		{name: "leading whitespace", value: " model", valid: false},
-		{name: "trailing whitespace", value: "model ", valid: false},
-		{name: "qualified name", value: "provider/model", valid: false},
-		{name: "bare name with colon", value: "model:0", valid: true},
-		{name: "bare name", value: "model-v1.2", valid: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := ValidateBaseModel(test.value)
-			if test.valid && err != nil {
-				t.Fatalf("ValidateBaseModel(%q) rejected a valid bare name: %v", test.value, err)
-			}
-			if !test.valid && err == nil {
-				t.Fatalf("ValidateBaseModel(%q) accepted an invalid identity", test.value)
-			}
-		})
-	}
-
+func TestCatalogPreservesCanonicalBaseModel(t *testing.T) {
 	config := testModelConfig("model:0")
-	catalog, err := newCatalog([]Config{config}, nil)
+	catalog, err := newCatalog([]Config{config})
 	if err != nil {
 		t.Fatalf("construct catalog with a colon-bearing bare name: %v", err)
 	}
@@ -532,7 +647,7 @@ func TestCatalogRejectsInvalidCapabilityShapes(t *testing.T) {
 		{name: "embedding output is exclusive", config: embeddingOutput},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newCatalog([]Config{test.config}, nil)
+			_, err := newCatalog([]Config{test.config})
 			var configErr *ConfigError
 			if !errors.As(err, &configErr) || configErr.Field != "capability" {
 				t.Fatalf("expected capability-shape error, got %T %v", err, err)
@@ -544,7 +659,7 @@ func TestCatalogRejectsInvalidCapabilityShapes(t *testing.T) {
 func TestCatalogRetainsStructuredOutputModelCompatibilityEvidence(t *testing.T) {
 	config := testModelConfig("structured-override")
 	config.Capability.Features = []api.Feature{api.FeatureStructured}
-	catalog, err := newCatalog([]Config{config}, nil)
+	catalog, err := newCatalog([]Config{config})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +686,7 @@ func TestCatalogRetainsExplicitMultimodalCapabilityFacts(t *testing.T) {
 		InputModalities:  []api.Modality{api.ModalityImage, api.ModalityText},
 		OutputModalities: []api.Modality{api.ModalityImage, api.ModalityText},
 	}
-	catalog, err := newCatalog([]Config{realtime, image}, nil)
+	catalog, err := newCatalog([]Config{realtime, image})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +710,7 @@ func TestCatalogDocumentErrorsAreTyped(t *testing.T) {
 		`{"schema_version":3,"models":[],"sources":[]}`,
 	}
 	for _, data := range tests {
-		_, err := loadCatalogDefaults([]byte(data))
+		_, err := loadCatalogTestData([]byte(data))
 		var catalogError *CatalogDataError
 		if !errors.As(err, &catalogError) {
 			t.Fatalf("catalog document error is not typed: %T %v", err, err)
@@ -604,15 +719,15 @@ func TestCatalogDocumentErrorsAreTyped(t *testing.T) {
 }
 
 func TestCatalogDocumentAcceptsOnlyCurrentSchema(t *testing.T) {
-	document := CatalogDocument{
-		SchemaVersion: CatalogSchemaVersion,
+	document := catalogTestDocument{
+		SchemaVersion: catalogTestSchemaVersion,
 		Models:        []Config{testModelConfig("model-a")},
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadCatalogDefaults(encoded); err != nil {
+	if _, err := loadCatalogTestData(encoded); err != nil {
 		t.Fatalf("current schema was rejected: %v", err)
 	}
 	document.SchemaVersion--
@@ -620,7 +735,7 @@ func TestCatalogDocumentAcceptsOnlyCurrentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadCatalogDefaults(encoded); err == nil {
+	if _, err := loadCatalogTestData(encoded); err == nil {
 		t.Fatal("previous schema was accepted")
 	}
 }
@@ -635,13 +750,13 @@ func TestModelErrorsPreserveBoundaryFacts(t *testing.T) {
 		t.Fatalf("unexpected lookup error: %q", notFoundErrorValue)
 	}
 	catalogErrorValue := (&CatalogDataError{Reason: "broken"}).Error()
-	if catalogErrorValue != "invalid embedded model catalog: broken" {
+	if catalogErrorValue != "invalid model catalog: broken" {
 		t.Fatalf("unexpected catalog error: %q", catalogErrorValue)
 	}
 }
 
 func TestBuiltInClaudeModelsFilterUnsupportedSamplingParameters(t *testing.T) {
-	catalog, err := NewCatalog(nil)
+	catalog, err := newSeedCatalog()
 	if err != nil {
 		t.Fatalf("load built-in catalog: %v", err)
 	}
@@ -695,6 +810,35 @@ func testModelConfig(baseModel string) Config {
 			},
 		},
 	}
+}
+
+func reasoningModelConfig(baseModel string) Config {
+	config := testModelConfig(baseModel)
+	defaultThinking := api.ThinkingAdaptive
+	enabledDefault := api.ReasoningEffortMedium
+	adaptiveDefault := api.ReasoningEffortMedium
+	config.Capability.Reasoning = &ReasoningPolicy{
+		ThinkingModes: []ThinkingModePolicy{
+			{Thinking: api.ThinkingDisabled},
+			{
+				Thinking:      api.ThinkingEnabled,
+				Efforts:       []api.ReasoningEffort{api.ReasoningEffortLow, api.ReasoningEffortMedium, api.ReasoningEffortHigh},
+				DefaultEffort: &enabledDefault,
+			},
+			{
+				Thinking:      api.ThinkingAdaptive,
+				Efforts:       []api.ReasoningEffort{api.ReasoningEffortLow, api.ReasoningEffortMedium, api.ReasoningEffortHigh},
+				DefaultEffort: &adaptiveDefault,
+			},
+		},
+		DefaultThinking: &defaultThinking,
+	}
+	return config
+}
+
+func withReasoningPolicy(config Config, policy *ReasoningPolicy) Config {
+	config.Capability.Reasoning = policy
+	return config
 }
 
 func embeddingModelConfig(baseModel string, policy *EmbeddingPolicy) Config {
@@ -779,6 +923,21 @@ func withInvalidNumericDefault(config Config) Config {
 
 func withNonFiniteDefault(config Config) Config {
 	config.Capability.Generation.Temperature = &NumericParameter[float64]{Default: pointer(math.Inf(1))}
+	return config
+}
+
+func withTemperatureMaximum(config Config, maximum float64) Config {
+	config.Capability.Generation.Temperature = &NumericParameter[float64]{Maximum: &maximum}
+	return config
+}
+
+func withTopPMinimum(config Config, minimum float64) Config {
+	config.Capability.Generation.TopP = &NumericParameter[float64]{Minimum: &minimum}
+	return config
+}
+
+func withStopDefault(config Config, sequences []string) Config {
+	config.Capability.Generation.Stop = &StopParameter{Default: sequences}
 	return config
 }
 

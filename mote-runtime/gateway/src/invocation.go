@@ -1,146 +1,118 @@
-// Package gateway
-//
-// The cross-language DTO profiles and terminal-only observation rules live in
-// the repository conformance contract. These Go interfaces are the typed local
-// adapters for those profiles; they do not define a second wire protocol.
 package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/admission"
+	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/internal/application"
 )
 
-// Invocation is the Kernel LLM unary seam. Kernel sends only api.LLMRequest;
-// media-generation requests use MediaInvocation and are owned by Execution.
-type Invocation interface {
-	Invoke(context.Context, api.LLMRequest) (api.LLMResponse, error)
+// Public aliases expose the immutable admitted values and caller-owned
+// lifecycles without defining parallel invocation shapes.
+type (
+	AdmittedLLM                      = admission.AdmittedLLM
+	AdmittedMedia                    = admission.AdmittedMedia
+	LLMEventStream[Event any]        = api.LLMEventStream[Event]
+	MediaEventStream[Event any]      = api.MediaEventStream[Event]
+	DuplexSession[Input, Output any] = api.DuplexSession[Input, Output]
+)
+
+// These public names expose the application-owned admitted-request adapter
+// seams without defining parallel shapes at the Gateway boundary.
+type (
+	LLMAdapter                            = application.LLMAdapter
+	MediaAdapter                          = application.MediaAdapter
+	LLMStreamAdapter[Event any]           = application.LLMStreamAdapter[Event]
+	MediaStreamAdapter[Event any]         = application.MediaStreamAdapter[Event]
+	LLMRealtimeAdapter[Input, Output any] = application.LLMRealtimeAdapter[Input, Output]
+	MediaAsyncAdapter                     = application.MediaAsyncAdapter
+)
+
+// Invocation owns the single reusable admission pipeline. Delivery adapters
+// are supplied only to the operation that uses them, so stream-only,
+// realtime-only, and async-only implementations need no unrelated unary seam.
+type Invocation struct {
+	pipeline *application.Invocation
 }
 
-// LLMInvocation is the descriptive name for the Kernel model seam.
-type LLMInvocation interface {
-	Invocation
+// NewInvocation constructs the canonical typed-frame admission boundary from
+// the already-selected catalog, protocol, and service descriptors.
+func NewInvocation(config InvocationConfig) (*Invocation, error) {
+	pipeline, err := newPipeline(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Invocation{pipeline: pipeline}, nil
 }
 
-// MediaInvocation is the separate Execution → Gateway media seam. Its DTO is
-// intentionally not assignable to Invocation.
-type MediaInvocation interface {
-	InvokeMedia(context.Context, api.MediaRequest) (api.MediaResponse, error)
+// InvokeLLM admits one canonical LLM frame and invokes its unary adapter.
+func InvokeLLM(ctx context.Context, invocation *Invocation, adapter LLMAdapter, frame api.LLMRequestFrame) (api.LLMResponse, error) {
+	if adapter == nil {
+		return api.LLMResponse{}, fmt.Errorf("LLM adapter is required")
+	}
+	return invocation.pipeline.InvokeLLM(ctx, frame, adapter)
 }
 
-// LLMStreamInvocation opens a caller-owned LLM delivery stream. Event values
-// are local delivery values only; Finalize returns the one terminal response.
-type LLMStreamInvocation[Event any] interface {
-	Stream(context.Context, api.LLMRequest) (LLMEventStream[Event], error)
+// InvokeMedia admits one canonical media frame and invokes its unary adapter.
+func InvokeMedia(ctx context.Context, invocation *Invocation, adapter MediaAdapter, frame api.MediaRequestFrame) (api.MediaResponse, error) {
+	if adapter == nil {
+		return api.MediaResponse{}, fmt.Errorf("media adapter is required")
+	}
+	return invocation.pipeline.InvokeMedia(ctx, frame, adapter)
 }
 
-// MediaStreamInvocation opens a caller-owned media delivery stream. It has a
-// distinct request and final response type from the Kernel LLM stream.
-type MediaStreamInvocation[Event any] interface {
-	StreamMedia(context.Context, api.MediaRequest) (MediaEventStream[Event], error)
+// OpenLLMStream opens one caller-owned LLM stream through the same admission
+// pipeline as every other delivery mode.
+func OpenLLMStream[Event any](ctx context.Context, invocation *Invocation, adapter LLMStreamAdapter[Event], frame api.LLMRequestFrame) (LLMEventStream[Event], error) {
+	if adapter == nil {
+		return nil, fmt.Errorf("LLM stream adapter is required")
+	}
+	return application.OpenLLMStream(ctx, invocation.pipeline, frame, adapter)
 }
 
-// LLMInferenceInvocation combines the unary and server-stream LLM forms.
-type LLMInferenceInvocation[Event any] interface {
-	LLMInvocation
-	LLMStreamInvocation[Event]
+// OpenMediaStream opens one caller-owned media stream through the shared
+// admission pipeline.
+func OpenMediaStream[Event any](ctx context.Context, invocation *Invocation, adapter MediaStreamAdapter[Event], frame api.MediaRequestFrame) (MediaEventStream[Event], error) {
+	if adapter == nil {
+		return nil, fmt.Errorf("media stream adapter is required")
+	}
+	return application.OpenMediaStream(ctx, invocation.pipeline, frame, adapter)
 }
 
-// MediaInferenceInvocation combines synchronous, streaming, and asynchronous
-// Execution media forms without widening the Kernel LLM interface.
-type MediaInferenceInvocation[Event any] interface {
-	MediaInvocation
-	MediaStreamInvocation[Event]
-	AsyncMediaInvocation
+// OpenDuplex opens one caller-owned realtime session after admission.
+func OpenDuplex[Input, Output any](ctx context.Context, invocation *Invocation, adapter LLMRealtimeAdapter[Input, Output], frame api.LLMRequestFrame) (DuplexSession[Input, Output], error) {
+	if adapter == nil {
+		return nil, fmt.Errorf("LLM realtime adapter is required")
+	}
+	return application.OpenDuplex(ctx, invocation.pipeline, frame, adapter)
 }
 
-// LLMEventStream is one caller-owned LLM stream. Recv is never serialized into
-// the Kernel response; Finalize accumulates and normalizes the complete result.
-type LLMEventStream[Event any] interface {
-	Recv(context.Context) (Event, error)
-	Finalize(context.Context) (api.LLMResponse, error)
-	Close() error
+// SubmitMedia submits one asynchronous media operation after admission.
+func SubmitMedia(ctx context.Context, invocation *Invocation, adapter MediaAsyncAdapter, frame api.MediaRequestFrame) (api.TaskHandle, error) {
+	if adapter == nil {
+		return api.TaskHandle{}, fmt.Errorf("media async adapter is required")
+	}
+	return application.SubmitMedia(ctx, invocation.pipeline, frame, adapter)
 }
 
-// MediaEventStream is the corresponding Execution media stream lifecycle.
-type MediaEventStream[Event any] interface {
-	Recv(context.Context) (Event, error)
-	Finalize(context.Context) (api.MediaResponse, error)
-	Close() error
-}
-
-// RealtimeInvocation opens a bidirectional LLM session. The session's final
-// response is still terminal-only; frame delivery remains caller-owned.
-type RealtimeInvocation[Input, Output any] interface {
-	OpenDuplex(context.Context, api.LLMRequest) (DuplexSession[Input, Output], error)
-}
-
-// DuplexSession is one caller-owned bidirectional session with one finalizer
-// and one idempotent close path.
-type DuplexSession[Input, Output any] interface {
-	Send(context.Context, Input) error
-	Recv(context.Context) (Output, error)
-	Finalize(context.Context) (api.LLMResponse, error)
-	Close() error
-}
-
-// AsyncMediaInvocation submits one Execution media operation and returns a
-// durable task handle. Polling and reconciliation are separate operations.
-type AsyncMediaInvocation interface {
-	SubmitMedia(context.Context, api.MediaRequest) (api.TaskHandle, error)
-}
-
-// InvokeStrict forwards exactly one Kernel LLM request without retry,
-// fallback, timeout, mutation, or error translation.
-func InvokeStrict(
-	ctx context.Context,
-	invocation Invocation,
-	request api.LLMRequest,
-) (api.LLMResponse, error) {
-	return invocation.Invoke(ctx, request)
-}
-
-// InvokeMediaStrict forwards exactly one Execution media request.
-func InvokeMediaStrict(
-	ctx context.Context,
-	invocation MediaInvocation,
-	request api.MediaRequest,
-) (api.MediaResponse, error) {
-	return invocation.InvokeMedia(ctx, request)
-}
-
-// StreamStrict opens exactly one caller-owned LLM stream.
-func StreamStrict[Event any](
-	ctx context.Context,
-	invocation LLMStreamInvocation[Event],
-	request api.LLMRequest,
-) (LLMEventStream[Event], error) {
-	return invocation.Stream(ctx, request)
-}
-
-// StreamMediaStrict opens exactly one caller-owned media stream.
-func StreamMediaStrict[Event any](
-	ctx context.Context,
-	invocation MediaStreamInvocation[Event],
-	request api.MediaRequest,
-) (MediaEventStream[Event], error) {
-	return invocation.StreamMedia(ctx, request)
-}
-
-// OpenDuplexStrict opens exactly one realtime LLM session.
-func OpenDuplexStrict[Input, Output any](
-	ctx context.Context,
-	invocation RealtimeInvocation[Input, Output],
-	request api.LLMRequest,
-) (DuplexSession[Input, Output], error) {
-	return invocation.OpenDuplex(ctx, request)
-}
-
-// SubmitMediaStrict submits exactly one asynchronous media operation.
-func SubmitMediaStrict(
-	ctx context.Context,
-	invocation AsyncMediaInvocation,
-	request api.MediaRequest,
-) (api.TaskHandle, error) {
-	return invocation.SubmitMedia(ctx, request)
+func newPipeline(config InvocationConfig) (*application.Invocation, error) {
+	if config.Catalog == nil {
+		return nil, fmt.Errorf("model catalog is required")
+	}
+	if !config.Catalog.Current().Ready() {
+		return nil, fmt.Errorf("model catalog is not ready")
+	}
+	if config.Protocol.Name() == "" {
+		return nil, fmt.Errorf("protocol descriptor is required")
+	}
+	if config.Service.Name() == "" {
+		return nil, fmt.Errorf("service descriptor is required")
+	}
+	return application.New(application.Config{Admission: admission.Config{
+		Catalog:  config.Catalog,
+		Protocol: config.Protocol,
+		Service:  config.Service,
+	}}), nil
 }

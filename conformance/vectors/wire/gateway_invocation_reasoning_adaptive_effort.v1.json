@@ -1,0 +1,55 @@
+{
+  "$schema": "../../schemas/case/vector.v1.schema.json",
+  "case_version": 1,
+  "case_id": "gateway.invocation.reasoning.adaptive_effort",
+  "description": "An LLM request may ask the model to adapt its thinking while selecting a preferred reasoning effort.",
+  "protocol": {
+    "name": "gateway_invocation",
+    "version": 1,
+    "profile": "kernel_llm"
+  },
+  "input": {
+    "kind": "llm",
+    "schema_version": 1,
+    "operation_id": "reasoning-adaptive-1",
+    "base_model": "model.reasoning",
+    "operation": "generate",
+    "mode": "unary",
+    "input": {
+      "kind": "generate",
+      "messages": [{"role": "user", "content": [{"type": "text", "text": "Solve this."}]}],
+      "reasoning": {"thinking": "adaptive", "effort": "high"}
+    },
+    "features": []
+  },
+  "expect": {
+    "outcome": "accept",
+    "value": {
+      "kind": "llm_response",
+      "schema_version": 1,
+      "operation_id": "reasoning-adaptive-1",
+      "mode": "unary",
+      "terminal": {"outcome": "succeeded", "result": {"kind": "generate", "text": "Done."}},
+      "observation": {
+        "schema_version": 1,
+        "operation_id": "reasoning-adaptive-1",
+        "operation": "generate",
+        "modality": "text",
+        "mode": "unary",
+        "correlation": {"trace_id": "trace-reasoning-adaptive-1", "generation_id": "generation-reasoning-adaptive-1", "model_call_id": "call-reasoning-adaptive-1"},
+        "model": {"requested_base_model": "model.reasoning", "service_kind": "fixture", "protocol_id": "openai.chat_completions.v1"},
+        "input": {
+          "kind": "generate",
+          "messages": [{"role": "user", "content": [{"type": "text", "text": "Solve this."}]}],
+          "reasoning": {"thinking": "adaptive", "effort": "high"}
+        },
+        "finish": {"reasons": ["stop"]},
+        "usage": {"availability": "unavailable"},
+        "timing": {"latency_ms": 0, "streamed": false, "chunk_count": 0},
+        "cache": {"prompt": {"state": "not_requested"}, "result": {"state": "not_requested"}},
+        "attempts": []
+      },
+      "receipt": {"receipt_id": "receipt-reasoning-adaptive-1", "operation_id": "reasoning-adaptive-1", "revision": 1}
+    }
+  }
+}

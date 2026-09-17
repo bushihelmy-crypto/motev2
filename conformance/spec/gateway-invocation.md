@@ -1,7 +1,8 @@
 # Gateway model invocation contract
 
-This document defines `gateway_invocation` version `1`, the service- and protocol-neutral
-model boundary used by the runtimes. The JSON Schema in
+This document defines the not-yet-production `gateway_invocation` draft,
+schema version `1`, the service- and protocol-neutral model boundary used by
+the runtimes. The JSON Schema in
 [`schemas/protocol/gateway_invocation.v1.schema.json`](../schemas/protocol/gateway_invocation.v1.schema.json)
 is authoritative. Go types under `mote-runtime/gateway/src/api` and any
 future Python or Rust adapter are projections of that schema, not additional
@@ -30,15 +31,27 @@ The request has these fixed dimensions:
 | Field | Meaning |
 | --- | --- |
 | `operation_id` | Stable identity of one logical model operation; it is not an upstream request id. |
-| `model_id` | Model already selected by Router/Kernel. Gateway never replaces it. |
-| `operation` | Semantic model operation. |
-| `modality` | Primary input/output modality. `music` is distinct from `audio`. |
+| `base_model` | Bare model name already selected by Router/Kernel; `/` is not allowed. Gateway never replaces it. |
+| `operation` | Optional semantic model operation. When omitted, Gateway uses the operation declared by the exact `base_model` catalog entry; an explicit value must match it. |
+| Derived modality | Gateway derives the primary operation/result modality after resolving `operation`; callers do not send a top-level `modality`. Nested content contributes its actual input modalities, and `music` remains distinct from `audio`. |
 | `mode` | A profile-allowed lifecycle: `unary`, `server_stream`, `duplex`, or `async`. |
 | `input` | Operation-discriminated canonical model input. |
 | `features` | Required capabilities such as native tool calls, structured output, prompt cache, and usage. |
 | `trace` | Optional explicit correlation identities supplied by the caller. |
 
-The operation/modality/input combinations fixed by v1 are:
+The operation/input combinations and their derived primary modalities are:
+
+`features` is not trusted as a second capability truth. Gateway reduces the
+effective requirements from the typed input: tool definitions, tool choices,
+tool-result/call messages require `tool_calls`; `response_format=json_schema`
+requires `structured_output`; and system/instruction text, message content,
+media source, and transcription artifacts contribute their actual input
+modalities. Structural requirements are unioned with explicit features, so
+omitting a derived feature cannot bypass the capability intersection.
+`prompt_cache` and `usage`, which have no structural trigger in this DTO,
+remain explicit requirements. Artifact `kind` has one canonical modality:
+`text`, `image`, `audio`, `music`, or `video`; unknown kinds are invalid and
+MIME/provider strings are never used to guess a modality.
 
 | Profile | Operation | Modality | Mode | Input kind |
 | --- | --- | --- | --- | --- |
@@ -57,13 +70,38 @@ credentials, protocol, retry/fallback policy, and connection-pool
 settings are intentionally absent from the request; they are Gateway
 composition and outbound transport concerns.
 
+`operation` may be omitted from a request. The selected model remains the
+source of the default: Gateway looks up the exact `base_model`, copies its
+single catalog operation into the normalized request, and then performs the
+usual profile/modality/mode checks. An explicitly supplied operation is never
+replaced; if it differs from the catalog operation, the request is rejected.
+An empty string is not a valid explicit operation.
+
+For LLM inputs, the optional `reasoning` object carries the caller's
+provider-neutral preference. `reasoning.thinking` is one of `disabled`,
+`enabled`, or `adaptive`; `reasoning.effort` is one of `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`. The two fields are independent, so
+`adaptive` may be combined with an effort (for example, `adaptive` + `high`):
+the model may vary its depth while targeting that effort. Effort is not a
+token budget. `disabled` is the sole public way to turn reasoning off and
+cannot be combined with `effort`. Omitting `reasoning` uses a default only when
+the selected model catalog declares one; otherwise Gateway preserves omission
+and leaves the upstream interface default in control. Protocol and service
+descriptors do not invent a competing reasoning default. When `reasoning` is
+present it must contain at least one non-null, non-empty field; explicit empty values are not
+treated as omission. These values are checked against the model, protocol, and
+service capabilities before the upstream request; Gateway never silently
+downgrades or switches the selected model.
+
 ### Profile DTOs
 
 `kernel_llm` is the only boundary used by Kernel Think. Its `LLMInput` carries
 conversation messages, system/instruction text, model-native tool definitions
-and choices, structured-output preferences, and generation parameters. A
-realtime input uses `kind=realtime` and is opened as a duplex session; it does
-not turn media generation into an LLM operation.
+and choices, structured-output preferences, the optional reasoning preference,
+and generation parameters. A realtime input uses `kind=realtime` and is opened
+as a duplex session; it does not turn media generation into an LLM operation.
+The reasoning object is not a provider wire shape: adapters translate it to
+the selected protocol (or reject a combination they cannot express).
 
 `execution_media` is the only boundary used by Execution for media work. Its
 `MediaInput` is operation-specific: speech synthesis uses `text` and `voice`,

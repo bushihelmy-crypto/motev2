@@ -1,5 +1,7 @@
 package api
 
+import "fmt"
+
 // ErrorCode is stable enough for Kernel policy and recovery decisions.  The
 // message is intentionally safe and bounded; raw upstream bodies stay inside
 // the connector.
@@ -25,3 +27,22 @@ type GatewayError struct {
 	Retryability        string    `json:"retryability"`
 	ExternalCommitState string    `json:"external_commit_state"`
 }
+
+// RequestError is the Go error projection for deterministic admission and wire
+// failures that happen before an invocation can form a terminal response. It
+// keeps the stable public code while retaining the owner error for callers
+// that need typed diagnostics.
+type RequestError struct {
+	Code    ErrorCode
+	Message string
+	Cause   error
+}
+
+func (err *RequestError) Error() string {
+	if err.Message != "" {
+		return err.Message
+	}
+	return fmt.Sprintf("gateway request failed with %s", err.Code)
+}
+
+func (err *RequestError) Unwrap() error { return err.Cause }

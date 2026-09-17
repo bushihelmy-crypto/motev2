@@ -9,9 +9,19 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$"
     },
-    "model_id": {
+    "base_model": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
+    },
+    "service_kind": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "protocol_id": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
     },
     "digest": {
       "type": "string",
@@ -30,7 +40,7 @@
         "artifact_id": {"$ref": "#/$defs/identifier"},
         "revision": {"type": "integer", "minimum": 1},
         "representation": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
-        "kind": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"},
+        "kind": {"enum": ["text", "image", "audio", "music", "video"]},
         "mime_type": {"type": "string", "pattern": "^[^\\s/]+/[^\\s]+$"},
         "content_ref": {"$ref": "#/$defs/identifier"},
         "digest": {"$ref": "#/$defs/digest"},
@@ -47,6 +57,22 @@
         "stop": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
         "seed": {"type": "integer"}
       }
+    },
+    "reasoning": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "thinking": {"enum": ["disabled", "enabled", "adaptive"]},
+        "effort": {"enum": ["minimal", "low", "medium", "high", "xhigh", "max"]}
+      },
+      "anyOf": [{"required": ["thinking"]}, {"required": ["effort"]}],
+      "allOf": [
+        {
+          "if": {"required": ["thinking"], "properties": {"thinking": {"const": "disabled"}}},
+          "then": {"not": {"required": ["effort"]}}
+        }
+      ]
     },
     "text_part": {
       "type": "object",
@@ -142,6 +168,7 @@
         "tools": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/tool_definition"}},
         "tool_choice": {"$ref": "#/$defs/tool_choice"},
         "response_format": {"$ref": "#/$defs/response_format"},
+        "reasoning": {"$ref": "#/$defs/reasoning"},
         "parameters": {"$ref": "#/$defs/parameters"}
       }
     },
@@ -155,6 +182,7 @@
         "modalities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["text", "audio"]}},
         "tools": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/tool_definition"}},
         "tool_choice": {"$ref": "#/$defs/tool_choice"},
+        "reasoning": {"$ref": "#/$defs/reasoning"},
         "parameters": {"$ref": "#/$defs/parameters"}
       }
     },
@@ -253,14 +281,13 @@
     "request_base": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "schema_version", "operation_id", "model_id", "operation", "modality", "mode", "input", "features"],
+      "required": ["kind", "schema_version", "operation_id", "base_model", "mode", "input"],
       "properties": {
         "kind": {"enum": ["llm", "media"]},
         "schema_version": {"const": 1},
         "operation_id": {"$ref": "#/$defs/identifier"},
-        "model_id": {"$ref": "#/$defs/model_id"},
-        "operation": {"type": "string"},
-        "modality": {"type": "string"},
+        "base_model": {"$ref": "#/$defs/base_model"},
+        "operation": {"type": "string", "minLength": 1},
         "mode": {"type": "string"},
         "input": {"type": "object"},
         "features": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
@@ -272,18 +299,19 @@
         {"$ref": "#/$defs/request_base"},
         {
           "type": "object",
-          "required": ["kind", "operation", "modality", "mode", "input", "features"],
+          "required": ["kind", "mode", "input"],
           "properties": {
             "kind": {"const": "llm"},
             "operation": {"enum": ["generate", "realtime"]},
-            "modality": {"enum": ["text", "audio"]},
             "mode": {"enum": ["unary", "server_stream", "duplex"]},
             "input": {"$ref": "#/$defs/llm_input"},
             "features": {"items": {"enum": ["tool_calls", "structured_output", "prompt_cache", "usage"]}}
           },
           "allOf": [
-            {"if": {"properties": {"operation": {"const": "generate"}}}, "then": {"properties": {"modality": {"const": "text"}, "mode": {"enum": ["unary", "server_stream"]}, "input": {"$ref": "#/$defs/llm_generate_input"}}}},
-            {"if": {"properties": {"operation": {"const": "realtime"}}}, "then": {"properties": {"modality": {"const": "audio"}, "mode": {"const": "duplex"}, "input": {"$ref": "#/$defs/llm_realtime_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "generate"}}}, "then": {"properties": {"mode": {"enum": ["unary", "server_stream"]}, "input": {"$ref": "#/$defs/llm_generate_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "realtime"}}}, "then": {"properties": {"mode": {"const": "duplex"}, "input": {"$ref": "#/$defs/llm_realtime_input"}}}},
+            {"if": {"properties": {"input": {"properties": {"kind": {"const": "generate"}}}}}, "then": {"properties": {"mode": {"enum": ["unary", "server_stream"]}}}},
+            {"if": {"properties": {"input": {"properties": {"kind": {"const": "realtime"}}}}}, "then": {"properties": {"mode": {"const": "duplex"}}}},
             {"if": {"properties": {"mode": {"const": "duplex"}}}, "then": {"properties": {"operation": {"const": "realtime"}}}}
           ]
         }
@@ -294,21 +322,20 @@
         {"$ref": "#/$defs/request_base"},
         {
           "type": "object",
-          "required": ["kind", "operation", "modality", "mode", "input", "features"],
+          "required": ["kind", "mode", "input"],
           "properties": {
             "kind": {"const": "media"},
             "operation": {"enum": ["image_generation", "audio_generation", "music_generation", "video_generation", "audio_transcription"]},
-            "modality": {"enum": ["image", "audio", "music", "video"]},
             "mode": {"enum": ["unary", "server_stream", "async"]},
             "input": {"$ref": "#/$defs/media_input"},
             "features": {"items": {"enum": ["prompt_cache", "usage"]}}
           },
           "allOf": [
-            {"if": {"properties": {"operation": {"const": "image_generation"}}}, "then": {"properties": {"modality": {"const": "image"}, "input": {"$ref": "#/$defs/image_generation_input"}}}},
-            {"if": {"properties": {"operation": {"const": "audio_generation"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/audio_generation_input"}}}},
-            {"if": {"properties": {"operation": {"const": "music_generation"}}}, "then": {"properties": {"modality": {"const": "music"}, "input": {"$ref": "#/$defs/music_generation_input"}}}},
-            {"if": {"properties": {"operation": {"const": "video_generation"}}}, "then": {"properties": {"modality": {"const": "video"}, "input": {"$ref": "#/$defs/video_generation_input"}}}},
-            {"if": {"properties": {"operation": {"const": "audio_transcription"}}}, "then": {"properties": {"modality": {"const": "audio"}, "input": {"$ref": "#/$defs/transcription_input"}}}}
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "image_generation"}}}, "then": {"properties": {"input": {"$ref": "#/$defs/image_generation_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "audio_generation"}}}, "then": {"properties": {"input": {"$ref": "#/$defs/audio_generation_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "music_generation"}}}, "then": {"properties": {"input": {"$ref": "#/$defs/music_generation_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "video_generation"}}}, "then": {"properties": {"input": {"$ref": "#/$defs/video_generation_input"}}}},
+            {"if": {"required": ["operation"], "properties": {"operation": {"const": "audio_transcription"}}}, "then": {"properties": {"input": {"$ref": "#/$defs/transcription_input"}}}}
           ]
         }
       ]
@@ -412,12 +439,12 @@
     "model_observation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requested_model_id", "service_kind", "protocol_id"],
+      "required": ["requested_base_model", "service_kind", "protocol_id"],
       "properties": {
-        "requested_model_id": {"$ref": "#/$defs/model_id"},
-        "resolved_model_id": {"$ref": "#/$defs/model_id"},
-        "service_kind": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
-        "protocol_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}(\\.[a-z][a-z0-9_.-]{0,127})+$"},
+        "requested_base_model": {"$ref": "#/$defs/base_model"},
+        "resolved_base_model": {"$ref": "#/$defs/base_model"},
+        "service_kind": {"$ref": "#/$defs/service_kind"},
+        "protocol_id": {"$ref": "#/$defs/protocol_id"},
         "upstream_request_id": {"$ref": "#/$defs/identifier"},
         "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
         "tenant_fingerprint": {"$ref": "#/$defs/digest"},
@@ -515,14 +542,14 @@
     "attempt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["attempt_id", "ordinal", "resume_generation", "state", "model_id", "service_kind", "latency_ms", "usage", "selected"],
+      "required": ["attempt_id", "ordinal", "resume_generation", "state", "base_model", "service_kind", "latency_ms", "usage", "selected"],
       "properties": {
         "attempt_id": {"$ref": "#/$defs/identifier"},
         "ordinal": {"type": "integer", "minimum": 1},
         "resume_generation": {"type": "integer", "minimum": 0},
         "state": {"enum": ["succeeded", "failed", "cancelled", "unknown"]},
-        "model_id": {"$ref": "#/$defs/model_id"},
-        "service_kind": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"},
+        "base_model": {"$ref": "#/$defs/base_model"},
+        "service_kind": {"$ref": "#/$defs/service_kind"},
         "endpoint_fingerprint": {"$ref": "#/$defs/digest"},
         "credential_slot_id": {"$ref": "#/$defs/identifier"},
         "latency_ms": {"type": "number", "minimum": 0},

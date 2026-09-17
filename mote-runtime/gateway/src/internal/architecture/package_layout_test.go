@@ -38,16 +38,28 @@ func TestScaffoldHasOneModuleAndExplicitOwners(t *testing.T) {
 		"internal/cache/result",
 		"internal/complexity",
 		"internal/model",
-		"internal/plan",
 		"internal/protocol",
+		"internal/protocol/anthropic/messages",
+		"internal/protocol/bedrock/converse",
+		"internal/protocol/gemini/generatecontent",
+		"internal/protocol/openai/chatcompletions",
+		"internal/protocol/openai/realtime",
+		"internal/protocol/openai/responses",
 		"internal/receipt",
 		"internal/service",
+		"internal/service/azure",
+		"internal/service/bedrock",
+		"internal/service/generic",
+		"internal/service/huggingface",
+		"internal/service/vertex",
 		"internal/telemetry",
 		"internal/testkit",
 		"internal/upstream",
-		"protocols",
-		"connectors",
-		"upstream",
+		"internal/upstream/eventstream",
+		"internal/upstream/httpclient",
+		"internal/upstream/pool",
+		"internal/upstream/sse",
+		"internal/upstream/websocket",
 		"ports",
 		"integration",
 	}
@@ -55,6 +67,16 @@ func TestScaffoldHasOneModuleAndExplicitOwners(t *testing.T) {
 		path := filepath.Join(source, relative)
 		if info, err := os.Stat(path); err != nil || !info.IsDir() {
 			t.Errorf("required owner directory %q is missing", relative)
+		}
+	}
+	for _, relative := range []string{
+		"protocols", "connectors", "upstream", "internal/capability", "internal/plan",
+		"internal/protocol/registry.go", "internal/service/registry.go",
+	} {
+		if _, err := os.Stat(filepath.Join(source, relative)); err == nil {
+			t.Errorf("removed owner or registry still exists: %q", relative)
+		} else if !os.IsNotExist(err) {
+			t.Errorf("stat removed owner %q: %v", relative, err)
 		}
 	}
 

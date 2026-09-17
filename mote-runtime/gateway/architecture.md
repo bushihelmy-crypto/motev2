@@ -1,13 +1,15 @@
 # Mote Model Gateway 架构
 
-> 状态：目标架构草案。本文定义 `mote-runtime/gateway` 的职责、调用边界和内部拆分，不代表这些组件已经实现。
+> 状态：包结构与 Gateway 侧 admission/application 前置链路已经落地；具体协议、服务和 transport 尚未接入真实上游执行，本文中的完整执行链仍是目标架构。
 
 ## 1. 一句话结论
 
 Model Gateway 不负责选模型，也不负责选服务商。
 
-它接收两个明确的调用边界：Kernel `Think` 阶段通过 `LLMInvocation` 发来的
-`LLMRequest`，以及 Execution 通过 `MediaInvocation` 发来的 `MediaRequest`。
+它接收两个明确的调用边界：inbound invocation owner 校验 Kernel `Think` 的
+`LLMRequest` 后交给 `gateway.InvokeLLM` 的 canonical frame，以及校验 Execution
+`MediaRequest` 后交给 `gateway.InvokeMedia` 的 canonical frame。两个入口复用同一个
+只持有 admission 的 `gateway.Invocation`。
 模型已经由 `RouterPort` 选好，服务商、请求协议和 API Key 已经由用户配置并
 绑定在调用端的配置中。Gateway 只负责判断这个组合能不能执行，然后完成
 真实模型调用。媒体生成不从 Kernel 发起。
@@ -18,12 +20,11 @@ Model Gateway 不负责选模型，也不负责选服务商。
 ├── 请求协议
 └── API Key / 其他凭据
         │
-        ├── Kernel 装配 → LLMInvocation
-        └── Execution 装配 → MediaInvocation
+        └── 调用端装配 → gateway.Invocation
 
-Kernel Think ── LLMRequest ────────┐
+Kernel Think ── LLMRequestFrame ───┐
                                    ├── Model Gateway
-Execution ──── MediaRequest ───────┘
+Execution ──── MediaRequestFrame ──┘
                                    ├── 校验 模型 × 协议 × 服务商
                                    ├── 转换为上游协议
                                    ├── 处理地址与鉴权
@@ -38,8 +39,8 @@ Execution ──── MediaRequest ───────┘
 ```mermaid
 flowchart LR
     U[用户配置<br/>服务商 + 协议 + 凭据] --> K[Kernel 装配]
-    K --> LI[LLMInvocation]
-    E[Execution 装配] --> MP[MediaInvocation]
+    K --> I[gateway.Invocation]
+    E[Execution 装配] --> I
 
     subgraph THINK[Kernel Think]
         RN[RouterNode] --> RP[RouterPort]
@@ -47,9 +48,12 @@ flowchart LR
         M --> IN[InferenceNode]
     end
 
-    IN --> LI
-    LI --> LR[LLMRequest]
-    MP --> MR[MediaRequest]
+    IN --> LF[LLMRequestFrame]
+    E --> MF[MediaRequestFrame]
+    LF --> LI[gateway.InvokeLLM / stream / duplex]
+    MF --> MI[gateway.InvokeMedia / stream / async]
+    LI --> LR[AdmittedLLM]
+    MI --> MR[AdmittedMedia]
     LR --> G[Model Gateway]
     MR --> G
 
@@ -67,8 +71,8 @@ flowchart LR
     X <--> UP[上游模型服务]
     R --> LOUT[LLMResponse]
     R --> MOUT[MediaResponse]
-    LOUT --> LI
-    MOUT --> MP
+    LOUT --> K
+    MOUT --> E
 ```
 
 调用时有两份来源不同的信息：
@@ -113,20 +117,20 @@ operation 声明的输入/输出模态、模型兼容性 feature，以及参数�
 和数值边界。delivery mode 属于协议/服务调用生命周期，不进入模型定义。执行行为
 仍然属于 Protocol Adapter 与 Service Connector。
 
-模型配置按固定优先级只合并一次：
+模型目录只有一条生产数据链：
 
 ```text
-Gateway catalog default
-        +
-Kernel invocation config 中该模型的显式 override
-        =
-immutable model.Definition
+用户 CRUD
+        → 数据库最新完整记录
+        → ports.ModelCatalogSource
+        → 整批校验
+        → immutable model.Definition
 ```
 
-override 使用 presence 语义：未提供的公共标量和 token limit 继承默认值；非 nil
-的 capability 整体替换默认 capability，不存在第二套 capability patch 规则。override
-不能借此传入 service、protocol、endpoint、credential 或 price。Gateway 不读取
-另一份用户配置源，也不在调用中修改已经冻结的 `model.Definition`。
+Gateway 不内置生产默认目录，也不接受 invocation 级模型 patch。新增或修改模型时，
+数据源必须返回该模型的完整记录；整批记录全部合法后才原子替换 Catalog。模型记录
+不能带入 service、protocol、endpoint、credential 或 price，调用中也不能修改已经
+冻结的 `model.Definition`。
 
 本次请求的规范生成参数再按“模型默认值 → Kernel 显式请求值”覆盖。对于 Gateway
 DTO 已知、但该模型明确不支持的可选参数，模型层在协议编码前自动过滤；
@@ -202,10 +206,15 @@ RouterPort 选择的 ModelSelection
         +
 调用端持有的 ProtocolId
         =
-GatewayCallPlan
+admission.AdmittedLLM / admission.AdmittedMedia
 ```
 
-这个组合只在 Gateway 内形成一次不可变的 `GatewayCallPlan`，不能在调用过程中继续修改模型、服务商或协议。
+这个组合只在 Gateway 内形成一次不可变的已审核请求封装，不能在调用过程中继续修改模型、服务商或协议。
+
+当前 Go 装配面要求 composition root 显式注入 `InvocationConfig`，其中包含 Catalog reader、
+protocol descriptor 和 service descriptor。缺少任一项会在构造时失败；生产代码没有“全部支持”
+的默认值。所有 delivery mode 复用同一条 admission 链；CatalogStore 刷新只影响后续调用，
+已审核请求继续持有本次调用的不可变模型定义。
 
 ```mermaid
 flowchart TB
@@ -217,18 +226,22 @@ flowchart TB
     S --> C
     P --> C
 
-    C -->|通过| E[Immutable GatewayCallPlan]
+    C -->|通过| E[Immutable Admitted Request]
     C -->|不通过| F[Gateway typed error<br/>不访问上游]
 
     E --> PA[ProtocolAdapter]
     E --> SC[ServiceConnector]
 ```
 
-这里不需要再引入一个“模型路由器”。`GatewayCallPlan` 只是把已经确定的信息冻结成一次调用计划。
+这里不需要再引入一个“模型路由器”。`admission` 的已审核封装只服务当前调用，application 直接消费，不建立独立 plan 生命周期。
 
 ## 5. Gateway 必须做兼容性校验
 
 这是 Gateway 的硬门禁。确定性不兼容必须在访问上游之前报错，不能把错误请求发给服务商碰运气。
+
+请求中的 `operation` 可以省略。Gateway 先按精确 `BaseModel` 查目录，并用该模型唯一
+声明的 operation 补齐规范化请求；显式 operation 若不匹配则直接拒绝。补齐发生在
+兼容性校验前，不能使用全局 `generate` 作为默认值。
 
 一次调用至少同时满足：
 
@@ -292,7 +305,7 @@ Gateway 不建立上游连接，不改走 OpenAI Chat，也不自行更换服务
 5. 校验模型是否允许出现在该服务商上。
 6. 从请求提取 `RequiredFeatures`。
 7. 校验模型、协议、服务商三方能力交集。
-8. 冻结 `GatewayCallPlan`，之后才允许序列化和联网。
+8. 生成不可变的已审核请求封装，之后才允许序列化和联网。
 
 ### 5.3 能力规则放哪里
 
@@ -311,8 +324,8 @@ Gateway 执行校验，但规则由各自 owner 声明：
 
 ### 6.1 Kernel 侧装配
 
-用户配置由调用端装配阶段验证，并捕获到具体 invocation 实现中。Kernel
-只把 Router 选出的模型和 LLM 输入交给 `LLMInvocation`：
+用户配置由调用端装配阶段验证，并冻结为 protocol/service descriptor。Kernel
+只把 Router 选出的模型和 LLM typed frame 交给对应的 Gateway delivery 入口：
 
 ```yaml
 inference:
@@ -338,14 +351,16 @@ API Key 可以由 Kernel 侧 Port 配置持有，也可以表示为安全的 `Se
 
 ```text
 Kernel Think
-  LLMInvocation.Invoke(ctx, LLMRequest) -> LLMResponse
-  LLMInvocation.Stream(ctx, LLMRequest) -> LLMEventStream
-  RealtimeInvocation.OpenDuplex(ctx, LLMRequest) -> DuplexSession
+  invocation.Validate(LLMRequest) -> LLMRequestFrame
+  gateway.InvokeLLM(ctx, Invocation, LLMAdapter, LLMRequestFrame) -> LLMResponse
+  gateway.OpenLLMStream(ctx, Invocation, LLMStreamAdapter, LLMRequestFrame) -> LLMEventStream
+  gateway.OpenDuplex(ctx, Invocation, LLMRealtimeAdapter, LLMRequestFrame) -> DuplexSession
 
 Execution
-  MediaInvocation.InvokeMedia(ctx, MediaRequest) -> MediaResponse
-  MediaInvocation.StreamMedia(ctx, MediaRequest) -> MediaEventStream
-  AsyncMediaInvocation.SubmitMedia(ctx, MediaRequest) -> TaskHandle
+  invocation.Validate(MediaRequest) -> MediaRequestFrame
+  gateway.InvokeMedia(ctx, Invocation, MediaAdapter, MediaRequestFrame) -> MediaResponse
+  gateway.OpenMediaStream(ctx, Invocation, MediaStreamAdapter, MediaRequestFrame) -> MediaEventStream
+  gateway.SubmitMedia(ctx, Invocation, MediaAsyncAdapter, MediaRequestFrame) -> TaskHandle
 ```
 
 `LLMRequest` 的 operation 只有 `generate` 和 `realtime`；`MediaRequest` 的
@@ -363,11 +378,10 @@ Kernel/Execution 状态，也不决定 Think、Act、Failover 或结束。
 
 ```mermaid
 flowchart TB
-    CALL[LLMInvocation / MediaInvocation]
+    CALL[gateway.Invocation + delivery adapter]
     ADMIT[Admission<br/>结构与兼容性校验]
-    PLAN[CallPlan Builder]
-    PREG[(Protocol Registry)]
-    SREG[(Service Connector Registry)]
+    PF[Protocol Facts]
+    SF[Service Facts]
     MCAT[(Model Catalog)]
     PAD[Protocol Adapter]
     CONN[Service Connector]
@@ -378,11 +392,10 @@ flowchart TB
     MEDIAOUT[MediaResponse]
 
     CALL --> ADMIT
-    PREG --> ADMIT
-    SREG --> ADMIT
+    PF --> ADMIT
+    SF --> ADMIT
     MCAT --> ADMIT
-    ADMIT --> PLAN
-    PLAN --> PAD
+    ADMIT --> PAD
     PAD --> CONN
     CONN --> TRANS
     TRANS --> CONN
@@ -395,25 +408,19 @@ flowchart TB
 
 ### 7.1 Admission
 
-只做确定性校验并产生 typed error。它不访问模型，不执行自动 fallback。
+只做确定性校验并产生 typed error。它不访问上游模型服务，不执行自动 fallback。
 
-### 7.2 CallPlan Builder
+### 7.2 Protocol and service facts
 
-把已确定的模型、协议 Adapter、服务商 Connector、endpoint 和请求特征冻结为不可变计划。后续组件只能消费，不能重新选择。
+协议和服务分别在各自 owner 下声明事实。Admission 直接读取两个 owner-specific
+接口并求交集；不再存在共享 capability matrix，也不提供全局可变 Registry。
+静态实现由 composition root 的只读映射装配，未找到明确实现直接报错。
 
-### 7.3 Protocol Registry
-
-按 `ProtocolId` 注册 Adapter。新增一种协议只增加协议实现，不要求修改所有服务商。
-
-### 7.4 Service Connector Registry
-
-按 `ServiceKind` 注册 Connector。简单服务商复用通用 Connector；只有存在真实平台逻辑的服务商才增加专用实现。
-
-### 7.5 Transport
+### 7.3 Transport
 
 只负责网络机械能力：连接池、deadline、取消、代理、TLS、SSE、WebSocket、EventStream 和流背压。Transport 不理解模型，也不选择协议。
 
-### 7.6 Receipt Service
+### 7.4 Receipt Service
 
 Gateway 是 `ModelReceipt` 的领域 owner，但持久化机制必须通过 `mote-infra/persistence` 提供的 Port，不在 Gateway 内自建数据库机制。
 
@@ -462,9 +469,9 @@ Replicate 的“创建 prediction、轮询状态、连接返回的 stream URL”
 ```text
 ProtocolAdapter
 ├── descriptor() -> ProtocolAdapterDescriptor
-├── encode(LLMRequest | MediaRequest, call_plan) -> WireRequest
-├── decode(response, call_plan) -> LLMResponse | MediaResponse
-└── decode_stream(events, call_plan) -> Stream<InferenceEvent>
+├── encode(admitted_call) -> WireRequest
+├── decode(response, admitted_call) -> LLMResponse | MediaResponse
+└── decode_stream(events, admitted_call) -> Stream<InferenceEvent>
 
 ServiceConnector
 ├── descriptor() -> ServiceConnectorDescriptor
@@ -473,10 +480,17 @@ ServiceConnector
 └── classify_service_failure(response) -> GatewayError?
 
 CompatibilityGate
-└── admit(config, model, request) -> GatewayCallPlan | GatewayError
+└── admit(config, model, request) -> AdmittedLLM | AdmittedMedia | GatewayError
 ```
 
-不要设计一个包含 Chat、Responses、Embedding、Image、Audio、Batch、Files 等几十个方法的胖 `Provider` 接口。是否支持某个 operation 应首先表现为 descriptor 数据；对应 operation 的 Adapter 未注册时直接校验失败。
+Inbound invocation framing and canonical JSON/schema validation are owned by
+`mote-infra/invocation`. It hands Gateway a typed request frame that retains
+optional-field presence (not raw JSON). Raw request DTOs are not callable
+Gateway entry points. Gateway then runs the single
+`frame -> admission -> immutable admitted request -> adapter` path for unary,
+streaming, duplex, and asynchronous delivery.
+
+不要设计一个包含 Chat、Responses、Embedding、Image、Audio、Batch、Files 等几十个方法的胖 `Provider` 接口。是否支持某个 operation 应首先表现为各 owner 的 descriptor 数据；缺少明确 Adapter 时直接校验失败。
 
 ## 10. 错误语义
 
@@ -504,7 +518,7 @@ Gateway 可以对明确安全的网络失败做有界机械重试，但不能自
 
 ```text
 Admission
-  -> CallPlan
+  -> Admitted Request
   -> 建立上游连接
   -> 校验首个有效协议事件
   -> 对外开始流式输出
@@ -549,20 +563,16 @@ mote-runtime/gateway/
     ├── internal/
     │   ├── application/         # invoke 用例编排；唯一组合三维的地方
     │   ├── admission/           # 模型 × 协议 × 服务兼容性门禁
-    │   ├── plan/                # 不可变 GatewayCallPlan
     │   ├── model/               # 模型身份、能力和 catalog
-    │   ├── protocol/            # Adapter contract、descriptor、registry
-    │   ├── service/             # Connector contract、配置、descriptor、registry
+    │   ├── protocol/            # Adapter contract、协议事实和具体实现
+    │   ├── service/             # Connector contract、服务事实和具体实现
     │   ├── cache/
     │   │   ├── prompt/          # 上游 prompt/context cache 语义和统计
     │   │   └── result/          # 可选 exact result cache 编排
     │   ├── usage/               # unary/stream/realtime/task usage 累积
     │   ├── receipt/             # ModelReceipt 构建
     │   ├── telemetry/           # metrics 和 traces
-    │   └── upstream/            # 内部 wire request/response 和 transport contract
-    ├── protocols/               # 具体协议 Adapter
-    ├── connectors/              # 通用及少量专用 Service Connector
-    ├── upstream/                # HTTP/SSE/WebSocket/EventStream/连接池实现
+    │   └── upstream/            # internal wire request/response 和 transport 实现
     └── ports/                   # Persistence、ResultCacheStore、Secret、Clock
 ```
 
@@ -571,8 +581,8 @@ mote-runtime/gateway/
 ## 14. 必须长期保持的约束
 
 1. `RouterPort` 只选择模型，不选择服务商、协议或 API Key。
-2. Kernel 只通过 `LLMInvocation` 发送 `LLMRequest`；Execution 通过
-   `MediaInvocation` 发送 `MediaRequest`，媒体生成不从 Kernel 发起。
+2. Kernel/Execution 的请求先由 invocation owner 校验并形成 canonical frame；
+   Gateway delivery 入口不接受 raw DTO，媒体生成不从 Kernel 发起。
 3. 服务商、协议和凭据来自用户配置，在调用端装配时绑定到 invocation。
 4. Gateway 不调用 `mote-runtime/router`，也不拥有模型路由策略。
 5. Gateway 在联网前校验模型、协议、服务商和请求 feature 的完整组合。
