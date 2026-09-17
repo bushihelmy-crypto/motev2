@@ -19,7 +19,11 @@ func ProtocolCapabilities() protocol.Descriptor {
 		api.OperationVideoGeneration:    fixtureProtocolMediaCapability(),
 		api.OperationAudioTranscription: fixtureProtocolMediaCapability(),
 	}
-	descriptor, err := protocol.NewDescriptor("fixture.protocol", operations)
+	return mustProtocolDescriptor("fixture.protocol", operations)
+}
+
+func mustProtocolDescriptor(identifier string, operations map[api.Operation]protocol.OperationCapability) protocol.Descriptor {
+	descriptor, err := protocol.NewDescriptor(identifier, operations)
 	if err != nil {
 		panic(err)
 	}
@@ -47,12 +51,16 @@ func ServiceCapabilities(models ...string) service.Descriptor {
 		api.OperationVideoGeneration:    fixtureServiceMediaCapability(),
 		api.OperationAudioTranscription: fixtureServiceMediaCapability(),
 	}
-	descriptor, err := service.NewDescriptor(service.DescriptorConfig{
+	return mustServiceDescriptor(service.DescriptorConfig{
 		Kind:       "fixture.service",
 		Protocols:  []string{"fixture.protocol"},
 		Models:     models,
 		Operations: operations,
 	})
+}
+
+func mustServiceDescriptor(config service.DescriptorConfig) service.Descriptor {
+	descriptor, err := service.NewDescriptor(config)
 	if err != nil {
 		panic(err)
 	}

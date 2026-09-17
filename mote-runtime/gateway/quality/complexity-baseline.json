@@ -4,7 +4,7 @@
     "production_files": 64,
     "top_level_declarations": 370,
     "function_definitions": 186,
-    "decision_points": 475,
+    "decision_points": 467,
     "max_cyclomatic": 11,
     "max_nesting_depth": 3,
     "import_edges": 67,

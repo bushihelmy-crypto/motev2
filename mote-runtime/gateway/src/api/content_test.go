@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -41,6 +42,89 @@ func TestGenerationParametersValidatePublicDomain(t *testing.T) {
 				t.Fatal("invalid parameters accepted")
 			}
 		})
+	}
+}
+
+func TestGenerationParametersAcceptAndRejectExactNumericBoundaries(t *testing.T) {
+	valid := []GenerationParameters{
+		{Temperature: floatPointer(0)},
+		{Temperature: floatPointer(2)},
+		{TopP: floatPointer(math.SmallestNonzeroFloat64)},
+		{TopP: floatPointer(1)},
+		{MaxOutputTokens: intPointer(1)},
+		{MaxOutputTokens: intPointer(math.MaxInt64)},
+	}
+	for index, parameters := range valid {
+		if err := parameters.Validate(); err != nil {
+			t.Errorf("valid boundary %d rejected: %+v: %v", index, parameters, err)
+		}
+	}
+
+	invalid := []GenerationParameters{
+		{Temperature: floatPointer(math.Nextafter(0, math.Inf(-1)))},
+		{Temperature: floatPointer(math.Nextafter(2, math.Inf(1)))},
+		{Temperature: floatPointer(math.Inf(-1))},
+		{Temperature: floatPointer(math.NaN())},
+		{TopP: floatPointer(math.Copysign(0, -1))},
+		{TopP: floatPointer(math.Nextafter(1, math.Inf(1)))},
+		{TopP: floatPointer(math.Inf(1))},
+		{TopP: floatPointer(math.Inf(-1))},
+		{MaxOutputTokens: intPointer(-1)},
+	}
+	for index, parameters := range invalid {
+		if err := parameters.Validate(); err == nil {
+			t.Errorf("invalid boundary %d accepted: %+v", index, parameters)
+		}
+	}
+}
+
+func TestStopSequencesUseCharacterAndItemBoundaries(t *testing.T) {
+	validSixteen := make([]string, 16)
+	for index := range validSixteen {
+		validSixteen[index] = "x"
+	}
+	for _, stop := range [][]string{
+		nil,
+		{},
+		{"x"},
+		{strings.Repeat("界", 256)},
+		validSixteen,
+	} {
+		if err := (GenerationParameters{Stop: stop}).Validate(); err != nil {
+			t.Errorf("valid stop boundary rejected (items=%d): %v", len(stop), err)
+		}
+	}
+
+	invalidSeventeen := append(append([]string(nil), validSixteen...), "x")
+	for _, stop := range [][]string{
+		invalidSeventeen,
+		{strings.Repeat("界", 257)},
+		{string([]byte{'x', 0xff})},
+	} {
+		if err := (GenerationParameters{Stop: stop}).Validate(); err == nil {
+			t.Errorf("invalid stop boundary accepted (items=%d)", len(stop))
+		}
+	}
+}
+
+func TestGenerationParameterPointersPreserveExplicitZeroOnJSONRoundTrip(t *testing.T) {
+	parameters := GenerationParameters{
+		Temperature: floatPointer(0),
+		Seed:        intPointer(0),
+	}
+	encoded, err := json.Marshal(parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"temperature":0`) || !strings.Contains(string(encoded), `"seed":0`) {
+		t.Fatalf("explicit zero values became omission: %s", encoded)
+	}
+	var decoded GenerationParameters
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Temperature == nil || *decoded.Temperature != 0 || decoded.Seed == nil || *decoded.Seed != 0 {
+		t.Fatalf("explicit zero values did not round-trip: %+v", decoded)
 	}
 }
 

@@ -54,6 +54,36 @@ func TestReasoningVocabularyAndCombinations(t *testing.T) {
 	}
 }
 
+func TestReasoningConfigValidatesTheCompleteModeEffortMatrix(t *testing.T) {
+	efforts := []ReasoningEffort{
+		ReasoningEffortMinimal,
+		ReasoningEffortLow,
+		ReasoningEffortMedium,
+		ReasoningEffortHigh,
+		ReasoningEffortXHigh,
+		ReasoningEffortMax,
+	}
+	for _, mode := range []ThinkingMode{ThinkingDisabled, ThinkingEnabled, ThinkingAdaptive} {
+		if err := (ReasoningConfig{Thinking: mode}).Validate(); err != nil {
+			t.Errorf("mode-only %q rejected: %v", mode, err)
+		}
+		for _, effort := range efforts {
+			err := (ReasoningConfig{Thinking: mode, Effort: effort}).Validate()
+			if mode == ThinkingDisabled && err == nil {
+				t.Errorf("disabled + %q was accepted", effort)
+			}
+			if mode != ThinkingDisabled && err != nil {
+				t.Errorf("%q + %q rejected: %v", mode, effort, err)
+			}
+		}
+	}
+	for _, effort := range efforts {
+		if err := (ReasoningConfig{Effort: effort}).Validate(); err != nil {
+			t.Errorf("effort-only %q rejected: %v", effort, err)
+		}
+	}
+}
+
 func TestReasoningConfigRoundTripsOnLLMInputOnly(t *testing.T) {
 	input := LLMInput{
 		Kind: "generate",

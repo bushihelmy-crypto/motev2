@@ -22,7 +22,7 @@ an immutable Catalog and atomically refreshed.
 | production files | 83 | 64 | 64 |
 | top-level declarations | 159 | 381 | 370 |
 | function definitions | 53 | 189 | 186 |
-| decision points | 146 | 489 | 475 |
+| decision points | 146 | 489 | 467 |
 | max cyclomatic | — | 11 | 11 |
 | max nesting depth | — | 3 | 3 |
 | import edges | 21 | 71 | 67 |
@@ -56,3 +56,11 @@ compatibility wrappers.
 The ratchet remains exact. Any production change must reproduce these metrics;
 a real reduction lowers the baseline, while an increase requires a new
 architecture review rather than a mechanical threshold bump.
+
+The coverage-boundary cleanup removed eight unreachable defensive decision
+points. `ResolveOperation` already proves a model capability exists; the
+feature vocabulary is validated before its profile branch; reasoning syntax
+and normalized policies exclude disabled thinking with an effort; and the
+three clone routines are called only after their owners reject nil policies.
+Those invariants are now expressed once at their existing owner boundaries, so
+the lower baseline records a simpler call chain rather than masking complexity.

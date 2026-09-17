@@ -44,6 +44,7 @@ help:
 	@printf '%s\n' 'Mote Gateway (Go scaffold) commands:'
 	@printf '%s\n' '  make check             complete local/CI quality gate'
 	@printf '%s\n' '  make test-unit         deterministic unit tests + race detector'
+	@printf '%s\n' '  make coverage          exact 100% statement coverage gate'
 	@printf '%s\n' '  make test-integration  local integration harness (integration tag)'
 	@printf '%s\n' '  make architecture      package ownership and dependency checks'
 	@printf '%s\n' '  make complexity        exact production complexity ratchet'
@@ -100,7 +101,7 @@ lint: tools
 test test-unit:
 	@packages="$$(cd $(GO_DIR) && $(GO) list ./... | grep -Ev '/internal/(architecture|complexity)$$|/integration$$')"; \
 		test -n "$$packages"; \
-		$(GO) -C $(GO_DIR) test -race -count=1 -covermode=atomic -coverprofile=../$(COVERAGE_FILE) $$packages
+		$(GO) -C $(GO_DIR) test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=../$(COVERAGE_FILE) $$packages
 
 test-integration:
 	@$(GO) -C $(GO_DIR) test -race -count=1 -tags=integration ./integration/...
@@ -112,7 +113,7 @@ complexity:
 	@$(GO) -C $(GO_DIR) test -count=1 ./internal/complexity
 
 coverage: test-unit
-	@$(GO) -C $(GO_DIR) tool cover -func=../$(COVERAGE_FILE)
+	@GO_BIN='$(GO)' COVERAGE_PROFILE='$(CURDIR)/$(COVERAGE_FILE)' ./scripts/check-coverage.sh
 
 module-hygiene tidy-check:
 	@GO_BIN='$(GO)' ./scripts/check-module-hygiene.sh

@@ -3,6 +3,8 @@ package model
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bushihelmy-crypto/motev2/mote-runtime/gateway/api"
@@ -230,14 +232,184 @@ func TestCatalogFromRecordsConvertsCompleteCapabilities(t *testing.T) {
 	}
 
 	wantTemperatureMaximum := temperatureMaximum
+	wantTopPDefault := topPDefault
+	wantSeedDefault := seedDefault
+	wantDefaultThinking := defaultThinking
+	wantDefaultEffort := defaultEffort
+	wantDimensionsDefault := dimensionsDefault
 	*records[0].Capability.Generation.Temperature.Maximum = 9
+	*records[0].Capability.Generation.TopP.Default = 0.1
+	*records[0].Capability.Generation.Seed.Default = 9
 	records[0].Capability.Generation.Stop.Default[0] = "MUTATED"
+	records[0].Capability.InputModalities[0] = api.ModalityImage
+	records[0].Capability.OutputModalities[0] = api.ModalityAudio
+	records[0].Capability.Features[0] = api.FeatureStructured
 	records[0].Capability.Reasoning.ThinkingModes[1].Efforts[0] = api.ReasoningEffortLow
+	*records[0].Capability.Reasoning.DefaultThinking = api.ThinkingDisabled
+	*records[0].Capability.Reasoning.ThinkingModes[1].DefaultEffort = api.ReasoningEffortLow
+	*records[1].Capability.Embedding.Dimensions.Default = 128
 	parameters = capability.ResolveGenerationParameters(api.GenerationParameters{Temperature: &requestedTemperature})
 	reasoning, err = capability.ResolveReasoning(nil)
-	if err != nil || *parameters.Temperature != wantTemperatureMaximum || parameters.Stop[0] != "END" || reasoning.Effort != defaultEffort {
+	if err != nil || *parameters.Temperature != wantTemperatureMaximum || *parameters.TopP != wantTopPDefault ||
+		*parameters.Seed != wantSeedDefault || parameters.Stop[0] != "END" ||
+		reasoning.Thinking != wantDefaultThinking || reasoning.Effort != wantDefaultEffort ||
+		!capability.SupportsInputModality(api.ModalityText) || capability.SupportsInputModality(api.ModalityImage) ||
+		!capability.SupportsOutputModality(api.ModalityText) || capability.SupportsOutputModality(api.ModalityAudio) ||
+		!capability.SupportsFeature(api.FeatureToolCalls) || capability.SupportsFeature(api.FeatureStructured) {
 		t.Fatalf("catalog retained mutable nested persistence state: parameters=%+v reasoning=%+v err=%v", parameters, reasoning, err)
 	}
+	if dimensions, known := embedding.DefaultEmbeddingDimensions(); !known || dimensions != wantDimensionsDefault {
+		t.Fatalf("embedding catalog state followed source mutation: dimensions=%d known=%v", dimensions, known)
+	}
+}
+
+type orderedCatalogSource struct {
+	mu      sync.Mutex
+	loads   int
+	records [][]ports.ModelRecord
+	started chan int
+	release []chan struct{}
+}
+
+func (source *orderedCatalogSource) LoadModelCatalog(ctx context.Context) ([]ports.ModelRecord, error) {
+	source.mu.Lock()
+	index := source.loads
+	source.loads++
+	records := source.records[index]
+	var release chan struct{}
+	if index < len(source.release) {
+		release = source.release[index]
+	}
+	source.mu.Unlock()
+	if source.started != nil {
+		source.started <- index
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return records, nil
+}
+
+func (source *orderedCatalogSource) loadCount() int {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	return source.loads
+}
+
+func TestCatalogStoreSerializesRefreshAndKeepsSnapshotsImmutable(t *testing.T) {
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
+	source := &orderedCatalogSource{
+		records: [][]ports.ModelRecord{
+			{sourceRecord("initial")},
+			{sourceRecord("first-refresh")},
+			{sourceRecord("second-refresh")},
+		},
+		started: make(chan int, 3),
+		release: []chan struct{}{nil, firstRelease, secondRelease},
+	}
+	store, err := NewCatalogStore(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index := <-source.started; index != 0 {
+		t.Fatalf("initial load index = %d", index)
+	}
+	initialSnapshot := store.Current()
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- store.Refresh(context.Background()) }()
+	if index := <-source.started; index != 1 {
+		t.Fatalf("first refresh load index = %d", index)
+	}
+	if _, err := store.Current().Lookup("initial"); err != nil {
+		t.Fatalf("in-flight refresh hid current catalog: %v", err)
+	}
+
+	secondEntered := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondEntered)
+		secondDone <- store.Refresh(context.Background())
+	}()
+	<-secondEntered
+	if got := source.loadCount(); got != 2 {
+		t.Fatalf("later refresh entered the source before the in-flight refresh completed: loads=%d", got)
+	}
+
+	close(firstRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if index := <-source.started; index != 2 {
+		t.Fatalf("second refresh load index = %d", index)
+	}
+	close(secondRelease)
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Current().Lookup("second-refresh"); err != nil {
+		t.Fatalf("later refresh was not the current catalog: %v", err)
+	}
+	if _, err := store.Current().Lookup("first-refresh"); err == nil {
+		t.Fatal("earlier refresh remained current after the later refresh")
+	}
+	if _, err := initialSnapshot.Lookup("initial"); err != nil {
+		t.Fatalf("previous immutable snapshot changed after refresh: %v", err)
+	}
+	if _, err := initialSnapshot.Lookup("second-refresh"); err == nil {
+		t.Fatal("previous snapshot observed a later refresh")
+	}
+}
+
+type rotatingCatalogSource struct {
+	loads atomic.Uint64
+}
+
+func (source *rotatingCatalogSource) LoadModelCatalog(context.Context) ([]ports.ModelRecord, error) {
+	record := sourceRecord("concurrent")
+	if source.loads.Add(1)%2 == 0 {
+		record.Lifecycle = ports.ModelLifecycleDeprecated
+	}
+	return []ports.ModelRecord{record}, nil
+}
+
+func TestCatalogStoreSupportsConcurrentReadersDuringRefresh(t *testing.T) {
+	store, err := NewCatalogStore(context.Background(), &rotatingCatalogSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readers sync.WaitGroup
+	start := make(chan struct{})
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for range 500 {
+				definition, lookupErr := store.Current().Lookup("concurrent")
+				if lookupErr != nil {
+					t.Errorf("reader observed an incomplete catalog: %v", lookupErr)
+					return
+				}
+				if lifecycle := definition.Lifecycle(); lifecycle != LifecycleActive && lifecycle != LifecycleDeprecated {
+					t.Errorf("reader observed invalid lifecycle %q", lifecycle)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	for range 100 {
+		if err := store.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readers.Wait()
 }
 
 func sourceRecord(baseModel string) ports.ModelRecord {
