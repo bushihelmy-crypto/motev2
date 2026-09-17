@@ -3,8 +3,17 @@
 The gateway follows the same ratchet principle as `mote-kernel`, expressed in
 Go-native tooling:
 
-- `make test-unit` runs deterministic package tests with `-race` and produces a
-  machine-readable coverage profile.
+- `make test-unit` runs deterministic package tests with `-race`, instruments
+  every Go package in the module through one `-coverpkg=./...` scope, and
+  produces a machine-readable coverage profile. Architecture, complexity, and
+  integration test runners remain separate gates; their production statements
+  are still part of the module-wide instrumentation scope.
+- `make coverage` requires exact 100% statement coverage. The checker merges
+  repeated multi-package coverage blocks by source location and rejects any
+  block whose aggregate count is zero, so the displayed percentage cannot pass
+  merely because it rounded up to `100.0%`. Command entry points and
+  `internal/testkit` are included; no production file or owner is excluded to
+  improve the number.
 - `make test-integration` runs only tests tagged `integration`; external API
   credentials are never implicit.
 - `make architecture` runs executable package-layout and dependency-direction

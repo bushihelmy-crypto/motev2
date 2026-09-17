@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -121,6 +122,45 @@ func (asyncOnlyAdapter) SubmitMedia(_ context.Context, admitted AdmittedMedia) (
 	return api.TaskHandle{TaskID: "async-only", OperationID: admitted.Request().OperationID}, nil
 }
 
+type deliveryErrorAdapter struct {
+	err      error
+	contexts []context.Context
+	calls    []string
+}
+
+func (adapter *deliveryErrorAdapter) result(ctx context.Context, call string) error {
+	adapter.contexts = append(adapter.contexts, ctx)
+	adapter.calls = append(adapter.calls, call)
+	if adapter.err != nil {
+		return adapter.err
+	}
+	return ctx.Err()
+}
+
+func (adapter *deliveryErrorAdapter) Invoke(ctx context.Context, _ AdmittedLLM) (api.LLMResponse, error) {
+	return api.LLMResponse{}, adapter.result(ctx, "llm-unary")
+}
+
+func (adapter *deliveryErrorAdapter) Stream(ctx context.Context, _ AdmittedLLM) (LLMEventStream[invocationTestEvent], error) {
+	return nil, adapter.result(ctx, "llm-stream")
+}
+
+func (adapter *deliveryErrorAdapter) OpenDuplex(ctx context.Context, _ AdmittedLLM) (DuplexSession[invocationTestEvent, invocationTestEvent], error) {
+	return nil, adapter.result(ctx, "llm-duplex")
+}
+
+func (adapter *deliveryErrorAdapter) InvokeMedia(ctx context.Context, _ AdmittedMedia) (api.MediaResponse, error) {
+	return api.MediaResponse{}, adapter.result(ctx, "media-unary")
+}
+
+func (adapter *deliveryErrorAdapter) StreamMedia(ctx context.Context, _ AdmittedMedia) (MediaEventStream[invocationTestEvent], error) {
+	return nil, adapter.result(ctx, "media-stream")
+}
+
+func (adapter *deliveryErrorAdapter) SubmitMedia(ctx context.Context, _ AdmittedMedia) (api.TaskHandle, error) {
+	return api.TaskHandle{}, adapter.result(ctx, "media-async")
+}
+
 func (s *invocationTestService) Invoke(ctx context.Context, admitted AdmittedLLM) (api.LLMResponse, error) {
 	s.record(ctx, admitted)
 	return api.LLMResponse{OperationID: admitted.Request().OperationID}, nil
@@ -219,6 +259,9 @@ func TestInvocationUsesOneAdmittedChainWithoutOwningLifecycle(t *testing.T) {
 	if service.lastAdmitted.Model().BaseModel() != duplexRequest.BaseModel || service.lastAdmitted.ProtocolID() == "" || service.lastAdmitted.ServiceKind() == "" {
 		t.Fatal("downstream adapter did not receive the frozen model/protocol/service identity")
 	}
+	if service.lastAdmitted.BaseModel() != duplexRequest.BaseModel || service.lastMediaAdmitted.Model().BaseModel() != mediaAsyncRequest.BaseModel || service.lastMediaAdmitted.BaseModel() != mediaAsyncRequest.BaseModel {
+		t.Fatal("admitted accessors did not retain the exact selected models")
+	}
 	if stream.closed || stream.finalized || session.closed || session.finalized || mediaStream.closed || mediaStream.finalized {
 		t.Fatal("strict helpers must not take ownership of returned lifecycle")
 	}
@@ -272,6 +315,86 @@ func TestInvocationPreservesImplementationError(t *testing.T) {
 	}
 	if invocation.calls != 1 {
 		t.Fatalf("expected one invocation, got %d", invocation.calls)
+	}
+}
+
+func TestEveryDeliveryPathPreservesAdapterAndContextErrors(t *testing.T) {
+	wantCalls := []string{"llm-unary", "llm-stream", "llm-duplex", "media-unary", "media-stream", "media-async"}
+	tests := []struct {
+		name    string
+		context func() context.Context
+		err     error
+		want    error
+	}{
+		{
+			name: "downstream sentinel",
+			context: func() context.Context {
+				return context.WithValue(context.Background(), invocationTestContextKey{}, "sentinel")
+			},
+			err:  errors.New("downstream sentinel"),
+			want: nil,
+		},
+		{
+			name: "canceled context",
+			context: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			want: context.Canceled,
+		},
+		{
+			name: "downstream admission-shaped error",
+			context: func() context.Context {
+				return context.Background()
+			},
+			err: &admission.AdmissionError{Code: api.ErrorInvalidRequest, Err: errors.New("adapter-owned admission-shaped error")},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			invocation, err := NewInvocation(testInvocationConfig(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := testCase.context()
+			adapter := &deliveryErrorAdapter{err: testCase.err}
+			want := testCase.want
+			if want == nil {
+				want = testCase.err
+			}
+
+			llmUnary := validLLMRequest("chatgpt-4o", api.OperationGenerate, api.ModalityText, api.ModeUnary, "generate", "error-llm-unary")
+			_, llmUnaryErr := InvokeLLM(ctx, invocation, adapter, llmFrame(llmUnary))
+			llmStream := validLLMRequest("chatgpt-4o", api.OperationGenerate, api.ModalityText, api.ModeServerStream, "generate", "error-llm-stream")
+			_, llmStreamErr := OpenLLMStream(ctx, invocation, adapter, llmFrame(llmStream))
+			llmDuplex := validLLMRequest("gpt-realtime-1.5", api.OperationRealtime, api.ModalityAudio, api.ModeDuplex, "realtime", "error-llm-duplex")
+			_, llmDuplexErr := OpenDuplex(ctx, invocation, adapter, llmFrame(llmDuplex))
+			mediaUnary := validMediaRequest("dall-e-3", api.OperationImageGeneration, api.ModalityImage, api.ModeUnary, "error-media-unary")
+			_, mediaUnaryErr := InvokeMedia(ctx, invocation, adapter, mediaFrame(mediaUnary))
+			mediaStream := validMediaRequest("dall-e-3", api.OperationImageGeneration, api.ModalityImage, api.ModeServerStream, "error-media-stream")
+			_, mediaStreamErr := OpenMediaStream(ctx, invocation, adapter, mediaFrame(mediaStream))
+			mediaAsync := validMediaRequest("dall-e-3", api.OperationImageGeneration, api.ModalityImage, api.ModeAsync, "error-media-async")
+			_, mediaAsyncErr := SubmitMedia(ctx, invocation, adapter, mediaFrame(mediaAsync))
+
+			for index, got := range []error{llmUnaryErr, llmStreamErr, llmDuplexErr, mediaUnaryErr, mediaStreamErr, mediaAsyncErr} {
+				if got != want {
+					t.Errorf("%s error identity = %T %v, want %T %v", wantCalls[index], got, got, want, want)
+				}
+				var requestError *api.RequestError
+				if errors.As(got, &requestError) {
+					t.Errorf("%s adapter error was reclassified: %+v", wantCalls[index], requestError)
+				}
+			}
+			if !reflect.DeepEqual(adapter.calls, wantCalls) {
+				t.Fatalf("adapter calls = %v, want %v", adapter.calls, wantCalls)
+			}
+			for index, got := range adapter.contexts {
+				if got != ctx {
+					t.Errorf("%s received a different context", wantCalls[index])
+				}
+			}
+		})
 	}
 }
 
@@ -365,19 +488,49 @@ func TestInvocationUsesBoundProtocolAndServiceCapabilities(t *testing.T) {
 }
 
 func TestInvocationRejectsIncompleteComposition(t *testing.T) {
-	_, err := NewInvocation(InvocationConfig{})
-	if err == nil || !strings.Contains(err.Error(), "model catalog is required") {
-		t.Fatalf("expected explicit composition error, got %v", err)
+	valid := testInvocationConfig(t)
+	tests := []struct {
+		name   string
+		config InvocationConfig
+		want   string
+	}{
+		{name: "missing catalog", config: InvocationConfig{}, want: "model catalog is required"},
+		{name: "catalog not ready", config: InvocationConfig{Catalog: model.Catalog{}}, want: "model catalog is not ready"},
+		{name: "missing protocol", config: InvocationConfig{Catalog: valid.Catalog, Service: valid.Service}, want: "protocol descriptor is required"},
+		{name: "missing service", config: InvocationConfig{Catalog: valid.Catalog, Protocol: valid.Protocol}, want: "service descriptor is required"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := NewInvocation(testCase.config)
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("expected %q composition error, got %v", testCase.want, err)
+			}
+		})
 	}
 }
 
-func TestInvokeLLMRejectsMissingAdapter(t *testing.T) {
+func TestInvocationHelpersRejectMissingAdapters(t *testing.T) {
 	invocation, err := NewInvocation(testInvocationConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := InvokeLLM(context.Background(), invocation, nil, api.LLMRequestFrame{}); err == nil {
-		t.Fatal("missing invocation target was accepted")
+		t.Fatal("missing LLM adapter was accepted")
+	}
+	if _, err := InvokeMedia(context.Background(), invocation, nil, api.MediaRequestFrame{}); err == nil {
+		t.Fatal("missing media adapter was accepted")
+	}
+	if _, err := OpenLLMStream[invocationTestEvent](context.Background(), invocation, nil, api.LLMRequestFrame{}); err == nil {
+		t.Fatal("missing LLM stream adapter was accepted")
+	}
+	if _, err := OpenMediaStream[invocationTestEvent](context.Background(), invocation, nil, api.MediaRequestFrame{}); err == nil {
+		t.Fatal("missing media stream adapter was accepted")
+	}
+	if _, err := OpenDuplex[invocationTestEvent, invocationTestEvent](context.Background(), invocation, nil, api.LLMRequestFrame{}); err == nil {
+		t.Fatal("missing realtime adapter was accepted")
+	}
+	if _, err := SubmitMedia(context.Background(), invocation, nil, api.MediaRequestFrame{}); err == nil {
+		t.Fatal("missing async media adapter was accepted")
 	}
 }
 

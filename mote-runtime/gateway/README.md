@@ -59,6 +59,7 @@ Run commands from `gateway/`:
 ```bash
 make check              # complete quality gate
 make test-unit          # unit tests (race detector enabled)
+make coverage           # exact 100% module statement coverage
 make test-integration   # deterministic integration harness
 make architecture       # package and dependency ownership checks
 make complexity         # exact complexity ratchet
@@ -67,10 +68,11 @@ make build              # bin/gateway
 make docker-build       # build the reproducible scaffold image
 ```
 
-`make check` also runs the deterministic integration harness, architecture and
-complexity ratchets, module hygiene, vulnerability/secret scanning, and legal
-metadata checks. `make tools` installs the pinned quality tools into the ignored
-`.tools/bin` directory.
+`make check` also enforces exact module-wide statement coverage and runs the
+deterministic integration harness, architecture and complexity ratchets,
+module hygiene, vulnerability/secret scanning, and legal metadata checks.
+`make tools` installs the pinned quality tools into the ignored `.tools/bin`
+directory.
 
 The module can also be used directly:
 

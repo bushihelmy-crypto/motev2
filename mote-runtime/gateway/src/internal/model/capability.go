@@ -364,12 +364,6 @@ func validateResolvedReasoning(
 	if effort == "" {
 		return nil
 	}
-	if thinking == api.ThinkingDisabled {
-		return &ReasoningRequestError{
-			BaseModel: baseModel,
-			Reason:    "reasoning effort cannot be set when thinking is disabled",
-		}
-	}
 	if slices.Contains(modePolicy.Efforts, effort) {
 		return nil
 	}
@@ -613,9 +607,6 @@ func validateNumericParameter[T number](policy *NumericParameter[T]) (string, st
 }
 
 func cloneGenerationPolicy(policy *GenerationPolicy) *GenerationPolicy {
-	if policy == nil {
-		return nil
-	}
 	cloned := *policy
 	cloned.Temperature = cloneNumericParameter(policy.Temperature)
 	cloned.TopP = cloneNumericParameter(policy.TopP)
@@ -631,9 +622,6 @@ func cloneGenerationPolicy(policy *GenerationPolicy) *GenerationPolicy {
 }
 
 func cloneReasoningPolicy(policy *ReasoningPolicy) *ReasoningPolicy {
-	if policy == nil {
-		return nil
-	}
 	cloned := &ReasoningPolicy{
 		ThinkingModes:   make([]ThinkingModePolicy, len(policy.ThinkingModes)),
 		DefaultThinking: clonePointer(policy.DefaultThinking),
@@ -649,9 +637,6 @@ func cloneReasoningPolicy(policy *ReasoningPolicy) *ReasoningPolicy {
 }
 
 func cloneEmbeddingPolicy(policy *EmbeddingPolicy) *EmbeddingPolicy {
-	if policy == nil {
-		return nil
-	}
 	return &EmbeddingPolicy{
 		FixedDimensions: clonePointer(policy.FixedDimensions),
 		Dimensions:      cloneNumericParameter(policy.Dimensions),

@@ -57,6 +57,7 @@ required_files=(
 	quality/tools.md
 	scripts/check-toolchain.sh
 	scripts/check-module-hygiene.sh
+	scripts/check-coverage.sh
 	scripts/check-license.sh
 	scripts/check-secrets.sh
 	src/go.mod

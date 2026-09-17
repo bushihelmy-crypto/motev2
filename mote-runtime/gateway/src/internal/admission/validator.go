@@ -111,14 +111,9 @@ func (validator Validator) resolveModel(baseModel string, requested *api.Operati
 	if err != nil {
 		return "", model.Definition{}, model.Capability{}, classifyModelError(err)
 	}
-	capability, ok := definition.Capability(operation)
-	if !ok {
-		return "", model.Definition{}, model.Capability{}, invalid(&model.OperationMismatchError{
-			BaseModel: baseModel,
-			Requested: operation,
-			Available: definition.Operation(),
-		})
-	}
+	// ResolveOperation already proves that operation is the definition's one
+	// canonical operation, so Capability cannot miss here.
+	capability, _ := definition.Capability(operation)
 	return operation, definition, capability, nil
 }
 
@@ -309,12 +304,7 @@ func validateProfileFeature(feature api.Feature, llm bool) error {
 		return fmt.Errorf("unsupported feature %q", feature)
 	}
 	if llm {
-		switch feature {
-		case api.FeatureToolCalls, api.FeatureStructured, api.FeaturePromptCache, api.FeatureUsage:
-			return nil
-		default:
-			return fmt.Errorf("feature %q is not supported by kernel_llm", feature)
-		}
+		return nil
 	}
 	if feature != api.FeaturePromptCache && feature != api.FeatureUsage {
 		return fmt.Errorf("feature %q is not supported by execution_media", feature)

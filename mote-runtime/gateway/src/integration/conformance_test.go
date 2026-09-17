@@ -266,6 +266,245 @@ func TestAuthoritativeResponseSchemaRejectsNonCanonicalRuntimeIdentities(t *test
 	}
 }
 
+func TestLLMTerminalRejectsCrossDocumentMismatches(t *testing.T) {
+	root := conformanceRoot(t)
+	schemas := assertProtocolSchema(t, root)
+	validator := fixtureValidator(t)
+	requestValue, responseData := admittedFixture(
+		t,
+		root,
+		schemas.request,
+		validator,
+		"gateway_invocation_unary_text.v1.json",
+	)
+	request, ok := requestValue.(api.LLMRequest)
+	if !ok {
+		t.Fatalf("fixture admitted as %T, want api.LLMRequest", requestValue)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*api.LLMResponse)
+	}{
+		{name: "operation id", mutate: func(response *api.LLMResponse) { response.OperationID = "another-operation" }},
+		{name: "mode", mutate: func(response *api.LLMResponse) { response.Mode = api.ModeServerStream }},
+		{name: "submitted outcome", mutate: func(response *api.LLMResponse) { response.Terminal.Outcome = api.OutcomeSubmitted }},
+		{name: "missing successful result", mutate: func(response *api.LLMResponse) { response.Terminal.Result = nil }},
+		{name: "wrong result kind", mutate: func(response *api.LLMResponse) { response.Terminal.Result.Kind = api.ResultImage }},
+		{name: "empty successful result", mutate: func(response *api.LLMResponse) {
+			response.Terminal.Result = &api.LLMOutput{Kind: api.ResultGenerate}
+		}},
+		{name: "failed without error", mutate: func(response *api.LLMResponse) {
+			response.Terminal.Outcome = api.OutcomeFailed
+			response.Terminal.Result = nil
+			response.Terminal.Error = nil
+		}},
+		{name: "observation operation id", mutate: func(response *api.LLMResponse) { response.Observation.OperationID = "another-operation" }},
+		{name: "observation operation", mutate: func(response *api.LLMResponse) { response.Observation.Operation = api.OperationRealtime }},
+		{name: "observation modality", mutate: func(response *api.LLMResponse) { response.Observation.Modality = api.ModalityAudio }},
+		{name: "observation mode", mutate: func(response *api.LLMResponse) { response.Observation.Mode = api.ModeServerStream }},
+		{name: "requested model", mutate: func(response *api.LLMResponse) { response.Observation.Model.RequestedBaseModel = "another-model" }},
+		{name: "resolved model", mutate: func(response *api.LLMResponse) { response.Observation.Model.ResolvedBaseModel = "another-model" }},
+		{name: "observed input", mutate: func(response *api.LLMResponse) { response.Observation.Input.SystemPrompt = "changed" }},
+		{name: "receipt operation id", mutate: func(response *api.LLMResponse) { response.Receipt.OperationID = "another-operation" }},
+		{name: "empty receipt id", mutate: func(response *api.LLMResponse) { response.Receipt.ReceiptID = "" }},
+		{name: "zero receipt revision", mutate: func(response *api.LLMResponse) { response.Receipt.Revision = 0 }},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var response api.LLMResponse
+			if err := decodeStrict(responseData, &response); err != nil {
+				t.Fatalf("decode fixture response: %v", err)
+			}
+			testCase.mutate(&response)
+			if err := admitMutatedResponse(request, response); err == nil {
+				t.Fatal("mismatched LLM terminal was accepted")
+			}
+		})
+	}
+}
+
+func TestMediaTerminalRejectsCrossDocumentMismatches(t *testing.T) {
+	root := conformanceRoot(t)
+	schemas := assertProtocolSchema(t, root)
+	validator := fixtureValidator(t)
+	imageValue, imageResponse := admittedFixture(
+		t,
+		root,
+		schemas.request,
+		validator,
+		"gateway_invocation_unary_image.v1.json",
+	)
+	imageRequest, ok := imageValue.(api.MediaRequest)
+	if !ok {
+		t.Fatalf("fixture admitted as %T, want api.MediaRequest", imageValue)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*api.MediaResponse)
+	}{
+		{name: "operation id", mutate: func(response *api.MediaResponse) { response.OperationID = "another-operation" }},
+		{name: "mode", mutate: func(response *api.MediaResponse) { response.Mode = api.ModeServerStream }},
+		{name: "missing successful result", mutate: func(response *api.MediaResponse) { response.Terminal.Result = nil }},
+		{name: "empty result kind", mutate: func(response *api.MediaResponse) { response.Terminal.Result.Kind = "" }},
+		{name: "wrong result kind", mutate: func(response *api.MediaResponse) { response.Terminal.Result.Kind = api.ResultAudio }},
+		{name: "failed without error", mutate: func(response *api.MediaResponse) {
+			response.Terminal.Outcome = api.OutcomeFailed
+			response.Terminal.Result = nil
+			response.Terminal.Error = nil
+		}},
+		{name: "observation operation id", mutate: func(response *api.MediaResponse) { response.Observation.OperationID = "another-operation" }},
+		{name: "observation operation", mutate: func(response *api.MediaResponse) { response.Observation.Operation = api.OperationVideoGeneration }},
+		{name: "observation modality", mutate: func(response *api.MediaResponse) { response.Observation.Modality = api.ModalityVideo }},
+		{name: "observation mode", mutate: func(response *api.MediaResponse) { response.Observation.Mode = api.ModeServerStream }},
+		{name: "requested model", mutate: func(response *api.MediaResponse) { response.Observation.Model.RequestedBaseModel = "another-model" }},
+		{name: "resolved model", mutate: func(response *api.MediaResponse) { response.Observation.Model.ResolvedBaseModel = "another-model" }},
+		{name: "observed input", mutate: func(response *api.MediaResponse) { response.Observation.Input.Prompt = "changed" }},
+		{name: "receipt operation id", mutate: func(response *api.MediaResponse) { response.Receipt.OperationID = "another-operation" }},
+		{name: "empty receipt id", mutate: func(response *api.MediaResponse) { response.Receipt.ReceiptID = "" }},
+		{name: "zero receipt revision", mutate: func(response *api.MediaResponse) { response.Receipt.Revision = 0 }},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var response api.MediaResponse
+			if err := decodeStrict(imageResponse, &response); err != nil {
+				t.Fatalf("decode fixture response: %v", err)
+			}
+			testCase.mutate(&response)
+			if err := admitMutatedResponse(imageRequest, response); err == nil {
+				t.Fatal("mismatched media terminal was accepted")
+			}
+		})
+	}
+
+	transcriptionValue, transcriptionResponse := admittedFixture(
+		t,
+		root,
+		schemas.request,
+		validator,
+		"gateway_invocation_unary_transcription.v1.json",
+	)
+	transcriptionRequest := transcriptionValue.(api.MediaRequest)
+	var wrongTranscription api.MediaResponse
+	if err := decodeStrict(transcriptionResponse, &wrongTranscription); err != nil {
+		t.Fatalf("decode transcription response: %v", err)
+	}
+	wrongTranscription.Terminal.Result.Kind = api.ResultAudio
+	if err := admitMutatedResponse(transcriptionRequest, wrongTranscription); err == nil {
+		t.Fatal("transcription accepted a non-transcript result")
+	}
+}
+
+func TestSubmittedMediaTerminalRequiresAsyncCorrelatedTask(t *testing.T) {
+	root := conformanceRoot(t)
+	schemas := assertProtocolSchema(t, root)
+	requestValue, responseData := admittedFixture(
+		t,
+		root,
+		schemas.request,
+		fixtureValidator(t),
+		"gateway_invocation_async_video.v1.json",
+	)
+	request := requestValue.(api.MediaRequest)
+
+	tests := []struct {
+		name          string
+		mutateRequest func(*api.MediaRequest)
+		mutate        func(*api.MediaResponse)
+	}{
+		{name: "missing task", mutate: func(response *api.MediaResponse) { response.Terminal.Task = nil }},
+		{name: "task operation mismatch", mutate: func(response *api.MediaResponse) { response.Terminal.Task.OperationID = "another-operation" }},
+		{name: "submitted from unary", mutateRequest: func(request *api.MediaRequest) { request.Mode = api.ModeUnary }, mutate: func(response *api.MediaResponse) {
+			response.Mode = api.ModeUnary
+			response.Observation.Mode = api.ModeUnary
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidateRequest := request
+			var response api.MediaResponse
+			if err := decodeStrict(responseData, &response); err != nil {
+				t.Fatalf("decode fixture response: %v", err)
+			}
+			if testCase.mutateRequest != nil {
+				testCase.mutateRequest(&candidateRequest)
+			}
+			testCase.mutate(&response)
+			if err := admitMutatedResponse(candidateRequest, response); err == nil {
+				t.Fatal("invalid submitted terminal was accepted")
+			}
+		})
+	}
+}
+
+func TestTerminalTimingMatchesDeliveryMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   api.DeliveryMode
+		timing api.StreamSummary
+		valid  bool
+	}{
+		{name: "unary", mode: api.ModeUnary, timing: api.StreamSummary{}, valid: true},
+		{name: "async", mode: api.ModeAsync, timing: api.StreamSummary{}, valid: true},
+		{name: "server stream", mode: api.ModeServerStream, timing: api.StreamSummary{Streamed: true, ChunkCount: 1}, valid: true},
+		{name: "duplex", mode: api.ModeDuplex, timing: api.StreamSummary{Streamed: true, ChunkCount: 1}, valid: true},
+		{name: "negative latency", mode: api.ModeUnary, timing: api.StreamSummary{LatencyMS: -1}},
+		{name: "negative chunks", mode: api.ModeUnary, timing: api.StreamSummary{ChunkCount: -1}},
+		{name: "unary marked streamed", mode: api.ModeUnary, timing: api.StreamSummary{Streamed: true}},
+		{name: "unary has chunks", mode: api.ModeUnary, timing: api.StreamSummary{ChunkCount: 1}},
+		{name: "stream not marked streamed", mode: api.ModeServerStream, timing: api.StreamSummary{ChunkCount: 1}},
+		{name: "stream has no chunks", mode: api.ModeServerStream, timing: api.StreamSummary{Streamed: true}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := validateTiming(testCase.mode, testCase.timing)
+			if testCase.valid && err != nil {
+				t.Fatalf("valid timing rejected: %v", err)
+			}
+			if !testCase.valid && err == nil {
+				t.Fatal("invalid timing accepted")
+			}
+		})
+	}
+}
+
+func admittedFixture(
+	t *testing.T,
+	root string,
+	schema *jsonschema.Schema,
+	validator admission.Validator,
+	filename string,
+) (any, json.RawMessage) {
+	t.Helper()
+	vector := readJSONFile[vectorCase](t, filepath.Join(root, "vectors", "wire", filename))
+	request, err := admitProfileRequest(schema, validator, vector.Protocol.Profile, vector.Input)
+	if err != nil {
+		t.Fatalf("admit fixture request: %v", err)
+	}
+	expect := readJSON[vectorExpectation](t, vector.Expect, filename+" expectation")
+	if expect.Outcome != "accept" {
+		t.Fatalf("fixture %s is not an acceptance vector", filename)
+	}
+	return request, expect.Value
+}
+
+func admitMutatedResponse(request, response any) error {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	switch typed := request.(type) {
+	case api.LLMRequest:
+		_, err = admitLLMResponse(typed, data)
+	case api.MediaRequest:
+		_, err = admitMediaResponse(typed, data)
+	default:
+		return fmt.Errorf("unsupported request type %T", request)
+	}
+	return err
+}
+
 func cloneObject(value map[string]any) map[string]any {
 	data, err := json.Marshal(value)
 	if err != nil {

@@ -108,6 +108,68 @@ func TestInvocationEnforcesDeliveryHelperMode(t *testing.T) {
 	}
 }
 
+func TestEveryDeliveryPathProjectsAdmissionFailureBeforeAdapter(t *testing.T) {
+	catalog, err := model.NewCatalogFromRecords([]ports.ModelRecord{
+		{BaseModel: "llm", Lifecycle: ports.ModelLifecycleActive, Capability: ports.ModelCapability{
+			Operation: api.OperationGenerate, InputModalities: []api.Modality{api.ModalityText}, OutputModalities: []api.Modality{api.ModalityText},
+		}},
+		{BaseModel: "realtime", Lifecycle: ports.ModelLifecycleActive, Capability: ports.ModelCapability{
+			Operation: api.OperationRealtime, InputModalities: []api.Modality{api.ModalityAudio}, OutputModalities: []api.Modality{api.ModalityAudio},
+		}},
+		{BaseModel: "media", Lifecycle: ports.ModelLifecycleActive, Capability: ports.ModelCapability{
+			Operation: api.OperationImageGeneration, InputModalities: []api.Modality{api.ModalityText}, OutputModalities: []api.Modality{api.ModalityImage},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation := New(Config{Admission: admission.Config{
+		Catalog: catalog, Protocol: testkit.ProtocolCapabilities(), Service: testkit.ServiceCapabilities("llm", "realtime", "media"),
+	}})
+
+	invalidLLM := func(baseModel string, operation api.Operation, mode api.DeliveryMode, kind string) api.LLMRequestFrame {
+		return api.LLMRequestFrame{Request: api.LLMRequest{
+			Kind: api.RequestKindLLM, SchemaVersion: 1, BaseModel: baseModel,
+			Operation: operationPtr(operation), Mode: mode, Input: api.LLMInput{Kind: kind}, Features: []api.Feature{},
+		}}
+	}
+	invalidMedia := func(mode api.DeliveryMode) api.MediaRequestFrame {
+		return api.MediaRequestFrame{Request: api.MediaRequest{
+			Kind: api.RequestKindMedia, SchemaVersion: 1, BaseModel: "media",
+			Operation: operationPtr(api.OperationImageGeneration), Mode: mode,
+			Input: api.MediaInput{Kind: "image_generation"}, Features: []api.Feature{},
+		}}
+	}
+
+	if _, err := invocation.InvokeMedia(context.Background(), invalidMedia(api.ModeUnary), nil); err == nil {
+		t.Fatal("invalid unary media request reached its adapter")
+	}
+	if _, err := OpenLLMStream[int](context.Background(), invocation, invalidLLM("llm", api.OperationGenerate, api.ModeServerStream, "generate"), nil); err == nil {
+		t.Fatal("invalid LLM stream request reached its adapter")
+	}
+	if _, err := OpenMediaStream[int](context.Background(), invocation, invalidMedia(api.ModeServerStream), nil); err == nil {
+		t.Fatal("invalid media stream request reached its adapter")
+	}
+	if _, err := OpenDuplex[int, int](context.Background(), invocation, invalidLLM("realtime", api.OperationRealtime, api.ModeDuplex, "realtime"), nil); err == nil {
+		t.Fatal("invalid realtime request reached its adapter")
+	}
+	if _, err := SubmitMedia(context.Background(), invocation, invalidMedia(api.ModeAsync), nil); err == nil {
+		t.Fatal("invalid async media request reached its adapter")
+	}
+
+	wrongMode := invalidMedia(api.ModeAsync)
+	if _, err := invocation.InvokeMedia(context.Background(), wrongMode, nil); err == nil {
+		t.Fatal("media helper mode mismatch was accepted")
+	}
+}
+
+func TestAdmissionProjectionPreservesNonAdmissionError(t *testing.T) {
+	want := errors.New("sentinel")
+	if got := projectAdmissionError(want); got != want {
+		t.Fatalf("non-admission error identity changed: %v", got)
+	}
+}
+
 func llmFrame(request api.LLMRequest) api.LLMRequestFrame {
 	return api.LLMRequestFrame{Request: request}
 }

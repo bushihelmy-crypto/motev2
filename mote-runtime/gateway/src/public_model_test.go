@@ -83,3 +83,9 @@ func TestPublicCompositionRejectsInvalidDescriptorIdentities(t *testing.T) {
 		t.Fatal("invalid public service identity was accepted")
 	}
 }
+
+func TestPublicCompositionRejectsMissingCatalogSource(t *testing.T) {
+	if _, err := gateway.NewCatalogStore(context.Background(), nil); err == nil {
+		t.Fatal("nil catalog source was accepted")
+	}
+}
