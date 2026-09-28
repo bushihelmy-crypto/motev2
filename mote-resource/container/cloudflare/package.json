@@ -38,12 +38,12 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.0.0",
-    "@cloudflare/workers-types": "5.20260820.1",
+    "@cloudflare/workers-types": "5.20260925.2",
     "@vitest/coverage-istanbul": "4.1.11",
-    "oxlint": "1.79.0",
-    "prettier": "3.9.6",
+    "oxlint": "1.85.0",
+    "prettier": "3.9.9",
     "typescript": "7.0.2",
     "vitest": "4.1.11",
-    "wrangler": "4.125.0"
+    "wrangler": "4.140.0"
   }
 }
